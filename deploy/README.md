@@ -31,8 +31,14 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 ```bash
 # Upload deploy.sh to the server, then:
 chmod +x deploy.sh
-sudo ./deploy.sh --setup
+sudo GITHUB_TOKEN=github_pat_xxx ./deploy.sh --setup
 ```
+
+The `GITHUB_TOKEN` is a **fine-grained Personal Access Token** (Contents: Read-only).
+Generate one at: https://github.com/settings/tokens?type=beta
+
+The token is automatically saved into `/opt/ownclaw/.env` so that cron-based
+auto-updates can authenticate without further configuration.
 
 This will:
 - Create `ownclaw` system user
@@ -53,6 +59,7 @@ sudo nano /opt/ownclaw/.env
 
 | Variable | Required | Description |
 |---|---|---|
+| `GITHUB_TOKEN` | **Yes** | Fine-grained PAT with Contents:read. Generate at [github.com/settings/tokens](https://github.com/settings/tokens?type=beta) |
 | `OPENAI_API_KEY` | **Yes** | OpenAI API key for the Mentor LLM (GPT-4o). Get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather. Set `OWNCLAW_TELEGRAM_ENABLED=true` to activate |
 | `OWNCLAW_SERVER_PORT` | No | HTTP port (default: `8080`) |

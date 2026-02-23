@@ -6,6 +6,11 @@
 #   ./deploy.sh              # Full deploy (first time or force)
 #   ./deploy.sh --update     # Only deploy if there are new commits (for cron)
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
+#   ./deploy.sh --rollback   # Restore previous JAR
+#
+# Authentication:
+#   Set GITHUB_TOKEN in /opt/ownclaw/.env (fine-grained PAT with Contents:read)
+#   The token is loaded automatically and used for git clone/fetch.
 #
 # Cron example (check for updates every 15 minutes):
 #   */15 * * * * /opt/ownclaw/deploy/deploy.sh --update >> /opt/ownclaw/logs/deploy.log 2>&1
@@ -14,8 +19,23 @@ set -euo pipefail
 
 # === Configuration ===
 DEPLOY_DIR="/opt/ownclaw"
-REPO_URL="https://github.com/shaman79/ownclaw.git"
 REPO_DIR="${DEPLOY_DIR}/repo"
+
+# Load .env if present (picks up GITHUB_TOKEN and other vars)
+if [ -f "$DEPLOY_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$DEPLOY_DIR/.env"
+    set +a
+fi
+
+# Build repo URL — with token auth if GITHUB_TOKEN is set
+GITHUB_REPO="github.com/shaman79/ownclaw.git"
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    REPO_URL="https://x-access-token:${GITHUB_TOKEN}@${GITHUB_REPO}"
+else
+    REPO_URL="https://${GITHUB_REPO}"
+fi
 BRANCH="main"
 SERVICE_NAME="ownclaw"
 JDK_VERSION="21"
@@ -36,7 +56,12 @@ do_setup() {
     log "=== OwnClaw Server Setup ==="
 
     if [ "$(id -u)" -ne 0 ]; then
-        die "Setup must be run as root: sudo ./deploy.sh --setup"
+        die "Setup must be run as root: sudo GITHUB_TOKEN=<your-pat> ./deploy.sh --setup"
+    fi
+
+    # Require GITHUB_TOKEN for cloning
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        die "GITHUB_TOKEN is required for setup. Run: sudo GITHUB_TOKEN=github_pat_xxx ./deploy.sh --setup"
     fi
 
     # Create service user
@@ -75,6 +100,8 @@ do_setup() {
     if [ ! -f "$DEPLOY_DIR/.env" ]; then
         log "Creating .env from template..."
         cp "$REPO_DIR/deploy/.env.template" "$DEPLOY_DIR/.env"
+        # Inject the token so cron-based updates can authenticate
+        sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=${GITHUB_TOKEN}|" "$DEPLOY_DIR/.env"
         chmod 600 "$DEPLOY_DIR/.env"
     fi
 
