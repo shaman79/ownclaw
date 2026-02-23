@@ -1,0 +1,48 @@
+name: http_request
+version: 1
+description: "Make an HTTP request and return status code, headers, and body"
+summary: "Make an HTTP request and return the response status, headers, and body"
+
+triggers:
+  keywords: [http, request, get, post, api, url, fetch, rest, web]
+  intents: [make_request, call_api, fetch_url]
+
+parameters:
+  - name: method
+    type: string
+    required: true
+    description: "HTTP method: GET, POST, PUT, DELETE, PATCH, HEAD"
+  - name: url
+    type: string
+    required: true
+    description: "Target URL"
+  - name: headers
+    type: object
+    required: false
+    description: "Request headers as key-value pairs"
+  - name: body
+    type: string
+    required: false
+    description: "Request body (for POST/PUT/PATCH)"
+  - name: timeout
+    type: integer
+    required: false
+    description: "Request timeout in seconds (default: 30)"
+
+credentials: []
+
+permissions:
+  network: true
+  filesystem: false
+  timeout: 60
+
+complexity: low
+created_by: system
+tested: true
+reversible: false
+interactive: false
+
+changelog:
+  - version: 1
+    date: "2025-01-01"
+    change: "Initial version"

@@ -1,0 +1,83 @@
+{
+  "skills" : [ {
+    "name" : "shell_command",
+    "version" : 1,
+    "summary" : "Execute a shell command and return stdout/stderr/exit code",
+    "keywords" : [ "shell", "command", "run", "execute", "bash", "terminal", "cli" ],
+    "complexity" : "low",
+    "params" : [ "command", "working_dir?", "timeout?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "file_operations",
+    "version" : 1,
+    "summary" : "Read, write, list, delete, or move files and directories",
+    "keywords" : [ "file", "read", "write", "create", "delete", "move", "copy", "list", "directory", "folder" ],
+    "complexity" : "low",
+    "params" : [ "operation", "path", "content?", "destination?", "recursive?" ],
+    "credentials" : [ ],
+    "reversible" : true,
+    "interactive" : false
+  }, {
+    "name" : "http_request",
+    "version" : 1,
+    "summary" : "Make an HTTP request and return the response status, headers, and body",
+    "keywords" : [ "http", "request", "get", "post", "api", "url", "fetch", "rest", "web" ],
+    "complexity" : "low",
+    "params" : [ "method", "url", "headers?", "body?", "timeout?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "pdf_parser",
+    "version" : 1,
+    "summary" : "Download and extract text from a PDF file (by URL or local path)",
+    "keywords" : [ "pdf", "parse", "extract", "text", "document", "download", "read" ],
+    "complexity" : "low",
+    "params" : [ "url?", "path?", "max_pages?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "web_search",
+    "version" : 1,
+    "summary" : "Performs a web search using a query string and returns the top search result.",
+    "keywords" : [ "web", "search", "query" ],
+    "complexity" : "medium",
+    "params" : [ "query" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "send_email",
+    "version" : 1,
+    "summary" : "Send an email via SMTP with optional HTML body and CC/BCC",
+    "keywords" : [ "email", "send", "smtp", "mail", "message", "notify" ],
+    "complexity" : "medium",
+    "params" : [ "to", "subject", "body", "html?", "cc?", "bcc?" ],
+    "credentials" : [ "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS" ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "browse_web",
+    "version" : 1,
+    "summary" : "Fetch a web page, extract text and links, optionally follow links",
+    "keywords" : [ "browse", "web", "fetch", "crawl", "scrape", "page", "links", "extract" ],
+    "complexity" : "medium",
+    "params" : [ "url", "extract_links?", "follow_links?", "link_pattern?", "max_pages?", "max_text_length?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "text_summarize",
+    "version" : 1,
+    "summary" : "Summarize text using extractive summarization with TF scoring",
+    "keywords" : [ "summarize", "summary", "text", "extract", "condense", "shorten", "tldr" ],
+    "complexity" : "low",
+    "params" : [ "text", "max_sentences?", "max_length?", "style?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  } ]
+}

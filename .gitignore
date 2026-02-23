@@ -1,0 +1,38 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Java
+*.class
+*.jar
+*.war
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OwnClaw runtime data
+data/
+logs/
+
+# Python virtual environments for skills
+skills/_envs/
+
+# Gradle build output (bin/)
+bin/
+
+# Secrets
+*.env

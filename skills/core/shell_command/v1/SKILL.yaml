@@ -1,0 +1,40 @@
+name: shell_command
+version: 1
+description: "Execute a shell command and capture stdout, stderr, and exit code"
+summary: "Execute a shell command and return stdout/stderr/exit code"
+
+triggers:
+  keywords: [shell, command, run, execute, bash, terminal, cli]
+  intents: [run_command, execute_script]
+
+parameters:
+  - name: command
+    type: string
+    required: true
+    description: "The command to execute"
+  - name: working_dir
+    type: string
+    required: false
+    description: "Working directory for command execution"
+  - name: timeout
+    type: integer
+    required: false
+    description: "Timeout in seconds (default: 30)"
+
+credentials: []
+
+permissions:
+  network: false
+  filesystem: read-only
+  timeout: 60
+
+complexity: low
+created_by: system
+tested: true
+reversible: false
+interactive: false
+
+changelog:
+  - version: 1
+    date: "2025-01-01"
+    change: "Initial version"

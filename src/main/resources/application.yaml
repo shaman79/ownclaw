@@ -1,0 +1,88 @@
+spring:
+  application:
+    name: ownclaw
+
+  datasource:
+    url: jdbc:sqlite:${ownclaw.database.path:./data/ownclaw.db}
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1  # SQLite is single-writer
+
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+
+server:
+  port: ${ownclaw.server.port:8080}
+
+ownclaw:
+  executor:
+    provider: ollama
+    url: http://localhost:11434
+    model: qwen2.5:14b
+    temperature: 0.3
+    context-window: 16384
+
+  mentor:
+    provider: openai
+    model: gpt-4o
+    api-key: ${OPENAI_API_KEY:}
+    max-tokens-per-task: 10000
+    temperature: 0.4
+
+  budgets:
+    daily-cloud-tokens: 500000
+    per-task-cloud-tokens: 10000
+    warning-threshold: 0.8
+
+  queue:
+    max-concurrent-tasks: 5
+    ollama-concurrency: 1
+    cloud-concurrency: 3
+    sandbox-concurrency: 3
+    max-queued-tasks: 50
+
+  tasks:
+    default-timeout: 300
+    step-timeout: 240
+    max-plan-steps: 20
+
+  telegram:
+    enabled: false
+    bot-token: ${TELEGRAM_BOT_TOKEN:}
+    registration: open
+
+  webui:
+    enabled: true
+
+  sandbox:
+    type: auto
+    default-timeout: 60
+    default-network: deny
+    python-path: python
+
+  skills:
+    core-path: ./skills/core
+    generated-path: ./skills/generated
+    manifest-path: ./skills/manifest.json
+    max-versions-kept: 5
+
+  database:
+    path: ./data/ownclaw.db
+
+  confidence:
+    mentor-threshold: 0.3
+    cache-skip-threshold: 0.7
+
+  observability:
+    event-log-retention-days: 30
+    chat-status-messages: true
+    status-verbosity: concise
+
+  feedback:
+    max-rounds: 3
+    teaching-log-max-entries: 30
+
+  plan-cache:
+    enabled: true
+    max-entries: 500
+    ttl-hours: 168

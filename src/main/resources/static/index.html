@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OwnClaw</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+             background:#0d1117;color:#e6edf3;height:100vh;display:flex;flex-direction:column}
+
+        /* Header */
+        #header{padding:10px 20px;background:#161b22;border-bottom:1px solid #30363d;
+                display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600}
+        #header .dot{width:8px;height:8px;border-radius:50%;background:#484f58;flex-shrink:0}
+        #header .dot.online{background:#3fb950}
+
+        /* Messages area */
+        #messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+        #messages::-webkit-scrollbar{width:6px}
+        #messages::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+
+        /* Message bubbles */
+        .msg{max-width:85%;font-size:14px;line-height:1.6;animation:fadeIn .2s ease}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+        .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;padding:8px 14px;
+                  border-radius:12px 12px 2px 12px;white-space:pre-wrap;word-break:break-word}
+
+        .msg.response{align-self:flex-start;background:#161b22;border:1px solid #30363d;
+                      border-radius:2px 12px 12px 12px;padding:12px 16px;word-break:break-word}
+
+        .msg.system{align-self:center;color:#8b949e;font-size:12px;padding:4px 12px;
+                    background:#161b22;border-radius:16px;border:1px solid #21262d}
+
+        /* Status messages — compact inline indicators */
+        .msg.status{align-self:flex-start;color:#8b949e;font-size:13px;padding:2px 0;
+                    background:none;border:none}
+
+        /* Connection banner */
+        #conn-banner{display:none;align-items:center;gap:8px;padding:6px 14px;margin:0 0 4px;
+                     background:#161b22;border:1px solid #30363d;border-radius:8px;
+                     color:#8b949e;font-size:12px;align-self:center}
+        #conn-banner.visible{display:flex}
+        #conn-banner .spinner{width:12px;height:12px;border:2px solid #30363d;
+                              border-top-color:#58a6ff;border-radius:50%;
+                              animation:spin .8s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+
+        /* Thinking indicator */
+        #thinking{display:none;align-self:flex-start;padding:8px 0;align-items:center;gap:8px;
+                  color:#8b949e;font-size:13px}
+        #thinking.active{display:flex}
+        .thinking-dots span{display:inline-block;width:6px;height:6px;border-radius:50%;
+                            background:#58a6ff;animation:pulse 1.4s infinite ease-in-out both}
+        .thinking-dots span:nth-child(1){animation-delay:0s}
+        .thinking-dots span:nth-child(2){animation-delay:.16s}
+        .thinking-dots span:nth-child(3){animation-delay:.32s}
+        @keyframes pulse{0%,80%,100%{transform:scale(0);opacity:.4}40%{transform:scale(1);opacity:1}}
+
+        /* Markdown rendering inside response messages */
+        .msg.response p{margin:0 0 8px 0}
+        .msg.response p:last-child{margin-bottom:0}
+        .msg.response ul,.msg.response ol{margin:4px 0 8px 20px}
+        .msg.response li{margin:2px 0}
+        .msg.response strong{color:#f0f6fc}
+        .msg.response em{color:#c9d1d9}
+        .msg.response a{color:#58a6ff;text-decoration:none}
+        .msg.response a:hover{text-decoration:underline}
+        .msg.response blockquote{border-left:3px solid #30363d;padding:2px 12px;margin:8px 0;color:#8b949e}
+        .msg.response h1,.msg.response h2,.msg.response h3{margin:12px 0 6px;color:#f0f6fc}
+        .msg.response h1{font-size:1.3em}
+        .msg.response h2{font-size:1.15em}
+        .msg.response h3{font-size:1.05em}
+        .msg.response hr{border:none;border-top:1px solid #30363d;margin:12px 0}
+        .msg.response table{border-collapse:collapse;margin:8px 0;width:100%}
+        .msg.response th,.msg.response td{border:1px solid #30363d;padding:6px 10px;text-align:left;font-size:13px}
+        .msg.response th{background:#21262d;font-weight:600}
+
+        /* Code blocks */
+        .msg.response pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;
+                          padding:12px;margin:8px 0;overflow-x:auto;position:relative}
+        .msg.response pre code{background:none;padding:0;font-size:13px;line-height:1.5;
+                               font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
+        .msg.response code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:13px;
+                           font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
+        .msg.response pre code{background:none;padding:0}
+
+        /* Copy button on code blocks */
+        .code-block-wrap{position:relative}
+        .copy-btn{position:absolute;top:6px;right:6px;background:#21262d;border:1px solid #30363d;
+                  color:#8b949e;padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer;
+                  opacity:0;transition:opacity .15s}
+        .code-block-wrap:hover .copy-btn{opacity:1}
+        .copy-btn:hover{background:#30363d;color:#e6edf3}
+        .copy-btn.copied{color:#3fb950}
+
+        /* Input area */
+        #input-area{padding:12px 20px;background:#161b22;border-top:1px solid #30363d;
+                    display:flex;gap:10px;align-items:flex-end}
+        #input{flex:1;padding:10px 14px;border:1px solid #30363d;border-radius:8px;
+               background:#0d1117;color:#e6edf3;font-size:14px;outline:none;resize:none;
+               max-height:120px;min-height:40px;line-height:1.4;
+               font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+        #input:focus{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+        #input::placeholder{color:#484f58}
+        #send{padding:10px 18px;background:#238636;color:#fff;border:none;border-radius:8px;
+              cursor:pointer;font-size:14px;font-weight:600;transition:background .15s;
+              height:40px;flex-shrink:0}
+        #send:hover{background:#2ea043}
+        #send:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+    </style>
+</head>
+<body>
+    <div id="header">
+        <span class="dot" id="connDot"></span>
+        🦀 OwnClaw
+    </div>
+    <div id="messages">
+        <div id="conn-banner"><div class="spinner"></div><span id="conn-text"></span></div>
+        <div id="thinking">
+            <div class="thinking-dots"><span></span><span></span><span></span></div>
+            <span id="thinking-text">Thinking...</span>
+        </div>
+    </div>
+    <div id="input-area">
+        <textarea id="input" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" autocomplete="off"></textarea>
+        <button id="send">Send</button>
+    </div>
+    <script>
+    (function() {
+        const messagesEl = document.getElementById('messages');
+        const thinkingEl = document.getElementById('thinking');
+        const thinkingText = document.getElementById('thinking-text');
+        const inputEl = document.getElementById('input');
+        const sendBtn = document.getElementById('send');
+        const connDot = document.getElementById('connDot');
+        const connBanner = document.getElementById('conn-banner');
+        const connText = document.getElementById('conn-text');
+
+        let reconnectAttempt = 0;
+
+        // Configure marked
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    try { return hljs.highlight(code, { language: lang }).value; } catch {}
+                }
+                try { return hljs.highlightAuto(code).value; } catch {}
+                return code;
+            }
+        });
+
+        let ws;
+        let busy = false;
+
+        function showConnBanner(text) {
+            connText.textContent = text;
+            connBanner.classList.add('visible');
+            scrollBottom();
+        }
+
+        function hideConnBanner() {
+            connBanner.classList.remove('visible');
+        }
+
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(proto + '//' + location.host + '/ws/chat');
+
+            ws.onopen = () => {
+                connDot.classList.add('online');
+                hideConnBanner();
+                if (reconnectAttempt > 0) {
+                    addMsg('system', 'Reconnected');
+                } else {
+                    addMsg('system', 'Connected');
+                }
+                reconnectAttempt = 0;
+            };
+
+            ws.onclose = () => {
+                connDot.classList.remove('online');
+                setThinking(false);
+                reconnectAttempt++;
+                const delay = Math.min(3000 * reconnectAttempt, 30000);
+                if (reconnectAttempt === 1) {
+                    showConnBanner('Disconnected — reconnecting...');
+                } else {
+                    showConnBanner('Reconnecting... attempt ' + reconnectAttempt);
+                }
+                setTimeout(connect, delay);
+            };
+
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    const type = data.type || 'response';
+                    const content = data.content || '';
+
+                    if (type === 'status') {
+                        setThinking(true, content);
+                    } else {
+                        if (type === 'response') setThinking(false);
+                        addMsg(type, content);
+                    }
+                } catch {
+                    setThinking(false);
+                    addMsg('response', e.data);
+                }
+            };
+        }
+
+        function setThinking(on, text) {
+            if (on) {
+                thinkingEl.classList.add('active');
+                if (text) thinkingText.textContent = text;
+                scrollBottom();
+            } else {
+                thinkingEl.classList.remove('active');
+                thinkingText.textContent = 'Thinking...';
+                busy = false;
+            }
+        }
+
+        function addMsg(type, text) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + type;
+
+            if (type === 'response' || type === 'system') {
+                // Render markdown for response and system messages
+                div.innerHTML = renderMarkdown(text);
+                // Wrap code blocks with copy button
+                div.querySelectorAll('pre').forEach(wrapCodeBlock);
+            } else {
+                div.textContent = text;
+            }
+
+            // Insert before the thinking indicator
+            messagesEl.insertBefore(div, thinkingEl);
+            scrollBottom();
+        }
+
+        function renderMarkdown(text) {
+            // marked handles markdown → HTML
+            try {
+                return marked.parse(text);
+            } catch {
+                // Fallback: escape HTML and preserve whitespace
+                return '<p>' + escapeHtml(text) + '</p>';
+            }
+        }
+
+        function escapeHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function wrapCodeBlock(pre) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'code-block-wrap';
+            pre.parentNode.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+
+            const btn = document.createElement('button');
+            btn.className = 'copy-btn';
+            btn.textContent = 'Copy';
+            btn.onclick = () => {
+                const code = pre.querySelector('code');
+                navigator.clipboard.writeText(code ? code.textContent : pre.textContent).then(() => {
+                    btn.textContent = 'Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+                });
+            };
+            wrapper.appendChild(btn);
+        }
+
+        function send() {
+            const text = inputEl.value.trim();
+            if (!text || !ws || ws.readyState !== 1) return;
+            addMsg('user', text);
+            ws.send(JSON.stringify({ message: text }));
+            inputEl.value = '';
+            inputEl.style.height = 'auto';
+            busy = true;
+            setThinking(true, 'Processing...');
+        }
+
+        function scrollBottom() {
+            requestAnimationFrame(() => {
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            });
+        }
+
+        // Auto-resize textarea
+        inputEl.addEventListener('input', () => {
+            inputEl.style.height = 'auto';
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+        });
+
+        // Enter to send, Shift+Enter for newline
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+            }
+        });
+
+        sendBtn.addEventListener('click', send);
+        connect();
+    })();
+    </script>
+</body>
+</html>

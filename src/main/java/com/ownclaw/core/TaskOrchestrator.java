@@ -1,0 +1,928 @@
+package com.ownclaw.core;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.executor.ExecutorService;
+import com.ownclaw.executor.ExecutorService.ClassificationResult;
+import com.ownclaw.executor.ExecutorService.CompletenessResult;
+import com.ownclaw.executor.PreferencesManager;
+import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.mentor.MentorService;
+import com.ownclaw.mentor.SkillDiagnostician;
+import com.ownclaw.mentor.SkillGenerator;
+import com.ownclaw.mentor.SkillRepairer;
+import com.ownclaw.mentor.TaskContext;
+import com.ownclaw.observability.ChatStatusEmitter;
+import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
+import com.ownclaw.observability.EventLogService;
+import com.ownclaw.skillrunner.SkillFailureContext;
+import com.ownclaw.skillrunner.SkillRunnerService;
+import com.ownclaw.skills.SkillManifest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * The main task flow coordinator.
+ * Implements: Executor classifies → Mentor plans → SkillRunner executes → Mentor reviews.
+ */
+@Service
+public class TaskOrchestrator {
+
+    private static final Logger log = LoggerFactory.getLogger(TaskOrchestrator.class);
+    private static final Pattern REF_PATTERN = Pattern.compile("\\$(\\d+)\\.(output|exit_code|success)");
+    private static final int MAX_SELF_HEAL_ATTEMPTS = 2;
+
+    private final ExecutorService executor;
+    private final MentorService mentor;
+    private final SkillRunnerService skillRunner;
+    private final SkillManifest skillManifest;
+    private final ConditionEvaluator conditionEvaluator;
+    private final ConversationService conversation;
+    private final EventLogService eventLog;
+    private final ChatStatusEmitter statusEmitter;
+    private final PlanCacheService planCache;
+    private final TokenBudgetTracker budgetTracker;
+    private final SkillGenerator skillGenerator;
+    private final SkillDiagnostician skillDiagnostician;
+    private final SkillRepairer skillRepairer;
+    private final PreferencesManager preferencesManager;
+    private final ObjectMapper mapper;
+    private final JdbcTemplate jdbc;
+    private final OwnClawConfig config;
+
+    public TaskOrchestrator(ExecutorService executor, MentorService mentor,
+                            SkillRunnerService skillRunner, SkillManifest skillManifest,
+                            ConditionEvaluator conditionEvaluator, ConversationService conversation,
+                            EventLogService eventLog,
+                            ChatStatusEmitter statusEmitter, PlanCacheService planCache,
+                            TokenBudgetTracker budgetTracker, SkillGenerator skillGenerator,
+                            SkillDiagnostician skillDiagnostician,
+                            SkillRepairer skillRepairer,
+                            PreferencesManager preferencesManager,
+                            ObjectMapper mapper, JdbcTemplate jdbc, OwnClawConfig config) {
+        this.executor = executor;
+        this.mentor = mentor;
+        this.skillRunner = skillRunner;
+        this.skillManifest = skillManifest;
+        this.conditionEvaluator = conditionEvaluator;
+        this.conversation = conversation;
+        this.eventLog = eventLog;
+        this.statusEmitter = statusEmitter;
+        this.planCache = planCache;
+        this.budgetTracker = budgetTracker;
+        this.skillGenerator = skillGenerator;
+        this.skillDiagnostician = skillDiagnostician;
+        this.skillRepairer = skillRepairer;
+        this.preferencesManager = preferencesManager;
+        this.mapper = mapper;
+        this.jdbc = jdbc;
+        this.config = config;
+    }
+
+    /**
+     * Process a user message through the full pipeline.
+     *
+     * @param userId      user ID
+     * @param userMessage raw user input
+     * @return final response text to send back to the user
+     */
+    public String processMessage(String userId, String userMessage) {
+        String taskId = UUID.randomUUID().toString().substring(0, 8);
+        String sessionId = conversation.getCurrentSession(userId);
+        eventLog.info(userId, taskId, "task.received", "Task: " + truncate(userMessage, 100));
+
+        // Save user message to conversation history
+        conversation.saveMessage(userId, sessionId, "user", userMessage);
+
+        try {
+            // Step 1: Executor classifies
+            statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Analyzing task...");
+            ClassificationResult classification = executor.classify(userMessage);
+
+            eventLog.info(userId, taskId, "task.classified",
+                    "Intent: " + classification.intent()
+                            + " | Confidence: " + String.format("%.2f", classification.confidence())
+                            + " | Conversational: " + classification.conversational()
+                            + " | Mentor: " + classification.needsMentor());
+
+            log.info("Classification for [{}]: intent={}, confidence={}, conversational={}, matches={}",
+                    truncate(userMessage, 50), classification.intent(),
+                    classification.confidence(), classification.conversational(), classification.matchesJson());
+
+            // If conversational — no skills needed, just respond
+            if (classification.conversational()) {
+                return handleConversational(userId, taskId, userMessage);
+            }
+
+            // Step 2: Determine flow based on confidence
+            double confidence = classification.confidence();
+            double mentorThreshold = config.getConfidence().getMentorThreshold();
+
+            if (!classification.needsMentor() && confidence > config.getConfidence().getCacheSkipThreshold()) {
+                // High confidence + no mentor needed → try plan cache
+            }
+
+            // Step 2b: Check plan cache before calling Mentor
+            Optional<TaskPlan> cachedPlan = config.getPlanCache().isEnabled()
+                    ? planCache.lookup(userMessage) : Optional.empty();
+
+            TaskPlan plan;
+            if (cachedPlan.isPresent()) {
+                plan = cachedPlan.get();
+                eventLog.info(userId, taskId, "task.cache_hit",
+                        "Using cached plan: " + plan.size() + " steps");
+                statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Using cached plan...");
+            } else {
+                // Step 3: Compress and send to Mentor
+                statusEmitter.emit(userId, StatusMessage.Type.MENTOR, "Planning with Mentor...");
+
+                // Budget check: ensure we have tokens before calling cloud LLM
+                if (!budgetTracker.hasBudget(userId)) {
+                    String msg = "Daily cloud token budget exhausted. Try again tomorrow or ask a simpler question.";
+                    statusEmitter.emit(userId, StatusMessage.Type.FAILED, "Token budget exhausted");
+                    conversation.saveMessage(userId, sessionId, "assistant", msg);
+                    return msg;
+                }
+
+                String compressedPayload;
+                if (confidence < mentorThreshold) {
+                    compressedPayload = userMessage;
+                    eventLog.warn(userId, taskId, "task.low_confidence",
+                            "Confidence " + String.format("%.2f", confidence) + " < threshold, sending raw to Mentor");
+                } else {
+                    compressedPayload = executor.compressForMentor(userMessage, null, classification);
+                }
+
+                // Build dynamic task context from classification so the Mentor
+                // receives only strategies relevant to this specific task
+                TaskContext taskCtx = TaskContext.fromMatchesJson(classification.matchesJson());
+
+                plan = mentor.plan(compressedPayload, skillManifest.toPromptSnippet(),
+                        taskCtx, userId, taskId);
+                eventLog.info(userId, taskId, "task.planned", "Plan: " + plan.size() + " steps");
+            }
+
+            // Fast path: Mentor answered from knowledge (no skills needed)
+            if (plan.isDirectAnswer()) {
+                String answer = plan.directAnswer();
+                eventLog.info(userId, taskId, "task.direct_answer",
+                        "Mentor answered directly: " + truncate(answer, 100));
+                statusEmitter.emit(userId, StatusMessage.Type.COMPLETED, "Done");
+                conversation.saveMessage(userId, sessionId, "assistant", answer);
+                return answer;
+            }
+
+            // Guard: if the Mentor returned 0 steps, try generating a new skill
+            if (plan.steps().isEmpty()) {
+                statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+                        "No matching skills — attempting to generate a new one...");
+                eventLog.info(userId, taskId, "task.skill_gen_attempt",
+                        "Mentor returned 0 steps, triggering skill generation");
+
+                try {
+                    SkillGenerator.GenerationResult genResult =
+                            skillGenerator.generate(userMessage, userId, taskId);
+
+                    if (genResult.success()) {
+                        statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+                                "New skill '" + genResult.skillName() + "' created! Re-planning...");
+
+                        // Re-plan now that a new skill is available
+                        String compressedRetry = executor.compressForMentor(userMessage, null, classification);
+                        // Refresh context — the new skill may change which strategies are relevant
+                        TaskContext retryCtx = TaskContext.fromMatchesJson(classification.matchesJson());
+                        plan = mentor.plan(compressedRetry, skillManifest.toPromptSnippet(),
+                                retryCtx, userId, taskId);
+
+                        if (plan.steps().isEmpty()) {
+                            String msg = "A new skill was created ('" + genResult.skillName()
+                                    + "') but planning still produced no steps. "
+                                    + "Try rephrasing your request.";
+                            conversation.saveMessage(userId, sessionId, "assistant", msg);
+                            return msg;
+                        }
+                    } else {
+                        String msg = "I wasn't able to create a plan for this task. "
+                                + "The available skills may not cover what's needed, "
+                                + "or the request may need to be rephrased.\n"
+                                + "Skill generation also failed: " + genResult.summary();
+                        eventLog.warn(userId, taskId, "task.empty_plan",
+                                "Mentor returned 0 steps and skill generation failed");
+                        statusEmitter.emit(userId, StatusMessage.Type.FAILED, "No plan generated");
+                        conversation.saveMessage(userId, sessionId, "assistant", msg);
+                        return msg;
+                    }
+                } catch (Exception e) {
+                    log.warn("Skill generation failed: {}", e.getMessage());
+                    String msg = "I wasn't able to create a plan for this task. "
+                            + "The available skills may not cover what's needed, "
+                            + "or the request may need to be rephrased.";
+                    eventLog.warn(userId, taskId, "task.empty_plan",
+                            "Mentor returned 0 steps");
+                    statusEmitter.emit(userId, StatusMessage.Type.FAILED, "No plan generated");
+                    conversation.saveMessage(userId, sessionId, "assistant", msg);
+                    return msg;
+                }
+            }
+
+            // Persist task state for recovery
+            persistTaskState(taskId, userId, "executing", plan);
+
+            // Step 4: Execute the plan (DAG-aware)
+            statusEmitter.emit(userId, StatusMessage.Type.STARTED,
+                    "Executing plan (" + plan.size() + " step" + (plan.size() > 1 ? "s" : "") + ")...");
+            Map<Integer, StepResult> stepResults = executePlan(plan, userId, taskId);
+
+            // Step 5: Optionally review with Mentor
+            if (plan.reviewResult()) {
+                statusEmitter.emit(userId, StatusMessage.Type.MENTOR, "Mentor reviewing results...");
+                String resultSummary = buildResultSummary(stepResults);
+                String compressed = executor.compressResults(
+                        plan.size() + " steps executed", resultSummary);
+                MentorService.ReviewResult review = mentor.review(compressed, userId, taskId);
+
+                if (review.isRetry() && plan.maxRetries() > 0) {
+                    eventLog.info(userId, taskId, "task.retry", "Mentor requested retry");
+                    // Simplified: re-execute the whole plan (full retry logic in later phases)
+                    stepResults = executePlan(plan, userId, taskId);
+                }
+            }
+
+            // Step 6: Evaluate results
+            persistTaskState(taskId, userId, "completed", plan);
+            boolean allSuccess = stepResults.values().stream()
+                    .filter(r -> !r.isSkipped())
+                    .allMatch(StepResult::success);
+
+            // Cache the plan if it succeeded, has steps, and wasn't already cached
+            if (config.getPlanCache().isEnabled() && cachedPlan.isEmpty()
+                    && allSuccess && !plan.steps().isEmpty()) {
+                planCache.store(userMessage, plan);
+            }
+
+            // Step 6b: Iterative re-planning — check if the results actually answer the question
+            // If not, identify what's missing and create follow-up plans
+            // Runs on partial success too — even if some steps failed, successful ones may
+            // contain enough context to identify follow-up actions
+            boolean hasAnySuccess = stepResults.values().stream().anyMatch(StepResult::success);
+            if (hasAnySuccess) {
+                int maxRounds = config.getFeedback().getMaxRounds();
+                int nextStepId = stepResults.keySet().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
+
+                // Carry the task context through follow-up rounds; we'll
+                // enrich it with failure info as rounds progress
+                TaskContext followUpCtx = TaskContext.fromMatchesJson(classification.matchesJson());
+
+                for (int round = 1; round <= maxRounds; round++) {
+                    // Include both successes AND failure summaries so the eval
+                    // knows what already failed and doesn't request impossible follow-ups
+                    String rawSoFar = buildResponseForEvaluation(stepResults);
+
+                    // Check if any steps have actually failed
+                    boolean hasFailures = stepResults.values().stream()
+                            .anyMatch(r -> !r.success());
+
+                    statusEmitter.emit(userId, StatusMessage.Type.STARTED,
+                            "Evaluating completeness (round " + round + "/" + maxRounds + ")...");
+
+                    CompletenessResult eval = executor.evaluateCompleteness(
+                            userMessage, rawSoFar, hasFailures);
+                    eventLog.info(userId, taskId, "task.completeness_eval",
+                            "Round " + round + ": complete=" + eval.complete()
+                                    + " | " + truncate(eval.analysis(), 200));
+
+                    if (eval.complete() || eval.followUp() == null || eval.followUp().isBlank()) {
+                        log.info("Results complete after round {} evaluation", round);
+                        break;
+                    }
+
+                    // Not complete — ask Mentor for a follow-up plan
+                    log.info("Results incomplete (round {}): {}", round, eval.analysis());
+                    statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+                            "Planning follow-up (round " + round + ")...");
+
+                    try {
+                        // Pass failure context so the Mentor knows what broke and doesn't retry the same thing
+                        String failureSummary = buildFailureSummary(stepResults);
+                        String followUpContext = eval.followUp()
+                                + (failureSummary.isEmpty() ? "" : "\n\nPREVIOUS FAILURES (do NOT retry these):\n" + failureSummary);
+
+                        // Enrich context with failure info for this round
+                        TaskContext roundCtx = hasFailures
+                                ? followUpCtx.withFailures()
+                                : followUpCtx;
+
+                        TaskPlan followUp = mentor.followUpPlan(
+                                userMessage, buildFinalResponse(stepResults), followUpContext,
+                                skillManifest.toPromptSnippet(), nextStepId, roundCtx,
+                                userId, taskId);
+
+                        if (followUp.steps().isEmpty()) {
+                            log.info("Mentor returned empty follow-up plan, stopping");
+                            break;
+                        }
+
+                        eventLog.info(userId, taskId, "task.follow_up",
+                                "Follow-up plan: " + followUp.size() + " steps (round " + round + ")");
+
+                        statusEmitter.emit(userId, StatusMessage.Type.STARTED,
+                                "Executing follow-up (" + followUp.size() + " step"
+                                        + (followUp.size() > 1 ? "s" : "") + ")...");
+
+                        Map<Integer, StepResult> followUpResults = executePlan(followUp, userId, taskId);
+                        stepResults.putAll(followUpResults);
+
+                        // Update next step ID offset for potential further rounds
+                        nextStepId = stepResults.keySet().stream()
+                                .mapToInt(Integer::intValue).max().orElse(nextStepId) + 1;
+
+                        // Note follow-up failures but DON'T break — let the next round's
+                        // completeness eval see the combined results and decide what to do.
+                        // The eval is now aware of failures and won't blindly retry.
+                        boolean followUpSuccess = followUpResults.values().stream()
+                                .allMatch(StepResult::success);
+                        if (!followUpSuccess) {
+                            long failCount = followUpResults.values().stream()
+                                    .filter(r -> !r.success()).count();
+                            log.info("Follow-up round {} had {} failure(s), continuing evaluation",
+                                    round, failCount);
+                        }
+                    } catch (Exception e) {
+                        log.warn("Follow-up planning failed in round {}: {}", round, e.getMessage());
+                        eventLog.warn(userId, taskId, "task.follow_up_failed",
+                                "Round " + round + ": " + e.getMessage());
+                        break;
+                    }
+                }
+
+                // Re-check allSuccess after follow-up rounds
+                allSuccess = stepResults.values().stream()
+                        .filter(r -> !r.isSkipped())
+                        .allMatch(StepResult::success);
+            }
+
+            String response;
+            boolean hasAnySuccessForSummary = stepResults.values().stream().anyMatch(StepResult::success);
+            boolean hasRealFailures = stepResults.values().stream()
+                    .anyMatch(r -> !r.success() && !r.isSkipped());
+            if (!allSuccess && !hasAnySuccessForSummary && hasRealFailures) {
+                // Total failure — no successful steps at all
+                response = buildErrorResponse(stepResults);
+                statusEmitter.emit(userId, StatusMessage.Type.FAILED, "Task failed");
+            } else if (hasRealFailures && hasAnySuccessForSummary) {
+                // Partial success — some steps succeeded, some failed.
+                // Summarize what we got + explain what failed, via the LLM.
+                String rawOutput = buildPartialResponse(stepResults);
+                statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Summarizing partial results...");
+                try {
+                    response = executor.summarize(userMessage, rawOutput);
+                } catch (Exception e) {
+                    log.warn("Summarization of partial results failed: {}", e.getMessage());
+                    response = null;
+                }
+                // Guard against empty response from LLM — never dump raw output to chat
+                if (response == null || response.isBlank()) {
+                    log.warn("Summarizer returned empty response for partial results, building safe fallback");
+                    response = buildSafeFallbackResponse(userMessage, stepResults);
+                }
+                statusEmitter.emit(userId, StatusMessage.Type.COMPLETED, "Done (some steps failed)");
+            } else {
+                // Step 7: Summarize successful output into a user-friendly response
+                String rawOutput = buildFinalResponse(stepResults);
+                statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Summarizing results...");
+                try {
+                    response = executor.summarize(userMessage, rawOutput);
+                } catch (Exception e) {
+                    log.warn("Summarization failed: {}", e.getMessage());
+                    response = null;
+                }
+                // Guard against empty response from LLM — never dump raw output to chat
+                if (response == null || response.isBlank()) {
+                    log.warn("Summarizer returned empty response, building safe fallback");
+                    response = buildSafeFallbackResponse(userMessage, stepResults);
+                }
+                statusEmitter.emit(userId, StatusMessage.Type.COMPLETED, "Done");
+            }
+
+            eventLog.info(userId, taskId, "task.completed", "Task complete");
+            conversation.saveMessage(userId, sessionId, "assistant", response);
+
+            // Phase 2: Learn from this interaction (async-safe, non-blocking)
+            try {
+                preferencesManager.learnFromTask(userId, userMessage, response, taskId);
+                preferencesManager.distillIfNeeded(userId);
+            } catch (Exception e) {
+                log.debug("Preference learning failed (non-critical): {}", e.getMessage());
+            }
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Task {} failed: {}", taskId, e.getMessage(), e);
+            eventLog.error(userId, taskId, "task.failed", e.getMessage());
+            statusEmitter.emit(userId, StatusMessage.Type.FAILED, "Task failed: " + e.getMessage());
+            persistTaskState(taskId, userId, "failed", null);
+            String errMsg = "Task failed: " + e.getMessage();
+            conversation.saveMessage(userId, sessionId, "assistant", errMsg);
+            return errMsg;
+        }
+    }
+
+    /**
+     * Execute a plan respecting DAG dependencies and conditions.
+     */
+    private Map<Integer, StepResult> executePlan(TaskPlan plan, String userId, String taskId) {
+        Map<Integer, StepResult> results = new LinkedHashMap<>();
+        Set<Integer> completed = new HashSet<>();
+
+        // Simple topological execution: iterate until all steps done or blocked
+        int maxIterations = plan.size() * 2; // safety limit
+        for (int iter = 0; iter < maxIterations && completed.size() < plan.size(); iter++) {
+            boolean progress = false;
+
+            for (TaskStep step : plan.steps()) {
+                if (completed.contains(step.id())) continue;
+
+                // Check dependencies satisfied
+                if (!completed.containsAll(step.dependsOn())) continue;
+
+                // Check condition
+                if (step.condition() != null && !conditionEvaluator.evaluate(step.condition(), results)) {
+                    results.put(step.id(), StepResult.skipped(step.id()));
+                    completed.add(step.id());
+                    progress = true;
+                    continue;
+                }
+
+                // Resolve parameter references ($N.output)
+                Map<String, Object> resolvedParams = resolveParams(step.params(), results);
+
+                statusEmitter.emit(userId, StatusMessage.Type.STEP,
+                        "Step " + step.id() + "/" + plan.size() + ": " + step.skill());
+
+                // Auto-generate missing skills before execution
+                if (skillManifest.findByName(step.skill()).isEmpty()) {
+                    log.info("Skill '{}' not in manifest — attempting auto-generation", step.skill());
+                    eventLog.info(userId, taskId, "skill.auto_gen",
+                            "Skill '" + step.skill() + "' not found, triggering generation");
+                    try {
+                        String genPrompt = "Create a skill called '" + step.skill()
+                                + "' that accepts these parameters: " + resolvedParams.keySet()
+                                + ". Example input: " + truncate(resolvedParams.toString(), 300);
+                        SkillGenerator.GenerationResult genResult =
+                                skillGenerator.generate(genPrompt, userId, taskId);
+                        if (genResult.success()) {
+                            eventLog.info(userId, taskId, "skill.auto_gen_success",
+                                    "Auto-generated skill '" + genResult.skillName() + "' v" + genResult.version());
+                            statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+                                    "New skill '" + genResult.skillName() + "' created!");
+                        } else {
+                            eventLog.warn(userId, taskId, "skill.auto_gen_failed",
+                                    "Failed to auto-generate '" + step.skill() + "': " + genResult.summary());
+                        }
+                    } catch (Exception e) {
+                        log.warn("Auto-generation of '{}' failed: {}", step.skill(), e.getMessage());
+                    }
+                }
+
+                // Execute
+                StepResult result = skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+                results.put(step.id(), result);
+                completed.add(step.id());
+                progress = true;
+
+                // Handle failure
+                if (!result.success()) {
+                    // Promote REPORT → RETRY: always attempt self-healing before aborting.
+                    // Skills are skills — any failure is worth diagnosing and retrying.
+                    TaskStep.OnFail effectiveOnFail = step.onFail();
+                    if (effectiveOnFail == TaskStep.OnFail.REPORT) {
+                        log.info("Promoting on_fail=REPORT → RETRY for skill '{}' — attempting self-heal first",
+                                step.skill());
+                        effectiveOnFail = TaskStep.OnFail.RETRY;
+                    }
+
+                    switch (effectiveOnFail) {
+                        case REPORT -> {
+                            eventLog.warn(userId, taskId, "step.failed",
+                                    "Step " + step.id() + " (" + step.skill() + ") failed: " + truncate(result.output(), 200));
+                            updateTaskStateStep(taskId, step.id(), results);
+                            return results; // stop plan execution
+                        }
+                        case SKIP -> eventLog.info(userId, taskId, "step.skipped",
+                                "Step " + step.id() + " failed, skipping (on_fail=skip)");
+                        case RETRY -> {
+                            // Self-healing retry: diagnose → repair → retry
+                            StepResult healedResult = attemptSelfHeal(
+                                    step, userId, taskId, resolvedParams, result);
+                            results.put(step.id(), healedResult);
+                            if (!healedResult.success()) {
+                                eventLog.warn(userId, taskId, "step.retry_failed",
+                                        "Step " + step.id() + " (" + step.skill()
+                                                + ") failed after self-heal — continuing with remaining steps");
+                                // Don't abort — continue with remaining independent steps.
+                                // Dependent steps will be skipped via dependency check.
+                            }
+                        }
+                    }
+                }
+
+                // Update persisted state
+                updateTaskStateStep(taskId, step.id(), results);
+            }
+
+            if (!progress) {
+                log.warn("DAG execution stalled — unresolvable dependencies in task {}", taskId);
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    /**
+     * Attempt to self-heal a failed skill step.
+     *
+     * <p>The self-healing loop:
+     * <ol>
+     *   <li>Capture the failure context (source code, stderr, params, etc.)</li>
+     *   <li>Ask the Mentor to diagnose the failure</li>
+     *   <li>If fixable, apply the repair (new skill version)</li>
+     *   <li>Validate the repair and retry the step</li>
+     *   <li>If fix fails or isn't possible, fall back to a plain retry</li>
+     * </ol>
+     *
+     * @param step           the failed step
+     * @param userId         user ID
+     * @param taskId         task ID
+     * @param resolvedParams the params that were used
+     * @param failedResult   the original failure result
+     * @return the result of the retry (may be success or failure)
+     */
+    private StepResult attemptSelfHeal(TaskStep step, String userId, String taskId,
+                                        Map<String, Object> resolvedParams,
+                                        StepResult failedResult) {
+
+        SkillFailureContext failureContext = skillRunner.getLastFailureContext();
+
+        if (failureContext == null) {
+            log.info("No failure context available for step {} — falling back to simple retry", step.id());
+            return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+        }
+
+        // Check budget before spending tokens on diagnosis
+        if (!budgetTracker.hasBudget(userId)) {
+            log.info("Token budget exhausted — falling back to simple retry for step {}", step.id());
+            return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+        }
+
+        for (int attempt = 1; attempt <= MAX_SELF_HEAL_ATTEMPTS; attempt++) {
+            log.info("Self-heal attempt {}/{} for skill '{}' step {}",
+                    attempt, MAX_SELF_HEAL_ATTEMPTS, step.skill(), step.id());
+
+            statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+                    "\uD83D\uDD27 Diagnosing failure in " + step.skill() + " (attempt " + attempt + ")...");
+
+            // Step 1: Diagnose
+            SkillDiagnostician.Diagnosis diagnosis = skillDiagnostician.diagnose(
+                    failureContext, userId, taskId);
+
+            log.info("Diagnosis for '{}': category={}, fixable={}, confidence={}, cause={}",
+                    step.skill(), diagnosis.category(), diagnosis.fixable(),
+                    diagnosis.confidence(), diagnosis.rootCause());
+
+            // Step 2: Attempt repair if fixable
+            if (diagnosis.hasCodeFix() && diagnosis.confidence() >= 0.4) {
+                statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+                        "\uD83D\uDD27 Repairing " + step.skill() + "...");
+
+                SkillRepairer.RepairResult repairResult = skillRepairer.repair(
+                        step.skill(), diagnosis, userId, taskId);
+
+                if (repairResult.success()) {
+                    statusEmitter.emit(userId, StatusMessage.Type.STEP,
+                            "\u2705 Skill " + step.skill() + " repaired (v" + repairResult.newVersion()
+                                    + ") — retrying...");
+
+                    // Reload skill manifest to pick up the new version
+                    skillManifest.reload();
+
+                    // Retry with the repaired skill
+                    StepResult retryResult = skillRunner.executeStep(
+                            step, userId, taskId, resolvedParams, Map.of());
+
+                    if (retryResult.success()) {
+                        eventLog.info(userId, taskId, "skill.self_healed",
+                                step.skill() + " self-healed: " + diagnosis.rootCause()
+                                        + " → v" + repairResult.newVersion());
+                        return retryResult;
+                    }
+
+                    // Retry failed even after repair — capture new context for next attempt
+                    failureContext = skillRunner.getLastFailureContext();
+                    if (failureContext == null) break;
+
+                    log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
+                    continue;
+                }
+
+                log.warn("Repair failed for '{}': {}", step.skill(), repairResult.summary());
+            }
+
+            // Not fixable via code (bad_params, network, external) or low confidence
+            // For param issues, log the diagnosis so the Mentor can adjust the plan
+            if (diagnosis.hasParamFix()) {
+                eventLog.info(userId, taskId, "skill.param_diagnosis",
+                        step.skill() + " needs different params: " + diagnosis.rootCause());
+            }
+
+            break; // No point retrying diagnosis if it says it's not fixable
+        }
+
+        // Self-healing didn't work — fall back to simple retry
+        log.info("Self-heal exhausted for step {} — executing simple retry", step.id());
+        return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+    }
+
+    /**
+     * Resolve $N.output, $N.exit_code, $N.success references in step params.
+     */
+    private Map<String, Object> resolveParams(Map<String, Object> params, Map<Integer, StepResult> results) {
+        Map<String, Object> resolved = new LinkedHashMap<>();
+        for (var entry : params.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof String s) {
+                resolved.put(entry.getKey(), resolveReferences(s, results));
+            } else {
+                resolved.put(entry.getKey(), value);
+            }
+        }
+        return resolved;
+    }
+
+    private String resolveReferences(String template, Map<Integer, StepResult> results) {
+        Matcher m = REF_PATTERN.matcher(template);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            int stepId = Integer.parseInt(m.group(1));
+            String field = m.group(2);
+            StepResult r = results.get(stepId);
+            String replacement = "";
+            if (r != null) {
+                replacement = switch (field) {
+                    case "output" -> r.output() != null ? r.output() : "";
+                    case "exit_code" -> String.valueOf(r.exitCode());
+                    case "success" -> String.valueOf(r.success());
+                    default -> "";
+                };
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String handleConversational(String userId, String taskId, String userMessage) {
+        eventLog.info(userId, taskId, "task.conversational", "Conversational — calling Executor LLM");
+        statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Thinking...");
+
+        // Load recent conversation history for context (already includes the user message we just saved)
+        String sessionId = conversation.getCurrentSession(userId);
+        List<Map<String, Object>> recentRows = conversation.getRecentMessages(userId, sessionId, 10);
+
+        // Convert DB rows to LlmMessage list (recentRows is DESC order, reverse to chronological)
+        // Exclude the last user message since executor.converse() adds it
+        List<LlmMessage> history = new ArrayList<>();
+        for (int i = recentRows.size() - 1; i >= 0; i--) {
+            Map<String, Object> row = recentRows.get(i);
+            String role = (String) row.get("role");
+            String content = (String) row.get("content");
+            // Skip the current message — it's the one we just saved, and converse() will add it
+            if (i == 0 && "user".equals(role) && userMessage.equals(content)) continue;
+            history.add(new LlmMessage(
+                    "assistant".equals(role) ? LlmMessage.Role.ASSISTANT : LlmMessage.Role.USER,
+                    content));
+        }
+
+        // Call Executor LLM for real conversational response
+        String response = executor.converse(userMessage, history);
+
+        // Save assistant response to conversation
+        conversation.saveMessage(userId, sessionId, "assistant", response);
+
+        return response;
+    }
+
+    private String buildResultSummary(Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        for (var entry : results.entrySet()) {
+            StepResult r = entry.getValue();
+            sb.append(r.label()).append(": ")
+                    .append(r.success() ? "SUCCESS" : "FAILED")
+                    .append(" (").append(r.durationMs()).append("ms)")
+                    .append(" — ").append(truncate(r.output(), 100))
+                    .append('\n');
+        }
+        return sb.toString();
+    }
+
+    private String buildFinalResponse(Map<Integer, StepResult> results) {
+        // Collect ALL successful step outputs — needed for completeness evaluation
+        // and for the summarizer to see all gathered information across rounds
+        var sb = new StringBuilder();
+        int count = 0;
+        StepResult last = null;
+        for (StepResult r : results.values()) {
+            if (!r.success()) continue;
+            last = r;
+            count++;
+        }
+        // Single successful step — return its output directly (avoid wrapper noise)
+        // Cap to prevent enormous payloads (e.g. full HTML pages) from flooding downstream.
+        if (count == 1 && last != null) return capOutput(last.output());
+        // Multiple successful steps — concatenate with headers
+        for (StepResult r : results.values()) {
+            if (!r.success()) continue;
+            if (sb.length() > 0) sb.append("\n\n---\n\n");
+            sb.append("[Step ").append(r.stepId()).append(" — ").append(r.label()).append("]\n");
+            sb.append(capOutput(r.output()));
+        }
+        return sb.length() > 0 ? sb.toString() : "No results produced.";
+    }
+
+    /**
+     * Build response for completeness evaluation.
+     * Includes BOTH successful outputs AND failure summaries so the evaluator
+     * understands what already failed and can make realistic follow-up recommendations.
+     */
+    private String buildResponseForEvaluation(Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        // Successful outputs
+        for (StepResult r : results.values()) {
+            if (!r.success()) continue;
+            if (sb.length() > 0) sb.append("\n\n---\n\n");
+            sb.append("[Step ").append(r.stepId()).append(" — ").append(r.label()).append(" — SUCCESS]\n");
+            sb.append(r.output());
+        }
+        // Brief failure summaries (not full output — just enough for the eval to know)
+        String failureSummary = buildFailureSummary(results);
+        if (!failureSummary.isEmpty()) {
+            if (sb.length() > 0) sb.append("\n\n---\n\n");
+            sb.append("FAILED STEPS (these cannot be retried with the same parameters):\n");
+            sb.append(failureSummary);
+        }
+        return sb.length() > 0 ? sb.toString() : "No results produced.";
+    }
+
+    /**
+     * Build a concise summary of all failures.
+     * Used by the completeness eval and follow-up planner to avoid retrying the same broken operations.
+     */
+    private String buildFailureSummary(Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        for (StepResult r : results.values()) {
+            if (r.success()) continue;
+            if (r.isSkipped()) continue;
+            sb.append("- ").append(r.label()).append(": ").append(truncate(r.output(), 150)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Build a response that includes both successful outputs and failure context.
+     * This IS passed through the LLM summarizer so it can explain what worked and what didn't.
+     */
+    private String buildPartialResponse(Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        // Successful outputs first
+        for (StepResult r : results.values()) {
+            if (!r.success()) continue;
+            if (sb.length() > 0) sb.append("\n\n---\n\n");
+            sb.append("[Step ").append(r.stepId()).append(" — ").append(r.label()).append(" — SUCCESS]\n");
+            sb.append(capOutput(r.output()));
+        }
+        // Then failures with context
+        for (StepResult r : results.values()) {
+            if (r.success()) continue;
+            if (r.isSkipped()) continue;
+            if (sb.length() > 0) sb.append("\n\n---\n\n");
+            sb.append("[Step ").append(r.stepId()).append(" — ").append(r.label()).append(" — FAILED]\n");
+            sb.append(truncate(r.output(), 500));
+        }
+        return sb.length() > 0 ? sb.toString() : "No results produced.";
+    }
+
+    /**
+     * Build a clean, structured error message from failed steps.
+     * This is returned directly to the user — never passed through the LLM.
+     */
+    private String buildErrorResponse(Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        sb.append("**Task failed**\n\n");
+        for (StepResult r : results.values()) {
+            if (r.success()) continue;
+            String label = r.label();
+            String output = r.output() != null ? r.output().strip() : "Unknown error";
+            // Clean up verbose internal errors into user-friendly messages
+            if (output.contains("Python interpreter not found")) {
+                sb.append("Python is not installed or not found. Please install Python 3 and run `/setup`.\n");
+            } else if (output.contains("Skill not found")) {
+                sb.append(output).append("\n");
+            } else if (output.contains("Credential access not granted")) {
+                sb.append(output).append("\n");
+            } else if (output.contains("timed out")) {
+                sb.append(label).append(" timed out. The operation took too long to complete.\n");
+            } else {
+                sb.append(label).append(" failed: ");
+                sb.append(truncate(output, 300)).append("\n");
+            }
+        }
+        return sb.toString().strip();
+    }
+
+    private void persistTaskState(String taskId, String userId, String status, TaskPlan plan) {
+        try {
+            String planJson = plan != null ? mapper.writeValueAsString(plan) : null;
+            jdbc.update("""
+                INSERT INTO task_state (task_id, user_id, status, plan, current_step, step_results)
+                VALUES (?, ?, ?, ?, 0, '{}')
+                ON CONFLICT(task_id) DO UPDATE SET status = ?, plan = ?, updated_at = datetime('now')
+                """, taskId, userId, status, planJson, status, planJson);
+        } catch (Exception e) {
+            log.warn("Failed to persist task state: {}", e.getMessage());
+        }
+    }
+
+    private void updateTaskStateStep(String taskId, int stepId, Map<Integer, StepResult> results) {
+        try {
+            String resultsJson = mapper.writeValueAsString(results);
+            jdbc.update("""
+                UPDATE task_state SET current_step = ?, step_results = ?, updated_at = datetime('now')
+                WHERE task_id = ?
+                """, stepId, resultsJson, taskId);
+        } catch (Exception e) {
+            log.warn("Failed to update task state: {}", e.getMessage());
+        }
+    }
+
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() > maxLen ? s.substring(0, maxLen) + "..." : s;
+    }
+
+    /**
+     * Cap step output to a maximum size suitable for LLM processing.
+     * Prevents a single step (e.g. http_request returning a full HTML page)
+     * from flooding downstream summarization with 100KB+ of noise.
+     */
+    private static final int MAX_STEP_OUTPUT = 12_000;
+
+    private static String capOutput(String output) {
+        if (output == null) return "";
+        if (output.length() <= MAX_STEP_OUTPUT) return output;
+        return output.substring(0, MAX_STEP_OUTPUT) + "\n... [output truncated at " + MAX_STEP_OUTPUT + " chars]";
+    }
+
+    /**
+     * Build a structured, safe fallback response when summarization fails.
+     * NEVER returns raw step output — instead explains what happened at a high level.
+     */
+    private String buildSafeFallbackResponse(String userMessage, Map<Integer, StepResult> results) {
+        var sb = new StringBuilder();
+        sb.append("I completed the task but couldn't summarize the results properly.\n\n");
+
+        long successCount = results.values().stream().filter(StepResult::success).count();
+        long failCount = results.values().stream().filter(r -> !r.success()).count();
+
+        if (successCount > 0) {
+            sb.append("**Completed steps:** ").append(successCount).append("\n");
+            for (StepResult r : results.values()) {
+                if (!r.success()) continue;
+                sb.append("- ").append(r.label()).append(" — SUCCESS");
+                // Show a brief snippet of the output, not the whole thing
+                String snippet = truncate(r.output(), 200);
+                if (!snippet.isBlank() && !snippet.contains("<html") && !snippet.contains("<body")) {
+                    sb.append(": ").append(snippet);
+                }
+                sb.append("\n");
+            }
+        }
+        if (failCount > 0) {
+            sb.append("\n**Failed steps:** ").append(failCount).append("\n");
+            for (StepResult r : results.values()) {
+                if (r.success()) continue;
+                if ("skipped".equals(r.output())) continue;
+                sb.append("- ").append(r.label()).append(": ").append(truncate(r.output(), 200)).append("\n");
+            }
+        }
+        sb.append("\nPlease try rephrasing your question or ask me to try again.");
+        return sb.toString();
+    }
+}
