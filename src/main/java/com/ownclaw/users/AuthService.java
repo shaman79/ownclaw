@@ -109,6 +109,16 @@ public class AuthService {
     }
 
     /**
+     * Check whether any registered users (with password) exist.
+     * Used by the login screen to decide between register vs. login mode.
+     */
+    public boolean hasRegisteredUsers() {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM users WHERE password_hash IS NOT NULL", Integer.class);
+        return count != null && count > 0;
+    }
+
+    /**
      * Validate a JWT token and return the user ID.
      *
      * @return userId if token is valid, empty otherwise

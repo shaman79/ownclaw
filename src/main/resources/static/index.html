@@ -12,11 +12,36 @@
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
              background:#0d1117;color:#e6edf3;height:100vh;display:flex;flex-direction:column}
 
+        /* ── Auth overlay ─────────────────────────────────────── */
+        #auth-overlay{position:fixed;inset:0;background:#0d1117;z-index:100;display:flex;
+                      align-items:center;justify-content:center}
+        #auth-overlay.hidden{display:none}
+        #auth-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;
+                  width:360px;max-width:90vw}
+        #auth-box h2{margin-bottom:6px;font-size:20px;text-align:center}
+        #auth-box .subtitle{color:#8b949e;font-size:13px;text-align:center;margin-bottom:20px}
+        #auth-box input{width:100%;padding:10px 12px;border:1px solid #30363d;border-radius:8px;
+                        background:#0d1117;color:#e6edf3;font-size:14px;outline:none;margin-bottom:12px}
+        #auth-box input:focus{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+        #auth-box input::placeholder{color:#484f58}
+        #auth-submit{width:100%;padding:10px;background:#238636;color:#fff;border:none;
+                     border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+        #auth-submit:hover{background:#2ea043}
+        #auth-submit:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+        #auth-error{color:#f85149;font-size:13px;margin-top:8px;display:none;text-align:center}
+        #auth-toggle{color:#58a6ff;font-size:13px;text-align:center;margin-top:14px;cursor:pointer}
+        #auth-toggle:hover{text-decoration:underline}
+        .auth-loading{text-align:center;color:#8b949e;padding:40px}
+
         /* Header */
         #header{padding:10px 20px;background:#161b22;border-bottom:1px solid #30363d;
                 display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600}
         #header .dot{width:8px;height:8px;border-radius:50%;background:#484f58;flex-shrink:0}
         #header .dot.online{background:#3fb950}
+        #header .spacer{flex:1}
+        #logout-btn{background:none;border:1px solid #30363d;color:#8b949e;padding:4px 12px;
+                    border-radius:6px;font-size:12px;cursor:pointer}
+        #logout-btn:hover{color:#f85149;border-color:#f85149}
 
         /* Messages area */
         #messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
@@ -115,9 +140,25 @@
     </style>
 </head>
 <body>
+    <!-- Auth overlay -->
+    <div id="auth-overlay">
+        <div class="auth-loading" id="auth-loading">Checking authentication...</div>
+        <div id="auth-box" style="display:none">
+            <h2 id="auth-title">Welcome to OwnClaw</h2>
+            <div class="subtitle" id="auth-subtitle">Create your account to get started</div>
+            <input type="text" id="auth-username" placeholder="Username" autocomplete="username">
+            <input type="password" id="auth-password" placeholder="Password (min 4 characters)" autocomplete="new-password">
+            <button id="auth-submit">Create Account</button>
+            <div id="auth-error"></div>
+            <div id="auth-toggle" style="display:none"></div>
+        </div>
+    </div>
+
     <div id="header">
         <span class="dot" id="connDot"></span>
         🦀 OwnClaw
+        <span class="spacer"></span>
+        <button id="logout-btn">Logout</button>
     </div>
     <div id="messages">
         <div id="conn-banner"><div class="spinner"></div><span id="conn-text"></span></div>
@@ -132,6 +173,19 @@
     </div>
     <script>
     (function() {
+        // ── DOM refs ──────────────────────────────────────────
+        const authOverlay = document.getElementById('auth-overlay');
+        const authLoading = document.getElementById('auth-loading');
+        const authBox = document.getElementById('auth-box');
+        const authTitle = document.getElementById('auth-title');
+        const authSubtitle = document.getElementById('auth-subtitle');
+        const authUsername = document.getElementById('auth-username');
+        const authPassword = document.getElementById('auth-password');
+        const authSubmit = document.getElementById('auth-submit');
+        const authError = document.getElementById('auth-error');
+        const authToggle = document.getElementById('auth-toggle');
+        const logoutBtn = document.getElementById('logout-btn');
+
         const messagesEl = document.getElementById('messages');
         const thinkingEl = document.getElementById('thinking');
         const thinkingText = document.getElementById('thinking-text');
@@ -142,6 +196,8 @@
         const connText = document.getElementById('conn-text');
 
         let reconnectAttempt = 0;
+        let authToken = localStorage.getItem('ownclaw_token');
+        let isRegisterMode = true;
 
         // Configure marked
         marked.setOptions({
@@ -159,6 +215,147 @@
         let ws;
         let busy = false;
 
+        // ── Auth flow ─────────────────────────────────────────
+
+        async function checkAuth() {
+            try {
+                const headers = {};
+                if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+                const resp = await fetch('/api/auth/status', { headers });
+                const data = await resp.json();
+
+                if (data.authenticated && authToken) {
+                    // Token still valid — go straight to chat
+                    enterChat();
+                    return;
+                }
+
+                // Token invalid — clear it
+                if (authToken) {
+                    authToken = null;
+                    localStorage.removeItem('ownclaw_token');
+                }
+
+                // Show appropriate form
+                authLoading.style.display = 'none';
+                authBox.style.display = 'block';
+
+                if (data.hasUsers) {
+                    switchToLogin();
+                } else {
+                    switchToRegister();
+                }
+            } catch (e) {
+                authLoading.textContent = 'Cannot reach server. Retrying...';
+                setTimeout(checkAuth, 3000);
+            }
+        }
+
+        function switchToRegister() {
+            isRegisterMode = true;
+            authTitle.textContent = 'Welcome to OwnClaw';
+            authSubtitle.textContent = 'Create your account to get started';
+            authSubmit.textContent = 'Create Account';
+            authPassword.placeholder = 'Password (min 4 characters)';
+            authPassword.autocomplete = 'new-password';
+            authToggle.style.display = 'none';
+            authError.style.display = 'none';
+        }
+
+        function switchToLogin() {
+            isRegisterMode = false;
+            authTitle.textContent = 'Sign In';
+            authSubtitle.textContent = 'Enter your credentials to continue';
+            authSubmit.textContent = 'Sign In';
+            authPassword.placeholder = 'Password';
+            authPassword.autocomplete = 'current-password';
+            authToggle.style.display = 'block';
+            authToggle.textContent = 'Need an account? Register';
+            authError.style.display = 'none';
+        }
+
+        authToggle.addEventListener('click', () => {
+            if (isRegisterMode) switchToLogin();
+            else switchToRegister();
+        });
+
+        async function doAuth() {
+            const username = authUsername.value.trim();
+            const password = authPassword.value;
+
+            if (!username || password.length < 4) {
+                showAuthError('Username required, password must be at least 4 characters');
+                return;
+            }
+
+            authSubmit.disabled = true;
+            authError.style.display = 'none';
+
+            const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    showAuthError(data.error || 'Authentication failed');
+                    authSubmit.disabled = false;
+                    return;
+                }
+
+                authToken = data.token;
+                localStorage.setItem('ownclaw_token', authToken);
+                enterChat();
+            } catch (e) {
+                showAuthError('Network error — try again');
+                authSubmit.disabled = false;
+            }
+        }
+
+        function showAuthError(msg) {
+            authError.textContent = msg;
+            authError.style.display = 'block';
+        }
+
+        function enterChat() {
+            authOverlay.classList.add('hidden');
+            connect();
+        }
+
+        function logout() {
+            authToken = null;
+            localStorage.removeItem('ownclaw_token');
+            if (ws) { ws.close(); ws = null; }
+            reconnectAttempt = 0;
+            // Clear messages
+            messagesEl.querySelectorAll('.msg').forEach(m => m.remove());
+            connDot.classList.remove('online');
+            hideConnBanner();
+
+            // Show auth screen
+            authOverlay.classList.remove('hidden');
+            authLoading.style.display = 'none';
+            authBox.style.display = 'block';
+            authUsername.value = '';
+            authPassword.value = '';
+            authSubmit.disabled = false;
+            switchToLogin();
+        }
+
+        authSubmit.addEventListener('click', doAuth);
+        authPassword.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doAuth();
+        });
+        authUsername.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') authPassword.focus();
+        });
+        logoutBtn.addEventListener('click', logout);
+
+        // ── WebSocket ─────────────────────────────────────────
+
         function showConnBanner(text) {
             connText.textContent = text;
             connBanner.classList.add('visible');
@@ -171,7 +368,8 @@
 
         function connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(proto + '//' + location.host + '/ws/chat');
+            const tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
+            ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam);
 
             ws.onopen = () => {
                 connDot.classList.add('online');
@@ -184,9 +382,16 @@
                 reconnectAttempt = 0;
             };
 
-            ws.onclose = () => {
+            ws.onclose = (e) => {
                 connDot.classList.remove('online');
                 setThinking(false);
+
+                // Code 1008 = POLICY_VIOLATION → auth rejected, go back to login
+                if (e.code === 1008) {
+                    logout();
+                    return;
+                }
+
                 reconnectAttempt++;
                 const delay = Math.min(3000 * reconnectAttempt, 30000);
                 if (reconnectAttempt === 1) {
@@ -314,7 +519,9 @@
         });
 
         sendBtn.addEventListener('click', send);
-        connect();
+
+        // Start auth check instead of connecting directly
+        checkAuth();
     })();
     </script>
 </body>

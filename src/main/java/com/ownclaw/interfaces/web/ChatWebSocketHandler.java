@@ -82,9 +82,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession session) {
+    public void afterConnectionEstablished(WebSocketSession session) throws IOException {
         // Authenticate: check for JWT token in query params
         String userId = resolveUserId(session);
+        if (userId == null) {
+            sendToSession(session, "system", "Authentication required. Please log in.");
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
         session.getAttributes().put("userId", userId);
         sessions.put(userId, session);
 
@@ -341,7 +346,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Resolve user ID from JWT token in query params, fallback to default user.
+     * Resolve user ID from JWT token in query params.
+     * Returns null if not authenticated — caller must close the session.
      * Supports: ws://host/ws/chat?token=jwt_token
      */
     private String resolveUserId(WebSocketSession session) {
@@ -359,7 +365,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 }
             }
         }
-        // Fallback: default user (Phase 1 compatibility)
-        return userRepo.getDefaultUserId();
+        // No valid token — reject
+        log.warn("WebSocket connection rejected: no valid authentication token");
+        return null;
     }
 }

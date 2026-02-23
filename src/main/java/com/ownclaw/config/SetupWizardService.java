@@ -7,6 +7,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -36,6 +37,7 @@ public class SetupWizardService {
     private final OwnClawConfig config;
     private final OkHttpClient http;
     private final ObjectMapper mapper;
+    private final ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider;
 
     /** Cached diagnostic result, refreshed on demand. */
     private volatile DiagnosticResult lastDiagnostic;
@@ -43,10 +45,12 @@ public class SetupWizardService {
     /** Models discovered during wizard Ollama URL step. */
     private volatile List<String> lastDiscoveredModels = List.of();
 
-    public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper) {
+    public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
+                              ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider) {
         this.jdbc = jdbc;
         this.config = config;
         this.mapper = mapper;
+        this.telegramBotProvider = telegramBotProvider;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
@@ -360,6 +364,7 @@ public class SetupWizardService {
                 saveSetting("telegram_enabled", "true");
                 config.getTelegram().setBotToken(token);
                 config.getTelegram().setEnabled(true);
+                restartTelegramBot();
                 return finalizeSetup("\u2705 Telegram bot connected: @" + botName + "\n\n");
             } else {
                 // Invalid token — save anyway but warn
@@ -367,6 +372,7 @@ public class SetupWizardService {
                 saveSetting("telegram_enabled", "true");
                 config.getTelegram().setBotToken(token);
                 config.getTelegram().setEnabled(true);
+                restartTelegramBot();
                 return finalizeSetup("\u26a0\ufe0f Token saved but could not verify via Telegram API. Check the token if bot doesn't respond.\n\n");
             }
         }
@@ -376,6 +382,16 @@ public class SetupWizardService {
             config.getTelegram().setEnabled(false);
         }
         return finalizeSetup("");
+    }
+
+    /** Restart the Telegram bot after config change (lazy to avoid circular dependency). */
+    private void restartTelegramBot() {
+        try {
+            var bot = telegramBotProvider.getIfAvailable();
+            if (bot != null) bot.restart();
+        } catch (Exception e) {
+            log.warn("Failed to restart Telegram bot: {}", e.getMessage());
+        }
     }
 
     /** Validate a Telegram bot token via getMe. Returns bot username or null on failure. */

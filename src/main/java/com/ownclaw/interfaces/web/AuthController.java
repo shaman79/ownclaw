@@ -25,6 +25,29 @@ public class AuthController {
     }
 
     /**
+     * Auth status — tells the frontend whether to show register or login.
+     * Also validates an existing token if provided.
+     * GET /api/auth/status
+     */
+    @GetMapping("/status")
+    public ResponseEntity<?> status(@RequestHeader(value = "Authorization", required = false) String authHeader) {
+        boolean hasUsers = authService.hasRegisteredUsers();
+        boolean authenticated = false;
+        String username = null;
+
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            String token = authHeader.substring(7);
+            var userId = authService.validateToken(token);
+            authenticated = userId.isPresent();
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "hasUsers", hasUsers,
+                "authenticated", authenticated
+        ));
+    }
+
+    /**
      * Register a new user.
      * POST /api/auth/register
      * Body: {"username": "...", "password": "..."}

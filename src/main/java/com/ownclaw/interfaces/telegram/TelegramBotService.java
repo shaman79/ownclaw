@@ -3,6 +3,7 @@ package com.ownclaw.interfaces.telegram;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.users.UserRepository;
@@ -36,9 +37,11 @@ public class TelegramBotService {
     private Thread pollingThread;
     private long lastUpdateId = 0;
 
+    @SuppressWarnings("unused") // setupWizard injected to guarantee applyOverrides() runs first
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
                               UserRepository userRepo,
-                              ChatStatusEmitter statusEmitter, ObjectMapper mapper) {
+                              ChatStatusEmitter statusEmitter, ObjectMapper mapper,
+                              SetupWizardService setupWizard) {
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
@@ -71,6 +74,12 @@ public class TelegramBotService {
     public void stop() {
         running = false;
         if (pollingThread != null) pollingThread.interrupt();
+    }
+
+    /** Restart the bot — called after setup wizard saves a new token. */
+    public void restart() {
+        stop();
+        start();
     }
 
     private void pollLoop() {
