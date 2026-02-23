@@ -144,8 +144,10 @@ do_setup() {
     systemctl daemon-reload
     systemctl enable ownclaw
 
-    # Fix ownership
+    # Fix ownership and permissions
     chown -R ownclaw:ownclaw "$DEPLOY_DIR"
+    chmod +x "$REPO_DIR/deploy/deploy.sh"
+    chmod +x "$REPO_DIR/gradlew"
 
     # Initial build and deploy
     log "Running initial build..."
