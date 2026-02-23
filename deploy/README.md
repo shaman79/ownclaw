@@ -31,14 +31,16 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 ```bash
 # Upload deploy.sh to the server, then:
 chmod +x deploy.sh
-sudo GITHUB_TOKEN=github_pat_xxx ./deploy.sh --setup
+sudo ./deploy.sh --setup
 ```
 
-The `GITHUB_TOKEN` is a **fine-grained Personal Access Token** (Contents: Read-only).
-Generate one at: https://github.com/settings/tokens?type=beta
+The setup wizard will interactively prompt you for:
+1. **GitHub token** — fine-grained PAT with Contents: Read-only ([create one here](https://github.com/settings/tokens?type=beta))
+2. **OpenAI API key** — for the Mentor LLM
+3. **Telegram bot token** — optional
 
-The token is automatically saved into `/opt/ownclaw/.env` so that cron-based
-auto-updates can authenticate without further configuration.
+All secrets are saved to `/opt/ownclaw/.env` (chmod 600) and loaded automatically
+by the systemd service and cron-based auto-updates.
 
 This will:
 - Create `ownclaw` system user

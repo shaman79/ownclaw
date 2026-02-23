@@ -9,8 +9,8 @@
 #   ./deploy.sh --rollback   # Restore previous JAR
 #
 # Authentication:
-#   Set GITHUB_TOKEN in /opt/ownclaw/.env (fine-grained PAT with Contents:read)
-#   The token is loaded automatically and used for git clone/fetch.
+#   During --setup, you will be prompted for your GitHub token interactively.
+#   The token is saved to /opt/ownclaw/.env for subsequent cron-based updates.
 #
 # Cron example (check for updates every 15 minutes):
 #   */15 * * * * /opt/ownclaw/deploy/deploy.sh --update >> /opt/ownclaw/logs/deploy.log 2>&1
@@ -56,12 +56,23 @@ do_setup() {
     log "=== OwnClaw Server Setup ==="
 
     if [ "$(id -u)" -ne 0 ]; then
-        die "Setup must be run as root: sudo GITHUB_TOKEN=<your-pat> ./deploy.sh --setup"
+        die "Setup must be run as root: sudo ./deploy.sh --setup"
     fi
 
-    # Require GITHUB_TOKEN for cloning
+    # Prompt for GITHUB_TOKEN interactively if not already set
     if [ -z "${GITHUB_TOKEN:-}" ]; then
-        die "GITHUB_TOKEN is required for setup. Run: sudo GITHUB_TOKEN=github_pat_xxx ./deploy.sh --setup"
+        echo ""
+        echo "  GitHub Personal Access Token is required to clone the repository."
+        echo "  Generate a fine-grained token at: https://github.com/settings/tokens?type=beta"
+        echo "  Required permission: Contents → Read-only (select the ownclaw repo)"
+        echo ""
+        read -r -p "  Paste your GitHub token: " GITHUB_TOKEN
+        echo ""
+        if [ -z "$GITHUB_TOKEN" ]; then
+            die "No token provided. Cannot continue."
+        fi
+        # Rebuild repo URL with token
+        REPO_URL="https://x-access-token:${GITHUB_TOKEN}@${GITHUB_REPO}"
     fi
 
     # Create service user
@@ -100,9 +111,31 @@ do_setup() {
     if [ ! -f "$DEPLOY_DIR/.env" ]; then
         log "Creating .env from template..."
         cp "$REPO_DIR/deploy/.env.template" "$DEPLOY_DIR/.env"
-        # Inject the token so cron-based updates can authenticate
+
+        # Inject the GitHub token
         sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=${GITHUB_TOKEN}|" "$DEPLOY_DIR/.env"
+
+        # Prompt for OpenAI key
+        echo ""
+        echo "  OpenAI API key is required for the Mentor LLM (GPT-4o)."
+        echo "  Get one at: https://platform.openai.com/api-keys"
+        echo ""
+        read -r -p "  Paste your OpenAI API key (or press Enter to skip): " openai_key
+        if [ -n "$openai_key" ]; then
+            sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${openai_key}|" "$DEPLOY_DIR/.env"
+        fi
+
+        # Prompt for Telegram bot token
+        echo ""
+        read -r -p "  Paste your Telegram bot token (or press Enter to skip): " telegram_token
+        if [ -n "$telegram_token" ]; then
+            sed -i "s|^# TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${telegram_token}|" "$DEPLOY_DIR/.env"
+            sed -i "s|^# OWNCLAW_TELEGRAM_ENABLED=.*|OWNCLAW_TELEGRAM_ENABLED=true|" "$DEPLOY_DIR/.env"
+        fi
+        echo ""
+
         chmod 600 "$DEPLOY_DIR/.env"
+        log "Secrets saved to $DEPLOY_DIR/.env"
     fi
 
     # Install systemd service
@@ -120,10 +153,10 @@ do_setup() {
 
     log ""
     log "=== Setup Complete ==="
-    log "1. Edit secrets:   sudo nano $DEPLOY_DIR/.env"
-    log "2. Start service:  sudo systemctl start ownclaw"
-    log "3. Check status:   sudo systemctl status ownclaw"
-    log "4. View logs:      sudo journalctl -u ownclaw -f"
+    log "1. Review secrets:  sudo nano $DEPLOY_DIR/.env"
+    log "2. Start service:   sudo systemctl start ownclaw"
+    log "3. Check status:    sudo systemctl status ownclaw"
+    log "4. View logs:       sudo journalctl -u ownclaw -f"
     log ""
     log "For auto-updates, add to crontab (sudo crontab -u ownclaw -e):"
     log "  */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
