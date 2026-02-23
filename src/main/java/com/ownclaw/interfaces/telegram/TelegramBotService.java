@@ -59,15 +59,51 @@ public class TelegramBotService {
             log.info("Telegram bot disabled in config");
             return;
         }
-        if (config.getBotToken() == null || config.getBotToken().isBlank()) {
+        String token = config.getBotToken();
+        if (token == null || token.isBlank()) {
             log.warn("Telegram bot token not configured — bot disabled");
             return;
         }
+
+        // Log token prefix for debugging (safe — only the numeric bot-id part)
+        String tokenPrefix = token.contains(":") ? token.substring(0, token.indexOf(':')) : "(no colon in token)";
+        log.info("Telegram bot token prefix: {}, length: {}", tokenPrefix, token.length());
+
+        // Validate token via getMe before starting poll loop
+        String botName = validateToken(token);
+        if (botName == null) {
+            log.error("Telegram bot token is INVALID (getMe returned error). Fix the token and restart.");
+            return;
+        }
+        log.info("Telegram bot verified: @{}", botName);
+
         running = true;
         pollingThread = new Thread(this::pollLoop, "telegram-poller");
         pollingThread.setDaemon(true);
         pollingThread.start();
-        log.info("Telegram bot started");
+        log.info("Telegram bot polling started");
+    }
+
+    /** Call getMe to validate the token. Returns bot username or null. */
+    private String validateToken(String token) {
+        try {
+            Request req = new Request.Builder()
+                    .url("https://api.telegram.org/bot" + token + "/getMe")
+                    .get().build();
+            try (Response resp = httpClient.newCall(req).execute()) {
+                if (!resp.isSuccessful() || resp.body() == null) {
+                    log.error("Telegram getMe failed: HTTP {} — URL: {}", resp.code(),
+                            req.url().toString().replaceAll("bot[^/]+", "bot***"));
+                    return null;
+                }
+                JsonNode root = mapper.readTree(resp.body().string());
+                if (!root.path("ok").asBoolean(false)) return null;
+                return root.path("result").path("username").asText(null);
+            }
+        } catch (Exception e) {
+            log.error("Telegram getMe exception: {}", e.getMessage());
+            return null;
+        }
     }
 
     @PreDestroy
@@ -95,13 +131,14 @@ public class TelegramBotService {
         }
     }
 
-    private void pollUpdates() throws IOException {
+    private void pollUpdates() throws IOException, InterruptedException {
         String url = apiUrl("getUpdates") + "?timeout=30&offset=" + (lastUpdateId + 1);
         Request request = new Request.Builder().url(url).get().build();
 
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                log.warn("Telegram getUpdates failed: HTTP {}", response.code());
+                log.warn("Telegram getUpdates failed: HTTP {}. Backing off 10s...", response.code());
+                Thread.sleep(10_000);
                 return;
             }
 
