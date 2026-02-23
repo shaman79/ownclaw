@@ -48,8 +48,8 @@ HEALTH_TIMEOUT=60
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
-log()  { echo "[$(timestamp)] $*"; }
-die()  { log "ERROR: $*" >&2; exit 1; }
+log()  { echo "[$(timestamp)] $*" >&2; }
+die()  { log "ERROR: $*"; exit 1; }
 
 # === First-time server setup (run as root) ===
 do_setup() {
