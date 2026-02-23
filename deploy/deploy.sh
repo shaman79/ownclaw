@@ -101,10 +101,15 @@ do_setup() {
         apt-get update -qq && apt-get install -y -qq python3 python3-venv
     fi
 
-    # Clone repo
+    # Clone or update repo
     if [ ! -d "$REPO_DIR/.git" ]; then
         log "Cloning repository..."
         git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
+    else
+        log "Updating repository..."
+        cd "$REPO_DIR"
+        git fetch origin "$BRANCH" --depth 1 --quiet
+        git reset --hard "origin/$BRANCH" --quiet
     fi
 
     # Create .env from template if it doesn't exist
