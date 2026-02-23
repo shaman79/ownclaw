@@ -1,0 +1,39 @@
+[Unit]
+Description=OwnClaw Autonomous AI Agent
+Documentation=https://github.com/shaman79/ownclaw
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ownclaw
+Group=ownclaw
+WorkingDirectory=/opt/ownclaw
+ExecStart=/opt/ownclaw/jdk/bin/java -jar /opt/ownclaw/ownclaw.jar --server.port=8080
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# Environment
+EnvironmentFile=-/opt/ownclaw/.env
+
+# Graceful shutdown (30s)
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Auto-restart on crash
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ownclaw/data /opt/ownclaw/skills/generated /opt/ownclaw/skills/_envs /opt/ownclaw/logs
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ownclaw
+
+[Install]
+WantedBy=multi-user.target
