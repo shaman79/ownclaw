@@ -235,8 +235,10 @@ build_jar() {
     cd "$REPO_DIR"
 
     export JAVA_HOME="$JDK_DIR"
+    export GRADLE_USER_HOME="$DEPLOY_DIR/.gradle"
+    mkdir -p "$GRADLE_USER_HOME" 2>/dev/null || true
     chmod +x gradlew 2>/dev/null || true
-    ./gradlew build -x test --no-daemon --quiet
+    ./gradlew build -x test --no-daemon
 
     local jar="$REPO_DIR/build/libs/ownclaw-0.1.0.jar"
     [ -f "$jar" ] || die "Build failed — JAR not found at $jar"
