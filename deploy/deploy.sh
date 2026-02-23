@@ -102,6 +102,7 @@ do_setup() {
     fi
 
     # Clone or update repo
+    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
     if [ ! -d "$REPO_DIR/.git" ]; then
         log "Cloning repository..."
         git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
