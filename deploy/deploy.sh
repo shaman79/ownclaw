@@ -83,7 +83,7 @@ do_setup() {
 
     # Create directory structure
     log "Creating directories..."
-    mkdir -p "$DEPLOY_DIR"/{data,logs,backups,skills/_envs}
+    mkdir -p "$DEPLOY_DIR"/{data,logs,backups,skills/_envs,skills/core,skills/generated}
     mkdir -p "$REPO_DIR"
 
     # Install JDK 21
