@@ -71,16 +71,10 @@ do_setup() {
         git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
     fi
 
-    # Create .env template if it doesn't exist
+    # Create .env from template if it doesn't exist
     if [ ! -f "$DEPLOY_DIR/.env" ]; then
-        log "Creating .env template..."
-        cat > "$DEPLOY_DIR/.env" <<'ENVEOF'
-# OwnClaw Production Environment
-# Fill in your secrets and adjust settings here.
-OPENAI_API_KEY=
-TELEGRAM_BOT_TOKEN=
-# OWNCLAW_PORT=8080
-ENVEOF
+        log "Creating .env from template..."
+        cp "$REPO_DIR/deploy/.env.template" "$DEPLOY_DIR/.env"
         chmod 600 "$DEPLOY_DIR/.env"
     fi
 

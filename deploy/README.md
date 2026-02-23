@@ -45,19 +45,25 @@ This will:
 
 ### 2. Configure secrets
 
+The setup copies [.env.template](.env.template) to `/opt/ownclaw/.env`. Edit it:
+
 ```bash
 sudo nano /opt/ownclaw/.env
 ```
 
-Required variables:
-```
-OPENAI_API_KEY=sk-...
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-```
+| Variable | Required | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | **Yes** | OpenAI API key for the Mentor LLM (GPT-4o). Get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from @BotFather. Set `OWNCLAW_TELEGRAM_ENABLED=true` to activate |
+| `OWNCLAW_SERVER_PORT` | No | HTTP port (default: `8080`) |
+| `OWNCLAW_EXECUTOR_URL` | No | Ollama URL (default: `http://localhost:11434`) |
+| `OWNCLAW_EXECUTOR_MODEL` | No | Ollama model (default: `qwen2.5:14b`) |
+| `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 
-Optional:
-```
-OWNCLAW_PORT=8080
+**Important:** Ollama must be installed separately on the production server:
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:14b
 ```
 
 ### 3. Start the service

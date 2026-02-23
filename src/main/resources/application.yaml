@@ -12,13 +12,13 @@ spring:
     change-log: classpath:db/changelog/db.changelog-master.yaml
 
 server:
-  port: ${ownclaw.server.port:8080}
+  port: ${OWNCLAW_SERVER_PORT:${ownclaw.server.port:8080}}
 
 ownclaw:
   executor:
     provider: ollama
-    url: http://localhost:11434
-    model: qwen2.5:14b
+    url: ${OWNCLAW_EXECUTOR_URL:http://localhost:11434}
+    model: ${OWNCLAW_EXECUTOR_MODEL:qwen2.5:14b}
     temperature: 0.3
     context-window: 16384
 
@@ -47,7 +47,7 @@ ownclaw:
     max-plan-steps: 20
 
   telegram:
-    enabled: false
+    enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     registration: open
 
