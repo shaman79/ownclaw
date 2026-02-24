@@ -6,6 +6,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.observability.ChatStatusEmitter;
+import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.UserRepository;
 import okhttp3.*;
 import org.slf4j.Logger;
@@ -30,6 +31,7 @@ public class TelegramBotService {
     private final TaskQueue taskQueue;
     private final UserRepository userRepo;
     private final ChatStatusEmitter statusEmitter;
+    private final SkillInteractionHandler interactionHandler;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
@@ -41,11 +43,13 @@ public class TelegramBotService {
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
                               UserRepository userRepo,
                               ChatStatusEmitter statusEmitter, ObjectMapper mapper,
+                              SkillInteractionHandler interactionHandler,
                               SetupWizardService setupWizard) {
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
         this.statusEmitter = statusEmitter;
+        this.interactionHandler = interactionHandler;
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
@@ -169,6 +173,16 @@ public class TelegramBotService {
 
         // Subscribe to status messages for this user → send to Telegram
         statusEmitter.subscribe(userId, msg -> sendMessage(chatId, msg.formatted()));
+
+        // Interactive skill input: if a skill is waiting for user input, route this message
+        // to the pending need_input prompt instead of starting a new task.
+        if (interactionHandler.hasPending(userId)) {
+            boolean handled = interactionHandler.provideInput(userId, null, text);
+            if (!handled) {
+                sendMessage(chatId, "No pending input request.");
+            }
+            return;
+        }
 
         // Submit to task queue — orchestrator handles conversation persistence
         taskQueue.submit(userId, text).thenAccept(response -> {

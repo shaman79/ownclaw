@@ -1753,41 +1753,41 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 
 ### Phase 1: Foundation (MVP)
 
-- [ ] Java/Spring Boot project scaffold
-- [ ] Ollama integration (Executor)
-- [ ] Single cloud provider (OpenAI) for Mentor
-- [ ] Task orchestrator: Executor classifies → Mentor plans → SkillRunner executes
-- [ ] Task queue (priority-based, with Ollama serialization)
-- [ ] DAG plan format (steps with depends_on, on_fail)
-- [ ] Skill manifest + 3 core skills (shell_command, file_operations, http_request)
-- [ ] ProcessBuilder sandbox (Windows dev-friendly)
-- [ ] SQLite persistence (users, conversations, events)
-- [ ] Telegram bot (single user)
-- [ ] Basic conversation management (last N messages)
-- [ ] Simple WebUI (chat only, WebSocket)
-- [ ] **Event log + chat status messages (observability from day one)**
-- [ ] **Credential grant approval flow (permanent/one-time/declined)**
-- [ ] `/log` chat commands for event inspection
-- [ ] Confidence threshold bypass (skip Mentor for cached plans)
+- [x] Java/Spring Boot project scaffold
+- [x] Ollama integration (Executor)
+- [x] Single cloud provider (OpenAI) for Mentor
+- [x] Task orchestrator: Executor classifies → Mentor plans → SkillRunner executes
+- [x] Task queue (priority-based, with Ollama serialization)
+- [x] DAG plan format (steps with depends_on, on_fail)
+- [x] Skill manifest + 3 core skills (shell_command, file_operations, http_request)
+- [x] ProcessBuilder sandbox (Windows dev-friendly)
+- [x] SQLite persistence (users, conversations, events)
+- [x] Telegram bot (single user)
+- [x] Basic conversation management (last N messages)
+- [x] Simple WebUI (chat only, WebSocket)
+- [x] **Event log + chat status messages (observability from day one)**
+- [x] **Credential grant approval flow (permanent/one-time/declined)**
+- [x] `/log` chat commands for event inspection
+- [x] Confidence threshold bypass (skip Mentor for cached plans)
 
 ### Phase 2: Multi-User & Skills
 
-- [ ] Multi-user support with profiles + isolation
-- [ ] Credential vault (AES-256-GCM encrypted, per-user keys)
-- [ ] Token budget tracking + alerts
-- [ ] Skill generation (Mentor creates new skills)
-- [ ] Skill validation (static analysis + sandbox test)
-- [ ] Skill versioning (numbered dirs, auto-rollback)
-- [ ] More core skills (send_email, browse_web, text_summarize)
-- [ ] Conversation compression (Executor summarizes history)
-- [ ] Feedback loop (Mentor reviews, max N rounds)
-- [ ] Plan cache (LRU, invalidation on skill changes)
-- [ ] User preferences (maintained by Executor, local LLM)
-- [ ] Skill interaction (need_input protocol)
+- [x] Multi-user support with profiles + isolation
+- [x] Credential vault (AES-256-GCM encrypted, per-user keys)
+- [x] Token budget tracking + alerts
+- [x] Skill generation (Mentor creates new skills)
+- [x] Skill validation (static analysis + sandbox test)
+- [x] Skill versioning (numbered dirs, regeneration/repair on failure; no automatic quarantine)
+- [x] More core skills (send_email, browse_web, text_summarize)
+- [x] Conversation compression (Executor summarizes history)
+- [x] Feedback loop (Mentor reviews, max N rounds)
+- [x] Plan cache (LRU, invalidation on skill changes)
+- [x] User preferences (maintained by Executor, local LLM)
+- [x] Skill interaction (need_input protocol)
 
 ### Phase 3: Polish & Hardening
 
-- [ ] MCP Bridge implementation (should work with our skills system alongside, but give us access to existing tools)
+- [x] MCP Bridge implementation (should work with our skills system alongside, but give us access to existing tools)
 - [ ] Bubblewrap sandbox (Linux production)
 - [ ] Multi-provider cloud LLM support (OpenAI, DeepSeek, Mistral)
 - [ ] Skill generalization (merge similar skills)
@@ -1795,7 +1795,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [ ] Long-running / deferred / scheduled tasks
 - [ ] WebUI: event timeline, skill management, token usage dashboard
 - [ ] Registration flow (invite codes, admin approval)
-- [ ] Prompt anti-bloat (bounded teaching log, periodic distillation)
+- [x] Prompt anti-bloat (bounded teaching log, periodic distillation)
 
 ### Phase 4: Advanced
 

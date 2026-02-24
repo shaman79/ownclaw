@@ -510,12 +510,22 @@ public class TaskOrchestrator {
                             updateTaskStateStep(taskId, step.id(), results);
                             return results; // stop plan execution
                         }
-                        case SKIP -> eventLog.info(userId, taskId, "step.skipped",
-                                "Step " + step.id() + " failed, skipping (on_fail=skip)");
+                        case SKIP -> {
+                            // Even when Mentor says "skip", first try a single self-heal attempt.
+                            // This avoids silently skipping steps due to fixable failures.
+                            StepResult healed = attemptSelfHeal(step, userId, taskId, resolvedParams, result, 1);
+                            if (healed.success()) {
+                                results.put(step.id(), healed);
+                            } else {
+                                results.put(step.id(), StepResult.skipped(step.id()));
+                                eventLog.info(userId, taskId, "step.skipped",
+                                        "Step " + step.id() + " failed, skipping (on_fail=skip)");
+                            }
+                        }
                         case RETRY -> {
                             // Self-healing retry: diagnose → repair → retry
                             StepResult healedResult = attemptSelfHeal(
-                                    step, userId, taskId, resolvedParams, result);
+                                    step, userId, taskId, resolvedParams, result, MAX_SELF_HEAL_ATTEMPTS);
                             results.put(step.id(), healedResult);
                             if (!healedResult.success()) {
                                 eventLog.warn(userId, taskId, "step.retry_failed",
@@ -558,11 +568,13 @@ public class TaskOrchestrator {
      * @param taskId         task ID
      * @param resolvedParams the params that were used
      * @param failedResult   the original failure result
+    * @param maxAttempts    number of self-heal attempts to try (LLM-driven)
      * @return the result of the retry (may be success or failure)
      */
     private StepResult attemptSelfHeal(TaskStep step, String userId, String taskId,
-                                        Map<String, Object> resolvedParams,
-                                        StepResult failedResult) {
+                                Map<String, Object> resolvedParams,
+                                StepResult failedResult,
+                                int maxAttempts) {
 
         SkillFailureContext failureContext = skillRunner.getLastFailureContext();
 
@@ -577,12 +589,23 @@ public class TaskOrchestrator {
             return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
         }
 
-        for (int attempt = 1; attempt <= MAX_SELF_HEAL_ATTEMPTS; attempt++) {
-            log.info("Self-heal attempt {}/{} for skill '{}' step {}",
-                    attempt, MAX_SELF_HEAL_ATTEMPTS, step.skill(), step.id());
+        boolean regenerated = false;
 
-            statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
-                    "\uD83D\uDD27 Diagnosing failure in " + step.skill() + " (attempt " + attempt + ")...");
+        // Determine if the currently selected skill implementation is generated.
+        // Generated skills override core skills and can be regenerated safely.
+        boolean isGeneratedSkill = skillLoader.resolveScript(step.skill())
+            .map(p -> p.normalize().toAbsolutePath().startsWith(
+                java.nio.file.Path.of(config.getSkills().getGeneratedPath()).normalize().toAbsolutePath()))
+            .orElse(false);
+
+        // Minimal user-facing status line: emit once per self-heal invocation.
+        statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+            "Self-healing " + step.skill() + "...");
+
+        int boundedAttempts = Math.max(1, Math.min(maxAttempts, MAX_SELF_HEAL_ATTEMPTS));
+        for (int attempt = 1; attempt <= boundedAttempts; attempt++) {
+            log.info("Self-heal attempt {}/{} for skill '{}' step {}",
+                attempt, boundedAttempts, step.skill(), step.id());
 
             // Step 1: Diagnose
             SkillDiagnostician.Diagnosis diagnosis = skillDiagnostician.diagnose(
@@ -594,17 +617,10 @@ public class TaskOrchestrator {
 
             // Step 2: Attempt repair if fixable
             if (diagnosis.hasCodeFix() && diagnosis.confidence() >= 0.4) {
-                statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
-                        "\uD83D\uDD27 Repairing " + step.skill() + "...");
-
                 SkillRepairer.RepairResult repairResult = skillRepairer.repair(
                         step.skill(), diagnosis, userId, taskId);
 
                 if (repairResult.success()) {
-                    statusEmitter.emit(userId, StatusMessage.Type.STEP,
-                            "\u2705 Skill " + step.skill() + " repaired (v" + repairResult.newVersion()
-                                    + ") — retrying...");
-
                     // Reload skill manifest to pick up the new version
                     skillManifest.reload();
 
@@ -624,10 +640,29 @@ public class TaskOrchestrator {
                     if (failureContext == null) break;
 
                     log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
+                    // If repairs keep failing and this is a generated skill, try regeneration once.
+                    if (isGeneratedSkill && !regenerated && attempt == boundedAttempts) {
+                        StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
+                        if (regen.success()) return regen;
+                        regenerated = true;
+                    }
                     continue;
                 }
 
                 log.warn("Repair failed for '{}': {}", step.skill(), repairResult.summary());
+            }
+
+            // If not fixable (or low confidence) and this is a generated skill, try regeneration once.
+            if (isGeneratedSkill && !regenerated) {
+                StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
+                regenerated = true;
+                if (regen.success()) return regen;
+
+                // If regeneration didn't help, update context for any remaining attempts.
+                SkillFailureContext newContext = skillRunner.getLastFailureContext();
+                if (newContext != null) {
+                    failureContext = newContext;
+                }
             }
 
             // Not fixable via code (bad_params, network, external) or low confidence
@@ -643,6 +678,41 @@ public class TaskOrchestrator {
         // Self-healing didn't work — fall back to simple retry
         log.info("Self-heal exhausted for step {} — executing simple retry", step.id());
         return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+    }
+
+    private StepResult attemptRegenerateSkill(TaskStep step, String userId, String taskId,
+                                             Map<String, Object> resolvedParams,
+                                             SkillFailureContext failureContext) {
+        if (failureContext == null) {
+            return StepResult.failure(step.id(), "No failure context", -1, 0);
+        }
+        if (!budgetTracker.hasBudget(userId)) {
+            return StepResult.failure(step.id(), "No token budget for regeneration", -1, 0);
+        }
+
+        // Regenerate a fresh version of the skill (same name) into skills/generated.
+        String prompt = "Regenerate the existing OwnClaw skill as a new version. "
+                + "The JSON field 'name' MUST be exactly '" + step.skill() + "'. "
+                + "Preserve the stdin JSON → stdout JSON-lines protocol and keep changes minimal but robust. "
+                + "If dependencies are missing, include a correct requirements.txt content.\n\n"
+                + "Failure report:\n" + failureContext.toDiagnosticReport();
+
+        try {
+            SkillGenerator.GenerationResult gen = skillGenerator.generateForName(step.skill(), prompt, userId, taskId);
+            if (!gen.success()) {
+                log.warn("Regeneration failed for skill '{}': {}", step.skill(), gen.summary());
+                return StepResult.failure(step.id(), "Regeneration failed: " + gen.summary(), -1, 0);
+            }
+
+            skillManifest.reload();
+
+            // Retry with regenerated skill
+            return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+
+        } catch (Exception e) {
+            log.warn("Regeneration exception for skill '{}': {}", step.skill(), e.getMessage());
+            return StepResult.failure(step.id(), "Regeneration exception: " + e.getMessage(), -1, 0);
+        }
     }
 
     private void ensureSkillAvailableOnDisk(TaskStep step, Map<String, Object> resolvedParams,
@@ -680,7 +750,7 @@ public class TaskOrchestrator {
         gen.append("Example input params: ").append(truncate(resolvedParams.toString(), 300));
 
         statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
-                "🧩 Creating missing skill: " + step.skill());
+            "Self-healing " + step.skill() + "...");
         eventLog.info(userId, taskId, "skill.auto_gen",
                 "Skill missing on disk, triggering generation: " + step.skill());
 
@@ -692,8 +762,6 @@ public class TaskOrchestrator {
                 if (skillLoader.resolveScript(step.skill()).isPresent()) {
                     eventLog.info(userId, taskId, "skill.auto_gen_success",
                             "Auto-generated missing skill '" + genResult.skillName() + "' v" + genResult.version());
-                    statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
-                            "Missing skill '" + genResult.skillName() + "' created (v" + genResult.version() + ")");
                 } else {
                     eventLog.warn(userId, taskId, "skill.auto_gen_incomplete",
                             "Generated skill but could not resolve it on disk: " + step.skill());

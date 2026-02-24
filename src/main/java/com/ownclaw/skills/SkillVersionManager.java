@@ -87,7 +87,7 @@ public class SkillVersionManager {
      */
     public void registerSkill(String skillName, String summary, List<String> keywords,
                               List<String> params, List<String> credentials,
-                              int version, String createdBy) throws IOException {
+                              int version, boolean interactive, String createdBy) throws IOException {
         // Add to manifest.json
         Path manifestPath = Path.of(config.getSkills().getManifestPath());
         ObjectNode root;
@@ -121,7 +121,7 @@ public class SkillVersionManager {
         ArrayNode cr = entry.putArray("credentials");
         credentials.forEach(cr::add);
         entry.put("reversible", false);
-        entry.put("interactive", false);
+        entry.put("interactive", interactive);
         skillsArray.add(entry);
 
         mapper.writerWithDefaultPrettyPrinter().writeValue(manifestPath.toFile(), root);
@@ -186,7 +186,7 @@ public class SkillVersionManager {
 
     /**
      * Record a skill execution outcome. If failure rate exceeds threshold,
-     * auto-disable or rollback.
+        * update status for monitoring.
      */
     public void recordExecution(String skillName, boolean success) {
         if (success) {
@@ -212,26 +212,15 @@ public class SkillVersionManager {
         int executions = ((Number) skill.get("executions")).intValue();
         int failures = ((Number) skill.get("failures")).intValue();
 
-        if ("probationary".equals(status)) {
-            if (executions >= 3) {
-                if (failures >= 2) {
-                    // Too many failures — try rollback, or disable
-                    log.warn("Skill '{}' failed {}/{} during probation, attempting rollback", skillName, failures, executions);
-                    try {
-                        if (!rollback(skillName)) {
-                            // No previous version — disable
-                            jdbc.update("UPDATE generated_skills SET status = 'disabled' WHERE skill_name = ?", skillName);
-                            log.warn("Skill '{}' disabled (no previous version to rollback)", skillName);
-                        }
-                    } catch (IOException e) {
-                        log.error("Rollback failed for '{}': {}", skillName, e.getMessage());
-                        jdbc.update("UPDATE generated_skills SET status = 'failed' WHERE skill_name = ?", skillName);
-                    }
-                } else {
-                    // Passed probation
-                    jdbc.update("UPDATE generated_skills SET status = 'active' WHERE skill_name = ?", skillName);
-                    log.info("Skill '{}' passed probation ({}/{} succeeded)", skillName, executions - failures, executions);
-                }
+        if ("probationary".equals(status) && executions >= 3) {
+            if (failures >= 2) {
+                // Do not automatically quarantine/rollback/disable. Just mark for regeneration.
+                jdbc.update("UPDATE generated_skills SET status = 'needs_regeneration' WHERE skill_name = ?", skillName);
+                log.warn("Skill '{}' marked needs_regeneration (failed {}/{})", skillName, failures, executions);
+            } else {
+                // Passed probation
+                jdbc.update("UPDATE generated_skills SET status = 'active' WHERE skill_name = ?", skillName);
+                log.info("Skill '{}' passed probation ({}/{} succeeded)", skillName, executions - failures, executions);
             }
         }
     }

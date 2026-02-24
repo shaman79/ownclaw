@@ -27,6 +27,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Executes skill scripts in the sandbox and captures results.
@@ -44,6 +46,7 @@ public class SkillRunnerService {
     private final CredentialGrantService credentialGrants;
     private final CredentialVault credentialVault;
     private final SkillVersionManager versionManager;
+    private final NativeSkillRegistry nativeSkillRegistry;
     private final SkillOutputParser outputParser;
     private final EventLogService eventLog;
     private final ChatStatusEmitter statusEmitter;
@@ -54,12 +57,25 @@ public class SkillRunnerService {
     /** Last failure context captured during execution, for self-healing diagnosis. */
     private volatile SkillFailureContext lastFailureContext;
 
+        private static final Pattern MODULE_NOT_FOUND = Pattern.compile(
+            "ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]|ImportError: No module named ([A-Za-z0-9_.]+)");
+
+        private static final Map<String, String> MODULE_TO_PACKAGE = Map.ofEntries(
+            Map.entry("bs4", "beautifulsoup4"),
+            Map.entry("yaml", "pyyaml"),
+            Map.entry("PIL", "pillow"),
+            Map.entry("cv2", "opencv-python"),
+            Map.entry("sklearn", "scikit-learn"),
+            Map.entry("lxml", "lxml")
+        );
+
     public SkillRunnerService(SandboxManager sandbox, SkillLoader skillLoader,
                               SkillManifest skillManifest,
                               PythonEnvironmentService pythonEnv,
                               CredentialGrantService credentialGrants,
                               CredentialVault credentialVault,
                               SkillVersionManager versionManager,
+                              NativeSkillRegistry nativeSkillRegistry,
                               SkillOutputParser outputParser, EventLogService eventLog,
                               ChatStatusEmitter statusEmitter,
                               SkillInteractionHandler interactionHandler,
@@ -72,6 +88,7 @@ public class SkillRunnerService {
         this.credentialGrants = credentialGrants;
         this.credentialVault = credentialVault;
         this.versionManager = versionManager;
+        this.nativeSkillRegistry = nativeSkillRegistry;
         this.outputParser = outputParser;
         this.eventLog = eventLog;
         this.statusEmitter = statusEmitter;
@@ -96,6 +113,27 @@ public class SkillRunnerService {
 
         statusEmitter.emit(userId, StatusMessage.Type.STEP,
                 "Running skill: " + step.skill());
+
+        // Native skills (Java-implemented) take precedence.
+        var nativeSkill = nativeSkillRegistry.find(step.skill());
+        if (nativeSkill.isPresent()) {
+            long start = System.currentTimeMillis();
+            try {
+            StepResult res = nativeSkill.get().execute(step, userId, taskId, resolvedParams);
+            long duration = System.currentTimeMillis() - start;
+            String sev = res.success() ? "info" : "warn";
+            eventLog.log(userId, taskId, "skill.executed", sev,
+                step.skill() + " -> " + (res.success() ? "success" : "failed"), null, 0);
+            return new StepResult(step.id(), res.success(), res.output(), res.exitCode(),
+                duration, step.skill(), resolvedParams);
+            } catch (Exception e) {
+            long duration = System.currentTimeMillis() - start;
+            String msg = e.getMessage() != null ? e.getMessage() : "Native skill failed";
+            eventLog.warn(userId, taskId, "skill.executed",
+                step.skill() + " -> failed | " + msg);
+            return StepResult.failureWithContext(step.id(), msg, -1, duration, step.skill(), resolvedParams);
+            }
+        }
 
         // Clear previous failure context
         this.lastFailureContext = null;
@@ -150,20 +188,37 @@ public class SkillRunnerService {
             envVars.putAll(vaultCreds);
         }
 
-        // Resolve Python executable (venv if skill has requirements.txt)
-        String python = pythonEnv.resolvePython(workDir, step.skill());
+        // Resolve Python executable + any env needed for dependency fallback.
+        PythonEnvironmentService.PythonResolution py = pythonEnv.resolveExecution(workDir, step.skill());
+        String python = py.python();
 
-        // If venv provisioning failed, we fall back to system Python — warn the user with the reason.
-        // This is the most common cause of "<lib> not installed" errors in Python skills.
+        // If we're using the non-venv fallback, prepend its PYTHONPATH to any existing.
+        if (py.extraEnv() != null && !py.extraEnv().isEmpty()) {
+            for (var entry : py.extraEnv().entrySet()) {
+                if ("PYTHONPATH".equals(entry.getKey())) {
+                    String prepend = entry.getValue();
+                    String existing = envVars.getOrDefault("PYTHONPATH", System.getenv("PYTHONPATH"));
+                    if (existing != null && !existing.isBlank()) {
+                        envVars.put("PYTHONPATH", prepend + java.io.File.pathSeparator + existing);
+                    } else {
+                        envVars.put("PYTHONPATH", prepend);
+                    }
+                } else {
+                    envVars.put(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+
+        // If venv provisioning failed, we fall back to system Python.
+        // Avoid warning the user here: missing deps are often recoverable via deterministic self-heal.
         try {
             if (Files.exists(workDir.resolve("requirements.txt"))
                     && python != null
                     && python.equals(pythonEnv.getSystemPython())) {
-                pythonEnv.getLastProvisionError(workDir, step.skill()).ifPresent(err ->
-                        statusEmitter.emit(userId, StatusMessage.Type.WARNING,
-                                "Python deps could not be installed for skill '" + step.skill() + "': " + err
-                                        + " (using system Python)")
-                );
+            pythonEnv.getLastProvisionError(workDir, step.skill()).ifPresent(err ->
+                log.warn("Python deps provisioning failed for skill '{}': {} (using system Python)",
+                    step.skill(), err)
+            );
             }
         } catch (Exception ignored) {
             // non-fatal
@@ -176,23 +231,10 @@ public class SkillRunnerService {
             return StepResult.failure(step.id(), errMsg, -1, 0);
         }
 
-        // Execute in sandbox — use interactive mode if skill declares interactive: true
-        boolean isInteractive = skillMeta.isPresent() && skillMeta.get().interactive();
-        SandboxResult sandboxResult;
-        if (isInteractive) {
-            log.info("Executing interactive skill: {}", step.skill());
-            sandboxResult = sandbox.executeInteractive(python, script, workDir, stdinJson, envVars,
-                    defaultTimeout, prompt -> {
-                        try {
-                            return interactionHandler.requestInput(userId, taskId, prompt);
-                        } catch (Exception e) {
-                            log.warn("Interactive input failed for skill {}: {}", step.skill(), e.getMessage());
-                            return "";
-                        }
-                    });
-        } else {
-            sandboxResult = sandbox.execute(python, script, workDir, stdinJson, envVars, defaultTimeout);
-        }
+        // Execute in sandbox — enable interactive mode when the skill supports need_input.
+        boolean isInteractive = shouldRunInteractive(skillMeta, script);
+        SandboxResult sandboxResult = runInSandbox(isInteractive, python, script, workDir, stdinJson, envVars,
+                userId, taskId, step.skill());
 
         // Parse output
         List<SkillOutputParser.SkillOutput> outputs = outputParser.parse(sandboxResult.stdout());
@@ -202,13 +244,12 @@ public class SkillRunnerService {
             if (output.type() == SkillOutputParser.SkillOutput.Type.PROGRESS) {
                 statusEmitter.emit(userId, StatusMessage.Type.PROGRESS, output.content());
             } else if (output.type() == SkillOutputParser.SkillOutput.Type.NEED_INPUT) {
-                // Skill requested user input — emit prompt and wait.
-                // Note: in the current one-shot sandbox model, the process has already exited
-                // so we can't feed input back. We log the request for awareness.
-                // Full interactive mode (keeping process alive) is possible via executeInteractive
-                // when the sandbox supports it. For now, the skill should handle missing input gracefully.
-                log.info("Skill {} emitted need_input (post-execution): {}", step.skill(), output.content());
-                statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, output.content());
+                // If we ran in interactive mode, need_input was already handled live.
+                // In non-interactive mode, we can only surface it as a post-execution hint.
+                if (!isInteractive) {
+                    log.info("Skill {} emitted need_input (post-execution): {}", step.skill(), output.content());
+                    statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, output.content());
+                }
             }
         }
 
@@ -232,6 +273,80 @@ public class SkillRunnerService {
             // No structured result — use raw stdout
             outputText = sandboxResult.stdout();
             success = sandboxResult.exitCode() == 0;
+        }
+
+        // Deterministic self-heal: missing Python module -> pip install -> retry once.
+        if (!success) {
+            String missingModule = extractMissingModule(outputText);
+            if (missingModule != null) {
+                String pkg = mapModuleToPackage(missingModule);
+                statusEmitter.emit(userId, StatusMessage.Type.PROGRESS,
+                        "Self-healing " + step.skill() + "...");
+
+                boolean installed = pythonEnv.installPackages(workDir, step.skill(), List.of(pkg));
+                if (installed) {
+                    PythonEnvironmentService.PythonResolution healed = pythonEnv.resolveExecution(workDir, step.skill());
+                    String healedPython = healed.python();
+
+                    Map<String, String> retryEnv = new HashMap<>(envVars);
+                    if (healed.extraEnv() != null && !healed.extraEnv().isEmpty()) {
+                        for (var entry : healed.extraEnv().entrySet()) {
+                            if ("PYTHONPATH".equals(entry.getKey())) {
+                                String prepend = entry.getValue();
+                                String existing = retryEnv.getOrDefault("PYTHONPATH", System.getenv("PYTHONPATH"));
+                                if (existing != null && !existing.isBlank()) {
+                                    retryEnv.put("PYTHONPATH", prepend + java.io.File.pathSeparator + existing);
+                                } else {
+                                    retryEnv.put("PYTHONPATH", prepend);
+                                }
+                            } else {
+                                retryEnv.put(entry.getKey(), entry.getValue());
+                            }
+                        }
+                    }
+                    SandboxResult retryResult = runInSandbox(isInteractive, healedPython, script, workDir,
+                            stdinJson, retryEnv, userId, taskId, step.skill());
+                    List<SkillOutputParser.SkillOutput> retryOutputs = outputParser.parse(retryResult.stdout());
+                    for (var o : retryOutputs) {
+                        if (o.type() == SkillOutputParser.SkillOutput.Type.PROGRESS) {
+                            statusEmitter.emit(userId, StatusMessage.Type.PROGRESS, o.content());
+                        } else if (o.type() == SkillOutputParser.SkillOutput.Type.NEED_INPUT) {
+                            if (!isInteractive) {
+                                statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, o.content());
+                            }
+                        }
+                    }
+
+                    SkillOutputParser.SkillOutput retryResultOutput = outputParser.extractResult(retryOutputs);
+                    if (retryResult.timedOut()) {
+                        outputText = "Skill timed out after " + defaultTimeout + "s";
+                        success = false;
+                        sandboxResult = retryResult;
+                        outputs = retryOutputs;
+                        resultOutput = retryResultOutput;
+                    } else if (!retryResult.isSuccess()) {
+                        outputText = retryResult.stderr().isBlank()
+                                ? "Exit code " + retryResult.exitCode()
+                                : retryResult.stderr();
+                        success = false;
+                        sandboxResult = retryResult;
+                        outputs = retryOutputs;
+                        resultOutput = retryResultOutput;
+                    } else if (retryResultOutput != null) {
+                        outputText = retryResultOutput.content();
+                        success = retryResultOutput.isSuccess();
+                        sandboxResult = retryResult;
+                        outputs = retryOutputs;
+                        resultOutput = retryResultOutput;
+                    } else {
+                        outputText = retryResult.stdout();
+                        success = retryResult.exitCode() == 0;
+                        sandboxResult = retryResult;
+                        outputs = retryOutputs;
+                        resultOutput = retryResultOutput;
+                    }
+                }
+            }
         }
 
         // Log the execution with error details for debugging
@@ -276,6 +391,61 @@ public class SkillRunnerService {
                         step.skill(), resolvedParams)
                 : StepResult.failureWithContext(step.id(), outputText, sandboxResult.exitCode(),
                         sandboxResult.durationMs(), step.skill(), resolvedParams);
+    }
+
+    private SandboxResult runInSandbox(boolean isInteractive, String python, Path script, Path workDir,
+                                       String stdinJson, Map<String, String> envVars,
+                                       String userId, String taskId, String skillName) {
+        if (isInteractive) {
+            log.info("Executing interactive skill: {}", skillName);
+            return sandbox.executeInteractive(python, script, workDir, stdinJson, envVars,
+                    defaultTimeout, prompt -> {
+                        try {
+                            return interactionHandler.requestInput(userId, taskId, prompt);
+                        } catch (Exception e) {
+                            log.warn("Interactive input failed for skill {}: {}", skillName, e.getMessage());
+                            return "";
+                        }
+                    });
+        }
+        return sandbox.execute(python, script, workDir, stdinJson, envVars, defaultTimeout);
+    }
+
+    private boolean shouldRunInteractive(Optional<SkillModel> skillMeta, Path scriptPath) {
+        if (skillMeta.isPresent() && skillMeta.get().interactive()) {
+            return true;
+        }
+
+        // Heuristic fallback: if the script contains the need_input protocol string,
+        // run in interactive mode even if the manifest flag is stale.
+        // This keeps interactive skills working even when older manifests had interactive=false.
+        try {
+            String src = Files.readString(scriptPath, StandardCharsets.UTF_8);
+            return src.contains("need_input");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String extractMissingModule(String outputText) {
+        if (outputText == null || outputText.isBlank()) return null;
+        Matcher m = MODULE_NOT_FOUND.matcher(outputText);
+        if (!m.find()) return null;
+
+        String mod = m.group(1) != null ? m.group(1) : m.group(2);
+        if (mod == null || mod.isBlank()) return null;
+        // top-level package only
+        int dot = mod.indexOf('.');
+        if (dot > 0) mod = mod.substring(0, dot);
+        return mod.strip();
+    }
+
+    private String mapModuleToPackage(String moduleName) {
+        if (moduleName == null || moduleName.isBlank()) return moduleName;
+        String direct = MODULE_TO_PACKAGE.get(moduleName);
+        if (direct != null) return direct;
+        // Common case: module == package
+        return moduleName;
     }
 
     /**

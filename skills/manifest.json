@@ -50,6 +50,16 @@
     "reversible" : false,
     "interactive" : false
   }, {
+    "name" : "websearch",
+    "version" : 1,
+    "summary" : "Alias of web_search: performs a web search and returns the top result.",
+    "keywords" : [ "web", "search", "query", "websearch" ],
+    "complexity" : "medium",
+    "params" : [ "query" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
     "name" : "send_email",
     "version" : 1,
     "summary" : "Send an email via SMTP with optional HTML body and CC/BCC",
@@ -76,6 +86,36 @@
     "keywords" : [ "summarize", "summary", "text", "extract", "condense", "shorten", "tldr" ],
     "complexity" : "low",
     "params" : [ "text", "max_sentences?", "max_length?", "style?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
+    "name" : "ask_user",
+    "version" : 1,
+    "summary" : "Ask the user a clarifying question and return the response",
+    "keywords" : [ "ask", "clarify", "question", "choose", "select", "option" ],
+    "complexity" : "low",
+    "params" : [ "prompt", "options?" ],
+    "credentials" : [ ],
+    "reversible" : true,
+    "interactive" : true
+  }, {
+    "name" : "mcp_list_tools",
+    "version" : 1,
+    "summary" : "List available tools from a configured MCP server",
+    "keywords" : [ "mcp", "tools", "list", "bridge" ],
+    "complexity" : "medium",
+    "params" : [ "server?" ],
+    "credentials" : [ ],
+    "reversible" : true,
+    "interactive" : false
+  }, {
+    "name" : "mcp_call_tool",
+    "version" : 1,
+    "summary" : "Call a tool on a configured MCP server and return the result",
+    "keywords" : [ "mcp", "tool", "call", "invoke", "bridge" ],
+    "complexity" : "medium",
+    "params" : [ "server?", "tool", "arguments?" ],
     "credentials" : [ ],
     "reversible" : false,
     "interactive" : false

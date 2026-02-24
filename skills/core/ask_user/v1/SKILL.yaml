@@ -1,0 +1,23 @@
+name: ask_user
+version: 1
+description: Ask the user a clarifying question mid-execution.
+summary: Ask the user a question and return the response.
+triggers:
+  keywords: [ask, clarify, question, choose, select, option]
+  intents: [clarify]
+parameters:
+  - name: prompt
+  - name: options
+    optional: true
+permissions:
+  network: false
+  filesystem: false
+  timeout: 120
+complexity: low
+created_by: system
+tested: true
+reversible: true
+interactive: true
+changelog:
+  - version: 1
+    notes: Initial version.

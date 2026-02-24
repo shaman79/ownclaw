@@ -86,3 +86,10 @@ ownclaw:
     enabled: true
     max-entries: 500
     ttl-hours: 168
+
+  # MCP Bridge (Model Context Protocol) — external tool servers over stdio.
+  # Disabled by default. Add servers to enable.
+  mcp:
+    enabled: false
+    timeout-sec: 30
+    servers: []

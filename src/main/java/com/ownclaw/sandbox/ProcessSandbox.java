@@ -164,7 +164,7 @@ public class ProcessSandbox implements SandboxManager {
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
                     () -> drainStream(process.getErrorStream()));
 
-            // Read stdout line by line
+                // Read stdout line by line
             StringBuilder allStdout = new StringBuilder();
             java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
@@ -183,17 +183,18 @@ public class ProcessSandbox implements SandboxManager {
 
                 // Check if this line is a need_input JSON
                 String trimmed = line.trim();
-                if (trimmed.startsWith("{") && trimmed.contains("\"need_input\"")) {
+                if (trimmed.startsWith("{")) {
                     try {
                         JsonNode node = mapper.readTree(trimmed);
                         if ("need_input".equals(node.path("type").asText(""))) {
-                            String prompt = node.path("prompt").asText("Input needed:");
+                            String prompt = formatNeedInputPrompt(node);
                             String userResponse = inputCallback.apply(prompt);
+                            String value = normalizeUserResponse(userResponse, node);
 
                             // Write response back to process stdin as JSON
                             String responseJson = mapper
                                     .writeValueAsString(Map.of("type", "user_input", "value",
-                                            userResponse != null ? userResponse : ""));
+                                            value != null ? value : ""));
                             stdin.write(responseJson.getBytes(StandardCharsets.UTF_8));
                             stdin.write('\n');
                             stdin.flush();
@@ -228,5 +229,55 @@ public class ProcessSandbox implements SandboxManager {
             long durationMs = System.currentTimeMillis() - startTime;
             return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
+    }
+
+    private String formatNeedInputPrompt(JsonNode node) {
+        String prompt = node.path("prompt").asText("Input needed:");
+        JsonNode options = node.get("options");
+        if (options != null && options.isArray() && options.size() > 0) {
+            StringBuilder sb = new StringBuilder(prompt);
+            sb.append("\n\nOptions:\n");
+            for (int i = 0; i < options.size(); i++) {
+                JsonNode opt = options.get(i);
+                String label;
+                if (opt.isTextual()) {
+                    label = opt.asText();
+                } else {
+                    label = opt.path("label").asText(opt.path("value").asText(""));
+                    if (label.isBlank()) {
+                        label = opt.toString();
+                    }
+                }
+                sb.append(i + 1).append(". ").append(label).append('\n');
+            }
+            sb.append("\nReply with the number or the value.");
+            return sb.toString();
+        }
+        return prompt;
+    }
+
+    private String normalizeUserResponse(String userResponse, JsonNode needInputNode) {
+        if (userResponse == null) return "";
+        String trimmed = userResponse.trim();
+        if (trimmed.isEmpty()) return "";
+
+        JsonNode options = needInputNode.get("options");
+        if (options != null && options.isArray() && options.size() > 0) {
+            try {
+                int idx = Integer.parseInt(trimmed);
+                if (idx >= 1 && idx <= options.size()) {
+                    JsonNode opt = options.get(idx - 1);
+                    if (opt.isTextual()) return opt.asText();
+                    String value = opt.path("value").asText("");
+                    if (!value.isBlank()) return value;
+                    String label = opt.path("label").asText("");
+                    if (!label.isBlank()) return label;
+                    return opt.toString();
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through
+            }
+        }
+        return trimmed;
     }
 }

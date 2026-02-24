@@ -152,6 +152,7 @@ public class SkillGenerator {
                 String summary = genJson.path("summary").asText("");
                 String script = genJson.path("script").asText("");
                 String requirements = genJson.path("requirements").asText("");
+                boolean interactive = genJson.path("interactive").asBoolean(false);
                 String testParamsJson = genJson.has("test_params")
                         ? genJson.get("test_params").toString() : null;
 
@@ -166,6 +167,11 @@ public class SkillGenerator {
                     lastError = "Generated skill missing name or script content";
                     continue;
                 }
+
+                                // If Mentor didn't explicitly mark interactive, infer from script usage of need_input.
+                                if (!interactive && script.contains("need_input")) {
+                                        interactive = true;
+                                }
 
                 // Sanitize skill name
                 skillName = skillName.toLowerCase().replaceAll("[^a-z0-9_]", "_");
@@ -200,7 +206,7 @@ public class SkillGenerator {
                 int version = versionManager.getCurrentVersion(skillName);
                 if (version == 0) version = 1;
                 versionManager.registerSkill(skillName, summary, keywords, params,
-                        credentials, version, userId);
+                        credentials, version, interactive, userId);
 
                 eventLog.info(userId, taskId, "skill.created",
                         "New skill created: '" + skillName + "' v" + version);

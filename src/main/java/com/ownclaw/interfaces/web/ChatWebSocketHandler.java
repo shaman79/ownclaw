@@ -116,12 +116,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String payload = message.getPayload();
         String userMessage;
 
-        // Accept plain text or JSON {"message": "...", "type": "..."}
+        // Accept plain text or JSON {"message": "...", "type": "...", "taskId": "..."}
         String messageType = "message";
+        String taskId = null;
         try {
             JsonNode json = mapper.readTree(payload);
             messageType = json.has("type") ? json.path("type").asText("message") : "message";
             userMessage = json.has("message") ? json.path("message").asText() : payload;
+            taskId = json.has("taskId") ? json.path("taskId").asText(null) : null;
         } catch (Exception e) {
             userMessage = payload;
         }
@@ -130,7 +132,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Handle input_response for skill interaction (need_input)
         if ("input_response".equals(messageType)) {
-            boolean handled = interactionHandler.provideInput(userId, null, userMessage);
+            boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
             if (!handled) {
                 sendToSession(session, "system", "No pending input request.");
             }
@@ -149,6 +151,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 session.getAttributes().remove("wizardStep");
             } else {
                 session.getAttributes().put("wizardStep", nextStep);
+            }
+            return;
+        }
+
+        // Interactive skill input: if a skill is waiting for user input, treat this as the response.
+        // (Commands still work while waiting.)
+        if (!userMessage.startsWith("/") && interactionHandler.hasPending(userId)) {
+            boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
+            if (!handled) {
+                sendToSession(session, "system", "No pending input request.");
             }
             return;
         }

@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +30,9 @@ public class PythonEnvironmentService {
     private volatile String systemPython;
     private final Path envsDir;
 
+    /** Dependency fallback location (when venv/ensurepip is unavailable). */
+    private final Path targetsDir;
+
     /** Tracks which skill dirs have been provisioned this session (avoid redundant checks). */
     private final Map<String, String> provisionedHashes = new ConcurrentHashMap<>();
 
@@ -38,12 +42,14 @@ public class PythonEnvironmentService {
     public PythonEnvironmentService(OwnClawConfig config) {
         this.systemPython = config.getSandbox().getPythonPath();
         this.envsDir = Path.of(config.getSkills().getCorePath()).getParent().resolve("_envs");
+        this.targetsDir = envsDir.resolve("_targets");
     }
 
     @PostConstruct
     public void init() {
         try {
             Files.createDirectories(envsDir);
+            Files.createDirectories(targetsDir);
         } catch (IOException e) {
             log.warn("Failed to create _envs directory: {}", e.getMessage());
         }
@@ -81,6 +87,51 @@ public class PythonEnvironmentService {
     /** @return the current resolved Python command */
     public String getSystemPython() {
         return systemPython;
+    }
+
+    /**
+     * Resolved Python command plus optional environment variables needed for imports.
+     *
+     * <p>Normally this returns a per-skill venv python. On minimal Linux installs
+     * (missing python3-venv / ensurepip), it falls back to installing into a
+     * per-skill target directory and returns system Python with PYTHONPATH set.</p>
+     */
+    public record PythonResolution(String python, Map<String, String> extraEnv) {}
+
+    /**
+     * Resolve the best Python executable for running a skill, provisioning dependencies if needed.
+     */
+    public PythonResolution resolveExecution(Path skillDir, String skillName) {
+        Path reqFile = skillDir.resolve("requirements.txt");
+        if (!Files.exists(reqFile)) {
+            return new PythonResolution(systemPython, Map.of());
+        }
+
+        try {
+            String reqContent = Files.readString(reqFile, StandardCharsets.UTF_8).strip();
+            if (reqContent.isEmpty()) {
+                return new PythonResolution(systemPython, Map.of());
+            }
+
+            // Try venv path first.
+            String python = resolvePython(skillDir, skillName);
+            if (python != null && !python.isBlank() && !python.equals(systemPython)) {
+                return new PythonResolution(python, Map.of());
+            }
+
+            // Venv unavailable or provisioning failed; try a target install + PYTHONPATH.
+            Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
+            if (target != null) {
+                return new PythonResolution(systemPython, Map.of(
+                        "PYTHONPATH", target.toAbsolutePath().toString()
+                ));
+            }
+        } catch (Exception e) {
+            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
+            log.warn("Failed to resolve execution environment for skill '{}': {}", skillName, msg);
+        }
+
+        return new PythonResolution(systemPython, Map.of());
     }
 
     /**
@@ -151,6 +202,157 @@ public class PythonEnvironmentService {
         return Optional.ofNullable(lastProvisionErrors.get(skillName + ":" + skillDir));
     }
 
+    /**
+     * Install one or more packages into a per-skill venv, creating the venv if needed.
+     * Also persists the packages into requirements.txt for future seamless provisioning.
+     *
+     * This is used for deterministic self-healing (e.g. ModuleNotFoundError).
+     */
+    public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
+        if (packages == null || packages.isEmpty()) return false;
+        try {
+            Path venvDir = envsDir.resolve(skillName);
+            try {
+                createVenv(venvDir);
+                ensurePipAvailable(venvDir);
+            } catch (Exception venvErr) {
+                // Minimal Python installs often cannot create venvs.
+                // Fall back to target installs + PYTHONPATH.
+                persistRequirements(skillDir, packages);
+                String reqContent = Files.exists(skillDir.resolve("requirements.txt"))
+                        ? Files.readString(skillDir.resolve("requirements.txt"), StandardCharsets.UTF_8).strip()
+                        : "";
+                ensureTargetDependencies(skillDir, skillName, reqContent);
+                lastProvisionErrors.remove(skillName + ":" + skillDir);
+                return true;
+            }
+
+            String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
+
+            var args = new java.util.ArrayList<String>();
+            args.add(venvPython);
+            args.add("-m");
+            args.add("pip");
+            args.add("install");
+            args.add("--disable-pip-version-check");
+            args.add("-q");
+            args.addAll(packages);
+
+            ProcessResult install = run(300, new ProcessBuilder(args));
+            if (install.exitCode != 0) {
+                throw new IOException("pip install failed: " + install.output);
+            }
+
+            // Persist/update requirements.txt so future runs provision automatically.
+            persistRequirements(skillDir, packages);
+
+            // Refresh hash cache so resolvePython() uses venv without re-install.
+            Path reqFile = skillDir.resolve("requirements.txt");
+            if (Files.exists(reqFile)) {
+                String reqContent = Files.readString(reqFile, StandardCharsets.UTF_8).strip();
+                if (!reqContent.isBlank()) {
+                    String reqHash = hash(reqContent);
+                    Files.createDirectories(venvDir);
+                    Files.writeString(venvDir.resolve(".req_hash"), reqHash, StandardCharsets.UTF_8);
+                    provisionedHashes.put(skillName + ":" + skillDir, reqHash);
+                }
+            }
+
+            lastProvisionErrors.remove(skillName + ":" + skillDir);
+            return true;
+        } catch (Exception e) {
+            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
+            lastProvisionErrors.put(skillName + ":" + skillDir, msg);
+            log.warn("Failed to install packages for skill '{}': {}", skillName, msg);
+            return false;
+        }
+    }
+
+    /**
+     * Ensure dependencies are installed into a per-skill target directory (no venv required).
+     *
+     * @return the target directory if ready; null if installation failed
+     */
+    private Path ensureTargetDependencies(Path skillDir, String skillName, String reqContent)
+            throws IOException, InterruptedException {
+        if (reqContent == null || reqContent.isBlank()) return null;
+
+        String reqHash = hash(reqContent);
+        Path targetDir = targetsDir.resolve(skillName);
+        Path hashFile = targetDir.resolve(".req_hash");
+
+        if (Files.exists(hashFile)) {
+            String stored = Files.readString(hashFile, StandardCharsets.UTF_8).strip();
+            if (reqHash.equals(stored)) {
+                return targetDir;
+            }
+        }
+
+        Files.createDirectories(targetDir);
+
+        // Ensure pip is available on system Python
+        ProcessResult pipCheck = run(60, new ProcessBuilder(systemPython, "-m", "pip", "--version"));
+        if (pipCheck.exitCode != 0) {
+            ProcessResult ensure = run(120, new ProcessBuilder(systemPython, "-m", "ensurepip", "--upgrade"));
+            if (ensure.exitCode != 0) {
+                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
+            }
+        }
+
+        Path reqFile = skillDir.resolve("requirements.txt");
+        ProcessResult install = run(600, new ProcessBuilder(
+                systemPython, "-m", "pip", "install",
+                "--disable-pip-version-check",
+                "-q", "-r", reqFile.toAbsolutePath().toString(),
+                "--target", targetDir.toAbsolutePath().toString()
+        ));
+
+        if (install.exitCode != 0) {
+            throw new IOException("pip --target install failed: " + install.output);
+        }
+
+        Files.writeString(hashFile, reqHash, StandardCharsets.UTF_8);
+        return targetDir;
+    }
+
+    private void ensurePipAvailable(Path venvDir) throws IOException, InterruptedException {
+        String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
+        ProcessResult pipCheck = run(120, new ProcessBuilder(venvPython, "-m", "pip", "--version"));
+        if (pipCheck.exitCode != 0) {
+            ProcessResult ensure = run(180, new ProcessBuilder(venvPython, "-m", "ensurepip", "--upgrade"));
+            if (ensure.exitCode != 0) {
+                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
+            }
+        }
+    }
+
+    private void persistRequirements(Path skillDir, List<String> packages) throws IOException {
+        Path reqFile = skillDir.resolve("requirements.txt");
+        Files.createDirectories(skillDir);
+
+        java.util.Set<String> existing = new java.util.LinkedHashSet<>();
+        if (Files.exists(reqFile)) {
+            for (String line : Files.readString(reqFile, StandardCharsets.UTF_8).split("\\R")) {
+                String trimmed = line.strip();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                existing.add(trimmed);
+            }
+        }
+
+        boolean changed = false;
+        for (String pkg : packages) {
+            String trimmed = pkg == null ? "" : pkg.strip();
+            if (trimmed.isEmpty()) continue;
+            if (existing.add(trimmed)) changed = true;
+        }
+
+        if (!Files.exists(reqFile) || changed) {
+            String content = String.join("\n", existing) + "\n";
+            Files.writeString(reqFile, content, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        }
+    }
+
     private void createVenv(Path venvDir) throws IOException, InterruptedException {
         if (Files.exists(venvDir.resolve(pythonRelative()))) {
             return; // venv already exists
@@ -172,13 +374,7 @@ public class PythonEnvironmentService {
         String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
 
         // Ensure pip is available in this venv (some Python installs omit it)
-        ProcessResult pipCheck = run(120, new ProcessBuilder(venvPython, "-m", "pip", "--version"));
-        if (pipCheck.exitCode != 0) {
-            ProcessResult ensure = run(180, new ProcessBuilder(venvPython, "-m", "ensurepip", "--upgrade"));
-            if (ensure.exitCode != 0) {
-                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
-            }
-        }
+        ensurePipAvailable(venvDir);
 
         // Install requirements using `python -m pip` (more portable than pip.exe path)
         ProcessResult install = run(300, new ProcessBuilder(
