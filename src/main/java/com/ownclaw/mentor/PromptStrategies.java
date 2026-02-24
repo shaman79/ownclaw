@@ -22,8 +22,12 @@ public final class PromptStrategies {
             When the task involves fetching content from the web:
             1. Always start with `http_request` (fast, lightweight).
             2. If `http_request` returns empty/useless body (JS-rendered page), retry with `browse_web`.
-            3. Use `web_search` only when the user hasn't provided a specific URL and you need to discover one.
-            4. After obtaining raw HTML, consider a `summarize_web_content` step or extract the data yourself in the plan.
+            3. If the user provides a URL/domain, DO NOT use `web_search`.
+               - Fetch the provided URL directly (via `http_request` or `browse_web`).
+               - If the needed info is likely on a subpage (menus, schedules, price lists), use `browse_web`
+             to extract links and follow a small number of same-domain links.
+            4. Use `web_search` only when the user has NOT provided a URL and you must discover one.
+            5. After obtaining raw HTML/text, summarize or extract the required facts in the plan.
             """;
 
     static final String WEB_FOLLOWUP = """
