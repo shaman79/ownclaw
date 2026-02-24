@@ -675,7 +675,6 @@ public class TaskOrchestrator {
             break; // No point retrying diagnosis if it says it's not fixable
         }
 
-        // Self-healing didn't work — fall back to simple retry
         log.info("Self-heal exhausted for step {} — executing simple retry", step.id());
         return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
     }
@@ -694,7 +693,7 @@ public class TaskOrchestrator {
         String prompt = "Regenerate the existing OwnClaw skill as a new version. "
                 + "The JSON field 'name' MUST be exactly '" + step.skill() + "'. "
                 + "Preserve the stdin JSON → stdout JSON-lines protocol and keep changes minimal but robust. "
-                + "If dependencies are missing, include a correct requirements.txt content.\n\n"
+                                + "If dependencies are missing, include a correct requirements.txt content.\n\n"
                 + "Failure report:\n" + failureContext.toDiagnosticReport();
 
         try {

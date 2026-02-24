@@ -56,8 +56,7 @@ public class SkillVersionManager {
      * @return path to the created version directory
      */
     public Path createSkillVersion(String skillName, String skillPy, String requirements) throws IOException {
-        Path genDir = Path.of(config.getSkills().getGeneratedPath());
-        Files.createDirectories(genDir);
+        Path genDir = resolveWritableGeneratedDir();
 
         Path skillDir = genDir.resolve(skillName);
         int nextVersion = getNextVersion(skillDir);
@@ -88,11 +87,35 @@ public class SkillVersionManager {
     public void registerSkill(String skillName, String summary, List<String> keywords,
                               List<String> params, List<String> credentials,
                               int version, boolean interactive, String createdBy) throws IOException {
-        // Add to manifest.json
+        // Add to manifest.json (or to a runtime overlay if the base manifest is not writable)
         Path manifestPath = Path.of(config.getSkills().getManifestPath());
+        Path runtimeManifest = runtimeSkillsDir().resolve("manifest.runtime.json");
+
+        Path writeTarget = manifestPath;
+        try {
+            if (Files.exists(manifestPath)) {
+                // Fast permission probe: attempt to open for write
+                if (!Files.isWritable(manifestPath)) {
+                    writeTarget = runtimeManifest;
+                }
+            } else {
+                // Ensure parent is writable
+                Path parent = manifestPath.toAbsolutePath().getParent();
+                if (parent != null && (!Files.exists(parent) || !Files.isWritable(parent))) {
+                    writeTarget = runtimeManifest;
+                }
+            }
+        } catch (Exception ignored) {
+            writeTarget = runtimeManifest;
+        }
+
+        if (!writeTarget.equals(manifestPath)) {
+            Files.createDirectories(writeTarget.toAbsolutePath().getParent());
+            log.warn("Base manifest is not writable; writing skill registration to runtime manifest: {}", writeTarget);
+        }
         ObjectNode root;
-        if (Files.exists(manifestPath)) {
-            root = (ObjectNode) mapper.readTree(manifestPath.toFile());
+        if (Files.exists(writeTarget)) {
+            root = (ObjectNode) mapper.readTree(writeTarget.toFile());
         } else {
             root = mapper.createObjectNode();
             root.putArray("skills");
@@ -124,8 +147,8 @@ public class SkillVersionManager {
         entry.put("interactive", interactive);
         skillsArray.add(entry);
 
-        mapper.writerWithDefaultPrettyPrinter().writeValue(manifestPath.toFile(), root);
-        log.info("Updated manifest with skill '{}' v{}", skillName, version);
+        mapper.writerWithDefaultPrettyPrinter().writeValue(writeTarget.toFile(), root);
+        log.info("Updated manifest ({}) with skill '{}' v{}", writeTarget, skillName, version);
 
         // Reload the in-memory manifest
         skillManifest.reload();
@@ -230,7 +253,7 @@ public class SkillVersionManager {
      */
     public void pruneOldVersions(String skillName) throws IOException {
         int keep = config.getSkills().getMaxVersionsKept();
-        Path genDir = Path.of(config.getSkills().getGeneratedPath());
+        Path genDir = resolveWritableGeneratedDir();
         Path skillDir = genDir.resolve(skillName);
 
         List<Integer> versions = listVersions(skillDir);
@@ -252,7 +275,7 @@ public class SkillVersionManager {
 
     /** Current (latest) version number for a skill. */
     public int getCurrentVersion(String skillName) {
-        Path genDir = Path.of(config.getSkills().getGeneratedPath());
+        Path genDir = resolveGeneratedDirForRead();
         Path skillDir = genDir.resolve(skillName);
         if (!Files.isDirectory(skillDir)) {
             skillDir = Path.of(config.getSkills().getCorePath()).resolve(skillName);
@@ -278,18 +301,73 @@ public class SkillVersionManager {
     }
 
     private void updateManifestVersion(String skillName, int version) throws IOException {
-        Path manifestPath = Path.of(config.getSkills().getManifestPath());
-        if (!Files.exists(manifestPath)) return;
+        Path base = Path.of(config.getSkills().getManifestPath());
+        Path runtime = runtimeSkillsDir().resolve("manifest.runtime.json");
+
+        boolean updated = updateManifestVersionInFile(base, skillName, version);
+        if (!updated) {
+            updateManifestVersionInFile(runtime, skillName, version);
+        }
+    }
+
+    private boolean updateManifestVersionInFile(Path manifestPath, String skillName, int version) throws IOException {
+        if (manifestPath == null || !Files.exists(manifestPath)) return false;
+        if (!Files.isWritable(manifestPath)) return false;
 
         ObjectNode root = (ObjectNode) mapper.readTree(manifestPath.toFile());
         ArrayNode skills = (ArrayNode) root.get("skills");
+        if (skills == null) return false;
+        boolean found = false;
         for (int i = 0; i < skills.size(); i++) {
             if (skillName.equals(skills.get(i).path("name").asText())) {
                 ((ObjectNode) skills.get(i)).put("version", version);
+                found = true;
                 break;
             }
         }
+        if (!found) return false;
         mapper.writerWithDefaultPrettyPrinter().writeValue(manifestPath.toFile(), root);
+        return true;
+    }
+
+    private Path runtimeSkillsDir() {
+        try {
+            Path db = Path.of(config.getDatabase().getPath()).toAbsolutePath().normalize();
+            Path dataDir = db.getParent() != null ? db.getParent() : Path.of("./data");
+            return dataDir.resolve("skills");
+        } catch (Exception e) {
+            return Path.of("./data/skills");
+        }
+    }
+
+    private Path resolveWritableGeneratedDir() throws IOException {
+        Path preferred = Path.of(config.getSkills().getGeneratedPath());
+        if (tryEnsureWritableDir(preferred)) {
+            return preferred;
+        }
+        Path fallback = runtimeSkillsDir().resolve("generated");
+        Files.createDirectories(fallback);
+        return fallback;
+    }
+
+    private Path resolveGeneratedDirForRead() {
+        Path preferred = Path.of(config.getSkills().getGeneratedPath());
+        if (Files.isDirectory(preferred)) return preferred;
+        Path fallback = runtimeSkillsDir().resolve("generated");
+        return Files.isDirectory(fallback) ? fallback : preferred;
+    }
+
+    private boolean tryEnsureWritableDir(Path dir) {
+        try {
+            Files.createDirectories(dir);
+            Path probe = dir.resolve(".write_test");
+            Files.writeString(probe, "ok", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            Files.deleteIfExists(probe);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void deleteDirectory(Path dir) throws IOException {

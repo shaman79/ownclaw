@@ -98,7 +98,13 @@ do_setup() {
     # Install Python 3 if missing (needed for skills)
     if ! command -v python3 &>/dev/null; then
         log "Installing Python 3..."
-        apt-get update -qq && apt-get install -y -qq python3 python3-venv
+        apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip
+    fi
+
+    # Ensure pip is present (some minimal installs omit it)
+    if ! python3 -m pip --version &>/dev/null; then
+        log "Installing python3-pip..."
+        apt-get update -qq && apt-get install -y -qq python3-pip
     fi
 
     # Clone or update repo
@@ -168,6 +174,20 @@ do_setup() {
     log ""
     log "For auto-updates, add to crontab (sudo crontab -u ownclaw -e):"
     log "  */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+}
+
+ensure_runtime_permissions() {
+    # This deploy script is sometimes (accidentally) run as root.
+    # If we copy/rsync skills as root, manifest.json becomes root-owned and the service user can't write it.
+    # Fix that deterministically here.
+    mkdir -p "$DEPLOY_DIR"/skills/{core,generated,_envs} "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R ownclaw:ownclaw "$DEPLOY_DIR"/skills "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
+    fi
+
+    chmod -R u+rwX,go-rwx "$DEPLOY_DIR"/skills/generated "$DEPLOY_DIR"/skills/_envs 2>/dev/null || true
+    chmod u+rw "$DEPLOY_DIR"/skills/manifest.json 2>/dev/null || true
 }
 
 # === Install JDK 21 (Adoptium Temurin) ===
@@ -276,9 +296,12 @@ deploy_jar() {
     log "Deployed new JAR"
 
     # Sync skills and config from repo
-    rsync -a --delete "$REPO_DIR/skills/core/" "$DEPLOY_DIR/skills/core/"
-    rsync -a "$REPO_DIR/skills/manifest.json" "$DEPLOY_DIR/skills/manifest.json"
+    # Avoid preserving root ownership if deploy is run with sudo.
+    rsync -a --no-owner --no-group --delete "$REPO_DIR/skills/core/" "$DEPLOY_DIR/skills/core/"
+    rsync -a --no-owner --no-group "$REPO_DIR/skills/manifest.json" "$DEPLOY_DIR/skills/manifest.json"
     log "Synced skills and manifest"
+
+    ensure_runtime_permissions
 
     # Restart service (only if systemd is running — skip in setup phase)
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then

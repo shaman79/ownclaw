@@ -7,6 +7,10 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -26,12 +30,14 @@ import java.util.concurrent.TimeUnit;
 public class PythonEnvironmentService {
 
     private static final Logger log = LoggerFactory.getLogger(PythonEnvironmentService.class);
+    private static final URI GET_PIP_URI = URI.create("https://bootstrap.pypa.io/get-pip.py");
 
     private volatile String systemPython;
-    private final Path envsDir;
-
-    /** Dependency fallback location (when venv/ensurepip is unavailable). */
-    private final Path targetsDir;
+    private volatile boolean systemPipAvailable;
+    private volatile boolean systemEnsurePipAvailable;
+    private volatile Path envsDir;
+    private volatile Path targetsDir;
+    private volatile Path bootstrapDir;
 
     /** Tracks which skill dirs have been provisioned this session (avoid redundant checks). */
     private final Map<String, String> provisionedHashes = new ConcurrentHashMap<>();
@@ -39,20 +45,17 @@ public class PythonEnvironmentService {
     /** Captures the last provisioning error per skill+dir (for user-facing diagnostics). */
     private final Map<String, String> lastProvisionErrors = new ConcurrentHashMap<>();
 
+    private final OwnClawConfig config;
+
     public PythonEnvironmentService(OwnClawConfig config) {
+        this.config = config;
         this.systemPython = config.getSandbox().getPythonPath();
-        this.envsDir = Path.of(config.getSkills().getCorePath()).getParent().resolve("_envs");
-        this.targetsDir = envsDir.resolve("_targets");
+        // Defer env directory resolution to init() so we can pick a writable location.
     }
 
     @PostConstruct
     public void init() {
-        try {
-            Files.createDirectories(envsDir);
-            Files.createDirectories(targetsDir);
-        } catch (IOException e) {
-            log.warn("Failed to create _envs directory: {}", e.getMessage());
-        }
+        resolveWritableEnvDirs();
 
         // Auto-detect a working Python if the configured one doesn't work
         if (!isPythonAvailable(systemPython)) {
@@ -68,6 +71,106 @@ public class PythonEnvironmentService {
         } else {
             getPythonVersion().ifPresent(v -> log.info("Python ready: {} -> {}", systemPython, v));
         }
+
+        probeSystemPackageInstallCapabilities();
+    }
+
+    private void resolveWritableEnvDirs() {
+        Path preferred = Path.of(config.getSkills().getCorePath()).getParent().resolve("_envs");
+        Path fallback = runtimeSkillsDir().resolve("_envs");
+
+        Path chosen = tryEnsureWritableDir(preferred) ? preferred : fallback;
+        if (!chosen.equals(preferred)) {
+            log.warn("Using writable fallback for python envs: {} (preferred not writable: {})", chosen, preferred);
+        }
+
+        this.envsDir = chosen;
+        this.targetsDir = chosen.resolve("_targets");
+        this.bootstrapDir = chosen.resolve("_bootstrap");
+
+        try {
+            Files.createDirectories(envsDir);
+            Files.createDirectories(targetsDir);
+            Files.createDirectories(bootstrapDir);
+        } catch (IOException e) {
+            log.warn("Failed to create python env directories under {}: {}", chosen, e.getMessage());
+        }
+    }
+
+    private boolean tryEnsureWritableDir(Path dir) {
+        try {
+            Files.createDirectories(dir);
+            Path probe = dir.resolve(".write_test");
+            Files.writeString(probe, "ok", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            Files.deleteIfExists(probe);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private Path runtimeSkillsDir() {
+        try {
+            Path db = Path.of(config.getDatabase().getPath()).toAbsolutePath().normalize();
+            Path dataDir = db.getParent() != null ? db.getParent() : Path.of("./data");
+            return dataDir.resolve("skills");
+        } catch (Exception e) {
+            return Path.of("./data/skills");
+        }
+    }
+
+    private void probeSystemPackageInstallCapabilities() {
+        try {
+            // Check pip on system Python
+            ProcessResult pip = run(10, new ProcessBuilder(systemPython, "-m", "pip", "--version"));
+            systemPipAvailable = pip.exitCode == 0;
+
+            // Check ensurepip module existence without modifying environment
+            if (!systemPipAvailable) {
+                ProcessResult ensure = run(10, new ProcessBuilder(systemPython, "-c", "import ensurepip"));
+                systemEnsurePipAvailable = ensure.exitCode == 0;
+            } else {
+                systemEnsurePipAvailable = true;
+            }
+
+            if (!systemPipAvailable && !systemEnsurePipAvailable) {
+                log.warn("Python dependency installation is unavailable (no pip, no ensurepip). "
+                        + "Skills that require third-party packages cannot self-heal; prefer stdlib-only skills.");
+            }
+        } catch (Exception e) {
+            // Be conservative: if probing fails, assume we can't install.
+            systemPipAvailable = false;
+            systemEnsurePipAvailable = false;
+        }
+    }
+
+    /**
+     * True if we can (in principle) install Python packages using system Python.
+     * This covers either a working pip module, or an available ensurepip module.
+     */
+    public boolean canInstallPackagesOnSystemPython() {
+        return systemPipAvailable || systemEnsurePipAvailable;
+    }
+
+    /**
+     * True if this skill can install packages via its venv (if present) or via system Python.
+     */
+    public boolean canInstallPackagesForSkill(String skillName) {
+        try {
+            Path venvDir = envsDir.resolve(skillName);
+            Path venvPython = venvDir.resolve(pythonRelative());
+            if (Files.exists(venvPython)) {
+                ProcessResult pip = run(10, new ProcessBuilder(
+                        venvPython.toAbsolutePath().toString(), "-m", "pip", "--version"));
+                if (pip.exitCode == 0) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return canInstallPackagesOnSystemPython();
     }
 
     /** Quick check if a Python command is executable. */
@@ -222,7 +325,10 @@ public class PythonEnvironmentService {
                 String reqContent = Files.exists(skillDir.resolve("requirements.txt"))
                         ? Files.readString(skillDir.resolve("requirements.txt"), StandardCharsets.UTF_8).strip()
                         : "";
-                ensureTargetDependencies(skillDir, skillName, reqContent);
+                Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
+                if (target == null) {
+                    throw new IOException("No target dependency directory produced");
+                }
                 lastProvisionErrors.remove(skillName + ":" + skillDir);
                 return true;
             }
@@ -290,14 +396,7 @@ public class PythonEnvironmentService {
 
         Files.createDirectories(targetDir);
 
-        // Ensure pip is available on system Python
-        ProcessResult pipCheck = run(60, new ProcessBuilder(systemPython, "-m", "pip", "--version"));
-        if (pipCheck.exitCode != 0) {
-            ProcessResult ensure = run(120, new ProcessBuilder(systemPython, "-m", "ensurepip", "--upgrade"));
-            if (ensure.exitCode != 0) {
-                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
-            }
-        }
+        ensurePipForPython(systemPython, /*isVenv=*/false, skillName);
 
         Path reqFile = skillDir.resolve("requirements.txt");
         ProcessResult install = run(600, new ProcessBuilder(
@@ -317,12 +416,83 @@ public class PythonEnvironmentService {
 
     private void ensurePipAvailable(Path venvDir) throws IOException, InterruptedException {
         String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
-        ProcessResult pipCheck = run(120, new ProcessBuilder(venvPython, "-m", "pip", "--version"));
-        if (pipCheck.exitCode != 0) {
-            ProcessResult ensure = run(180, new ProcessBuilder(venvPython, "-m", "ensurepip", "--upgrade"));
-            if (ensure.exitCode != 0) {
-                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
+        ensurePipForPython(venvPython, /*isVenv=*/true, venvDir.getFileName().toString());
+    }
+
+    private void ensurePipForPython(String pythonExe, boolean isVenv, String contextName)
+            throws IOException, InterruptedException {
+        ProcessResult pipCheck = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+        if (pipCheck.exitCode == 0) {
+            return;
+        }
+
+        // 1) Try ensurepip if available
+        ProcessResult ensure = run(120, new ProcessBuilder(pythonExe, "-m", "ensurepip", "--upgrade"));
+        if (ensure.exitCode == 0) {
+            ProcessResult pipAfter = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+            if (pipAfter.exitCode == 0) return;
+        }
+
+        // 2) Fall back to get-pip.py bootstrap
+        log.warn("Bootstrapping pip via get-pip.py for {} (ensurepip unavailable)", contextName);
+        bootstrapPipWithGetPip(pythonExe, isVenv);
+
+        ProcessResult pipAfter = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+        if (pipAfter.exitCode != 0) {
+            throw new IOException("pip bootstrapping failed: " + pipAfter.output);
+        }
+    }
+
+    private void bootstrapPipWithGetPip(String pythonExe, boolean isVenv)
+            throws IOException, InterruptedException {
+        Path getPip = downloadGetPipIfNeeded();
+
+        var args = new java.util.ArrayList<String>();
+        args.add(pythonExe);
+        args.add(getPip.toAbsolutePath().toString());
+
+        // For system Python, avoid requiring root by installing into user site.
+        if (!isVenv) {
+            args.add("--user");
+        }
+
+        ProcessResult res = run(600, new ProcessBuilder(args));
+        if (res.exitCode != 0) {
+            throw new IOException("get-pip.py failed: " + res.output);
+        }
+    }
+
+    private Path downloadGetPipIfNeeded() throws IOException {
+        if (bootstrapDir == null) {
+            // Defensive: init() should have set this.
+            bootstrapDir = runtimeSkillsDir().resolve("_envs/_bootstrap");
+            Files.createDirectories(bootstrapDir);
+        }
+
+        Path dest = bootstrapDir.resolve("get-pip.py");
+        if (Files.exists(dest) && Files.size(dest) > 0) {
+            return dest;
+        }
+
+        Files.createDirectories(dest.getParent());
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(java.time.Duration.ofSeconds(10))
+                .build();
+        HttpRequest req = HttpRequest.newBuilder(GET_PIP_URI)
+                .timeout(java.time.Duration.ofSeconds(30))
+                .GET()
+                .build();
+        try {
+            HttpResponse<byte[]> resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                throw new IOException("Failed to download get-pip.py: HTTP " + resp.statusCode());
             }
+            Files.write(dest, resp.body(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            return dest;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted downloading get-pip.py", e);
         }
     }
 

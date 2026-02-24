@@ -12,8 +12,11 @@ import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -36,18 +39,52 @@ public class SkillManifest {
 
     @PostConstruct
     public void load() {
-        Path manifestPath = Path.of(config.getSkills().getManifestPath());
-        if (!Files.exists(manifestPath)) {
-            log.warn("Skill manifest not found: {}. Starting with empty manifest.", manifestPath);
-            return;
-        }
         try {
-            JsonNode root = mapper.readTree(manifestPath.toFile());
-            JsonNode skillsNode = root.path("skills");
-            skills = mapper.convertValue(skillsNode, new TypeReference<>() {});
-            log.info("Loaded {} skills from manifest", skills.size());
+            List<SkillModel> base = loadManifestIfExists(Path.of(config.getSkills().getManifestPath()));
+            List<SkillModel> runtime = loadManifestIfExists(runtimeManifestPath());
+
+            // Merge by name: runtime overrides base
+            Map<String, SkillModel> merged = new LinkedHashMap<>();
+            for (SkillModel s : base) merged.put(s.name(), s);
+            for (SkillModel s : runtime) merged.put(s.name(), s);
+
+            skills = new ArrayList<>(merged.values());
+
+            if (skills.isEmpty()) {
+                log.warn("No skills loaded from manifests (base={}, runtime={})",
+                        config.getSkills().getManifestPath(), runtimeManifestPath());
+            } else {
+                log.info("Loaded {} skills (base={}, runtime={})",
+                        skills.size(), base.size(), runtime.size());
+            }
         } catch (IOException e) {
             log.error("Failed to load skill manifest: {}", e.getMessage());
+        }
+    }
+
+    private List<SkillModel> loadManifestIfExists(Path manifestPath) throws IOException {
+        if (manifestPath == null || !Files.exists(manifestPath)) {
+            return List.of();
+        }
+        JsonNode root = mapper.readTree(manifestPath.toFile());
+        JsonNode skillsNode = root.path("skills");
+        if (skillsNode == null || skillsNode.isMissingNode()) {
+            return List.of();
+        }
+        return mapper.convertValue(skillsNode, new TypeReference<>() {});
+    }
+
+    private Path runtimeManifestPath() {
+        return runtimeSkillsDir().resolve("manifest.runtime.json");
+    }
+
+    private Path runtimeSkillsDir() {
+        try {
+            Path db = Path.of(config.getDatabase().getPath()).toAbsolutePath().normalize();
+            Path dataDir = db.getParent() != null ? db.getParent() : Path.of("./data");
+            return dataDir.resolve("skills");
+        } catch (Exception e) {
+            return Path.of("./data/skills");
         }
     }
 

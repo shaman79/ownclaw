@@ -19,8 +19,10 @@ public class SkillLoader {
     private static final Logger log = LoggerFactory.getLogger(SkillLoader.class);
 
     private final OwnClawConfig.Skills skillsConfig;
+    private final OwnClawConfig config;
 
     public SkillLoader(OwnClawConfig config) {
+        this.config = config;
         this.skillsConfig = config.getSkills();
     }
 
@@ -36,8 +38,22 @@ public class SkillLoader {
         Optional<Path> genPath = findInDirectory(Path.of(skillsConfig.getGeneratedPath()), skillName);
         if (genPath.isPresent()) return genPath;
 
+        // Fall back to runtime-writable generated skills directory (common in packaged deployments)
+        Optional<Path> runtimeGenPath = findInDirectory(runtimeSkillsDir().resolve("generated"), skillName);
+        if (runtimeGenPath.isPresent()) return runtimeGenPath;
+
         // Fall back to core skills (factory defaults)
         return findInDirectory(Path.of(skillsConfig.getCorePath()), skillName);
+    }
+
+    private Path runtimeSkillsDir() {
+        try {
+            Path db = Path.of(config.getDatabase().getPath()).toAbsolutePath().normalize();
+            Path dataDir = db.getParent() != null ? db.getParent() : Path.of("./data");
+            return dataDir.resolve("skills");
+        } catch (Exception e) {
+            return Path.of("./data/skills");
+        }
     }
 
     /**

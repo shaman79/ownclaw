@@ -45,7 +45,7 @@ by the systemd service and cron-based auto-updates.
 This will:
 - Create `ownclaw` system user
 - Install JDK 21 (Adoptium Temurin)
-- Install git, python3, python3-venv if missing
+- Install git, python3, python3-venv, python3-pip if missing
 - Clone the repository
 - Build the JAR
 - Install the systemd service (`ownclaw.service`)
@@ -104,6 +104,8 @@ This checks for new commits on `main` every 15 minutes. If changes are found, it
 ```bash
 sudo -u ownclaw /opt/ownclaw/repo/deploy/deploy.sh
 ```
+
+Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). If files under `/opt/ownclaw/skills/` become root-owned (especially `manifest.json`), the `ownclaw` service user cannot update the manifest during skill generation/self-heal.
 
 ### Rollback to previous version
 
