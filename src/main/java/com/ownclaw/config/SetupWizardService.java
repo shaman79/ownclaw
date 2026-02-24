@@ -124,6 +124,44 @@ public class SetupWizardService {
         }
     }
 
+    /** Fetch selected model details (parameter size, quantization) from Ollama. */
+    private Optional<OllamaModelDetails> fetchOllamaModelDetails(String modelName) {
+        if (modelName == null || modelName.isBlank()) return Optional.empty();
+        String base = normalizeUrl(config.getExecutor().getUrl());
+        try {
+            String bodyJson = mapper.createObjectNode().put("name", modelName).toString();
+            okhttp3.RequestBody body = okhttp3.RequestBody.create(
+                    bodyJson, okhttp3.MediaType.parse("application/json"));
+
+            Request req = new Request.Builder()
+                    .url(base + "/api/show")
+                    .post(body)
+                    .build();
+
+            try (Response resp = http.newCall(req).execute()) {
+                if (!resp.isSuccessful() || resp.body() == null) return Optional.empty();
+                JsonNode root = mapper.readTree(resp.body().string());
+                JsonNode details = root.path("details");
+                String parameterSize = details.path("parameter_size").asText("");
+                String quant = details.path("quantization_level").asText("");
+
+                // Fallback: some versions expose size differently
+                if (parameterSize.isBlank()) {
+                    parameterSize = root.path("model_info").path("general.parameter_count").asText("");
+                }
+                if (parameterSize.isBlank()) {
+                    parameterSize = root.path("parameters").asText("");
+                }
+
+                if (parameterSize.isBlank() && quant.isBlank()) return Optional.empty();
+                return Optional.of(new OllamaModelDetails(parameterSize, quant));
+            }
+        } catch (Exception e) {
+            log.debug("Failed to fetch Ollama model details: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     /** List models available on the configured Ollama instance. */
     private List<String> listOllamaModels() {
         String base = normalizeUrl(config.getExecutor().getUrl());
@@ -235,7 +273,14 @@ public class SetupWizardService {
         sb.append("  ").append(d.ollamaReachable ? "✅" : "❌").append(" Ollama (")
                 .append(d.ollamaUrl).append("): ")
                 .append(d.ollamaReachable ? "reachable" : "not reachable")
-                .append(" | model: ").append(config.getExecutor().getModel()).append('\n');
+                .append(" | model: ").append(config.getExecutor().getModel());
+        if (d.ollamaReachable) {
+            fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
+                if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
+                if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
+            });
+        }
+        sb.append('\n');
         sb.append("  ").append(d.pythonPath != null ? "✅" : "❌").append(" Python: ")
                 .append(d.pythonPath != null ? d.pythonVersion + " (" + d.pythonPath + ")" : "not found")
                 .append('\n');
@@ -317,7 +362,25 @@ public class SetupWizardService {
         }
 
         var sb = new StringBuilder();
-        sb.append("Ollama model: ").append(config.getExecutor().getModel()).append("\n\n");
+        sb.append("Ollama model: ").append(config.getExecutor().getModel());
+        fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
+            String p = md.parameterSize();
+            String q = md.quantizationLevel();
+            if ((p != null && !p.isBlank()) || (q != null && !q.isBlank())) {
+                sb.append(" (");
+                boolean wrote = false;
+                if (p != null && !p.isBlank()) {
+                    sb.append("params: ").append(p);
+                    wrote = true;
+                }
+                if (q != null && !q.isBlank()) {
+                    if (wrote) sb.append(" | ");
+                    sb.append("quant: ").append(q);
+                }
+                sb.append(')');
+            }
+        });
+        sb.append("\n\n");
 
         String detected = detectPython();
         sb.append("Step 4/5: Python path");
@@ -424,7 +487,14 @@ public class SetupWizardService {
         sb.append("Final configuration:\n");
         sb.append("  OpenAI key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
         sb.append("  Ollama: ").append(d.ollamaReachable ? "reachable" : "not reachable")
-                .append(" | model: ").append(config.getExecutor().getModel()).append('\n');
+                .append(" | model: ").append(config.getExecutor().getModel());
+        if (d.ollamaReachable) {
+            fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
+                if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
+                if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
+            });
+        }
+        sb.append('\n');
         sb.append("  Python: ").append(d.pythonPath != null ? d.pythonVersion : "not found").append('\n');
         boolean tgEnabled = config.getTelegram().isEnabled()
                 && config.getTelegram().getBotToken() != null
@@ -446,4 +516,6 @@ public class SetupWizardService {
     ) {}
 
     public record WizardResponse(String message, boolean complete) {}
+
+    private record OllamaModelDetails(String parameterSize, String quantizationLevel) {}
 }

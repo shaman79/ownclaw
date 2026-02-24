@@ -1787,6 +1787,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 
 ### Phase 3: Polish & Hardening
 
+- [ ] MCP Bridge implementation (should work with our skills system alongside, but give us access to existing tools)
 - [ ] Bubblewrap sandbox (Linux production)
 - [ ] Multi-provider cloud LLM support (OpenAI, DeepSeek, Mistral)
 - [ ] Skill generalization (merge similar skills)

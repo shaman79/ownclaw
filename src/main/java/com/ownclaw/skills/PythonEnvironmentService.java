@@ -32,6 +32,9 @@ public class PythonEnvironmentService {
     /** Tracks which skill dirs have been provisioned this session (avoid redundant checks). */
     private final Map<String, String> provisionedHashes = new ConcurrentHashMap<>();
 
+    /** Captures the last provisioning error per skill+dir (for user-facing diagnostics). */
+    private final Map<String, String> lastProvisionErrors = new ConcurrentHashMap<>();
+
     public PythonEnvironmentService(OwnClawConfig config) {
         this.systemPython = config.getSandbox().getPythonPath();
         this.envsDir = Path.of(config.getSkills().getCorePath()).getParent().resolve("_envs");
@@ -107,6 +110,7 @@ public class PythonEnvironmentService {
 
             // Already provisioned this session with same hash?
             if (reqHash.equals(provisionedHashes.get(cacheKey))) {
+                lastProvisionErrors.remove(cacheKey);
                 return venvPython(skillName);
             }
 
@@ -118,6 +122,7 @@ public class PythonEnvironmentService {
                 String storedHash = Files.readString(hashFile, StandardCharsets.UTF_8).strip();
                 if (reqHash.equals(storedHash) && Files.exists(venvDir.resolve(pythonRelative()))) {
                     provisionedHashes.put(cacheKey, reqHash);
+                    lastProvisionErrors.remove(cacheKey);
                     return venvPython(skillName);
                 }
             }
@@ -128,15 +133,22 @@ public class PythonEnvironmentService {
             installRequirements(venvDir, reqFile);
             Files.writeString(hashFile, reqHash, StandardCharsets.UTF_8);
             provisionedHashes.put(cacheKey, reqHash);
+            lastProvisionErrors.remove(cacheKey);
 
             log.info("Venv ready for skill '{}'", skillName);
             return venvPython(skillName);
 
         } catch (Exception e) {
+            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
+            lastProvisionErrors.put(skillName + ":" + skillDir, msg);
             log.warn("Failed to provision venv for skill '{}': {}. Falling back to system Python.",
-                    skillName, e.getMessage());
+                    skillName, msg);
             return systemPython;
         }
+    }
+
+    public Optional<String> getLastProvisionError(Path skillDir, String skillName) {
+        return Optional.ofNullable(lastProvisionErrors.get(skillName + ":" + skillDir));
     }
 
     private void createVenv(Path venvDir) throws IOException, InterruptedException {
@@ -157,20 +169,24 @@ public class PythonEnvironmentService {
     }
 
     private void installRequirements(Path venvDir, Path reqFile) throws IOException, InterruptedException {
-        String pip = venvPipPath(venvDir);
+        String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
 
-        ProcessBuilder pb = new ProcessBuilder(pip, "install", "-q", "-r", reqFile.toAbsolutePath().toString());
-        pb.redirectErrorStream(true);
-        Process p = pb.start();
-        boolean ok = p.waitFor(300, TimeUnit.SECONDS);
-        String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-
-        if (!ok) {
-            p.destroyForcibly();
-            throw new IOException("pip install timed out");
+        // Ensure pip is available in this venv (some Python installs omit it)
+        ProcessResult pipCheck = run(120, new ProcessBuilder(venvPython, "-m", "pip", "--version"));
+        if (pipCheck.exitCode != 0) {
+            ProcessResult ensure = run(180, new ProcessBuilder(venvPython, "-m", "ensurepip", "--upgrade"));
+            if (ensure.exitCode != 0) {
+                throw new IOException("pip unavailable and ensurepip failed: " + ensure.output);
+            }
         }
-        if (p.exitValue() != 0) {
-            throw new IOException("pip install failed: " + output);
+
+        // Install requirements using `python -m pip` (more portable than pip.exe path)
+        ProcessResult install = run(300, new ProcessBuilder(
+                venvPython, "-m", "pip", "install",
+                "--disable-pip-version-check",
+                "-q", "-r", reqFile.toAbsolutePath().toString()));
+        if (install.exitCode != 0) {
+            throw new IOException("pip install failed: " + install.output);
         }
     }
 
@@ -181,6 +197,21 @@ public class PythonEnvironmentService {
     private String venvPipPath(Path venvDir) {
         return venvDir.resolve(isWindows() ? "Scripts/pip.exe" : "bin/pip").toAbsolutePath().toString();
     }
+
+    private static ProcessResult run(int timeoutSeconds, ProcessBuilder pb) throws IOException, InterruptedException {
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        boolean ok = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        if (!ok) {
+            p.destroyForcibly();
+            return new ProcessResult(-1, output + "\n(timeout)");
+        }
+        return new ProcessResult(p.exitValue(), output);
+    }
+
+    private record ProcessResult(int exitCode, String output) {}
 
     /** Relative path to the python executable inside a venv. */
     private String pythonRelative() {

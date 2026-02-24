@@ -153,6 +153,22 @@ public class SkillRunnerService {
         // Resolve Python executable (venv if skill has requirements.txt)
         String python = pythonEnv.resolvePython(workDir, step.skill());
 
+        // If venv provisioning failed, we fall back to system Python — warn the user with the reason.
+        // This is the most common cause of "<lib> not installed" errors in Python skills.
+        try {
+            if (Files.exists(workDir.resolve("requirements.txt"))
+                    && python != null
+                    && python.equals(pythonEnv.getSystemPython())) {
+                pythonEnv.getLastProvisionError(workDir, step.skill()).ifPresent(err ->
+                        statusEmitter.emit(userId, StatusMessage.Type.WARNING,
+                                "Python deps could not be installed for skill '" + step.skill() + "': " + err
+                                        + " (using system Python)")
+                );
+            }
+        } catch (Exception ignored) {
+            // non-fatal
+        }
+
         // Pre-flight: verify Python is available
         if (python == null || python.isBlank()) {
             String errMsg = "No Python interpreter available. Install Python 3 and run /setup.";
