@@ -45,6 +45,11 @@ public class SetupWizardService {
     /** Models discovered during wizard Ollama URL step. */
     private volatile List<String> lastDiscoveredModels = List.of();
 
+    /** Cached Ollama perf sample (best-effort), refreshed occasionally. */
+    private volatile OllamaPerfSample lastOllamaPerf;
+    private volatile long lastOllamaPerfAtMs;
+    private volatile String lastOllamaPerfModel;
+
     public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
                               ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider) {
         this.jdbc = jdbc;
@@ -162,6 +167,79 @@ public class SetupWizardService {
         }
     }
 
+        /**
+         * Best-effort speed sample (tokens/sec) for the configured executor model.
+         * Uses Ollama's eval_count/eval_duration counters from /api/chat.
+         */
+        private Optional<OllamaPerfSample> fetchOllamaPerfSample(String modelName) {
+        if (modelName == null || modelName.isBlank()) return Optional.empty();
+        if (!checkOllama()) return Optional.empty();
+
+        long now = System.currentTimeMillis();
+        // Cache for 10 minutes per model to avoid slowing down /setup.
+        if (lastOllamaPerf != null
+            && Objects.equals(lastOllamaPerfModel, modelName)
+            && (now - lastOllamaPerfAtMs) < TimeUnit.MINUTES.toMillis(10)) {
+            return Optional.of(lastOllamaPerf);
+        }
+
+        String base = normalizeUrl(config.getExecutor().getUrl());
+        try {
+            // Use a longer read timeout than the main diagnostics client.
+            OkHttpClient benchHttp = new OkHttpClient.Builder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(10, TimeUnit.SECONDS)
+                .build();
+
+            var bodyNode = mapper.createObjectNode();
+            bodyNode.put("model", modelName);
+            bodyNode.put("stream", false);
+            var options = bodyNode.putObject("options");
+            options.put("temperature", 0);
+            options.put("num_predict", 64);
+            var msgs = bodyNode.putArray("messages");
+            msgs.addObject()
+                .put("role", "user")
+                .put("content", "Benchmark: output the word OK 64 times separated by spaces, no punctuation.");
+
+            String bodyJson = bodyNode.toString();
+            okhttp3.RequestBody body = okhttp3.RequestBody.create(
+                bodyJson, okhttp3.MediaType.parse("application/json"));
+
+            Request req = new Request.Builder()
+                .url(base + "/api/chat")
+                .post(body)
+                .build();
+
+            try (Response resp = benchHttp.newCall(req).execute()) {
+            if (!resp.isSuccessful() || resp.body() == null) return Optional.empty();
+            JsonNode json = mapper.readTree(resp.body().string());
+            int promptTokens = json.path("prompt_eval_count").asInt(0);
+            int completionTokens = json.path("eval_count").asInt(0);
+            long promptDurationNs = json.path("prompt_eval_duration").asLong(0);
+            long evalDurationNs = json.path("eval_duration").asLong(0);
+
+            Double completionTps = (completionTokens > 0 && evalDurationNs > 0)
+                ? (completionTokens / (evalDurationNs / 1_000_000_000.0))
+                : null;
+            Double promptTps = (promptTokens > 0 && promptDurationNs > 0)
+                ? (promptTokens / (promptDurationNs / 1_000_000_000.0))
+                : null;
+
+            if (completionTps == null && promptTps == null) return Optional.empty();
+            var sample = new OllamaPerfSample(promptTps, completionTps);
+            lastOllamaPerf = sample;
+            lastOllamaPerfAtMs = now;
+            lastOllamaPerfModel = modelName;
+            return Optional.of(sample);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to benchmark Ollama speed: {}", e.getMessage());
+            return Optional.empty();
+        }
+        }
+
     /** List models available on the configured Ollama instance. */
     private List<String> listOllamaModels() {
         String base = normalizeUrl(config.getExecutor().getUrl());
@@ -278,6 +356,12 @@ public class SetupWizardService {
             fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
                 if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
                 if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
+            });
+            fetchOllamaPerfSample(config.getExecutor().getModel()).ifPresent(p -> {
+                if (p.completionTokensPerSecond() != null) {
+                    sb.append(" | speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
+                            .append(" tok/s");
+                }
             });
         }
         sb.append('\n');
@@ -493,6 +577,12 @@ public class SetupWizardService {
                 if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
                 if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
             });
+            fetchOllamaPerfSample(config.getExecutor().getModel()).ifPresent(p -> {
+                if (p.completionTokensPerSecond() != null) {
+                    sb.append(" | speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
+                            .append(" tok/s");
+                }
+            });
         }
         sb.append('\n');
         sb.append("  Python: ").append(d.pythonPath != null ? d.pythonVersion : "not found").append('\n');
@@ -518,4 +608,6 @@ public class SetupWizardService {
     public record WizardResponse(String message, boolean complete) {}
 
     private record OllamaModelDetails(String parameterSize, String quantizationLevel) {}
+
+    private record OllamaPerfSample(Double promptTokensPerSecond, Double completionTokensPerSecond) {}
 }

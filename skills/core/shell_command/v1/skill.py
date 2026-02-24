@@ -8,6 +8,44 @@ import json
 import subprocess
 import sys
 import os
+import shutil
+from typing import Optional
+
+
+def _run_command(command: str, *, working_dir: Optional[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run a command through an OS-appropriate shell.
+
+    On POSIX, prefer bash (-lc) if present to support bash-isms.
+    Falls back to sh (-c) otherwise.
+    """
+    if os.name == "nt":
+        return subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=working_dir,
+        )
+
+    bash = shutil.which("bash")
+    if bash:
+        return subprocess.run(
+            [bash, "-lc", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=working_dir,
+        )
+
+    sh = shutil.which("sh") or "/bin/sh"
+    return subprocess.run(
+        [sh, "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=working_dir,
+    )
 
 
 def main():
@@ -29,19 +67,35 @@ def main():
     emit_progress(f"Executing: {command}")
 
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=working_dir,
-        )
-        emit_result("success", {
+        result = _run_command(command, working_dir=working_dir, timeout=timeout)
+
+        # Self-heal: if we ended up on /bin/sh and hit a common dash syntax error,
+        # retry with bash if it exists.
+        if os.name != "nt" and result.returncode != 0:
+            stderr = (result.stderr or "").lower()
+            bash = shutil.which("bash")
+            if ("syntax error" in stderr or "unexpected" in stderr) and bash:
+                retry = subprocess.run(
+                    [bash, "-lc", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=working_dir,
+                )
+                if retry.returncode == 0:
+                    result = retry
+
+        payload = {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.returncode,
-        })
+        }
+        if result.returncode == 0:
+            emit_result("success", payload)
+        else:
+            # Important: emit error so orchestrator can self-heal.
+            payload["error"] = "Command failed"
+            emit_result("error", payload)
     except subprocess.TimeoutExpired:
         emit_result("error", {
             "error": f"Command timed out after {timeout}s",

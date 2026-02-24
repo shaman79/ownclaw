@@ -81,8 +81,29 @@ public class OllamaProvider implements LlmProvider {
             String content = json.path("message").path("content").asText("");
             int promptTokens = json.path("prompt_eval_count").asInt(0);
             int completionTokens = json.path("eval_count").asInt(0);
+            long promptDurationNs = json.path("prompt_eval_duration").asLong(0);
+            long evalDurationNs = json.path("eval_duration").asLong(0);
 
-            log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
+            if (completionTokens > 0 && evalDurationNs > 0) {
+                double tps = completionTokens / (evalDurationNs / 1_000_000_000.0);
+                if (promptTokens > 0 && promptDurationNs > 0) {
+                    double ptps = promptTokens / (promptDurationNs / 1_000_000_000.0);
+                    log.debug("Ollama [{}]: {} prompt ({} tok/s) + {} completion ({} tok/s)",
+                            model,
+                            promptTokens,
+                            String.format(java.util.Locale.US, "%.1f", ptps),
+                            completionTokens,
+                            String.format(java.util.Locale.US, "%.1f", tps));
+                } else {
+                    log.debug("Ollama [{}]: {} prompt + {} completion ({} tok/s)",
+                            model,
+                            promptTokens,
+                            completionTokens,
+                            String.format(java.util.Locale.US, "%.1f", tps));
+                }
+            } else {
+                log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
+            }
             return new LlmResponse(content, promptTokens, completionTokens);
 
         } catch (IOException e) {

@@ -18,7 +18,9 @@ import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.skillrunner.SkillFailureContext;
 import com.ownclaw.skillrunner.SkillRunnerService;
+import com.ownclaw.skills.SkillLoader;
 import com.ownclaw.skills.SkillManifest;
+import com.ownclaw.skills.SkillModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -43,6 +45,7 @@ public class TaskOrchestrator {
     private final MentorService mentor;
     private final SkillRunnerService skillRunner;
     private final SkillManifest skillManifest;
+    private final SkillLoader skillLoader;
     private final ConditionEvaluator conditionEvaluator;
     private final ConversationService conversation;
     private final EventLogService eventLog;
@@ -59,6 +62,7 @@ public class TaskOrchestrator {
 
     public TaskOrchestrator(ExecutorService executor, MentorService mentor,
                             SkillRunnerService skillRunner, SkillManifest skillManifest,
+                            SkillLoader skillLoader,
                             ConditionEvaluator conditionEvaluator, ConversationService conversation,
                             EventLogService eventLog,
                             ChatStatusEmitter statusEmitter, PlanCacheService planCache,
@@ -71,6 +75,7 @@ public class TaskOrchestrator {
         this.mentor = mentor;
         this.skillRunner = skillRunner;
         this.skillManifest = skillManifest;
+        this.skillLoader = skillLoader;
         this.conditionEvaluator = conditionEvaluator;
         this.conversation = conversation;
         this.eventLog = eventLog;
@@ -187,8 +192,17 @@ public class TaskOrchestrator {
                         "Mentor returned 0 steps, triggering skill generation");
 
                 try {
-                    SkillGenerator.GenerationResult genResult =
-                            skillGenerator.generate(userMessage, userId, taskId);
+                    SkillGenerator.GenerationResult genResult;
+                    if (plan.isCreateSkillRequest()) {
+                    var req = plan.createSkillRequest();
+                    String name = req != null ? req.name() : null;
+                    String task = req != null && req.taskDescription() != null && !req.taskDescription().isBlank()
+                        ? req.taskDescription()
+                        : userMessage;
+                    genResult = skillGenerator.generateForName(name, task, userId, taskId);
+                    } else {
+                    genResult = skillGenerator.generate(userMessage, userId, taskId);
+                    }
 
                     if (genResult.success()) {
                         statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
@@ -467,30 +481,10 @@ public class TaskOrchestrator {
                 statusEmitter.emit(userId, StatusMessage.Type.STEP,
                         "Step " + step.id() + "/" + plan.size() + ": " + step.skill());
 
-                // Auto-generate missing skills before execution
-                if (skillManifest.findByName(step.skill()).isEmpty()) {
-                    log.info("Skill '{}' not in manifest — attempting auto-generation", step.skill());
-                    eventLog.info(userId, taskId, "skill.auto_gen",
-                            "Skill '" + step.skill() + "' not found, triggering generation");
-                    try {
-                        String genPrompt = "Create a skill called '" + step.skill()
-                                + "' that accepts these parameters: " + resolvedParams.keySet()
-                                + ". Example input: " + truncate(resolvedParams.toString(), 300);
-                        SkillGenerator.GenerationResult genResult =
-                                skillGenerator.generate(genPrompt, userId, taskId);
-                        if (genResult.success()) {
-                            eventLog.info(userId, taskId, "skill.auto_gen_success",
-                                    "Auto-generated skill '" + genResult.skillName() + "' v" + genResult.version());
-                            statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
-                                    "New skill '" + genResult.skillName() + "' created!");
-                        } else {
-                            eventLog.warn(userId, taskId, "skill.auto_gen_failed",
-                                    "Failed to auto-generate '" + step.skill() + "': " + genResult.summary());
-                        }
-                    } catch (Exception e) {
-                        log.warn("Auto-generation of '{}' failed: {}", step.skill(), e.getMessage());
-                    }
-                }
+                // Auto-generate skills that are missing on disk (or not in manifest).
+                // This prevents a dead-end where Mentor references a manifest-listed skill
+                // but the corresponding skill files were not deployed to the runtime.
+                ensureSkillAvailableOnDisk(step, resolvedParams, userId, taskId);
 
                 // Execute
                 StepResult result = skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
@@ -649,6 +643,72 @@ public class TaskOrchestrator {
         // Self-healing didn't work — fall back to simple retry
         log.info("Self-heal exhausted for step {} — executing simple retry", step.id());
         return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+    }
+
+    private void ensureSkillAvailableOnDisk(TaskStep step, Map<String, Object> resolvedParams,
+                                            String userId, String taskId) {
+        // If the skill script exists on disk, we're good.
+        if (skillLoader.resolveScript(step.skill()).isPresent()) {
+            return;
+        }
+
+        // If we can't afford cloud tokens, don't attempt generation.
+        if (!budgetTracker.hasBudget(userId)) {
+            statusEmitter.emit(userId, StatusMessage.Type.WARNING,
+                    "Skill '" + step.skill() + "' is missing on disk and token budget is exhausted; cannot auto-generate.");
+            eventLog.warn(userId, taskId, "skill.missing_no_budget",
+                    "Skill missing on disk: " + step.skill());
+            return;
+        }
+
+        // Build a generation prompt using manifest metadata when available.
+        Optional<SkillModel> meta = skillManifest.findByName(step.skill());
+        StringBuilder gen = new StringBuilder();
+        gen.append("Create a Python skill for OwnClaw. ");
+        gen.append("The JSON field 'name' MUST be exactly '").append(step.skill()).append("'. ");
+
+        if (meta.isPresent()) {
+            gen.append("Skill summary: ").append(meta.get().summary()).append(". ");
+            gen.append("Parameters: ").append(String.join(", ", meta.get().params())).append(". ");
+            if (meta.get().keywords() != null && !meta.get().keywords().isEmpty()) {
+                gen.append("Keywords: ").append(String.join(", ", meta.get().keywords())).append(". ");
+            }
+        } else {
+            gen.append("Parameters: ").append(String.join(", ", resolvedParams.keySet())).append(". ");
+        }
+
+        gen.append("Example input params: ").append(truncate(resolvedParams.toString(), 300));
+
+        statusEmitter.emit(userId, StatusMessage.Type.MENTOR,
+                "🧩 Creating missing skill: " + step.skill());
+        eventLog.info(userId, taskId, "skill.auto_gen",
+                "Skill missing on disk, triggering generation: " + step.skill());
+
+        try {
+            SkillGenerator.GenerationResult genResult = skillGenerator.generateForName(step.skill(), gen.toString(), userId, taskId);
+            if (genResult.success() && step.skill().equals(genResult.skillName())) {
+                // SkillGenerator already registers + reloads manifest; re-resolve script for safety.
+                skillManifest.reload();
+                if (skillLoader.resolveScript(step.skill()).isPresent()) {
+                    eventLog.info(userId, taskId, "skill.auto_gen_success",
+                            "Auto-generated missing skill '" + genResult.skillName() + "' v" + genResult.version());
+                    statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+                            "Missing skill '" + genResult.skillName() + "' created (v" + genResult.version() + ")");
+                } else {
+                    eventLog.warn(userId, taskId, "skill.auto_gen_incomplete",
+                            "Generated skill but could not resolve it on disk: " + step.skill());
+                }
+            } else {
+                eventLog.warn(userId, taskId, "skill.auto_gen_failed",
+                        "Failed to auto-generate missing skill '" + step.skill() + "': " + genResult.summary());
+                statusEmitter.emit(userId, StatusMessage.Type.WARNING,
+                        "Failed to auto-generate missing skill '" + step.skill() + "': " + genResult.summary());
+            }
+        } catch (Exception e) {
+            log.warn("Auto-generation of missing skill '{}' failed: {}", step.skill(), e.getMessage());
+            eventLog.warn(userId, taskId, "skill.auto_gen_exception",
+                    "Auto-generation exception for '" + step.skill() + "': " + e.getMessage());
+        }
     }
 
     /**

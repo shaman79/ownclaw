@@ -88,15 +88,43 @@ public class SkillGenerator {
      * @return generation result with skill name and status
      */
     public GenerationResult generate(String taskDescription, String userId, String taskId) {
+                return generateInternal(null, taskDescription, userId, taskId);
+        }
+
+        /**
+         * Generate a new skill with an exact expected name.
+         * Useful when the Mentor references a skill name that doesn't exist yet.
+         */
+        public GenerationResult generateForName(String expectedSkillName, String taskDescription,
+                                                                                        String userId, String taskId) {
+                if (expectedSkillName == null || expectedSkillName.isBlank()) {
+                        return generate(taskDescription, userId, taskId);
+                }
+                return generateInternal(expectedSkillName, taskDescription, userId, taskId);
+        }
+
+        private GenerationResult generateInternal(String expectedSkillName, String taskDescription,
+                                                                                         String userId, String taskId) {
         String lastError = null;
+
+                String expectedSanitized = expectedSkillName != null && !expectedSkillName.isBlank()
+                                ? expectedSkillName.toLowerCase().replaceAll("[^a-z0-9_]", "_")
+                                : null;
 
         for (int attempt = 0; attempt <= MAX_GENERATION_RETRIES; attempt++) {
             try {
                 String prompt;
                 if (attempt == 0) {
-                    prompt = "Generate a skill for this task:\n" + taskDescription;
+                                        if (expectedSanitized != null) {
+                                                prompt = "Generate a skill with the exact name '" + expectedSanitized + "'.\n"
+                                                                + "Task:\n" + taskDescription;
+                                        } else {
+                                                prompt = "Generate a skill for this task:\n" + taskDescription;
+                                        }
                 } else {
-                    prompt = "Generate a skill for this task:\n" + taskDescription
+                                        prompt = (expectedSanitized != null
+                                                        ? "Generate a skill with the exact name '" + expectedSanitized + "'.\nTask:\n" + taskDescription
+                                                        : "Generate a skill for this task:\n" + taskDescription)
                             + "\n\nPREVIOUS ATTEMPT FAILED VALIDATION:\n" + lastError
                             + "\n\nFix the issues and regenerate.";
                 }
@@ -141,6 +169,13 @@ public class SkillGenerator {
 
                 // Sanitize skill name
                 skillName = skillName.toLowerCase().replaceAll("[^a-z0-9_]", "_");
+
+                                // Enforce expected skill name if provided
+                                if (expectedSanitized != null && !expectedSanitized.equals(skillName)) {
+                                        lastError = "Generated skill name mismatch: expected '" + expectedSanitized
+                                                        + "' but got '" + skillName + "'";
+                                        continue;
+                                }
 
                 // Write to disk
                 Path versionDir = versionManager.createSkillVersion(skillName, script,

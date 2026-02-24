@@ -81,6 +81,15 @@ public class MentorService {
               "review_result": bool,
               "max_retries": int
             }
+
+                                                ALTERNATIVE (only if no available skills can help even in combination):
+                                                {
+                                                        "action": "create_skill",
+                                                        "name": "skill_name_lowercase_underscored",
+                                                        "task": "What the new skill should do (1-3 sentences)",
+                                                        "params": ["param1", "param2?"],
+                                                        "notes": "Optional extra guidance"
+                                                }
             
             ON_FAIL STRATEGY:
             - Use "skip" for INDEPENDENT steps that don't block others.
@@ -213,8 +222,19 @@ public class MentorService {
 
             // Handle non-plan responses (e.g., {"action": "create_skill", ...})
             if (root.has("action") && !root.has("steps")) {
-                log.warn("Mentor returned action instead of plan: {}", root.path("action").asText());
-                return new TaskPlan(List.of(), false, 0);
+                                String action = root.path("action").asText("");
+                                log.warn("Mentor returned action instead of plan: {}", action);
+                                if ("create_skill".equalsIgnoreCase(action)) {
+                                        String name = root.path("name").asText("");
+                                        if (name.isBlank()) name = root.path("skill_name").asText("");
+                                        String task = root.path("task").asText("");
+                                        if (task.isBlank()) task = root.path("description").asText("");
+                                        if (task.isBlank()) task = root.path("prompt").asText("");
+                                        // Keep behavior resilient: if name missing, TaskOrchestrator will fall back to generic generation.
+                                        return TaskPlan.createSkill(name, task);
+                                }
+
+                                return new TaskPlan(List.of(), false, 0);
             }
 
             List<TaskStep> steps = new ArrayList<>();
