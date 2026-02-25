@@ -578,18 +578,16 @@ public class TaskOrchestrator {
 
         // Fast path: exit_code 127 = OS cannot find the command binary.
         // Self-healing modifies the Python skill wrapper but cannot install system binaries.
-        // Return an actionable failure so the orchestrator's completeness/follow-up loop can
-        // replan using a different skill (e.g., http_request to a REST API instead).
+        // Ask the user for an alternative before letting the follow-up loop replan.
         if (failureContext.exitCode() == 127 && !isGeneratedSkill) {
             String cmd = String.valueOf(resolvedParams.getOrDefault("command", "")).strip();
             String binary = cmd.isEmpty() ? "unknown" : cmd.split("\\s+")[0];
             eventLog.info(userId, taskId, "skill.command_not_found",
-                    "exit 127: '" + binary + "' is not installed — skipping self-heal, replan expected");
-            return StepResult.failure(step.id(),
-                    "command_not_found: '" + binary + "' is not available on this host (exit code 127). "
-                    + "Use an API-based alternative (e.g., http_request to a REST endpoint) "
-                    + "instead of shell_command.",
-                    127, failedResult.durationMs());
+                    "exit 127: '" + binary + "' is not installed — asking user for alternative");
+            var syntheticDiagnosis = new SkillDiagnostician.Diagnosis(
+                    "'" + binary + "' is not installed on this host (exit code 127)",
+                    "missing_dependency", false, 1.0, null, null, null, null);
+            return buildDefinitiveFailure(step, syntheticDiagnosis, failedResult, userId, taskId);
         }
 
         // Minimal user-facing status line: emit once per self-heal invocation.
