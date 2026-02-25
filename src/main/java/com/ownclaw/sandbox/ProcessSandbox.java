@@ -7,15 +7,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Development sandbox using Java ProcessBuilder.
@@ -67,30 +70,52 @@ public class ProcessSandbox implements SandboxManager {
                 }
             }
 
-            // Drain stdout and stderr concurrently to prevent pipe buffer deadlock.
-            // If the child writes more than the OS pipe buffer (~4-64KB), it blocks
-            // until someone reads the pipe. If we only read after waitFor(), deadlock.
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getInputStream()));
+            // Drain stderr async to prevent pipe-buffer deadlock.
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
                     () -> drainStream(process.getErrorStream()));
+
+            // Read stdout line-by-line so we can detect need_input immediately.
+            // If a skill emits need_input in a non-interactive run it will block forever
+            // waiting for user input that will never come — kill it right away.
+            AtomicBoolean needInputDetected = new AtomicBoolean(false);
+            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        buf.write(line.getBytes(StandardCharsets.UTF_8));
+                        buf.write('\n');
+                        if (isNeedInputLine(line)) {
+                            needInputDetected.set(true);
+                            process.destroyForcibly(); // fail fast — user input will never arrive
+                            break;
+                        }
+                    }
+                } catch (IOException ignored) {}
+                return buf.toByteArray();
+            });
 
             // Wait with timeout
             boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
             long durationMs = System.currentTimeMillis() - startTime;
+            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+
+            // need_input emitted → immediate failure (process was already killed above)
+            if (needInputDetected.get()) {
+                log.warn("Sandbox aborted — skill emitted need_input in non-interactive execution: {}",
+                        scriptPath.getFileName());
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            }
 
             if (!finished) {
                 process.destroyForcibly();
-                String partialStdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-                String partialStderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
                 log.warn("Sandbox timeout after {}s for {}", timeoutSec, scriptPath.getFileName());
-                return new SandboxResult(-1, partialStdout, partialStderr, durationMs, true);
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
             int exitCode = process.exitValue();
-
             log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
             return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
 
@@ -112,6 +137,15 @@ public class ProcessSandbox implements SandboxManager {
             long durationMs = System.currentTimeMillis() - startTime;
             return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
+    }
+
+    /**
+     * Returns true if a stdout line looks like a need_input JSON message.
+     * Used to fail-fast in non-interactive execution before the process blocks forever.
+     */
+    private static boolean isNeedInputLine(String line) {
+        String t = line.trim();
+        return t.startsWith("{") && t.contains("\"need_input\"");
     }
 
     /** Read an InputStream fully into a byte array. Safe to call from a background thread. */

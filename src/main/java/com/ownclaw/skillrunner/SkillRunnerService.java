@@ -60,6 +60,7 @@ public class SkillRunnerService {
         private static final Pattern MODULE_NOT_FOUND = Pattern.compile(
             "ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]|ImportError: No module named ([A-Za-z0-9_.]+)");
 
+
         private static final Map<String, String> MODULE_TO_PACKAGE = Map.ofEntries(
             Map.entry("bs4", "beautifulsoup4"),
             Map.entry("yaml", "pyyaml"),
@@ -260,7 +261,22 @@ public class SkillRunnerService {
         boolean success;
 
         if (sandboxResult.timedOut()) {
-            outputText = "Skill timed out after " + defaultTimeout + "s";
+            // If the skill emitted a need_input prompt before timing out, the root cause is
+            // the skill waiting for user input that never arrived in this automated context.
+            // Surface a specific, actionable message so the Mentor doesn't blindly retry.
+            String partialOut = sandboxResult.stdout();
+            boolean waitedForInput = partialOut != null && partialOut.contains("\"type\":\"need_input\"");
+            if (waitedForInput) {
+                outputText = "Skill timed out waiting for user input (need_input was emitted but "
+                        + "no response arrived in " + defaultTimeout + "s). "
+                        + "Hint for next attempt: Don't call ask_user in non-interactive runs. "
+                        + "Provide the missing task details as normal tool/skill parameters "
+                        + "(or route through an interactive UI that will send a "
+                        + "{\"type\":\"user_input\",\"value\":...} message back), "
+                        + "otherwise the request will always time out.";
+            } else {
+                outputText = "Skill timed out after " + defaultTimeout + "s";
+            }
             success = false;
         } else if (!sandboxResult.isSuccess()) {
             outputText = sandboxResult.stderr().isBlank()

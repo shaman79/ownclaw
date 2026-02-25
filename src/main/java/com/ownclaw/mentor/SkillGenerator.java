@@ -47,8 +47,12 @@ public class SkillGenerator {
                (e.g. pytesseract requires tesseract, moviepy requires ffmpeg). The system
                cannot install OS packages at runtime. If a capability like OCR is needed,
                use a free HTTP API that requires no system install.
-            8. Keep the script under 500 lines
-            9. ALL third-party package imports MUST be guarded with try/except ImportError.
+            8. NEVER emit need_input or use the ask_user interaction protocol. Skills run in
+               fully automated, non-interactive contexts. All input comes from JSON params in
+               stdin at startup. If a required param is missing or empty, emit an error result
+               immediately: {"type":"result","status":"error","output":{"error":"Missing required param: X"}}
+            9. Keep the script under 500 lines
+            10. ALL third-party package imports MUST be guarded with try/except ImportError.
                If an import fails, emit an error result and sys.exit(1). Never place bare
                third-party imports at module top-level — the venv may not be ready yet.
                Pattern:
@@ -57,7 +61,7 @@ public class SkillGenerator {
                  except ImportError:
                      print(json.dumps({"type":"result","status":"error","output":{"error":"missing_module: requests"}}))
                      sys.exit(1)
-            10. Generate REUSABLE skills: accept generic input params (e.g. "query",
+            11. Generate REUSABLE skills: accept generic input params (e.g. "query",
                "location", "url"). Do NOT hard-code specific values (like city names or
                dates) into the script — those are task inputs, not skill logic.
             

@@ -67,6 +67,11 @@ public class MentorService {
               a non-privileged user with 'no new privileges' enforced. System packages cannot
               be installed at runtime. If a CLI tool is missing, create a skill that uses a
               Python library or HTTP API instead.
+            - NEVER use placeholder tokens (e.g. <ORIGINAL_COMMAND>, <FILE_PATH>, <YOUR_VALUE>)
+              in step params. Every param value must be a complete, literal, ready-to-use value.
+            - NEVER include ask_user as a step in automated plans. If information the user must
+              provide is genuinely missing, return {"direct_answer": "<question>"} so the user
+              can clarify and re-submit. Do NOT stall execution waiting for runtime user input.
             - For ANY task involving reading text from an image (OCR, menu, receipt,
               screenshot, invoice, photo of text), use the 'image_ocr' skill directly.
               Do NOT use shell_command with tesseract or any other binary OCR tool.
