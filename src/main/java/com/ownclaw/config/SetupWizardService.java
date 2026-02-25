@@ -343,39 +343,42 @@ public class SetupWizardService {
     private WizardResponse buildWelcome() {
         var d = lastDiagnostic != null ? lastDiagnostic : runDiagnostics();
         var sb = new StringBuilder();
-        sb.append("Welcome to OwnClaw! Let's set up your environment.\n");
-        sb.append("(Type - to skip a step and keep the current value)\n\n");
-        sb.append("Current diagnostics:\n");
-        sb.append("  ").append(d.openAiKeySet ? "✅" : "❌").append(" OpenAI API key: ")
-                .append(d.openAiKeySet ? "configured" : "not set").append('\n');
-        sb.append("  ").append(d.ollamaReachable ? "✅" : "❌").append(" Ollama (")
-                .append(d.ollamaUrl).append("): ")
-                .append(d.ollamaReachable ? "reachable" : "not reachable")
-                .append(" | model: ").append(config.getExecutor().getModel());
+        sb.append("### OwnClaw setup\n\n");
+        sb.append("Type `-` to skip a step and keep the current value.\n\n");
+        sb.append("**Diagnostics**\n");
+        sb.append("- ").append(d.openAiKeySet ? "✅" : "❌").append(" OpenAI API key: ")
+            .append(d.openAiKeySet ? "configured" : "not set").append('\n');
+        sb.append("- ").append(d.ollamaReachable ? "✅" : "❌").append(" Ollama: `")
+            .append(d.ollamaUrl).append("` — ")
+            .append(d.ollamaReachable ? "reachable" : "not reachable")
+            .append(" (model: `").append(config.getExecutor().getModel()).append("`)");
         if (d.ollamaReachable) {
             fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
-                if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
-                if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
+            if (!md.parameterSize().isBlank()) sb.append(" — params: ").append(md.parameterSize());
+            if (!md.quantizationLevel().isBlank()) sb.append(" — quant: ").append(md.quantizationLevel());
             });
             fetchOllamaPerfSample(config.getExecutor().getModel()).ifPresent(p -> {
                 if (p.completionTokensPerSecond() != null) {
-                    sb.append(" | speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
-                            .append(" tok/s");
+                sb.append(" — speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
+                    .append(" tok/s");
                 }
             });
         }
         sb.append('\n');
-        sb.append("  ").append(d.pythonPath != null ? "✅" : "❌").append(" Python: ")
-                .append(d.pythonPath != null ? d.pythonVersion + " (" + d.pythonPath + ")" : "not found")
-                .append('\n');
+        sb.append("- ").append(d.pythonPath != null ? "✅" : "❌").append(" Python: ")
+            .append(d.pythonPath != null ? ("`" + d.pythonVersion + "` (" + d.pythonPath + ")") : "not found")
+            .append('\n');
         boolean tgEnabled = config.getTelegram().isEnabled()
                 && config.getTelegram().getBotToken() != null
                 && !config.getTelegram().getBotToken().isBlank();
-        sb.append("  ").append(tgEnabled ? "✅" : "⬜").append(" Telegram: ")
-                .append(tgEnabled ? "enabled" : "disabled").append('\n');
-        sb.append("\nStep 1/5: Enter your OpenAI API key");
+        sb.append("- ").append(tgEnabled ? "✅" : "⬜").append(" Telegram: ")
+            .append(tgEnabled ? "enabled" : "disabled").append('\n');
+
+        sb.append("\n---\n\n");
+        sb.append("**Step 1/5 — OpenAI API key**\n");
+        sb.append("Paste your OpenAI API key");
         if (d.openAiKeySet) {
-            sb.append(" (type - to keep current)");
+            sb.append(" (or `-` to keep current)");
         }
         sb.append(":");
         return new WizardResponse(sb.toString(), false);
@@ -390,11 +393,11 @@ public class SetupWizardService {
         if (!isSkip(input)) {
             sb.append("✅ OpenAI API key saved.\n\n");
         }
-        sb.append("Step 2/5: Ollama URL\n");
-        sb.append("  Format: http://host:port  (e.g. http://localhost:11434)\n");
-        sb.append("  No trailing slash, no /v1 suffix\n");
-        sb.append("  Current: ").append(config.getExecutor().getUrl()).append('\n');
-        sb.append("Enter new URL, or type - to keep current:");
+        sb.append("**Step 2/5 — Ollama URL**\n");
+        sb.append("- Format: `http://host:port` (e.g. `http://localhost:11434`)\n");
+        sb.append("- No trailing slash, no `/v1` suffix\n");
+        sb.append("- Current: `").append(config.getExecutor().getUrl()).append("`\n\n");
+        sb.append("Enter a new URL, or `-` to keep current:");
         return new WizardResponse(sb.toString(), false);
     }
 
@@ -408,25 +411,25 @@ public class SetupWizardService {
         boolean reachable = checkOllama();
         lastDiscoveredModels = reachable ? listOllamaModels() : List.of();
         var sb = new StringBuilder();
-        sb.append(reachable ? "✅" : "⚠️").append(" Ollama at ")
-                .append(config.getExecutor().getUrl()).append(": ")
-                .append(reachable ? "reachable" : "not reachable (you can configure later with /setup)")
+        sb.append((reachable ? "✅" : "⚠️")).append(" Ollama at `")
+                .append(config.getExecutor().getUrl()).append("`: ")
+                .append(reachable ? "reachable" : "not reachable (you can re-run `/setup` later)")
                 .append("\n\n");
 
-        sb.append("Step 3/5: Ollama model\n");
-        sb.append("  Current: ").append(config.getExecutor().getModel()).append('\n');
+        sb.append("**Step 3/5 — Ollama model**\n");
+        sb.append("- Current: `").append(config.getExecutor().getModel()).append("`\n");
         if (!lastDiscoveredModels.isEmpty()) {
-            sb.append("  Available models:\n");
+            sb.append("\n**Available models**\n");
             for (int i = 0; i < lastDiscoveredModels.size(); i++) {
-                sb.append("    ").append(i + 1).append(") ").append(lastDiscoveredModels.get(i)).append('\n');
+                sb.append(i + 1).append(") `").append(lastDiscoveredModels.get(i)).append("`\n");
             }
-            sb.append("Enter model name or number, or type - to keep current:");
+            sb.append("\nEnter model name or number, or `-` to keep current:");
         } else if (reachable) {
-            sb.append("  (no models found — pull one with: ollama pull <model>)\n");
-            sb.append("Enter model name, or type - to keep current:");
+            sb.append("\n(No models found — pull one with `ollama pull <model>`)\n");
+            sb.append("Enter model name, or `-` to keep current:");
         } else {
-            sb.append("  (cannot list models — Ollama not reachable)\n");
-            sb.append("Enter model name, or type - to keep current:");
+            sb.append("\n(Cannot list models — Ollama not reachable)\n");
+            sb.append("Enter model name, or `-` to keep current:");
         }
         return new WizardResponse(sb.toString(), false);
     }
@@ -446,7 +449,7 @@ public class SetupWizardService {
         }
 
         var sb = new StringBuilder();
-        sb.append("Ollama model: ").append(config.getExecutor().getModel());
+        sb.append("✅ Ollama model set to `").append(config.getExecutor().getModel()).append('`');
         fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
             String p = md.parameterSize();
             String q = md.quantizationLevel();
@@ -467,12 +470,12 @@ public class SetupWizardService {
         sb.append("\n\n");
 
         String detected = detectPython();
-        sb.append("Step 4/5: Python path");
+        sb.append("**Step 4/5 — Python path**");
         if (detected != null) {
-            sb.append(" (detected: ").append(detected).append(")\n");
-            sb.append("Enter custom path, or type - to keep:");
+            sb.append("\nDetected: `").append(detected).append("`\n");
+            sb.append("Enter a custom path, or `-` to keep current:");
         } else {
-            sb.append(" (not found!)\nEnter the path to your Python 3 executable:");
+            sb.append("\n(Not found)\nEnter the path to your Python 3 executable:");
         }
         return new WizardResponse(sb.toString(), false);
     }
@@ -484,20 +487,20 @@ public class SetupWizardService {
         }
 
         var sb = new StringBuilder();
-        sb.append("Step 5/5: Telegram Bot (optional)\n\n");
+        sb.append("**Step 5/5 — Telegram bot (optional)**\n\n");
         sb.append("To connect OwnClaw to Telegram:\n");
-        sb.append("  1. Open Telegram and search for @BotFather\n");
-        sb.append("  2. Send /newbot and follow the prompts to create a bot\n");
-        sb.append("  3. BotFather will give you an API token like: 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ\n");
-        sb.append("  4. Paste that token below\n\n");
+        sb.append("1) Open Telegram and search for `@BotFather`\n");
+        sb.append("2) Send `/newbot` and follow the prompts\n");
+        sb.append("3) BotFather will give you a token like `123456789:ABCdef...`\n");
+        sb.append("4) Paste that token below\n\n");
         String current = config.getTelegram().getBotToken();
         boolean hasToken = current != null && !current.isBlank();
         if (hasToken) {
-            sb.append("  Current token: ").append(current.substring(0, Math.min(10, current.length())))
-                    .append("...\n");
+            sb.append("Current token: `").append(current.substring(0, Math.min(10, current.length())))
+                .append("...`\n");
         }
-        sb.append("Enter your Telegram bot token, or type - to ")
-                .append(hasToken ? "keep current" : "skip (Telegram disabled)").append(':');
+        sb.append("\nEnter your Telegram bot token, or `-` to ")
+            .append(hasToken ? "keep current" : "skip (Telegram disabled)").append(':');
         return new WizardResponse(sb.toString(), false);
     }
 
@@ -567,31 +570,31 @@ public class SetupWizardService {
         var d = runDiagnostics();
         var sb = new StringBuilder();
         sb.append(prefix);
-        sb.append("Setup complete! \u2705\n\n");
-        sb.append("Final configuration:\n");
-        sb.append("  OpenAI key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
-        sb.append("  Ollama: ").append(d.ollamaReachable ? "reachable" : "not reachable")
-                .append(" | model: ").append(config.getExecutor().getModel());
+        sb.append("### Setup complete ✅\n\n");
+        sb.append("**Final configuration**\n");
+        sb.append("- OpenAI API key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
+        sb.append("- Ollama: ").append(d.ollamaReachable ? "reachable" : "not reachable")
+                .append(" (model: `").append(config.getExecutor().getModel()).append("`)");
         if (d.ollamaReachable) {
             fetchOllamaModelDetails(config.getExecutor().getModel()).ifPresent(md -> {
-                if (!md.parameterSize().isBlank()) sb.append(" | params: ").append(md.parameterSize());
-                if (!md.quantizationLevel().isBlank()) sb.append(" | quant: ").append(md.quantizationLevel());
+                if (!md.parameterSize().isBlank()) sb.append(" — params: ").append(md.parameterSize());
+                if (!md.quantizationLevel().isBlank()) sb.append(" — quant: ").append(md.quantizationLevel());
             });
             fetchOllamaPerfSample(config.getExecutor().getModel()).ifPresent(p -> {
                 if (p.completionTokensPerSecond() != null) {
-                    sb.append(" | speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
+                    sb.append(" — speed: ").append(String.format(Locale.US, "%.1f", p.completionTokensPerSecond()))
                             .append(" tok/s");
                 }
             });
         }
         sb.append('\n');
-        sb.append("  Python: ").append(d.pythonPath != null ? d.pythonVersion : "not found").append('\n');
+        sb.append("- Python: ").append(d.pythonPath != null ? ("`" + d.pythonVersion + "`") : "not found").append('\n');
         boolean tgEnabled = config.getTelegram().isEnabled()
                 && config.getTelegram().getBotToken() != null
                 && !config.getTelegram().getBotToken().isBlank();
-        sb.append("  Telegram: ").append(tgEnabled ? "enabled" : "disabled").append('\n');
-        sb.append("\nYou can now start chatting. Type /help for available commands.");
-        sb.append("\nTo re-run setup, type /setup");
+        sb.append("- Telegram: ").append(tgEnabled ? "enabled" : "disabled").append('\n');
+        sb.append("\nYou can now start chatting. Type `/help` for available commands.\n");
+        sb.append("To re-run setup, type `/setup`.");
         return new WizardResponse(sb.toString(), true);
     }
 

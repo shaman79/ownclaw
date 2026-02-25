@@ -23,11 +23,18 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import jakarta.annotation.PreDestroy;
+
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * WebSocket handler for the chat UI.
@@ -58,6 +65,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     /** Prevents spamming the chat with repeated welcome messages on reconnect loops. */
     private final Map<String, Long> lastWelcomeAtMs = new ConcurrentHashMap<>();
+
+    /** Tracks whether the /setup wizard is currently running for a user. */
+    private final Map<String, AtomicBoolean> setupWizardRunning = new ConcurrentHashMap<>();
+
+    /** Runs the setup wizard without blocking the WS handler thread. */
+    private final ExecutorService wizardExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    @PreDestroy
+    void shutdownWizardExecutor() {
+        try {
+            wizardExecutor.close();
+        } catch (Exception ignored) {
+        }
+    }
 
     public ChatWebSocketHandler(TaskQueue taskQueue, UserRepository userRepo,
                                 ConversationService conversationService,
@@ -104,15 +125,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Check if first-run wizard is needed
         if (setupWizard.isSetupNeeded()) {
-            session.getAttributes().put("wizardStep", 0);
-            var welcome = setupWizard.processStep(0, null);
-            sendToSession(session, "system", welcome.message());
+            startSetupWizardIfNeeded(userId);
         } else {
             long now = System.currentTimeMillis();
             Long last = lastWelcomeAtMs.get(userId);
             if (last == null || (now - last) > WELCOME_THROTTLE_MS) {
                 lastWelcomeAtMs.put(userId, now);
-                sendToSession(session, "system", "Connected to OwnClaw. Send a message to get started.");
+                sendToSession(session, "system", "**Connected to OwnClaw.** Send a message to get started.");
             }
         }
     }
@@ -151,22 +170,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
             if (!handled) {
                 sendToSession(session, "system", "No pending input request.");
-            }
-            return;
-        }
-
-        // Handle wizard mode
-        Integer wizardStep = (Integer) session.getAttributes().get("wizardStep");
-        if (wizardStep != null) {
-            int nextStep = wizardStep + 1;
-            var result = setupWizard.processStep(nextStep, userMessage);
-            if (result.message() != null) {
-                sendToSession(session, "system", result.message());
-            }
-            if (result.complete()) {
-                session.getAttributes().remove("wizardStep");
-            } else {
-                session.getAttributes().put("wizardStep", nextStep);
             }
             return;
         }
@@ -214,24 +217,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Delegate to a command handler (inline for Phase 1)
         String response = switch (command.trim().toLowerCase()) {
             case "/help" -> """
-                    Available commands:
-                    /log — Last 10 events
-                    /log errors — Recent errors
-                    /log tokens — Token usage today
-                    /tokens — Token budget summary
-                    /skills — List available skills
-                    /grant <skill> — Grant credential access to a skill
-                    /revoke <skill> — Revoke credential access
-                    /cred set <KEY> <VALUE> — Store a credential
-                    /cred list — List stored credential keys
-                    /cred delete <KEY> — Delete a credential
-                    /setup — Re-run setup wizard
-                    /status — System status
-                    /help — This message""";
+                    ### Commands
+                    - `/log` — Last 10 events
+                    - `/log errors` — Recent errors
+                    - `/log tokens` — Token usage today
+                    - `/tokens` — Token budget summary
+                    - `/skills` — List available skills
+                    - `/grant <skill>` — Grant credential access to a skill
+                    - `/revoke <skill>` — Revoke credential access
+                    - `/cred set <KEY> <VALUE>` — Store a credential
+                    - `/cred list` — List stored credential keys
+                    - `/cred delete <KEY>` — Delete a credential
+                    - `/setup` — Run setup wizard
+                    - `/status` — System status
+                    - `/help` — This message""";
             case "/setup" -> {
-                session.getAttributes().put("wizardStep", 0);
-                var welcome = setupWizard.processStep(0, null);
-                yield welcome.message();
+                startSetupWizardIfNeeded(userId);
+                yield "";
             }
             case "/status" -> "Queue size: " + taskQueue.getQueueSize()
                     + " | Connected sessions: " + sessions.size();
@@ -258,8 +260,78 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             }
         };
 
-        conversationService.saveMessage(userId, sessionId, "system", response);
-        sendToSession(session, "system", response);
+        if (response != null && !response.isBlank()) {
+            conversationService.saveMessage(userId, sessionId, "system", response);
+            sendToSession(session, "system", response);
+        }
+    }
+
+    private void startSetupWizardIfNeeded(String userId) {
+        AtomicBoolean running = setupWizardRunning.computeIfAbsent(userId, ignored -> new AtomicBoolean(false));
+        if (!running.compareAndSet(false, true)) {
+            // Already running
+            sendSystemToUser(userId, "Setup wizard is already running — reply to the latest prompt.");
+            return;
+        }
+
+        // Avoid overlapping interactive flows (skill need_input, etc.).
+        if (interactionHandler.hasPending(userId)) {
+            running.set(false);
+            sendSystemToUser(userId, "Finish the current input prompt first, then run `/setup` again.");
+            return;
+        }
+
+        wizardExecutor.submit(() -> {
+            try {
+                runSetupWizardConversation(userId);
+            } finally {
+                running.set(false);
+            }
+        });
+    }
+
+    private void runSetupWizardConversation(String userId) {
+        // A stable taskId so user replies can be routed without the client knowing it.
+        String taskId = "setup";
+
+        int step = 0;
+        var current = setupWizard.processStep(step, null);
+        if (current.message() != null) {
+            sendSystemToUser(userId, current.message());
+        }
+
+        while (!current.complete()) {
+            String input;
+            try {
+                input = interactionHandler.requestInputSilent(userId, taskId);
+            } catch (TimeoutException e) {
+                sendSystemToUser(userId, "Setup wizard timed out waiting for input. Run `/setup` to try again.");
+                return;
+            } catch (ExecutionException e) {
+                sendSystemToUser(userId, "Setup wizard was cancelled. Run `/setup` to start again.");
+                return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                sendSystemToUser(userId, "Setup wizard interrupted. Run `/setup` to start again.");
+                return;
+            }
+
+            step++;
+            current = setupWizard.processStep(step, input);
+            if (current.message() != null) {
+                sendSystemToUser(userId, current.message());
+            }
+        }
+    }
+
+    private void sendSystemToUser(String userId, String message) {
+        String sessionId = conversationService.getCurrentSession(userId);
+        conversationService.saveMessage(userId, sessionId, "system", message);
+
+        WebSocketSession ws = sessions.get(userId);
+        if (ws != null && ws.isOpen()) {
+            sendToSession(ws, "system", message);
+        }
     }
 
     private String handleLogCommand(String userId, String command) {

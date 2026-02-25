@@ -38,6 +38,16 @@ public class SkillInteractionHandler {
     }
 
     /**
+     * Request input from the user without emitting a NEED_INPUT status message.
+     *
+     * Useful for flows (like /setup) that render their own prompts as system messages.
+     */
+    public String requestInputSilent(String userId, String taskId)
+            throws TimeoutException, InterruptedException, ExecutionException {
+        return requestInputInternal(userId, taskId, null, false);
+    }
+
+    /**
      * Request input from the user during skill execution.
      * Emits a NEED_INPUT status message and blocks until the user responds or timeout.
      *
@@ -51,15 +61,23 @@ public class SkillInteractionHandler {
     public String requestInput(String userId, String taskId, String prompt)
             throws TimeoutException, InterruptedException, ExecutionException {
 
+        return requestInputInternal(userId, taskId, prompt, true);
+    }
+
+    private String requestInputInternal(String userId, String taskId, String prompt, boolean emitStatus)
+            throws TimeoutException, InterruptedException, ExecutionException {
+
         String key = userId + ":" + taskId;
 
         CompletableFuture<String> future = new CompletableFuture<>();
         pendingInputs.put(key, future);
 
-        log.info("Skill requesting input from user={}: {}", userId, prompt);
-
-        // Emit need_input status to user's chat
-        statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, prompt);
+        if (emitStatus && prompt != null && !prompt.isBlank()) {
+            log.info("Skill requesting input from user={}: {}", userId, prompt);
+            statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, prompt);
+        } else {
+            log.info("Awaiting user input: user={} taskId={}", userId, taskId);
+        }
 
         try {
             return future.get(INPUT_TIMEOUT_SEC, TimeUnit.SECONDS);
