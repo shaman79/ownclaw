@@ -67,16 +67,18 @@ ensure_sudoers_restart_rule() {
     # Installs a minimal sudoers rule that allows the service user to restart OwnClaw
     # without a password. This is required for cron-based --update runs.
     local sudoers_file="/etc/sudoers.d/ownclaw-ownclaw-restart"
-    local rule_line="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}"
+    local rule_restart="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}"
+    local rule_stop="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl stop ${SERVICE_NAME}"
 
     # Fast path: already present.
-    if [ -f "$sudoers_file" ] && grep -Fqx "$rule_line" "$sudoers_file" 2>/dev/null; then
+    if [ -f "$sudoers_file" ] && grep -Fqx "$rule_restart" "$sudoers_file" 2>/dev/null \
+                               && grep -Fqx "$rule_stop"    "$sudoers_file" 2>/dev/null; then
         return 0
     fi
 
     local tmp
     tmp=$(mktemp /tmp/ownclaw-sudoers-XXXXXX)
-    printf '%s\n' "$rule_line" >"$tmp"
+    printf '%s\n%s\n' "$rule_restart" "$rule_stop" >"$tmp"
 
     if [ "$(id -u)" -eq 0 ]; then
         install -o root -g root -m 0440 "$tmp" "$sudoers_file"
@@ -111,8 +113,23 @@ restart_service() {
         return 0
     fi
 
-    if can_sudo_non_interactive; then
-        sudo -n systemctl restart "$SERVICE_NAME"
+    # The sudoers rule grants only this specific command — don't gate on
+    # can_sudo_non_interactive (which tests 'sudo -n true', a command the
+    # narrow NOPASSWD rule does not cover).
+    if command -v sudo &>/dev/null && sudo -n systemctl restart "$SERVICE_NAME" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+stop_service() {
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl stop "$SERVICE_NAME"
+        return 0
+    fi
+
+    if command -v sudo &>/dev/null && sudo -n systemctl stop "$SERVICE_NAME" 2>/dev/null; then
         return 0
     fi
 
@@ -305,11 +322,7 @@ do_reset() {
     # ── Step 1: Stop the service ────────────────────────────────────────────
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         log "Stopping $SERVICE_NAME..."
-        if [ "$(id -u)" -eq 0 ]; then
-            systemctl stop "$SERVICE_NAME"
-        elif can_sudo_non_interactive; then
-            sudo -n systemctl stop "$SERVICE_NAME"
-        else
+        if ! stop_service; then
             die "Cannot stop service. Run as root or ensure the sudoers rule is installed "\
                 "(sudo $REPO_DIR/deploy/deploy.sh --install-sudoers)."
         fi
