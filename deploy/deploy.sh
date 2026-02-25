@@ -8,6 +8,7 @@
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
 #   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
 #   ./deploy.sh --rollback   # Restore previous JAR
+#   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
 #
 # Authentication:
 #   During --setup, you will be prompted for your GitHub token interactively.
@@ -265,6 +266,171 @@ do_setup() {
     log "  */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
 }
 
+# === Reset workspace to a clean default state ===
+# Preserves: .env (API keys, tokens), system_settings connection/API config
+# Clears:    DB (all tables), generated skills, skill virtualenvs
+do_reset() {
+    log "=== OwnClaw Workspace Reset ==="
+    echo ""
+    echo "  This will reset the workspace to a clean default state:"
+    echo "    CLEAR  — all conversations, tasks, event log, plan cache"
+    echo "    CLEAR  — all users (will need to re-register)"
+    echo "    CLEAR  — all teaching log and user preferences"
+    echo "    CLEAR  — all generated skills and their Python virtualenvs"
+    echo "    RESET  — skill manifest restored from repo"
+    echo ""
+    echo "  Preserved:"
+    echo "    KEEP   — .env  (OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, OWNCLAW_EXECUTOR_*, etc.)"
+    echo "    KEEP   — system_settings rows for connection/API config (URL, model, port, token)"
+    echo "    KEEP   — core skills (never modified by reset)"
+    echo "    BACKUP — database backed up to $DEPLOY_DIR/backups/ before deletion"
+    echo ""
+    read -r -p "  Type YES to confirm reset: " _reset_confirm
+    if [ "$_reset_confirm" != "YES" ]; then
+        log "Reset cancelled."
+        exit 0
+    fi
+    echo ""
+
+    local db_path="$DEPLOY_DIR/data/ownclaw.db"
+
+    # ── Step 1: Stop the service ────────────────────────────────────────────
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log "Stopping $SERVICE_NAME..."
+        if [ "$(id -u)" -eq 0 ]; then
+            systemctl stop "$SERVICE_NAME"
+        elif can_sudo_non_interactive; then
+            sudo -n systemctl stop "$SERVICE_NAME"
+        else
+            die "Cannot stop service. Run as root or ensure the sudoers rule is installed "\
+                "(sudo $REPO_DIR/deploy/deploy.sh --install-sudoers)."
+        fi
+    fi
+
+    # ── Step 2: Preserve connection/API settings from system_settings ───────
+    # These rows hold wizard-entered config that complements .env.
+    # We preserve any key that looks like a URL, model, port, API key, or token.
+    local _saved_settings=""
+    if [ -f "$db_path" ] && command -v sqlite3 &>/dev/null; then
+        log "Reading connection settings from system_settings..."
+        _saved_settings=$(sqlite3 "$db_path" \
+            "SELECT key, value FROM system_settings WHERE \
+             key LIKE '%url%'   OR key LIKE '%model%'   OR key LIKE '%port%'  OR \
+             key LIKE '%token%' OR key LIKE '%api_key%' OR key LIKE '%executor%' OR \
+             key LIKE '%mentor%' OR key LIKE '%telegram%' OR key LIKE '%openai%' OR \
+             key LIKE '%ollama%';" 2>/dev/null || true)
+        if [ -n "$_saved_settings" ]; then
+            local _n
+            _n=$(echo "$_saved_settings" | grep -c '.' || true)
+            log "Preserving $_n row(s) from system_settings"
+        else
+            log "No connection settings found in system_settings — nothing to preserve"
+        fi
+    elif [ -f "$db_path" ] && ! command -v sqlite3 &>/dev/null; then
+        log "WARN: sqlite3 not installed — cannot preserve system_settings rows"
+        log "      Install it with: sudo apt-get install -y sqlite3"
+    fi
+
+    # ── Step 3: Back up then delete the database ────────────────────────────
+    if [ -f "$db_path" ]; then
+        local _ts
+        _ts=$(date '+%Y%m%d-%H%M%S')
+        local _db_backup="$DEPLOY_DIR/backups/ownclaw-db-pre-reset-${_ts}.db"
+        mkdir -p "$DEPLOY_DIR/backups"
+        cp "$db_path" "$_db_backup"
+        log "Database backed up → $(basename "$_db_backup")"
+        rm -f "$db_path" "${db_path}-wal" "${db_path}-shm"
+        log "Database deleted"
+    else
+        log "No database found — skipping DB step"
+    fi
+
+    # ── Step 4: Wipe generated skills ───────────────────────────────────────
+    if [ -d "$DEPLOY_DIR/skills/generated" ]; then
+        local _skill_dirs
+        _skill_dirs=$(find "$DEPLOY_DIR/skills/generated" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l)
+        rm -rf "$DEPLOY_DIR/skills/generated"
+        mkdir -p "$DEPLOY_DIR/skills/generated"
+        log "Removed $_skill_dirs generated skill version(s)"
+    fi
+
+    # ── Step 5: Wipe skill Python virtualenvs ───────────────────────────────
+    if [ -d "$DEPLOY_DIR/skills/_envs" ]; then
+        local _env_dirs
+        _env_dirs=$(find "$DEPLOY_DIR/skills/_envs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        rm -rf "$DEPLOY_DIR/skills/_envs"
+        mkdir -p "$DEPLOY_DIR/skills/_envs"
+        log "Removed $_env_dirs skill virtualenv(s)"
+    fi
+
+    # ── Step 6: Restore manifest from repo ──────────────────────────────────
+    if [ -f "$REPO_DIR/skills/manifest.json" ]; then
+        cp "$REPO_DIR/skills/manifest.json" "$DEPLOY_DIR/skills/manifest.json"
+        log "Manifest restored from repo"
+    else
+        log "WARN: No manifest.json found in repo at $REPO_DIR/skills/manifest.json"
+    fi
+
+    ensure_runtime_permissions
+
+    # ── Step 7: Start service — Liquibase recreates the schema ───────────────
+    local _service_started=false
+    if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log "Starting $SERVICE_NAME (Liquibase will recreate DB schema)..."
+        if [ "$(id -u)" -eq 0 ]; then
+            systemctl start "$SERVICE_NAME"
+            _service_started=true
+        elif can_sudo_non_interactive; then
+            sudo -n systemctl start "$SERVICE_NAME"
+            _service_started=true
+        else
+            log "Cannot start service automatically — run: sudo systemctl start $SERVICE_NAME"
+            log "After starting, re-run this script with --reset-restore-settings if needed."
+        fi
+        if $_service_started; then
+            wait_for_health || log "WARN: Service started but health check timed out"
+        fi
+    else
+        log "Systemd service not installed — skipping start"
+    fi
+
+    # ── Step 8: Re-insert preserved system_settings ─────────────────────────
+    if [ -n "$_saved_settings" ] && command -v sqlite3 &>/dev/null; then
+        # Wait briefly for Liquibase to finish creating tables if service just started.
+        if $_service_started; then
+            sleep 2
+        fi
+        if [ -f "$db_path" ]; then
+            log "Restoring preserved settings into fresh database..."
+            local _restored=0
+            while IFS='|' read -r _key _value; do
+                [ -z "$_key" ] && continue
+                # Escape single quotes in value for SQLite
+                _value_escaped=$(printf '%s' "$_value" | sed "s/'/''/g")
+                if sqlite3 "$db_path" \
+                    "INSERT OR REPLACE INTO system_settings(key, value, updated_at) \
+                     VALUES('$_key', '$_value_escaped', datetime('now'));" 2>/dev/null; then
+                    _restored=$((_restored + 1))
+                else
+                    log "WARN: Could not restore setting '$_key'"
+                fi
+            done <<< "$_saved_settings"
+            log "Restored $_restored preserved setting(s)"
+        else
+            log "WARN: DB not found after service start — preserved settings not restored"
+            log "      Saved settings:"
+            echo "$_saved_settings" | while IFS='|' read -r _k _v; do
+                log "        $_k = $_v"
+            done
+        fi
+    fi
+
+    log ""
+    log "=== Reset Complete ==="
+    log "The workspace is clean. API keys and connection config were preserved."
+    log "Users will need to re-register via the web UI or Telegram."
+}
+
 ensure_runtime_permissions() {
     # This deploy script is sometimes (accidentally) run as root.
     # If we copy/rsync skills as root, manifest.json becomes root-owned and the service user can't write it.
@@ -485,6 +651,9 @@ main() {
             ;;
         --rollback)
             rollback
+            ;;
+        --reset)
+            do_reset
             ;;
         *)
             # Full deploy (no change check)

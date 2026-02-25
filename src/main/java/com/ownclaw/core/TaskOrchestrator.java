@@ -603,12 +603,23 @@ public class TaskOrchestrator {
             SkillDiagnostician.Diagnosis diagnosis = skillDiagnostician.diagnose(
                     failureContext, userId, taskId);
 
+            // Hard override: missing_dependency and permission_denied can NEVER be fixed by
+            // modifying Python code. The SkillRepairer cannot install system packages or grant
+            // OS-level privileges. Override fixable=false regardless of what the LLM returned.
+            boolean isCodeFixable = diagnosis.fixable()
+                    && !"missing_dependency".equals(diagnosis.category())
+                    && !"permission_denied".equals(diagnosis.category());
+            if (diagnosis.fixable() && !isCodeFixable) {
+                log.info("Overriding fixable=true for category='{}' — code change cannot help here",
+                        diagnosis.category());
+            }
+
             log.info("Diagnosis for '{}': category={}, fixable={}, confidence={}, cause={}",
-                    step.skill(), diagnosis.category(), diagnosis.fixable(),
+                    step.skill(), diagnosis.category(), isCodeFixable,
                     diagnosis.confidence(), diagnosis.rootCause());
 
             // Step 2: Attempt repair if fixable
-            if (diagnosis.hasCodeFix() && diagnosis.confidence() >= 0.4) {
+            if (isCodeFixable && diagnosis.hasCodeFix() && diagnosis.confidence() >= 0.4) {
                 SkillRepairer.RepairResult repairResult = skillRepairer.repair(
                         step.skill(), diagnosis, userId, taskId);
 
@@ -633,9 +644,9 @@ public class TaskOrchestrator {
 
                     log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
                     // If repairs keep failing and this is a generated skill, try regeneration once.
-                    // Not for missing_dependency — regenerating skill code won't install the binary.
+                    // Not for missing_dependency / permission_denied — regenerating skill code won't install the binary or grant privileges.
                     if (isGeneratedSkill && !regenerated && attempt == boundedAttempts
-                            && !"missing_dependency".equals(diagnosis.category())) {
+                            && !isTerminalCategory(diagnosis.category())) {
                         StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
                         if (regen.success()) return regen;
                         regenerated = true;
@@ -647,8 +658,8 @@ public class TaskOrchestrator {
             }
 
             // If not fixable (or low confidence) and this is a generated skill, try regeneration once.
-            // Not for missing_dependency — can't fix a missing binary by regenerating the Python wrapper.
-            if (isGeneratedSkill && !regenerated && !"missing_dependency".equals(diagnosis.category())) {
+            // Not for missing_dependency / permission_denied — can't fix by regenerating the Python wrapper.
+            if (isGeneratedSkill && !regenerated && !isTerminalCategory(diagnosis.category())) {
                 StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
                 regenerated = true;
                 if (regen.success()) return regen;
@@ -757,6 +768,14 @@ public class TaskOrchestrator {
             fullOutput = cause + "\nHint for next attempt: " + diagnosis.lesson();
         }
         return StepResult.failure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
+    }
+
+    /**
+     * Categories where no amount of Python code modification can fix the failure.
+     * Regenerating the skill is pointless for these — route straight to buildDefinitiveFailure.
+     */
+    private boolean isTerminalCategory(String category) {
+        return "missing_dependency".equals(category) || "permission_denied".equals(category);
     }
 
     /** Summarise a step's params for inclusion in generation prompts (3 entries max, truncated). */

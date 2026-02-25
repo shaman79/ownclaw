@@ -63,6 +63,10 @@ public class MentorService {
               can contribute to the task in any combination.
             - Flag irreversible actions (email, API calls, file deletion).
             - Keep all text responses under 500 tokens.
+            - NEVER use sudo or apt-get/yum/brew in shell_command steps. The service runs as
+              a non-privileged user with 'no new privileges' enforced. System packages cannot
+              be installed at runtime. If a CLI tool is missing, create a skill that uses a
+              Python library or HTTP API instead.
             
             TRIVIAL KNOWLEDGE:
             - If the answer is ALREADY in SYSTEM CONTEXT above (e.g. current date/time),

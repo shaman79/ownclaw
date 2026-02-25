@@ -35,11 +35,17 @@ public class SkillDiagnostician {
             4. FIX: If fixable, provide the COMPLETE corrected Python script.
                If only params need adjustment, provide corrected params instead.
             
-            IMPORTANT:
-            - Code bugs or missing error handling (SSL errors, encoding issues, redirect loops,
-              auth challenges) → fixable=true. SSL cert errors: add ssl._create_unverified_context().
-            - Truly external failures (dead server, non-existent domain, permanent auth wall) → fixable=false.
-            - Wrong param format → category="bad_params", fixable=false, explain correct params.
+            IMPORTANT — FIXABILITY RULES (apply strictly, in order):
+            1. missing_dependency (system binary not found, e.g. tesseract, ffmpeg, curl):
+               → fixable=false ALWAYS. The SkillRepairer modifies Python code only; it cannot install
+                 system packages. lesson: suggest a Python library or HTTP API alternative.
+            2. permission_denied (sudo blocked, setuid, 'no new privileges' container flag):
+               → fixable=false ALWAYS. No code change can grant OS-level privileges.
+                 lesson: suggest removing sudo / finding an API alternative.
+            3. Code bugs or missing Python error handling (SSL errors, encoding issues, redirect
+               loops, auth challenges) → fixable=true. Fix inline: SSL → ssl._create_unverified_context().
+            4. Truly external failures (dead server, non-existent domain, permanent auth wall) → fixable=false.
+            5. Wrong param format → category="bad_params", fixable=false, explain correct params.
             - Keep fixes minimal. Preserve I/O protocol (stdin JSON, stdout JSON lines).
             
             For the "lesson" field, write a CONCRETE NEXT-STEP SUGGESTION, not a post-mortem.
