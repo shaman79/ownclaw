@@ -765,17 +765,37 @@ public class TaskOrchestrator {
             // Auto-generation unavailable or failed — ask the user for an alternative.
             eventLog.info(userId, taskId, "skill.missing_dependency",
                     "'" + binary + "' not available — asking user for alternative");
-            String prompt = "**'" + binary + "' was not found on this server.**\n"
-                    + "Please tell me an alternative (e.g. an API URL or a different approach), "
-                    + "or type `cancel` to stop:";
+
+            // Build a prompt that tells the user what was attempted and gives concrete options.
+            String goal = step.description() != null && !step.description().isBlank()
+                    ? step.description()
+                    : "run `" + binary + "`";
+            String prompt = "**The system could not complete the step: _" + goal + "_**\n\n"
+                    + "The `" + binary + "` program is not installed on this server, "
+                    + "and the attempt to auto-create a Python-based replacement skill failed.\n\n"
+                    + "**What would you like to do?**\n"
+                    + "• **A** — Tell me an API or web service I can use instead "
+                    + "(e.g. `https://api.ocr.space/parse/image` for OCR)\n"
+                    + "• **B** — Describe a completely different approach to accomplish: _" + goal + "_\n"
+                    + "• **C** — Skip this step and continue with the rest of the task\n"
+                    + "• **cancel** — Stop the task entirely\n\n"
+                    + "Type A/B/C or paste a URL / description:";
             try {
                 String userInput = interactionHandler.requestInput(userId, taskId, prompt);
                 if (userInput != null && !userInput.isBlank()
                         && !"cancel".equalsIgnoreCase(userInput.strip())) {
+                    String stripped = userInput.strip();
+                    if ("c".equalsIgnoreCase(stripped)) {
+                        // User chose to skip — return a non-fatal failure so the plan continues
+                        return StepResult.failure(step.id(),
+                                "missing_dependency: '" + binary + "' not installed. User chose to skip this step.",
+                                originalFailure.exitCode(), originalFailure.durationMs());
+                    }
                     // Embed the user's answer so the follow-up planning loop can use it.
                     return StepResult.failure(step.id(),
                             "missing_dependency: '" + binary + "' is not installed.\n"
-                                    + "User provided: " + userInput,
+                                    + "Goal: " + goal + "\n"
+                                    + "User provided guidance: " + stripped,
                             originalFailure.exitCode(), originalFailure.durationMs());
                 }
             } catch (Exception e) {
