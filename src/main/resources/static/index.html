@@ -10,162 +10,335 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-             background:#0d1117;color:#e6edf3;height:100vh;display:flex;flex-direction:column}
 
-        /* ── Auth overlay ─────────────────────────────────────── */
-        #auth-overlay{position:fixed;inset:0;background:#0d1117;z-index:100;display:flex;
+        body{
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+            background:#0d0f14;color:#e2e8f0;height:100vh;display:flex;flex-direction:column;
+        }
+
+        /* ── Auth overlay ──────────────────────────────────── */
+        #auth-overlay{position:fixed;inset:0;background:#0d0f14;z-index:100;display:flex;
                       align-items:center;justify-content:center}
         #auth-overlay.hidden{display:none}
-        #auth-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;
-                  width:360px;max-width:90vw}
-        #auth-box h2{margin-bottom:6px;font-size:20px;text-align:center}
-        #auth-box .subtitle{color:#8b949e;font-size:13px;text-align:center;margin-bottom:20px}
-        #auth-box input{width:100%;padding:10px 12px;border:1px solid #30363d;border-radius:8px;
-                        background:#0d1117;color:#e6edf3;font-size:14px;outline:none;margin-bottom:12px}
-        #auth-box input:focus{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.15)}
-        #auth-box input::placeholder{color:#484f58}
-        #auth-submit{width:100%;padding:10px;background:#238636;color:#fff;border:none;
-                     border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-        #auth-submit:hover{background:#2ea043}
-        #auth-submit:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
-        #auth-error{color:#f85149;font-size:13px;margin-top:8px;display:none;text-align:center}
-        #auth-toggle{color:#58a6ff;font-size:13px;text-align:center;margin-top:14px;cursor:pointer}
+        #auth-box{
+            background:linear-gradient(135deg,#161b27 0%,#141920 100%);
+            border:1px solid #2a3140;border-radius:16px;padding:36px 32px;
+            width:380px;max-width:92vw;
+            box-shadow:0 24px 60px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.04);
+        }
+        #auth-box h2{margin-bottom:6px;font-size:22px;text-align:center;letter-spacing:-.3px}
+        #auth-box .subtitle{color:#64748b;font-size:13px;text-align:center;margin-bottom:24px}
+        #auth-box input{
+            width:100%;padding:11px 14px;border:1px solid #2a3140;border-radius:10px;
+            background:#0d0f14;color:#e2e8f0;font-size:14px;outline:none;margin-bottom:10px;
+            transition:border-color .15s,box-shadow .15s;
+        }
+        #auth-box input:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.18)}
+        #auth-box input::placeholder{color:#374151}
+        #auth-submit{
+            width:100%;padding:11px;
+            background:linear-gradient(135deg,#6366f1 0%,#4f46e5 100%);
+            color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;
+            cursor:pointer;margin-top:6px;transition:opacity .15s,transform .1s;
+        }
+        #auth-submit:hover{opacity:.9;transform:translateY(-1px)}
+        #auth-submit:active{transform:translateY(0)}
+        #auth-submit:disabled{background:#1e2433;color:#374151;cursor:not-allowed;transform:none}
+        #auth-error{color:#f87171;font-size:13px;margin-top:10px;display:none;text-align:center}
+        #auth-toggle{color:#6366f1;font-size:13px;text-align:center;margin-top:16px;cursor:pointer}
         #auth-toggle:hover{text-decoration:underline}
-        .auth-loading{text-align:center;color:#8b949e;padding:40px}
+        .auth-loading{text-align:center;color:#64748b;padding:40px}
 
-        /* Header */
-        #header{padding:10px 20px;background:#161b22;border-bottom:1px solid #30363d;
-                display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600}
-        #header .dot{width:8px;height:8px;border-radius:50%;background:#484f58;flex-shrink:0}
-        #header .dot.online{background:#3fb950}
+        /* ── Header ────────────────────────────────────────── */
+        #header{
+            padding:12px 20px;
+            background:rgba(13,15,20,.95);
+            border-bottom:1px solid #1e2433;
+            backdrop-filter:blur(8px);
+            display:flex;align-items:center;gap:10px;
+            font-size:15px;font-weight:600;letter-spacing:-.2px;
+        }
+        #header .dot{width:8px;height:8px;border-radius:50%;background:#374151;flex-shrink:0;
+                     transition:background .3s,box-shadow .3s}
+        #header .dot.online{background:#34d399;box-shadow:0 0 8px rgba(52,211,153,.5)}
         #header .spacer{flex:1}
-        #logout-btn{background:none;border:1px solid #30363d;color:#8b949e;padding:4px 12px;
-                    border-radius:6px;font-size:12px;cursor:pointer}
-        #logout-btn:hover{color:#f85149;border-color:#f85149}
+        #logout-btn{
+            background:none;border:1px solid #2a3140;color:#64748b;
+            padding:5px 14px;border-radius:8px;font-size:12px;cursor:pointer;
+            transition:all .15s;
+        }
+        #logout-btn:hover{color:#f87171;border-color:#f87171;background:rgba(248,113,113,.06)}
 
-        /* Messages area */
-        #messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
-        #messages::-webkit-scrollbar{width:6px}
-        #messages::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+        /* ── Messages area ─────────────────────────────────── */
+        #messages{
+            flex:1;overflow-y:auto;padding:24px 20px;
+            display:flex;flex-direction:column;gap:0;
+        }
+        #messages::-webkit-scrollbar{width:5px}
+        #messages::-webkit-scrollbar-thumb{background:#1e2433;border-radius:3px}
+        #messages::-webkit-scrollbar-thumb:hover{background:#2a3140}
 
-        /* Message bubbles */
-           .msg{max-width:85%;font-size:14px;line-height:1.6;animation:fadeIn .2s ease;
-               overflow-wrap:anywhere;word-break:break-word}
-        @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+        /* Center all content in a comfortable reading width */
+        .msg,.activity-wrap,#conn-banner,#thinking{
+            max-width:min(100%,760px);
+            width:100%;
+            margin-left:auto;
+            margin-right:auto;
+        }
 
-        .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;padding:8px 14px;
-                  border-radius:12px 12px 2px 12px;white-space:pre-wrap;word-break:break-word}
+        /* ── Message bubbles ──────────────────────────────── */
+        .msg{
+            font-size:14.5px;line-height:1.7;
+            animation:msgIn .2s cubic-bezier(.16,1,.3,1) both;
+            overflow-wrap:anywhere;word-break:break-word;
+            margin-bottom:4px;
+        }
+        @keyframes msgIn{
+            from{opacity:0;transform:translateY(8px) scale(.99)}
+            to{opacity:1;transform:none}
+        }
 
-        .msg.response{align-self:flex-start;background:#161b22;border:1px solid #30363d;
-                      border-radius:2px 12px 12px 12px;padding:12px 16px;word-break:break-word}
+        /* User messages */
+        .msg.user{
+            align-self:flex-end;
+            background:linear-gradient(135deg,#4f46e5 0%,#6366f1 100%);
+            color:#fff;padding:10px 16px;
+            border-radius:18px 18px 4px 18px;
+            white-space:pre-wrap;word-break:break-word;
+            max-width:72%;
+            box-shadow:0 4px 16px rgba(79,70,229,.3);
+            margin-bottom:16px;
+        }
 
-        .msg.system{align-self:center;color:#8b949e;font-size:12.5px;padding:10px 14px;
-                background:#161b22;border-radius:14px;border:1px solid #21262d;
-                max-width:min(92%,760px)}
+        /* AI response messages */
+        .msg.response{
+            align-self:flex-start;
+            background:#131720;
+            border:1px solid #1e2433;
+            border-radius:4px 18px 18px 18px;
+            padding:14px 18px;
+            margin-bottom:16px;
+            position:relative;
+        }
+        .msg.response::before{
+            content:'🦀';
+            position:absolute;top:-10px;left:-4px;
+            font-size:16px;line-height:1;
+        }
 
-        /* Status messages — compact inline indicators */
-        .msg.status{align-self:flex-start;color:#8b949e;font-size:13px;padding:2px 0;
-                    background:none;border:none}
+        /* System / info messages */
+        .msg.system{
+            align-self:center;
+            color:#94a3b8;font-size:13.5px;
+            padding:12px 18px;
+            background:#0f1219;
+            border:1px solid #1e2433;
+            border-radius:12px;
+            max-width:min(100%,680px);
+            margin-bottom:12px;
+        }
+
+        /* Error messages */
+        .msg.error{
+            align-self:flex-start;
+            background:#1a0f14;
+            border:1px solid #4b1c24;
+            border-left:3px solid #f87171;
+            border-radius:4px 12px 12px 12px;
+            padding:12px 16px;
+            color:#fca5a5;
+            margin-bottom:16px;
+        }
+
+        /* Question / input request */
+        .msg.question,.msg.input_request{
+            align-self:flex-start;
+            background:#0f1422;
+            border:1px solid #1e3a5f;
+            border-left:3px solid #6366f1;
+            border-radius:4px 12px 12px 12px;
+            padding:12px 16px;
+            margin-bottom:16px;
+        }
 
         /* Connection banner */
-        #conn-banner{display:none;align-items:center;gap:8px;padding:6px 14px;margin:0 0 4px;
-                     background:#161b22;border:1px solid #30363d;border-radius:8px;
-                     color:#8b949e;font-size:12px;align-self:center}
+        #conn-banner{
+            display:none;align-items:center;gap:8px;
+            padding:8px 14px;margin:0 auto 12px;
+            background:#0f1219;border:1px solid #1e2433;border-radius:10px;
+            color:#64748b;font-size:12.5px;
+        }
         #conn-banner.visible{display:flex}
-        #conn-banner .spinner{width:12px;height:12px;border:2px solid #30363d;
-                              border-top-color:#58a6ff;border-radius:50%;
-                              animation:spin .8s linear infinite}
+        #conn-banner .spinner{
+            width:13px;height:13px;border:2px solid #1e2433;
+            border-top-color:#6366f1;border-radius:50%;
+            animation:spin .8s linear infinite;flex-shrink:0;
+        }
         @keyframes spin{to{transform:rotate(360deg)}}
 
-        /* Thinking indicator */
-        #thinking{display:none;align-self:flex-start;padding:8px 0;align-items:center;gap:8px;
-                  color:#8b949e;font-size:13px}
+        /* ── Activity log (status messages) ─────────────────── */
+        .activity-wrap{
+            margin-bottom:8px;
+            animation:msgIn .2s cubic-bezier(.16,1,.3,1) both;
+        }
+        #activity{
+            background:#0f1219;
+            border:1px solid #1e2433;
+            border-radius:12px;
+            overflow:hidden;
+        }
+        #activity-header{
+            display:flex;align-items:center;gap:8px;
+            padding:9px 14px;
+            cursor:pointer;user-select:none;
+            transition:background .12s;
+        }
+        #activity-header:hover{background:#131720}
+        .activity-spinner{
+            width:14px;height:14px;border:2px solid #1e2433;
+            border-top-color:#6366f1;border-radius:50%;
+            animation:spin .8s linear infinite;flex-shrink:0;
+        }
+        .activity-spinner.done{
+            border-color:#34d399;border-top-color:transparent;
+            animation:none;
+        }
+        #activity-label{flex:1;font-size:13px;color:#94a3b8;font-weight:500}
+        .activity-toggle{font-size:11px;color:#374151;transition:transform .2s}
+        .activity-toggle.open{transform:rotate(180deg)}
+        #activity-steps{
+            display:none;
+            border-top:1px solid #1e2433;
+            padding:6px 0;
+            max-height:200px;overflow-y:auto;
+        }
+        #activity-steps::-webkit-scrollbar{width:3px}
+        #activity-steps::-webkit-scrollbar-thumb{background:#2a3140;border-radius:2px}
+        #activity-steps.visible{display:block}
+        .activity-step{
+            display:flex;align-items:flex-start;gap:10px;
+            padding:4px 14px;
+            font-size:12.5px;color:#64748b;
+            line-height:1.5;
+        }
+        .activity-step .step-dot{
+            width:5px;height:5px;border-radius:50%;background:#2a3140;
+            flex-shrink:0;margin-top:6px;
+        }
+        .activity-step.latest .step-dot{background:#6366f1}
+        .activity-step.latest{color:#94a3b8}
+
+        /* ── Thinking indicator ─────────────────────────────── */
+        #thinking{
+            display:none;align-self:flex-start;
+            padding:8px 0 2px;align-items:center;gap:8px;
+            color:#64748b;font-size:13px;
+        }
         #thinking.active{display:flex}
-        .thinking-dots span{display:inline-block;width:6px;height:6px;border-radius:50%;
-                            background:#58a6ff;animation:pulse 1.4s infinite ease-in-out both}
+        .thinking-dots span{
+            display:inline-block;width:7px;height:7px;border-radius:50%;
+            background:#6366f1;
+            animation:pulse 1.4s infinite ease-in-out both;
+        }
         .thinking-dots span:nth-child(1){animation-delay:0s}
-        .thinking-dots span:nth-child(2){animation-delay:.16s}
-        .thinking-dots span:nth-child(3){animation-delay:.32s}
-        @keyframes pulse{0%,80%,100%{transform:scale(0);opacity:.4}40%{transform:scale(1);opacity:1}}
+        .thinking-dots span:nth-child(2){animation-delay:.18s}
+        .thinking-dots span:nth-child(3){animation-delay:.36s}
+        @keyframes pulse{
+            0%,80%,100%{transform:scale(0);opacity:.3}
+            40%{transform:scale(1);opacity:1}
+        }
 
-        /* Markdown rendering inside response messages */
-        .msg.response p{margin:0 0 8px 0}
-        .msg.response p:last-child{margin-bottom:0}
-        .msg.response ul,.msg.response ol{margin:4px 0 8px 20px}
-        .msg.response li{margin:2px 0}
-        .msg.response strong{color:#f0f6fc}
-        .msg.response em{color:#c9d1d9}
-        .msg.response a{color:#58a6ff;text-decoration:none}
-        .msg.response a:hover{text-decoration:underline}
-        .msg.response blockquote{border-left:3px solid #30363d;padding:2px 12px;margin:8px 0;color:#8b949e}
-        .msg.response h1,.msg.response h2,.msg.response h3{margin:12px 0 6px;color:#f0f6fc}
-        .msg.response h1{font-size:1.3em}
-        .msg.response h2{font-size:1.15em}
-        .msg.response h3{font-size:1.05em}
-        .msg.response hr{border:none;border-top:1px solid #30363d;margin:12px 0}
-        .msg.response table{border-collapse:collapse;margin:8px 0;width:100%;display:block;max-width:100%;overflow-x:auto}
-        .msg.response th,.msg.response td{border:1px solid #30363d;padding:6px 10px;text-align:left;font-size:13px}
-        .msg.response th{background:#21262d;font-weight:600}
-        .msg.response img{max-width:100%;height:auto;border-radius:6px}
-
-        /* Markdown rendering inside system messages (setup, help, notices) */
-        .msg.system p{margin:0 0 8px 0}
-        .msg.system p:last-child{margin-bottom:0}
-        .msg.system ul,.msg.system ol{margin:6px 0 8px 18px}
-        .msg.system li{margin:2px 0}
-        .msg.system strong{color:#c9d1d9}
-        .msg.system a{color:#58a6ff;text-decoration:none}
-        .msg.system a:hover{text-decoration:underline}
-        .msg.system h1,.msg.system h2,.msg.system h3{margin:10px 0 6px;color:#c9d1d9}
-        .msg.system hr{border:none;border-top:1px solid #30363d;margin:10px 0}
-        .msg.system table{border-collapse:collapse;margin:8px 0;width:100%;display:block;max-width:100%;overflow-x:auto}
-        .msg.system th,.msg.system td{border:1px solid #30363d;padding:6px 10px;text-align:left;font-size:12.5px}
-        .msg.system th{background:#21262d;font-weight:600}
-        .msg.system code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12.5px;
-                 font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
-        .msg.system pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;
-                padding:10px;margin:8px 0;overflow-x:auto}
-
-        /* Code blocks */
-        .msg.response pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;
-                          padding:12px;margin:8px 0;overflow-x:auto;position:relative}
-        .msg.response pre code{background:none;padding:0;font-size:13px;line-height:1.5;
-                               font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
-        .msg.response code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:13px;
-                           font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
-        .msg.response pre code{background:none;padding:0}
+        /* ── Markdown rendering ─────────────────────────────── */
+        .md p{margin:0 0 10px 0}
+        .md p:last-child{margin-bottom:0}
+        .md ul,.md ol{margin:4px 0 10px 20px}
+        .md li{margin:3px 0}
+        .md strong{color:#f1f5f9}
+        .md em{color:#cbd5e1}
+        .md a{color:#818cf8;text-decoration:none}
+        .md a:hover{text-decoration:underline;color:#a5b4fc}
+        .md blockquote{border-left:3px solid #2a3140;padding:2px 14px;margin:10px 0;color:#64748b}
+        .md h1,.md h2,.md h3{margin:14px 0 6px;color:#f1f5f9;font-weight:600}
+        .md h1{font-size:1.3em;border-bottom:1px solid #1e2433;padding-bottom:6px}
+        .md h2{font-size:1.15em}
+        .md h3{font-size:1.05em}
+        .md hr{border:none;border-top:1px solid #1e2433;margin:14px 0}
+        .md table{border-collapse:collapse;margin:10px 0;width:100%;display:block;overflow-x:auto}
+        .md th,.md td{border:1px solid #1e2433;padding:7px 12px;text-align:left;font-size:13px}
+        .md th{background:#131720;font-weight:600;color:#f1f5f9}
+        .md tr:nth-child(even) td{background:#0c0f16}
+        .md img{max-width:100%;height:auto;border-radius:8px;margin:6px 0}
+        .md code{
+            background:#1a1f2e;padding:2px 7px;border-radius:5px;font-size:13px;
+            font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace;
+            color:#a5b4fc;
+        }
+        .md pre{
+            background:#0d0f14;border:1px solid #1e2433;border-radius:10px;
+            padding:14px;margin:10px 0;overflow-x:auto;position:relative;
+        }
+        .md pre code{
+            background:none;padding:0;font-size:13px;line-height:1.55;
+            color:#e2e8f0;font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace;
+        }
 
         /* Copy button on code blocks */
         .code-block-wrap{position:relative}
-        .copy-btn{position:absolute;top:6px;right:6px;background:#21262d;border:1px solid #30363d;
-                  color:#8b949e;padding:3px 8px;border-radius:4px;font-size:11px;cursor:pointer;
-                  opacity:0;transition:opacity .15s}
+        .copy-btn{
+            position:absolute;top:8px;right:8px;
+            background:#1e2433;border:1px solid #2a3140;
+            color:#64748b;padding:3px 10px;border-radius:6px;
+            font-size:11px;cursor:pointer;
+            opacity:0;transition:opacity .15s,color .15s;
+        }
         .code-block-wrap:hover .copy-btn{opacity:1}
-        .copy-btn:hover{background:#30363d;color:#e6edf3}
-        .copy-btn.copied{color:#3fb950}
+        .copy-btn:hover{background:#2a3140;color:#e2e8f0}
+        .copy-btn.copied{color:#34d399}
 
-        /* Input area */
-        #input-area{padding:12px 20px;background:#161b22;border-top:1px solid #30363d;
-                    display:flex;gap:10px;align-items:flex-end}
-        #input{flex:1;padding:10px 14px;border:1px solid #30363d;border-radius:8px;
-               background:#0d1117;color:#e6edf3;font-size:14px;outline:none;resize:none;
-               max-height:120px;min-height:40px;line-height:1.4;
-               font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
-        #input:focus{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.15)}
-        #input::placeholder{color:#484f58}
-        #send{padding:10px 18px;background:#238636;color:#fff;border:none;border-radius:8px;
-              cursor:pointer;font-size:14px;font-weight:600;transition:background .15s;
-              height:40px;flex-shrink:0}
-        #send:hover{background:#2ea043}
-        #send:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+        /* ── Input area ─────────────────────────────────────── */
+        #input-area{
+            padding:14px 20px 18px;
+            background:rgba(13,15,20,.95);
+            border-top:1px solid #1e2433;
+        }
+        .input-row{
+            display:flex;gap:10px;align-items:flex-end;
+            max-width:min(100%,760px);
+            margin:0 auto;
+        }
+        #input{
+            flex:1;padding:11px 16px;
+            border:1px solid #2a3140;border-radius:14px;
+            background:#0f1219;color:#e2e8f0;
+            font-size:14px;outline:none;resize:none;
+            max-height:140px;min-height:44px;line-height:1.5;
+            font-family:inherit;
+            transition:border-color .15s,box-shadow .15s;
+        }
+        #input:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+        #input::placeholder{color:#374151}
+        #send{
+            width:44px;height:44px;flex-shrink:0;
+            background:linear-gradient(135deg,#6366f1 0%,#4f46e5 100%);
+            color:#fff;border:none;border-radius:12px;
+            cursor:pointer;display:flex;align-items:center;justify-content:center;
+            transition:opacity .15s,transform .1s,box-shadow .15s;
+            box-shadow:0 4px 14px rgba(79,70,229,.4);
+        }
+        #send:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 6px 20px rgba(79,70,229,.5)}
+        #send:active{transform:translateY(0)}
+        #send:disabled{
+            background:#1e2433;color:#374151;cursor:not-allowed;
+            transform:none;box-shadow:none;
+        }
+        #send svg{width:18px;height:18px;fill:currentColor}
 
-        /* Responsive tweaks */
-        @media (max-width: 600px) {
-            #header{padding:10px 12px}
-            #messages{padding:14px 12px}
-            #input-area{padding:12px 12px}
-            .msg{max-width:92%}
+        /* ── Responsive ─────────────────────────────────────── */
+        @media (max-width:600px){
+            #header{padding:10px 14px}
+            #messages{padding:16px 14px}
+            #input-area{padding:12px 14px 16px}
+            .msg.user{max-width:85%}
         }
     </style>
 </head>
@@ -192,14 +365,29 @@
     </div>
     <div id="messages">
         <div id="conn-banner"><div class="spinner"></div><span id="conn-text"></span></div>
+        <!-- Activity log: accumulates status messages during task execution -->
+        <div class="activity-wrap" id="activity-wrap" style="display:none">
+            <div id="activity">
+                <div id="activity-header">
+                    <div class="activity-spinner" id="activity-spinner"></div>
+                    <span id="activity-label">Working...</span>
+                    <span class="activity-toggle" id="activity-toggle">▾</span>
+                </div>
+                <div id="activity-steps"></div>
+            </div>
+        </div>
         <div id="thinking">
             <div class="thinking-dots"><span></span><span></span><span></span></div>
             <span id="thinking-text">Thinking...</span>
         </div>
     </div>
     <div id="input-area">
-        <textarea id="input" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" autocomplete="off"></textarea>
-        <button id="send">Send</button>
+        <div class="input-row">
+            <textarea id="input" rows="1" placeholder="Ask anything… (Enter to send, Shift+Enter for newline)" autocomplete="off"></textarea>
+            <button id="send">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+        </div>
     </div>
     <script>
     (function() {
@@ -225,9 +413,18 @@
         const connBanner = document.getElementById('conn-banner');
         const connText = document.getElementById('conn-text');
 
+        const activityWrap = document.getElementById('activity-wrap');
+        const activitySpinner = document.getElementById('activity-spinner');
+        const activityLabel = document.getElementById('activity-label');
+        const activitySteps = document.getElementById('activity-steps');
+        const activityToggle = document.getElementById('activity-toggle');
+        const activityHeader = document.getElementById('activity-header');
+
         let reconnectAttempt = 0;
         let authToken = localStorage.getItem('ownclaw_token');
         let isRegisterMode = true;
+        let activityStepList = [];
+        let activityOpen = false;
 
         // Configure marked
         marked.setOptions({
@@ -245,6 +442,49 @@
         let ws;
         let busy = false;
 
+        // ── Activity log ──────────────────────────────────────
+
+        activityHeader.addEventListener('click', () => {
+            activityOpen = !activityOpen;
+            activitySteps.classList.toggle('visible', activityOpen);
+            activityToggle.classList.toggle('open', activityOpen);
+        });
+
+        function showActivity(text) {
+            activityWrap.style.display = 'block';
+            activitySpinner.classList.remove('done');
+            activityLabel.textContent = text;
+            activityStepList.forEach(s => s.classList.remove('latest'));
+            const step = document.createElement('div');
+            step.className = 'activity-step latest';
+            step.innerHTML = '<span class="step-dot"></span><span>' + escapeHtml(text) + '</span>';
+            activitySteps.appendChild(step);
+            activitySteps.scrollTop = activitySteps.scrollHeight;
+            activityStepList.push(step);
+            scrollBottom();
+        }
+
+        function doneActivity() {
+            activitySpinner.classList.add('done');
+            activityStepList.forEach(s => s.classList.remove('latest'));
+            setTimeout(() => {
+                if (!activityOpen) {
+                    activityWrap.style.display = 'none';
+                    activitySteps.innerHTML = '';
+                    activityStepList = [];
+                }
+            }, 1800);
+        }
+
+        function resetActivity() {
+            activityWrap.style.display = 'none';
+            activitySteps.innerHTML = '';
+            activityStepList = [];
+            activityOpen = false;
+            activityToggle.classList.remove('open');
+            activitySteps.classList.remove('visible');
+        }
+
         // ── Auth flow ─────────────────────────────────────────
 
         async function checkAuth() {
@@ -254,27 +494,18 @@
                 const resp = await fetch('/api/auth/status', { headers });
                 const data = await resp.json();
 
-                if (data.authenticated && authToken) {
-                    // Token still valid — go straight to chat
-                    enterChat();
-                    return;
-                }
+                if (data.authenticated && authToken) { enterChat(); return; }
 
-                // Token invalid — clear it
                 if (authToken) {
                     authToken = null;
                     localStorage.removeItem('ownclaw_token');
                 }
 
-                // Show appropriate form
                 authLoading.style.display = 'none';
                 authBox.style.display = 'block';
 
-                if (data.hasUsers) {
-                    switchToLogin();
-                } else {
-                    switchToRegister();
-                }
+                if (data.hasUsers) switchToLogin();
+                else switchToRegister();
             } catch (e) {
                 authLoading.textContent = 'Cannot reach server. Retrying...';
                 setTimeout(checkAuth, 3000);
@@ -305,8 +536,7 @@
         }
 
         authToggle.addEventListener('click', () => {
-            if (isRegisterMode) switchToLogin();
-            else switchToRegister();
+            if (isRegisterMode) switchToLogin(); else switchToRegister();
         });
 
         async function doAuth() {
@@ -329,13 +559,11 @@
                     body: JSON.stringify({ username, password })
                 });
                 const data = await resp.json();
-
                 if (!resp.ok) {
                     showAuthError(data.error || 'Authentication failed');
                     authSubmit.disabled = false;
                     return;
                 }
-
                 authToken = data.token;
                 localStorage.setItem('ownclaw_token', authToken);
                 enterChat();
@@ -360,12 +588,10 @@
             localStorage.removeItem('ownclaw_token');
             if (ws) { ws.close(); ws = null; }
             reconnectAttempt = 0;
-            // Clear messages
             messagesEl.querySelectorAll('.msg').forEach(m => m.remove());
             connDot.classList.remove('online');
             hideConnBanner();
-
-            // Show auth screen
+            resetActivity();
             authOverlay.classList.remove('hidden');
             authLoading.style.display = 'none';
             authBox.style.display = 'block';
@@ -376,12 +602,8 @@
         }
 
         authSubmit.addEventListener('click', doAuth);
-        authPassword.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') doAuth();
-        });
-        authUsername.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') authPassword.focus();
-        });
+        authPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth(); });
+        authUsername.addEventListener('keydown', (e) => { if (e.key === 'Enter') authPassword.focus(); });
         logoutBtn.addEventListener('click', logout);
 
         // ── WebSocket ─────────────────────────────────────────
@@ -390,23 +612,16 @@
 
         function startHeartbeat() {
             stopHeartbeat();
-            // Keep the WS alive through proxies/NATs during long idle periods.
             heartbeatTimer = setInterval(() => {
                 try {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
+                    if (ws && ws.readyState === WebSocket.OPEN)
                         ws.send(JSON.stringify({ type: 'ping' }));
-                    }
-                } catch {
-                    // ignore
-                }
+                } catch { /* ignore */ }
             }, 25000);
         }
 
         function stopHeartbeat() {
-            if (heartbeatTimer) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-            }
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         }
 
         function showConnBanner(text) {
@@ -435,20 +650,12 @@
                 connDot.classList.remove('online');
                 setThinking(false);
                 stopHeartbeat();
-
-                // Code 1008 = POLICY_VIOLATION → auth rejected, go back to login
-                if (e.code === 1008) {
-                    logout();
-                    return;
-                }
-
+                if (e.code === 1008) { logout(); return; }
                 reconnectAttempt++;
                 const delay = Math.min(3000 * reconnectAttempt, 30000);
-                if (reconnectAttempt === 1) {
-                    showConnBanner('Disconnected — reconnecting...');
-                } else {
-                    showConnBanner('Reconnecting... attempt ' + reconnectAttempt);
-                }
+                showConnBanner(reconnectAttempt === 1
+                    ? 'Disconnected — reconnecting...'
+                    : 'Reconnecting… attempt ' + reconnectAttempt);
                 setTimeout(connect, delay);
             };
 
@@ -460,14 +667,16 @@
 
                     if (type === 'status') {
                         setThinking(true, content);
+                        showActivity(content);
                     } else if (type === 'pong' || type === 'ping') {
-                        // heartbeat/no-op
+                        // heartbeat — no-op
                     } else {
-                        if (type === 'response') setThinking(false);
+                        if (type === 'response') { setThinking(false); doneActivity(); }
                         addMsg(type, content);
                     }
                 } catch {
                     setThinking(false);
+                    doneActivity();
                     addMsg('response', e.data);
                 }
             };
@@ -489,28 +698,23 @@
             const div = document.createElement('div');
             div.className = 'msg ' + type;
 
-            if (type === 'response' || type === 'system') {
-                // Render markdown for response and system messages
-                div.innerHTML = renderMarkdown(text);
-                // Wrap code blocks with copy button
-                div.querySelectorAll('pre').forEach(wrapCodeBlock);
-            } else {
+            if (type === 'user') {
+                // User messages: plain text, preserve newlines
                 div.textContent = text;
+            } else {
+                // All non-user messages: render markdown
+                div.innerHTML = renderMarkdown(text);
+                div.classList.add('md');
+                div.querySelectorAll('pre').forEach(wrapCodeBlock);
             }
 
-            // Insert before the thinking indicator
             messagesEl.insertBefore(div, thinkingEl);
             scrollBottom();
         }
 
         function renderMarkdown(text) {
-            // marked handles markdown → HTML
-            try {
-                return marked.parse(text);
-            } catch {
-                // Fallback: escape HTML and preserve whitespace
-                return '<p>' + escapeHtml(text) + '</p>';
-            }
+            try { return marked.parse(text); }
+            catch { return '<p>' + escapeHtml(text) + '</p>'; }
         }
 
         function escapeHtml(s) {
@@ -524,7 +728,6 @@
             wrapper.className = 'code-block-wrap';
             pre.parentNode.insertBefore(wrapper, pre);
             wrapper.appendChild(pre);
-
             const btn = document.createElement('button');
             btn.className = 'copy-btn';
             btn.textContent = 'Copy';
@@ -547,32 +750,26 @@
             inputEl.value = '';
             inputEl.style.height = 'auto';
             busy = true;
-            setThinking(true, 'Processing...');
+            resetActivity();
+            setThinking(true, 'Processing…');
         }
 
         function scrollBottom() {
-            requestAnimationFrame(() => {
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-            });
+            requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
         }
 
         // Auto-resize textarea
         inputEl.addEventListener('input', () => {
             inputEl.style.height = 'auto';
-            inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
         });
 
-        // Enter to send, Shift+Enter for newline
         inputEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                send();
-            }
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
         });
 
         sendBtn.addEventListener('click', send);
 
-        // Start auth check instead of connecting directly
         checkAuth();
     })();
     </script>
