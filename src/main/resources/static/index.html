@@ -356,6 +356,29 @@
 
         // ── WebSocket ─────────────────────────────────────────
 
+        let heartbeatTimer = null;
+
+        function startHeartbeat() {
+            stopHeartbeat();
+            // Keep the WS alive through proxies/NATs during long idle periods.
+            heartbeatTimer = setInterval(() => {
+                try {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                } catch {
+                    // ignore
+                }
+            }, 25000);
+        }
+
+        function stopHeartbeat() {
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+        }
+
         function showConnBanner(text) {
             connText.textContent = text;
             connBanner.classList.add('visible');
@@ -374,17 +397,14 @@
             ws.onopen = () => {
                 connDot.classList.add('online');
                 hideConnBanner();
-                if (reconnectAttempt > 0) {
-                    addMsg('system', 'Reconnected');
-                } else {
-                    addMsg('system', 'Connected');
-                }
+                startHeartbeat();
                 reconnectAttempt = 0;
             };
 
             ws.onclose = (e) => {
                 connDot.classList.remove('online');
                 setThinking(false);
+                stopHeartbeat();
 
                 // Code 1008 = POLICY_VIOLATION → auth rejected, go back to login
                 if (e.code === 1008) {
@@ -410,6 +430,8 @@
 
                     if (type === 'status') {
                         setThinking(true, content);
+                    } else if (type === 'pong' || type === 'ping') {
+                        // heartbeat/no-op
                     } else {
                         if (type === 'response') setThinking(false);
                         addMsg(type, content);

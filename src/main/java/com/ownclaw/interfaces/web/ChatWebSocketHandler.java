@@ -37,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocketHandler.class);
+    private static final long WELCOME_THROTTLE_MS = 60_000;
 
     private final TaskQueue taskQueue;
     private final UserRepository userRepo;
@@ -54,6 +55,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     /** Active WebSocket sessions by user ID. */
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+
+    /** Prevents spamming the chat with repeated welcome messages on reconnect loops. */
+    private final Map<String, Long> lastWelcomeAtMs = new ConcurrentHashMap<>();
 
     public ChatWebSocketHandler(TaskQueue taskQueue, UserRepository userRepo,
                                 ConversationService conversationService,
@@ -104,7 +108,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             var welcome = setupWizard.processStep(0, null);
             sendToSession(session, "system", welcome.message());
         } else {
-            sendToSession(session, "system", "Connected to OwnClaw. Send a message to get started.");
+            long now = System.currentTimeMillis();
+            Long last = lastWelcomeAtMs.get(userId);
+            if (last == null || (now - last) > WELCOME_THROTTLE_MS) {
+                lastWelcomeAtMs.put(userId, now);
+                sendToSession(session, "system", "Connected to OwnClaw. Send a message to get started.");
+            }
         }
     }
 
@@ -126,6 +135,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             taskId = json.has("taskId") ? json.path("taskId").asText(null) : null;
         } catch (Exception e) {
             userMessage = payload;
+        }
+
+        // Heartbeat ping: keep-alive for long-lived browser connections.
+        // Do not treat as user input or command.
+        if ("ping".equalsIgnoreCase(messageType) || "ping".equalsIgnoreCase(userMessage)) {
+            sendToSession(session, "pong", "");
+            return;
         }
 
         log.debug("WS message from {}: {}", userId, userMessage);

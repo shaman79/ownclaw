@@ -292,7 +292,12 @@ deploy_jar() {
 
     backup_current
 
-    cp "$new_jar" "$DEPLOY_DIR/ownclaw.jar"
+    # IMPORTANT: do not overwrite the currently-running JAR in-place.
+    # The JVM may still read classes/resources lazily from the file; truncating it mid-run
+    # can cause runtime NoClassDefFoundError / ClassNotFoundException.
+    local tmp_jar="$DEPLOY_DIR/ownclaw.jar.new"
+    cp "$new_jar" "$tmp_jar"
+    mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
     log "Deployed new JAR"
 
     # Sync skills and config from repo
