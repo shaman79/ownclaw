@@ -711,20 +711,32 @@ public class TaskOrchestrator {
                                 + " (params: " + describeParams(step) + ")";
                 String altHint = diagnosis.lesson() != null && !diagnosis.lesson().isBlank()
                         ? diagnosis.lesson()
-                        : "Use a Python library or HTTP API instead of calling the '" + binary + "' binary.";
+                        : "Use an HTTP API or pure-Python library that has NO system binary dependency. "
+                                + "For OCR tasks, prefer ocr.space (free, no key needed for basic use: "
+                                + "POST image to https://api.ocr.space/parse/image), Google Vision, or "
+                                + "Tesseract-free libs. Do NOT use pytesseract, which still requires "
+                                + "the tesseract binary.";
 
                 String genPrompt = """
                         Create a Python skill to: %s
                         The previous approach called the '%s' binary (via shell_command) which is NOT installed.
                         %s
+                        IMPORTANT CONSTRAINTS:
+                        - Do NOT use subprocess, os.system, or any shell command.
+                        - Do NOT use Python libraries that are just wrappers around missing binaries
+                          (e.g. pytesseract still requires tesseract to be installed, so avoid it).
+                        - USE HTTP APIs or pure-Python implementations that have no system binary dependency.
                         Name the skill after the CAPABILITY it provides (e.g., 'image_ocr', 'text_from_pdf').
-                        Do NOT use subprocess, os.system, or shell commands.
                         """.formatted(goalDesc, binary, altHint);
 
                 try {
                     eventLog.info(userId, taskId, "skill.auto_generate_alternative",
                             "'" + binary + "' not installed — auto-generating a capability skill");
-                    SkillGenerator.GenerationResult gen = skillGenerator.generate(genPrompt, userId, taskId);
+                    // Derive a meaningful name for the new skill so the LLM cannot accidentally
+                    // name it 'shell_command' (which would version under the broken skill).
+                    String capabilityName = deriveCapabilitySkillName(step, binary);
+                    SkillGenerator.GenerationResult gen =
+                            skillGenerator.generateForName(capabilityName, genPrompt, userId, taskId);
                     if (gen.success()) {
                         skillManifest.reload();
                         eventLog.info(userId, taskId, "skill.alternative_created",
@@ -768,6 +780,36 @@ public class TaskOrchestrator {
             fullOutput = cause + "\nHint for next attempt: " + diagnosis.lesson();
         }
         return StepResult.failure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
+    }
+
+    /**
+     * Derive a snake_case skill name that describes the capability rather than the implementation.
+     * Prefers the step description; falls back to a name constructed from the missing binary.
+     * Ensures the result is never the same as the failing skill name (e.g. 'shell_command').
+     */
+    private String deriveCapabilitySkillName(TaskStep step, String binary) {
+        String base = null;
+
+        // Prefer step description: take first ~5 words, sanitise to snake_case
+        if (step.description() != null && !step.description().isBlank()) {
+            base = step.description().toLowerCase()
+                    .replaceAll("[^a-z0-9]+", "_")
+                    .replaceAll("^_+|_+$", "");
+            // Limit length and strip trailing underscores
+            if (base.length() > 40) base = base.substring(0, 40).replaceAll("_+$", "");
+        }
+
+        // Fall back to binary name + _python
+        if (base == null || base.isBlank()) {
+            base = binary.toLowerCase().replaceAll("[^a-z0-9]+", "_") + "_python";
+        }
+
+        // Never return the same name as the failing skill
+        if (base.equals(step.skill())) {
+            base = base + "_capability";
+        }
+
+        return base;
     }
 
     /**

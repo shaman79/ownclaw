@@ -43,7 +43,11 @@ public class SkillGenerator {
             5. Use only standard library + common packages
             6. Do NOT use subprocess, os.system, or ctypes. For shell commands, use the
                shell_command skill in the plan instead. eval/exec are allowed.
-            7. Keep the script under 500 lines
+            7. Do NOT use Python libraries that are thin wrappers around system binaries
+               (e.g. pytesseract requires tesseract, moviepy requires ffmpeg). The system
+               cannot install OS packages at runtime. If OCR or similar is needed, use an
+               HTTP API (e.g. https://api.ocr.space/parse/image for OCR, free no-key tier).
+            8. Keep the script under 500 lines
             
             OUTPUT FORMAT (respond with ONLY this JSON, no other text):
             {
