@@ -58,24 +58,6 @@ public final class PromptStrategies {
             - Keep generated file content concise unless the user requested otherwise.
             """;
 
-    static final String SHELL_COMMANDS = """
-            
-            ## SHELL COMMAND STRATEGY
-            When the task requires running shell commands:
-            - Use platform-appropriate syntax (see PLATFORM AWARENESS).
-            - Prefer simple, single-purpose commands over long pipelines.
-            - Avoid interactive commands that require user input.
-            """;
-
-    static final String FAILURE_EVALUATION = """
-            
-            ## ABOUT FAILED STEPS
-            Some steps may have `"status":"FAILED"` with an error message.
-            - A failed step does NOT automatically mean the goal is unachieved.
-            - If later steps recovered the data through an alternative route, the task may still be COMPLETE.
-            - Focus on whether the FINAL GOAL was achieved, not on individual step status.
-            """;
-
     // ─── Assembly ───────────────────────────────────────────────────
 
     /**
@@ -95,12 +77,6 @@ public final class PromptStrategies {
         }
         if (ctx.involvesFiles()) {
             sb.append(FILE_OPS);
-        }
-        if (ctx.involvesShell()) {
-            sb.append(SHELL_COMMANDS);
-        }
-        if (ctx.hasFailures()) {
-            sb.append(FAILURE_EVALUATION);
         }
 
         return sb.toString();

@@ -258,22 +258,7 @@ public class TaskOrchestrator {
                     "Executing plan (" + plan.size() + " step" + (plan.size() > 1 ? "s" : "") + ")...");
             Map<Integer, StepResult> stepResults = executePlan(plan, userId, taskId);
 
-            // Step 5: Optionally review with Mentor
-            if (plan.reviewResult()) {
-                statusEmitter.emit(userId, StatusMessage.Type.MENTOR, "Mentor reviewing results...");
-                String resultSummary = buildResultSummary(stepResults);
-                String compressed = executor.compressResults(
-                        plan.size() + " steps executed", resultSummary);
-                MentorService.ReviewResult review = mentor.review(compressed, userId, taskId);
-
-                if (review.isRetry() && plan.maxRetries() > 0) {
-                    eventLog.info(userId, taskId, "task.retry", "Mentor requested retry");
-                    // Simplified: re-execute the whole plan (full retry logic in later phases)
-                    stepResults = executePlan(plan, userId, taskId);
-                }
-            }
-
-            // Step 6: Evaluate results
+            // Step 5: Evaluate results
             persistTaskState(taskId, userId, "completed", plan);
             boolean allSuccess = stepResults.values().stream()
                     .filter(r -> !r.isSkipped())
@@ -285,12 +270,7 @@ public class TaskOrchestrator {
                 planCache.store(userMessage, plan);
             }
 
-            // Step 6b: Iterative re-planning — check if the results actually answer the question
-            // If not, identify what's missing and create follow-up plans.
-            // Runs on TOTAL FAILURE too: evaluateCompleteness() sees the failed steps and will
-            // recommend alternative approaches (e.g. use http_request instead of shell_command
-            // when the CLI binary is not installed). This is the "total failure replan" path.
-            boolean hasAnySuccess = stepResults.values().stream().anyMatch(StepResult::success);
+            // Iterative re-planning — check if results actually answer the question
             boolean hasAnyRealResults = stepResults.values().stream().anyMatch(r -> !r.isSkipped());
             if (hasAnyRealResults) {
                 int maxRounds = config.getFeedback().getMaxRounds();
@@ -305,15 +285,10 @@ public class TaskOrchestrator {
                     // knows what already failed and doesn't request impossible follow-ups
                     String rawSoFar = buildResponseForEvaluation(stepResults);
 
-                    // Check if any steps have actually failed
-                    boolean hasFailures = stepResults.values().stream()
-                            .anyMatch(r -> !r.success());
-
                     statusEmitter.emit(userId, StatusMessage.Type.STARTED,
                             "Evaluating completeness (round " + round + "/" + maxRounds + ")...");
 
-                    CompletenessResult eval = executor.evaluateCompleteness(
-                            userMessage, rawSoFar, hasFailures);
+                    CompletenessResult eval = executor.evaluateCompleteness(userMessage, rawSoFar);
                     eventLog.info(userId, taskId, "task.completeness_eval",
                             "Round " + round + ": complete=" + eval.complete()
                                     + " | " + truncate(eval.analysis(), 200));
@@ -334,16 +309,11 @@ public class TaskOrchestrator {
                         String followUpContext = eval.followUp()
                                 + (failureSummary.isEmpty() ? "" : "\n\nPREVIOUS FAILURES (do NOT retry these):\n" + failureSummary);
 
-                        // Enrich context with failure info for this round
-                        TaskContext roundCtx = hasFailures
-                                ? followUpCtx.withFailures()
-                                : followUpCtx;
-
                         // Pass the full evaluation context (successes + failures) so the
                         // Mentor sees what failed and why when replanning from scratch.
                         TaskPlan followUp = mentor.followUpPlan(
                                 userMessage, buildResponseForEvaluation(stepResults), followUpContext,
-                                skillManifest.toPromptSnippet(), nextStepId, roundCtx,
+                                skillManifest.toPromptSnippet(), nextStepId, followUpCtx,
                                 userId, taskId);
 
                         if (followUp.steps().isEmpty()) {
@@ -920,19 +890,6 @@ public class TaskOrchestrator {
         conversation.saveMessage(userId, sessionId, "assistant", response);
 
         return response;
-    }
-
-    private String buildResultSummary(Map<Integer, StepResult> results) {
-        var sb = new StringBuilder();
-        for (var entry : results.entrySet()) {
-            StepResult r = entry.getValue();
-            sb.append(r.label()).append(": ")
-                    .append(r.success() ? "SUCCESS" : "FAILED")
-                    .append(" (").append(r.durationMs()).append("ms)")
-                    .append(" — ").append(truncate(r.output(), 100))
-                    .append('\n');
-        }
-        return sb.toString();
     }
 
     private String buildFinalResponse(Map<Integer, StepResult> results) {

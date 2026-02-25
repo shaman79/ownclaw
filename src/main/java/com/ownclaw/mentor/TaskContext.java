@@ -12,12 +12,11 @@ import java.util.*;
  */
 public record TaskContext(
         Set<String> matchedSkills,
-        boolean hasFailures,
         boolean isFollowUp
 ) {
 
     /** Empty context — no skills matched, no special strategies injected. */
-    public static final TaskContext EMPTY = new TaskContext(Set.of(), false, false);
+    public static final TaskContext EMPTY = new TaskContext(Set.of(), false);
 
     /**
      * Build a TaskContext from a classification's matched-skills JSON.
@@ -36,17 +35,12 @@ public record TaskContext(
                 skills.add(matcher.group(1));
             }
         }
-        return new TaskContext(skills, false, false);
-    }
-
-    /** Return a copy with failures flag set. */
-    public TaskContext withFailures() {
-        return new TaskContext(matchedSkills, true, isFollowUp);
+        return new TaskContext(skills, false);
     }
 
     /** Return a copy marked as a follow-up round. */
     public TaskContext asFollowUp() {
-        return new TaskContext(matchedSkills, hasFailures, true);
+        return new TaskContext(matchedSkills, true);
     }
 
     // ─── skill-group predicates ───
@@ -65,10 +59,5 @@ public record TaskContext(
     public boolean involvesFiles() {
         return matchedSkills.stream().anyMatch(s ->
                 s.contains("file") || s.contains("directory") || s.contains("folder"));
-    }
-
-    public boolean involvesShell() {
-        return matchedSkills.stream().anyMatch(s ->
-                s.contains("shell") || s.contains("command"));
     }
 }

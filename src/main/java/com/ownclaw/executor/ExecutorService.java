@@ -67,22 +67,11 @@ public class ExecutorService {
             JSON format:
             {"intent":"...","matches":[{"name":"skill_name","confidence":0.0-1.0}],"overall_confidence":0.0-1.0,"needs_mentor":true/false,"conversational":true/false}
             
-            CRITICAL — "conversational" MUST be false when:
-            - User asks to DO anything (fetch, run, read, write, check, find, open, go to, etc.)
-            - User mentions a URL, file path, or command
-            - User wants information that requires fetching data from the internet
-            - User wants to interact with any system, API, or website
-            - ANY skill could help fulfill the request
-            - User asks about weather, stock prices, or real-time data NOT in SYSTEM INFO
-            
-            "conversational" = true when:
-            - Pure greetings ("hello", "hi", "thanks")
-            - Questions about the system itself ("what can you do?", "how do you work?")
-            - Chitchat with zero actionable intent
-            - The answer is ALREADY PRESENT in SYSTEM INFO above.
-            
-            When in doubt, set "conversational" = false.
-            "needs_mentor" = true if multiple steps or skills are needed.
+            "conversational" = true ONLY for pure greetings, chitchat, questions about the system
+            itself with zero actionable intent, or when the answer is already in SYSTEM INFO.
+            Default to false — any actionable request (fetch, run, write, search, check, open, go to)
+            is NOT conversational. When in doubt, set conversational = false.
+            "needs_mentor" = true if task needs multiple steps or skills.
             """.formatted(platformInfo(), skillSnippet);
 
         List<LlmMessage> messages = List.of(
@@ -238,15 +227,9 @@ public class ExecutorService {
     public String converse(String userMessage, List<LlmMessage> history) {
         String systemPrompt = """
             You are OwnClaw, a helpful autonomous AI assistant.
-            
             SYSTEM INFO: %s
-            
-            You can execute tasks using skills (shell commands, file operations, web requests, etc.)
-            but right now the user is just chatting. Respond naturally and helpfully.
-            If the user seems to want an action, suggest they phrase it as a task.
-            When the user asks about the current date/time, answer from SYSTEM INFO above.
-            Keep responses concise — under 200 words unless detail is needed.
-            Use markdown formatting for readability.
+            Respond naturally and helpfully. Answer date/time questions from SYSTEM INFO.
+            Keep responses under 200 words unless detail is needed. Use markdown.
             """.formatted(platformInfo());
 
         List<LlmMessage> messages = new java.util.ArrayList<>();
@@ -290,8 +273,6 @@ public class ExecutorService {
             You are a data extraction assistant. A task was executed on behalf of the user.
             Extract and present ONLY the relevant information from the output below.
             
-            SYSTEM INFO: %s
-            
             STRICT RULES:
             - ONLY output information that is LITERALLY present in the RAW OUTPUT.
             - NEVER invent, fabricate, guess, or add ANY information not found verbatim in the output.
@@ -300,7 +281,7 @@ public class ExecutorService {
             - Be thorough — include ALL relevant data from the matching section, not just a sample.
             - If you cannot find the requested data in the output, say so honestly.
             - Do NOT show raw JSON or HTML unless the user asked for it.
-            """.formatted(platformInfo());
+            """;
 
         String userContent = "USER ASKED: " + userMessage + "\n\nRAW OUTPUT:\n" + truncated;
 
@@ -335,32 +316,14 @@ public class ExecutorService {
      * @param rawOutput   raw results from plan execution
      * @return evaluation result
      */
-    public CompletenessResult evaluateCompleteness(String userMessage, String rawOutput,
-                                                    boolean hasFailures) {
+    public CompletenessResult evaluateCompleteness(String userMessage, String rawOutput) {
         // Pre-process to strip HTML, keep links visible
         String processed = preprocessForCompleteness(rawOutput);
         String truncated = processed.length() > 6000
                 ? processed.substring(0, 6000) + "\n... [truncated]"
                 : processed;
 
-        // Build the evaluation prompt — include failure guidance only when
-        // the output actually contains failures (keeps prompt small otherwise)
-        String failedStepsSection = "";
-        if (hasFailures) {
-            failedStepsSection = """
-                    
-                    About FAILED STEPS in the output:
-                    - If you see "FAILED STEPS" in the output, that means those operations already
-                      failed and CANNOT be retried with the same parameters.
-                    - Do NOT request retrying the exact same URL that returned 404 or DNS failure.
-                    - If a URL failed, suggest an ALTERNATIVE approach in follow_up:
-                      e.g. "search the web for <restaurant name> menu page" or "try URL variant /menu"
-                    - If enough data was gathered despite some failures, set complete=true.
-                    - If the missing data is truly needed, suggest a web search or alternative URL, not a retry.
-                    """;
-        }
-
-        String systemPrompt = ("""
+        String systemPrompt = """
             You are an evaluation agent. Decide if the output fully answers the user's question.
             
             SYSTEM INFO: %s
@@ -383,7 +346,7 @@ public class ExecutorService {
               not a command that WOULD produce the answer if executed.
             - If the output only shows shell commands or error messages, set complete=false
               and suggest the correct platform command in follow_up.
-            """ + failedStepsSection).formatted(platformInfo());
+            """.formatted(platformInfo());
 
         String userContent = "USER ASKED: " + userMessage + "\n\nEXECUTION OUTPUT:\n" + truncated;
 

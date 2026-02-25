@@ -9,8 +9,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
@@ -134,24 +132,6 @@ public class SkillRepairer {
             return new RepairResult(false, skillName, 0,
                     "Repair failed: " + e.getMessage(), null);
         }
-    }
-
-    /**
-     * Read the current source code of a skill.
-     *
-     * @return the Python source code, or null if not found
-     */
-    public String readSkillSource(String skillName) {
-        return skillLoader.resolveScript(skillName)
-                .map(path -> {
-                    try {
-                        return Files.readString(path, StandardCharsets.UTF_8);
-                    } catch (Exception e) {
-                        log.warn("Could not read skill source for '{}': {}", skillName, e.getMessage());
-                        return null;
-                    }
-                })
-                .orElse(null);
     }
 
     private void logRepairAttempt(String skillName, SkillDiagnostician.Diagnosis diagnosis,

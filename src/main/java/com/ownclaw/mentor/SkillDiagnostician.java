@@ -36,20 +36,11 @@ public class SkillDiagnostician {
                If only params need adjustment, provide corrected params instead.
             
             IMPORTANT:
-            - If the error is in the skill code (bug, missing error handling, wrong parsing),
-              set fixable=true and provide the complete corrected script.
-            - If the error is about MISSING ERROR HANDLING (e.g. SSL certificate errors,
-              encoding issues, redirect loops, auth challenges), set category="code_bug"
-              and fixable=true — the skill code SHOULD handle these gracefully.
-            - SSL/TLS certificate errors (CERTIFICATE_VERIFY_FAILED, self-signed cert) are
-              ALWAYS fixable: add ssl._create_unverified_context() fallback in the skill.
-            - If the error is truly external and unfixable (DNS resolution failure for
-              non-existent domain, server completely down, permanent auth wall),
-              set fixable=false.
-            - If the error is about param format (e.g. wrong URL format, missing required param),
-              set category="bad_params", fixable=false, and explain what params should be used.
-            - Keep fixes minimal — change only what's needed to fix the specific failure.
-            - Preserve the existing I/O protocol (stdin JSON, stdout JSON lines).
+            - Code bugs or missing error handling (SSL errors, encoding issues, redirect loops,
+              auth challenges) → fixable=true. SSL cert errors: add ssl._create_unverified_context().
+            - Truly external failures (dead server, non-existent domain, permanent auth wall) → fixable=false.
+            - Wrong param format → category="bad_params", fixable=false, explain correct params.
+            - Keep fixes minimal. Preserve I/O protocol (stdin JSON, stdout JSON lines).
             
             Respond with ONLY this JSON:
             {

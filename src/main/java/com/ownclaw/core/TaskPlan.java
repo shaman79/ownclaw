@@ -12,24 +12,22 @@ import java.util.List;
  */
 public record TaskPlan(
     List<TaskStep> steps,
-    boolean reviewResult,
-    int maxRetries,
     @JsonIgnore String directAnswer,
     @JsonIgnore CreateSkillRequest createSkillRequest
 ) {
     /** Canonical constructor for normal plans (no direct answer). */
-    public TaskPlan(List<TaskStep> steps, boolean reviewResult, int maxRetries) {
-        this(steps, reviewResult, maxRetries, null, null);
+    public TaskPlan(List<TaskStep> steps) {
+        this(steps, null, null);
     }
 
     /** Create a plan that carries a direct answer — no skills needed. */
     public static TaskPlan directAnswer(String answer) {
-        return new TaskPlan(List.of(), false, 0, answer, null);
+        return new TaskPlan(List.of(), answer, null);
     }
 
     /** Create a plan that requests creating a missing skill (no steps yet). */
     public static TaskPlan createSkill(String name, String taskDescription) {
-        return new TaskPlan(List.of(), false, 0, null, new CreateSkillRequest(name, taskDescription));
+        return new TaskPlan(List.of(), null, new CreateSkillRequest(name, taskDescription));
     }
 
     /** True when the Mentor answered from knowledge (no skill execution needed). */

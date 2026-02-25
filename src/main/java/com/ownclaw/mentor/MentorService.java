@@ -107,13 +107,6 @@ public class MentorService {
               Example: "$1.success && !$2.output.isEmpty()"
             """;
 
-    /** Appended only when the Mentor is asked to review results. */
-    private static final String REVIEW_SECTION = """
-            
-            REVIEW SCHEMA:
-            {"status": "approved|retry|failed", "changes": {}, "teaching_note": str_or_null}
-            """;
-
     // ─── System-prompt constructors ──────────────────────────────────
 
     /** Build the platform-aware base and append the given section. */
@@ -180,34 +173,6 @@ public class MentorService {
         return parsePlan(response.content());
     }
 
-    /**
-     * Ask Mentor to review execution results.
-     *
-     * @param compressedResults   compressed result summary (from Executor)
-     * @param userId for logging
-     * @param taskId for logging
-     * @return review result
-     */
-    public ReviewResult review(String compressedResults, String userId, String taskId) {
-        String userMsg = "EXECUTION RESULTS:\n" + compressedResults
-                + "\n\nReview using the REVIEW SCHEMA.";
-
-        List<LlmMessage> messages = List.of(
-                LlmMessage.system(buildSystemPrompt(REVIEW_SECTION)),
-                LlmMessage.user(userMsg)
-        );
-
-        LlmResponse response = openAi.chat(messages, LlmRequestConfig.withMaxTokens(512));
-
-        budgetTracker.recordUsage(userId, "openai", response.totalTokens(), 0.0);
-
-        eventLog.log(userId, taskId, "mentor.review", "info",
-                "Mentor review (" + response.totalTokens() + " tokens)",
-                null, response.totalTokens());
-
-        return parseReview(response.content());
-    }
-
     private TaskPlan parsePlan(String json) {
         try {
             json = LlmOutputUtils.stripCodeFences(json);
@@ -234,7 +199,7 @@ public class MentorService {
                                         return TaskPlan.createSkill(name, task);
                                 }
 
-                                return new TaskPlan(List.of(), false, 0);
+                                return new TaskPlan(List.of());
             }
 
             List<TaskStep> steps = new ArrayList<>();
@@ -261,27 +226,10 @@ public class MentorService {
                         json.length() > 500 ? json.substring(0, 500) + "..." : json);
             }
 
-            boolean reviewResult = root.path("review_result").asBoolean(false);
-            int maxRetries = root.path("max_retries").asInt(1);
-
-            return new TaskPlan(steps, reviewResult, maxRetries);
+            return new TaskPlan(steps);
         } catch (Exception e) {
             log.error("Failed to parse Mentor plan: {}", e.getMessage());
             throw new LlmException("openai", "Invalid plan JSON: " + e.getMessage());
-        }
-    }
-
-    private ReviewResult parseReview(String json) {
-        try {
-            json = LlmOutputUtils.stripCodeFences(json);
-            JsonNode root = mapper.readTree(json);
-            String status = root.path("status").asText("approved");
-            String teachingNote = root.has("teaching_note") && !root.path("teaching_note").isNull()
-                    ? root.path("teaching_note").asText() : null;
-            return new ReviewResult(status, teachingNote);
-        } catch (Exception e) {
-            log.warn("Failed to parse Mentor review, defaulting to approved: {}", e.getMessage());
-            return new ReviewResult("approved", null);
         }
     }
 
@@ -321,14 +269,8 @@ public class MentorService {
                 AVAILABLE SKILLS:
                 %s
                 %s
-                Create a FOLLOW-UP execution plan to gather the missing information.
-                Use step IDs starting from %d.
-                
-                CRITICAL RULES FOR FOLLOW-UP:
-                - Do NOT retry operations that already failed with the same parameters.
-                  If a URL returned 404 or DNS failure, using the exact same URL again will fail again.
-                - The follow-up plan should be SMART — use logic to work around failures.
-                - Only fetch what's specifically missing.
+                Create a FOLLOW-UP execution plan for the missing information.
+                Use step IDs starting from %d. Fetch only what's specifically missing.
                 Use the PLAN SCHEMA.
                 """.formatted(
                 originalTask,
@@ -355,10 +297,5 @@ public class MentorService {
                 null, response.totalTokens());
 
         return parsePlan(response.content());
-    }
-
-    public record ReviewResult(String status, String teachingNote) {
-        public boolean isApproved() { return "approved".equals(status); }
-        public boolean isRetry() { return "retry".equals(status); }
     }
 }
