@@ -40,9 +40,10 @@ public class SkillGenerator {
                - Progress: {"type": "progress", "message": "..."}
                - Result:   {"type": "result", "status": "success"|"error", "output": {...}}
             4. Handle errors gracefully — catch exceptions and emit error results
-            5. Use only standard library + common packages (requests, beautifulsoup4, etc.)
-            6. Do NOT use subprocess, os.system, ctypes, eval, or exec
-            7. Keep the script under 200 lines
+            5. Use only standard library + common packages
+            6. Do NOT use subprocess, os.system, or ctypes. For shell commands, use the
+               shell_command skill in the plan instead. eval/exec are allowed.
+            7. Keep the script under 500 lines
             
             OUTPUT FORMAT (respond with ONLY this JSON, no other text):
             {

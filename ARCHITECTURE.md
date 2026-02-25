@@ -27,6 +27,34 @@ The system supports **multiple users**, each with isolated profiles, credentials
 5. **Multi-user from day one** — no single-user assumptions in the architecture
 6. **Observe everything** — every decision, token spend, and skill execution is logged and user-visible
 7. **Chat-centric UX** — the user sees concise status messages in the conversation, not a separate dashboard
+8. **Skills are generic** — the system must handle any arbitrary task without foreknowledge of it.
+   Skills are the execution primitive; the planning loop figures out how to accomplish goals
+   dynamically. Never hardcode task-specific knowledge into prompts.
+
+### Prompt Design Rules (CRITICAL — read before touching any prompt)
+
+These rules exist to keep OwnClaw generic and prevent regressions where a "fix" for one
+scenario breaks the system's ability to handle all others.
+
+- **Prompts describe the mechanism, not the task.** System prompts tell the LLM what it
+  *is* and what *tools* it has. They do NOT contain knowledge about specific technologies,
+  APIs, or how to solve particular classes of problem. That knowledge belongs in skills.
+
+- **Nothing is pre-injected.** Not config values, not service URLs, not platform hints beyond
+  what is universally true at plan time (OS name, shell, current datetime). If a task requires
+  knowing the deployment environment (e.g. what URL is the local LLM running at), the plan
+  uses `get_system_info` as a first step — a Python skill that reads `application.yaml` from
+  disk and returns the facts. Every piece of context is earned by executing a skill, never
+  handed to the planner for free.
+
+- **The planning loop is the intelligence, not the prompt.** When a step fails, the
+  completeness evaluator + follow-up planner figure out what to try next. If they can't
+  figure it out alone, the Mentor requests a new skill be auto-generated. Correct failures
+  at the loop level, not by pre-programming the answer into the system prompt.
+
+- **PromptStrategies is the right place for domain guidance.** If guidance is truly
+  needed for a class of tasks (web scraping, email, etc.), it goes into `PromptStrategies`
+  as a named strategy, injected only when that domain is detected — never always.
 
 ---
 

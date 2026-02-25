@@ -282,11 +282,13 @@ public class TaskOrchestrator {
             }
 
             // Step 6b: Iterative re-planning — check if the results actually answer the question
-            // If not, identify what's missing and create follow-up plans
-            // Runs on partial success too — even if some steps failed, successful ones may
-            // contain enough context to identify follow-up actions
+            // If not, identify what's missing and create follow-up plans.
+            // Runs on TOTAL FAILURE too: evaluateCompleteness() sees the failed steps and will
+            // recommend alternative approaches (e.g. use http_request instead of shell_command
+            // when the CLI binary is not installed). This is the "total failure replan" path.
             boolean hasAnySuccess = stepResults.values().stream().anyMatch(StepResult::success);
-            if (hasAnySuccess) {
+            boolean hasAnyRealResults = stepResults.values().stream().anyMatch(r -> !r.isSkipped());
+            if (hasAnyRealResults) {
                 int maxRounds = config.getFeedback().getMaxRounds();
                 int nextStepId = stepResults.keySet().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
 
@@ -333,8 +335,10 @@ public class TaskOrchestrator {
                                 ? followUpCtx.withFailures()
                                 : followUpCtx;
 
+                        // Pass the full evaluation context (successes + failures) so the
+                        // Mentor sees what failed and why when replanning from scratch.
                         TaskPlan followUp = mentor.followUpPlan(
-                                userMessage, buildFinalResponse(stepResults), followUpContext,
+                                userMessage, buildResponseForEvaluation(stepResults), followUpContext,
                                 skillManifest.toPromptSnippet(), nextStepId, roundCtx,
                                 userId, taskId);
 
@@ -597,6 +601,22 @@ public class TaskOrchestrator {
             .map(p -> p.normalize().toAbsolutePath().startsWith(
                 java.nio.file.Path.of(config.getSkills().getGeneratedPath()).normalize().toAbsolutePath()))
             .orElse(false);
+
+        // Fast path: exit_code 127 = OS cannot find the command binary.
+        // Self-healing modifies the Python skill wrapper but cannot install system binaries.
+        // Return an actionable failure so the orchestrator's completeness/follow-up loop can
+        // replan using a different skill (e.g., http_request to a REST API instead).
+        if (failureContext.exitCode() == 127 && !isGeneratedSkill) {
+            String cmd = String.valueOf(resolvedParams.getOrDefault("command", "")).strip();
+            String binary = cmd.isEmpty() ? "unknown" : cmd.split("\\s+")[0];
+            eventLog.info(userId, taskId, "skill.command_not_found",
+                    "exit 127: '" + binary + "' is not installed — skipping self-heal, replan expected");
+            return StepResult.failure(step.id(),
+                    "command_not_found: '" + binary + "' is not available on this host (exit code 127). "
+                    + "Use an API-based alternative (e.g., http_request to a REST endpoint) "
+                    + "instead of shell_command.",
+                    127, failedResult.durationMs());
+        }
 
         // Minimal user-facing status line: emit once per self-heal invocation.
         statusEmitter.emit(userId, StatusMessage.Type.MENTOR,

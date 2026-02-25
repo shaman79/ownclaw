@@ -119,5 +119,15 @@
     "credentials" : [ ],
     "reversible" : false,
     "interactive" : false
+  }, {
+    "name" : "get_system_info",
+    "version" : 1,
+    "summary" : "Return runtime facts about this OwnClaw deployment: executor URL, model, platform, shell. Use this as a first step whenever a task requires knowledge of configured services or environment.",
+    "keywords" : [ "system", "info", "config", "environment", "executor", "url", "model", "platform", "services", "local", "llm", "deployment" ],
+    "complexity" : "low",
+    "params" : [ "filter?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
   } ]
 }
