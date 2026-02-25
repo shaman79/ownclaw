@@ -31,57 +31,37 @@ public class SkillGenerator {
     private static final String GENERATION_PROMPT = """
             You are a Python skill generator for an autonomous agent system.
             
-            Generate a Python script that implements the requested capability.
+            Generate a Python script implementing the requested capability.
             
             REQUIREMENTS:
-            1. Script must be directly executable (with 'if __name__ == "__main__"' block)
-            2. Read input as JSON from stdin: `params = json.loads(sys.stdin.read())`
-            3. Emit output as JSON lines to stdout using this protocol:
-               - Progress: {"type": "progress", "message": "..."}
-               - Result:   {"type": "result", "status": "success"|"error", "output": {...}}
-            4. Handle errors gracefully — catch exceptions and emit error results
-            5. Use only standard library + common packages
-            6. Do NOT use subprocess, os.system, or ctypes. For shell commands, use the
-               shell_command skill in the plan instead. eval/exec are allowed.
-            7. Do NOT use Python libraries that are thin wrappers around system binaries
-               (e.g. pytesseract requires tesseract, moviepy requires ffmpeg). The system
-               cannot install OS packages at runtime. If a capability like OCR is needed,
-               use a free HTTP API that requires no system install.
-            8. NEVER emit need_input or use the ask_user interaction protocol. Skills run in
-               fully automated, non-interactive contexts. All input comes from JSON params in
-               stdin at startup. If a required param is missing or empty, emit an error result
-               immediately: {"type":"result","status":"error","output":{"error":"Missing required param: X"}}
-            9. Keep the script under 500 lines
-            10. ALL third-party package imports MUST be guarded with try/except ImportError.
-               If an import fails, emit an error result and sys.exit(1). Never place bare
-               third-party imports at module top-level — the venv may not be ready yet.
-               Pattern:
-                 try:
-                     import requests
-                 except ImportError:
-                     print(json.dumps({"type":"result","status":"error","output":{"error":"missing_module: requests"}}))
-                     sys.exit(1)
-            11. Generate REUSABLE skills: accept generic input params (e.g. "query",
-               "location", "url"). Do NOT hard-code specific values (like city names or
-               dates) into the script — those are task inputs, not skill logic.
+            1. Directly executable with `if __name__ == "__main__"` block.
+            2. Read input: `params = json.loads(sys.stdin.read())`
+            3. Output protocol (JSON lines to stdout):
+               - Progress: {"type":"progress","message":"..."}
+               - Result:   {"type":"result","status":"success"|"error","output":{...}}
+            4. Catch all exceptions; emit error results — never crash silently.
+            5. Standard library + common packages only.
+            6. No subprocess/os.system/ctypes. Use shell_command skill in the plan for shell needs.
+            7. No libraries wrapping system binaries. The system cannot install OS packages at runtime.
+               For OCR or similar needs, use a free HTTP API instead.
+            8. No need_input or ask_user. Skills are non-interactive. Missing required param → emit error immediately:
+               {"type":"result","status":"error","output":{"error":"Missing required param: X"}}
+            9. Under 500 lines.
+            10. ALL third-party imports must be guarded with try/except ImportError → emit error + sys.exit(1).
+                Never place bare third-party imports at module top-level.
+            11. Generate REUSABLE skills with generic params. Never hard-code task-specific values.
             
-            OUTPUT FORMAT (respond with ONLY this JSON, no other text):
+            OUTPUT FORMAT (ONLY this JSON, no other text):
             {
               "name": "skill_name_lowercase_underscored",
-              "summary": "One-line description of what this skill does",
-              "keywords": ["keyword1", "keyword2", ...],
+              "summary": "One-line description",
+              "keywords": ["kw1", "kw2"],
               "params": ["param1", "param2?"],
               "credentials": [],
               "requirements": "package1>=1.0\\npackage2",
-              "script": "#!/usr/bin/env python3\\nimport json\\nimport sys\\n...",
-              "test_params": {"param1": "test_value"}
+              "script": "#!/usr/bin/env python3\\n...",
+              "test_params": {"param1": "safe_test_value"}
             }
-            
-            NOTES:
-            - "params" uses ? suffix for optional parameters
-            - "requirements" is the content of requirements.txt (empty string if only stdlib)
-            - "test_params" should be safe test values that won't cause side effects
-            - "credentials" lists env var names the skill needs (e.g., ["API_KEY"])
             """;
 
     private final OpenAiProvider openAi;

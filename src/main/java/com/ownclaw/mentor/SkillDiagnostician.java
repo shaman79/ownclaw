@@ -27,40 +27,32 @@ public class SkillDiagnostician {
     private static final String DIAGNOSIS_PROMPT = """
             You are an expert Python debugger for an autonomous agent system.
             
-            A skill script failed during execution. Analyze the failure report and determine:
-            1. ROOT CAUSE: What exactly went wrong
-            2. CATEGORY: One of: code_bug | missing_dependency | bad_params | network_error
-                         | timeout | permission_denied | external_service_error | data_format
-            3. FIXABLE: Can this be fixed by modifying the skill's Python code? (true/false)
-            4. FIX: If fixable, provide the COMPLETE corrected Python script.
-               If only params need adjustment, provide corrected params instead.
+            Analyze the skill failure and determine:
+            1. ROOT CAUSE: what exactly went wrong
+            2. CATEGORY: code_bug | missing_dependency | bad_params | network_error | timeout | permission_denied | external_service_error | data_format
+            3. FIXABLE: can modifying the Python code fix this?
+            4. FIX: if fixable, the COMPLETE corrected script or corrected params.
             
-            IMPORTANT — FIXABILITY RULES (apply strictly, in order):
-            1. missing_dependency (system binary not found, e.g. tesseract, ffmpeg, curl):
-               → fixable=false ALWAYS. The SkillRepairer modifies Python code only; it cannot install
-                 system packages. lesson: suggest a Python library or HTTP API alternative.
-            2. permission_denied (sudo blocked, setuid, 'no new privileges' container flag):
-               → fixable=false ALWAYS. No code change can grant OS-level privileges.
-                 lesson: suggest removing sudo / finding an API alternative.
-            3. Code bugs or missing Python error handling (SSL errors, encoding issues, redirect
-               loops, auth challenges) → fixable=true. Fix inline: SSL → ssl._create_unverified_context().
-            4. Truly external failures (dead server, non-existent domain, permanent auth wall) → fixable=false.
-            5. Wrong param format → category="bad_params", fixable=false, explain correct params.
-            - Keep fixes minimal. Preserve I/O protocol (stdin JSON, stdout JSON lines).
+            FIXABILITY RULES (strict order):
+            1. missing_dependency (system binary not installed): fixable=false. Suggest a Python lib or HTTP API alternative.
+            2. permission_denied (sudo blocked, no new privileges): fixable=false. No code change grants OS privileges.
+            3. Code bugs, missing error handling (SSL, encoding, redirects): fixable=true. Fix in-place.
+            4. External failures (dead server, permanent auth wall): fixable=false.
+            5. Wrong param format: category=bad_params, fixable=false.
+            Keep fixes minimal. Preserve stdin JSON → stdout JSON-lines protocol.
             
-            For the "lesson" field, write a CONCRETE NEXT-STEP SUGGESTION, not a post-mortem.
-            Write what the NEXT attempt should try differently.
+            For "lesson": write a concrete next-step suggestion — what the NEXT attempt should do differently.
             
             Respond with ONLY this JSON:
             {
-              "root_cause": "concise explanation of what went wrong",
+              "root_cause": "concise explanation",
               "category": "code_bug|missing_dependency|bad_params|network_error|timeout|permission_denied|external_service_error|data_format",
               "fixable": true|false,
               "confidence": 0.0-1.0,
-              "fixed_script": "complete corrected Python script (null if not fixable)",
-              "fixed_params": {"key": "value"} or null,
-              "requirements": "additional pip requirements if needed (null if none)",
-              "lesson": "what should be remembered to avoid this failure in the future"
+              "fixed_script": "complete corrected Python script or null",
+              "fixed_params": {"key":"value"} or null,
+              "requirements": "pip requirements or null",
+              "lesson": "concrete next-step suggestion"
             }
             """;
 
