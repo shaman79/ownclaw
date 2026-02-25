@@ -706,7 +706,13 @@ public class TaskOrchestrator {
             }
         }
 
-        return StepResult.failure(step.id(), cause, originalFailure.exitCode(), originalFailure.durationMs());
+        // Append the diagnosis lesson so the Mentor sees an actionable hint in PREVIOUS FAILURES.
+        // This is the primary channel by which diagnostic insights inform follow-up planning.
+        String fullOutput = cause;
+        if (diagnosis.lesson() != null && !diagnosis.lesson().isBlank()) {
+            fullOutput = cause + "\nHint for next attempt: " + diagnosis.lesson();
+        }
+        return StepResult.failure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
     }
 
     /** Extract the relevant command/binary name from step params or the diagnosis root cause. */
@@ -947,7 +953,7 @@ public class TaskOrchestrator {
         for (StepResult r : results.values()) {
             if (r.success()) continue;
             if (r.isSkipped()) continue;
-            sb.append("- ").append(r.label()).append(": ").append(truncate(r.output(), 150)).append('\n');
+            sb.append("- ").append(r.label()).append(": ").append(truncate(r.output(), 300)).append('\n');
         }
         return sb.toString();
     }

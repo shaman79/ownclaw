@@ -42,6 +42,9 @@ public class SkillDiagnostician {
             - Wrong param format → category="bad_params", fixable=false, explain correct params.
             - Keep fixes minimal. Preserve I/O protocol (stdin JSON, stdout JSON lines).
             
+            For the "lesson" field, write a CONCRETE NEXT-STEP SUGGESTION, not a post-mortem.
+            Write what the NEXT attempt should try differently.
+            
             Respond with ONLY this JSON:
             {
               "root_cause": "concise explanation of what went wrong",
