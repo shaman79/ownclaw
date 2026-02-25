@@ -192,16 +192,17 @@ public class SkillRunnerService {
         PythonEnvironmentService.PythonResolution py = pythonEnv.resolveExecution(workDir, step.skill());
         String python = py.python();
 
-        // If we're using the non-venv fallback, prepend its PYTHONPATH to any existing.
+        // Merge extra env from Python resolution (venv PATH injection, PYTHONPATH fallback, etc.).
+        // PATH and PYTHONPATH are prepended rather than replaced so system entries are preserved.
         if (py.extraEnv() != null && !py.extraEnv().isEmpty()) {
             for (var entry : py.extraEnv().entrySet()) {
-                if ("PYTHONPATH".equals(entry.getKey())) {
+                if ("PYTHONPATH".equals(entry.getKey()) || "PATH".equals(entry.getKey())) {
                     String prepend = entry.getValue();
-                    String existing = envVars.getOrDefault("PYTHONPATH", System.getenv("PYTHONPATH"));
+                    String existing = envVars.getOrDefault(entry.getKey(), System.getenv(entry.getKey()));
                     if (existing != null && !existing.isBlank()) {
-                        envVars.put("PYTHONPATH", prepend + java.io.File.pathSeparator + existing);
+                        envVars.put(entry.getKey(), prepend + java.io.File.pathSeparator + existing);
                     } else {
-                        envVars.put("PYTHONPATH", prepend);
+                        envVars.put(entry.getKey(), prepend);
                     }
                 } else {
                     envVars.put(entry.getKey(), entry.getValue());

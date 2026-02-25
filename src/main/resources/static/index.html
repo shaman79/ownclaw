@@ -302,20 +302,23 @@
         .msg.first-in-run { margin-top: 28px }
         .msg:first-child { margin-top: 0 }
 
-        /*  User message  */
+        /*  User message — transparent column-width container, bubble pushed right  */
         .msg.user {
-            align-self: flex-end;
-            margin-left: auto;
-            margin-right: 0;
+            display: flex;
+            justify-content: flex-end;
             margin-bottom: 4px;
+        }
+        .msg.user .bubble {
             max-width: 72%;
             background: linear-gradient(150deg, var(--user-hi), var(--user-bg) 90%);
             color: #fff;
             padding: 10px 16px;
-            border-radius: 18px 18px 4px 18px;
+            border-radius: 14px 14px 4px 14px;
             font-size: 15px;
             line-height: 1.65;
             white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
             box-shadow: 0 2px 14px rgba(55,48,163,.3);
         }
 
@@ -682,7 +685,7 @@
         @media (max-width: 600px) {
             #messages { padding: 20px 14px 12px }
             #input-area { padding: 10px 12px 16px }
-            .msg.user { max-width: 85% }
+            .msg.user .bubble { max-width: 85% }
             #header { padding: 0 14px }
         }
     </style>
@@ -1045,7 +1048,10 @@
         div.className = 'msg ' + type + (firstInRun ? ' first-in-run' : '');
 
         if (isUserMsg) {
-            div.textContent = text;
+            var bubble = document.createElement('div');
+            bubble.className = 'bubble';
+            bubble.textContent = text;
+            div.appendChild(bubble);
         } else if (isAiMsg) {
             var avatar = document.createElement('div');
             avatar.className = 'msg-avatar';

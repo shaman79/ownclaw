@@ -219,7 +219,11 @@ public class PythonEnvironmentService {
             // Try venv path first.
             String python = resolvePython(skillDir, skillName);
             if (python != null && !python.isBlank() && !python.equals(systemPython)) {
-                return new PythonResolution(python, Map.of());
+                // Expose the venv bin/ directory on PATH so that subprocesses launched
+                // by the skill (e.g. "python3 -c ..." via shell_command) also resolve
+                // to this venv's Python and can find its installed packages.
+                String venvBin = Path.of(python).getParent().toAbsolutePath().toString();
+                return new PythonResolution(python, Map.of("PATH", venvBin));
             }
 
             // Venv unavailable or provisioning failed; try a target install + PYTHONPATH.
