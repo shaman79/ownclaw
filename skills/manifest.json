@@ -40,6 +40,16 @@
     "reversible" : false,
     "interactive" : false
   }, {
+    "name" : "image_ocr",
+    "version" : 1,
+    "summary" : "Extract text from an image (JPEG, PNG, GIF, BMP, TIFF, WebP) using the ocr.space OCR API. Does NOT require tesseract or any system binary. Supply image_url. Optional: api_key (defaults to free demo key), language (default: eng), ocr_engine (1=standard, 2=enhanced).",
+    "keywords" : [ "ocr", "image", "text", "extract", "scan", "photo", "read", "picture", "optical character recognition", "tesseract", "menu", "receipt", "screenshot", "invoice" ],
+    "complexity" : "low",
+    "params" : [ "image_url", "api_key?", "language?", "ocr_engine?" ],
+    "credentials" : [ ],
+    "reversible" : false,
+    "interactive" : false
+  }, {
     "name" : "web_search",
     "version" : 1,
     "summary" : "Performs a web search using a query string and returns the top search result.",

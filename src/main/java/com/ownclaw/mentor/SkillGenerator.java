@@ -173,20 +173,25 @@ public class SkillGenerator {
                     continue;
                 }
 
-                                // If Mentor didn't explicitly mark interactive, infer from script usage of need_input.
-                                if (!interactive && script.contains("need_input")) {
-                                        interactive = true;
-                                }
+                // Strip markdown code fences — LLMs often wrap the script in ```python ... ```
+                // which causes SyntaxError: invalid syntax on line 1.
+                script = stripMarkdownFences(script);
+
+                // If Mentor didn't explicitly mark interactive, infer from script usage of need_input.
+                if (!interactive && script.contains("need_input")) {
+                    interactive = true;
+                }
 
                 // Sanitize skill name
                 skillName = skillName.toLowerCase().replaceAll("[^a-z0-9_]", "_");
 
-                                // Enforce expected skill name if provided
-                                if (expectedSanitized != null && !expectedSanitized.equals(skillName)) {
-                                        lastError = "Generated skill name mismatch: expected '" + expectedSanitized
-                                                        + "' but got '" + skillName + "'";
-                                        continue;
-                                }
+                // Enforce expected skill name: override the LLM's choice rather than retrying.
+                // The LLM reliably ignores the "use this exact name" instruction.
+                // The script content is what matters; the file path is ours to control.
+                if (expectedSanitized != null && !expectedSanitized.equals(skillName)) {
+                    log.info("Overriding LLM skill name '{}' -> '{}'", skillName, expectedSanitized);
+                    skillName = expectedSanitized;
+                }
 
                 // Write to disk
                 Path versionDir = versionManager.createSkillVersion(skillName, script,
@@ -232,6 +237,21 @@ public class SkillGenerator {
 
         return new GenerationResult(false, null, 0,
                 "Failed to generate skill: " + lastError, List.of());
+    }
+
+    /**
+     * Strip markdown code fences from a Python script.
+     * LLMs often wrap generated code in ```python ... ``` which causes SyntaxError at line 1.
+     * Package-visible so SkillRepairer can reuse it.
+     */
+    static String stripMarkdownFences(String code) {
+        if (code == null) return code;
+        String trimmed = code.strip();
+        // Remove leading ```python or ``` (with optional trailing spaces/newline)
+        trimmed = trimmed.replaceAll("(?s)^```[a-zA-Z]*\\r?\\n", "");
+        // Remove trailing ``` (with optional surrounding whitespace)
+        trimmed = trimmed.replaceAll("(?s)\\r?\\n```\\s*$", "");
+        return trimmed.strip();
     }
 
     private JsonNode parseGenerationResponse(String raw) {

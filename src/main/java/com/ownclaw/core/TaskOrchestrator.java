@@ -576,10 +576,20 @@ public class TaskOrchestrator {
                 java.nio.file.Path.of(config.getSkills().getGeneratedPath()).normalize().toAbsolutePath()))
             .orElse(false);
 
-        // Fast path: exit_code 127 = OS cannot find the command binary.
-        // Self-healing modifies the Python skill wrapper but cannot install system binaries.
-        // Ask the user for an alternative before letting the follow-up loop replan.
-        if (failureContext.exitCode() == 127 && !isGeneratedSkill) {
+        // Fast path: "command not found" — the shell_command skill ran a missing binary.
+        // The Python wrapper always exits 0 and embeds the real exit code in its JSON stdout,
+        // so failureContext.exitCode() is 0 and the exitCode==127 check never fires.
+        // Detect via the embedded JSON content or stderr string instead.
+        // Self-healing can only modify Python — it cannot install system binaries.
+        // Skip ALL repair/regenerate attempts; go straight to creating a replacement skill.
+        boolean commandNotFound = failureContext.exitCode() == 127
+                || (failureContext.stdout() != null
+                        && (failureContext.stdout().contains("command not found")
+                                || failureContext.stdout().contains("\"exit_code\":127")
+                                || failureContext.stdout().contains("\"exit_code\": 127")))
+                || (failureContext.stderr() != null
+                        && failureContext.stderr().contains("command not found"));
+        if (commandNotFound && !isGeneratedSkill) {
             String cmd = String.valueOf(resolvedParams.getOrDefault("command", "")).strip();
             String binary = cmd.isEmpty() ? "unknown" : cmd.split("\\s+")[0];
             eventLog.info(userId, taskId, "skill.command_not_found",

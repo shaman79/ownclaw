@@ -67,6 +67,10 @@ public class MentorService {
               a non-privileged user with 'no new privileges' enforced. System packages cannot
               be installed at runtime. If a CLI tool is missing, create a skill that uses a
               Python library or HTTP API instead.
+            - For ANY task involving reading text from an image (OCR, menu, receipt,
+              screenshot, invoice, photo of text), use the 'image_ocr' skill directly.
+              Do NOT use shell_command with tesseract or any other binary OCR tool.
+              The 'image_ocr' skill uses the ocr.space HTTP API and needs no system installs.
             
             TRIVIAL KNOWLEDGE:
             - If the answer is ALREADY in SYSTEM CONTEXT above (e.g. current date/time),

@@ -71,10 +71,13 @@ public class SkillRepairer {
                 skillName, previousVersion, diagnosis.category());
 
         try {
-            // Step 1: Create new version with fixed script
+            // Step 1: Create new version with fixed script.
+            // Strip markdown code fences — LLMs sometimes wrap the repaired script in ```python ... ```
+            // which causes SyntaxError: invalid syntax on line 1.
+            String fixedScript = SkillGenerator.stripMarkdownFences(diagnosis.fixedScript());
             String requirements = diagnosis.requirements();
             Path versionDir = versionManager.createSkillVersion(
-                    skillName, diagnosis.fixedScript(), requirements);
+                    skillName, fixedScript, requirements);
 
             int newVersion = versionManager.getCurrentVersion(skillName);
 
