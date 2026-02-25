@@ -1,58 +1,41 @@
 #!/usr/bin/env python3
-"""websearch skill — alias of web_search (common naming variant).
-
-Protocol: JSON on stdin -> JSON-lines on stdout.
-Requires: requests, beautifulsoup4 (installed via requirements.txt)
+"""websearch skill — thin alias that delegates to web_search/v1/skill.py.
 
 Why this exists:
 - Users/LLMs often write "websearch" instead of "web_search".
-- Keeping a core alias prevents unnecessary generated skills and makes deps deterministic.
+- Keeping a core alias prevents unnecessary generated skills.
+
+Protocol: JSON on stdin -> JSON-lines on stdout.
 """
 
-import json
+import importlib.util
+import os
 import sys
-import urllib.parse
 
-import requests
-from bs4 import BeautifulSoup
-
-
-def emit_progress(message: str):
-    print(json.dumps({"type": "progress", "message": message}), flush=True)
-
-
-def emit_result(status: str, output: dict):
-    print(json.dumps({"type": "result", "status": status, "output": output}), flush=True)
+# Locate web_search/v1/skill.py robustly regardless of where this alias lives.
+# Directory layout: skills/{core|generated}/{skillname}/{vN}/skill.py
+# Go up 3 levels from this file to reach the skills/ root, then descend into core/web_search.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))  # .../vN
+_SKILL_DIR = os.path.dirname(_THIS_DIR)                 # .../websearch
+_TYPE_DIR  = os.path.dirname(_SKILL_DIR)                # .../core (or generated)
+_SKILLS_ROOT = os.path.dirname(_TYPE_DIR)               # .../skills/
+_WS_SCRIPT = os.path.join(_SKILLS_ROOT, "core", "web_search", "v1", "skill.py")
 
 
-def perform_web_search(query: str) -> str:
-    q = urllib.parse.quote_plus(query)
-    search_url = f"https://duckduckgo.com/html/?q={q}"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; OwnClaw/1.0)"}
-    resp = requests.get(search_url, headers=headers, timeout=20)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    a = soup.select_one("a.result__a")
-    if not a or not a.get("href"):
-        return "No results found."
-    return a.get("href")
-
-
-def main():
-    try:
-        params = json.loads(sys.stdin.read() or "{}")
-        query = params.get("query")
-        if not query or not str(query).strip():
-            emit_result("error", {"error": "Missing required parameter: query"})
-            return
-
-        emit_progress("Performing web search...")
-        top = perform_web_search(str(query).strip())
-        emit_result("success", {"result": top})
-    except Exception as e:
-        emit_result("error", {"error": str(e)})
+def _load_web_search():
+    if not os.path.exists(_WS_SCRIPT):
+        raise FileNotFoundError(f"web_search skill not found at: {_WS_SCRIPT}")
+    spec = importlib.util.spec_from_file_location("web_search_skill", _WS_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        mod = _load_web_search()
+        mod.main()
+    except Exception as e:
+        import json
+        print(json.dumps({"type": "result", "status": "error",
+                          "output": {"error": f"websearch alias failed to load web_search: {e}"}}))

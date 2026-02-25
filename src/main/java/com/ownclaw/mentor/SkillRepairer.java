@@ -85,9 +85,11 @@ public class SkillRepairer {
                     "Repairing " + skillName + " v" + previousVersion + " → v" + newVersion
                             + " | cause: " + diagnosis.rootCause());
 
-            // Step 2: Validate the new version
+            // Step 2: Validate the new version including a sandbox dry-run.
+            // Pass empty params "{}" — this verifies imports resolve and the script
+            // doesn't crash on startup, catching dependency regressions before runtime.
             SkillValidator.ValidationResult validation = validator.validate(
-                    versionDir, skillName, null);  // no dry run — we'll test with the real task
+                    versionDir, skillName, "{}");
 
             if (!validation.passed()) {
                 // Validation failed — roll back

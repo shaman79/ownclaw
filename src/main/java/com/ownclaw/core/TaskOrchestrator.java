@@ -609,6 +609,15 @@ public class TaskOrchestrator {
             log.info("Self-heal attempt {}/{} for skill '{}' step {}",
                 attempt, boundedAttempts, step.skill(), step.id());
 
+            // Re-check budget on every iteration — diagnosis calls can be 1000-4000 tokens each.
+            if (!budgetTracker.hasBudget(userId)) {
+                log.info("Token budget exhausted mid-loop — stopping self-heal for step {}", step.id());
+                return buildDefinitiveFailure(step,
+                        new SkillDiagnostician.Diagnosis("Token budget exhausted",
+                                "external_service_error", false, 1.0, null, null, null, null),
+                        failedResult, userId, taskId);
+            }
+
             // Step 1: Diagnose
             SkillDiagnostician.Diagnosis diagnosis = skillDiagnostician.diagnose(
                     failureContext, userId, taskId);
@@ -650,7 +659,11 @@ public class TaskOrchestrator {
 
                     // Retry failed even after repair — capture new context for next attempt
                     failureContext = skillRunner.getLastFailureContext();
-                    if (failureContext == null) break;
+                    if (failureContext == null) {
+                        // Runner didn't record a new context (unusual) — use what we already know.
+                        log.warn("No failure context after repair retry for '{}' — ending self-heal", step.skill());
+                        return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId);
+                    }
 
                     log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
                     // If repairs keep failing and this is a generated skill, try regeneration once.
