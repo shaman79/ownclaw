@@ -31,11 +31,11 @@
     "interactive" : false
   }, {
     "name" : "pdf_parser",
-    "version" : 1,
-    "summary" : "Download and extract text from a PDF file (by URL or local path)",
-    "keywords" : [ "pdf", "parse", "extract", "text", "document", "download", "read" ],
+    "version" : 2,
+    "summary" : "Download a PDF from a URL and extract its full text with high-quality layout-aware parsing (PyMuPDF). Use 'url' param — always a raw http/https URL string. Returns structured text with page separators.",
+    "keywords" : [ "pdf", "parse", "extract", "text", "document", "download", "read", "menu", "invoice", "report" ],
     "complexity" : "low",
-    "params" : [ "url?", "path?", "max_pages?" ],
+    "params" : [ "url", "max_pages?" ],
     "credentials" : [ ],
     "reversible" : false,
     "interactive" : false

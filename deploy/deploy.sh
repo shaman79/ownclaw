@@ -187,6 +187,12 @@ do_setup() {
         useradd --system --home-dir "$DEPLOY_DIR" --shell /usr/sbin/nologin ownclaw
     fi
 
+    # Allow ownclaw to read systemd journal (so shell_command can run journalctl for self-diagnosis)
+    if getent group systemd-journal &>/dev/null; then
+        usermod -aG systemd-journal ownclaw
+        log "Added ownclaw to systemd-journal group"
+    fi
+
     # Create directory structure
     log "Creating directories..."
     mkdir -p "$DEPLOY_DIR"/{data,logs,backups,skills/_envs,skills/core,skills/generated}
