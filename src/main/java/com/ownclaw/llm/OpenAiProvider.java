@@ -56,6 +56,10 @@ public class OpenAiProvider implements LlmProvider {
         body.put("temperature", temperature);
         body.put("max_tokens", maxTokens);
 
+        if (reqConfig.jsonMode()) {
+            body.putObject("response_format").put("type", "json_object");
+        }
+
         ArrayNode msgs = body.putArray("messages");
         for (LlmMessage msg : messages) {
             ObjectNode m = msgs.addObject();

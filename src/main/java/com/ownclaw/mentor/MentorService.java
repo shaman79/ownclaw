@@ -77,9 +77,7 @@ public class MentorService {
             {
               "steps": [{"id":int, "skill":str, "params":{},
                          "depends_on":[int], "condition":str_or_null,
-                         "on_fail":"report|skip|retry", "reversible":bool}],
-              "review_result": bool,
-              "max_retries": int
+                         "on_fail":"report|skip|retry", "reversible":bool}]
             }
 
                                                 ALTERNATIVE (only if no available skills can help even in combination):
@@ -161,7 +159,7 @@ public class MentorService {
                 LlmMessage.user(userMsg)
         );
 
-        LlmResponse response = openAi.chat(messages, LlmRequestConfig.withMaxTokens(2048));
+        LlmResponse response = openAi.chat(messages, LlmRequestConfig.withJsonMode(2048));
 
         budgetTracker.recordUsage(userId, "openai", response.totalTokens(), 0.0);
 
@@ -288,7 +286,7 @@ public class MentorService {
                 LlmMessage.user(userMsg)
         );
 
-        LlmResponse response = openAi.chat(messages, LlmRequestConfig.withMaxTokens(1024));
+        LlmResponse response = openAi.chat(messages, LlmRequestConfig.withJsonMode(1024));
 
         budgetTracker.recordUsage(userId, "openai", response.totalTokens(), 0.0);
 

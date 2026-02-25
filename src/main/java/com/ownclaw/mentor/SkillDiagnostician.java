@@ -87,7 +87,7 @@ public class SkillDiagnostician {
                     LlmMessage.user(diagnosticReport)
             );
 
-            LlmResponse response = openAi.chat(messages, LlmRequestConfig.withMaxTokens(4096));
+            LlmResponse response = openAi.chat(messages, LlmRequestConfig.withJsonMode(4096));
 
             budgetTracker.recordUsage(userId, "openai", response.totalTokens(), 0.0);
 

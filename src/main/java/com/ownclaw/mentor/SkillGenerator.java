@@ -135,7 +135,7 @@ public class SkillGenerator {
                         LlmMessage.user(prompt)
                 );
 
-                LlmResponse response = openAi.chat(messages, LlmRequestConfig.withMaxTokens(4096));
+                LlmResponse response = openAi.chat(messages, LlmRequestConfig.withJsonMode(4096));
 
                 eventLog.log(userId, taskId, "skill.generation", "info",
                         "Mentor generating skill (attempt " + (attempt + 1) + ", "
