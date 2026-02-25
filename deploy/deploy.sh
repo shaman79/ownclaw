@@ -185,7 +185,15 @@ do_setup() {
     # Install Python 3 if missing (needed for skills)
     if ! command -v python3 &>/dev/null; then
         log "Installing Python 3..."
-        apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip
+        apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-full python3-pip
+    fi
+
+    # Always ensure python3-venv / python3-full are installed, even when python3 was
+    # pre-installed by the OS.  Without python3-venv the skill venv creation fails with
+    # "ensurepip is not available" and the whole skill pipeline degrades.
+    if ! python3 -c "import ensurepip" 2>/dev/null; then
+        log "Installing python3-venv and python3-full (ensurepip missing)..."
+        apt-get update -qq && apt-get install -y -qq python3-venv python3-full 2>/dev/null || true
     fi
 
     # Ensure pip is present (some minimal installs omit it)

@@ -45,9 +45,21 @@ public class SkillGenerator {
                shell_command skill in the plan instead. eval/exec are allowed.
             7. Do NOT use Python libraries that are thin wrappers around system binaries
                (e.g. pytesseract requires tesseract, moviepy requires ffmpeg). The system
-               cannot install OS packages at runtime. If OCR or similar is needed, use an
-               HTTP API (e.g. https://api.ocr.space/parse/image for OCR, free no-key tier).
+               cannot install OS packages at runtime. If a capability like OCR is needed,
+               use a free HTTP API that requires no system install.
             8. Keep the script under 500 lines
+            9. ALL third-party package imports MUST be guarded with try/except ImportError.
+               If an import fails, emit an error result and sys.exit(1). Never place bare
+               third-party imports at module top-level — the venv may not be ready yet.
+               Pattern:
+                 try:
+                     import requests
+                 except ImportError:
+                     print(json.dumps({"type":"result","status":"error","output":{"error":"missing_module: requests"}}))
+                     sys.exit(1)
+            10. Generate REUSABLE skills: accept generic input params (e.g. "query",
+               "location", "url"). Do NOT hard-code specific values (like city names or
+               dates) into the script — those are task inputs, not skill logic.
             
             OUTPUT FORMAT (respond with ONLY this JSON, no other text):
             {

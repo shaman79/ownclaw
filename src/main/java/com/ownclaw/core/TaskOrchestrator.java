@@ -597,7 +597,7 @@ public class TaskOrchestrator {
             var syntheticDiagnosis = new SkillDiagnostician.Diagnosis(
                     "'" + binary + "' is not installed on this host (exit code 127)",
                     "missing_dependency", false, 1.0, null, null, null, null);
-            return buildDefinitiveFailure(step, syntheticDiagnosis, failedResult, userId, taskId);
+            return buildDefinitiveFailure(step, syntheticDiagnosis, failedResult, userId, taskId, resolvedParams);
         }
 
         // Minimal user-facing status line: emit once per self-heal invocation.
@@ -615,7 +615,7 @@ public class TaskOrchestrator {
                 return buildDefinitiveFailure(step,
                         new SkillDiagnostician.Diagnosis("Token budget exhausted",
                                 "external_service_error", false, 1.0, null, null, null, null),
-                        failedResult, userId, taskId);
+                        failedResult, userId, taskId, resolvedParams);
             }
 
             // Step 1: Diagnose
@@ -662,7 +662,7 @@ public class TaskOrchestrator {
                     if (failureContext == null) {
                         // Runner didn't record a new context (unusual) — use what we already know.
                         log.warn("No failure context after repair retry for '{}' — ending self-heal", step.skill());
-                        return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId);
+                        return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId, resolvedParams);
                     }
 
                     log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
@@ -703,7 +703,7 @@ public class TaskOrchestrator {
 
             // Diagnosis is definitive — retrying the same command won't help.
             // For missing_dependency, ask the user for an alternative before giving up.
-            return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId);
+            return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId, resolvedParams);
         }
 
         // Loop exhausted all repair attempts without a definitive verdict —
@@ -718,7 +718,8 @@ public class TaskOrchestrator {
      * approach so the follow-up planning loop has concrete user intent to work with.
      */
     private StepResult buildDefinitiveFailure(TaskStep step, SkillDiagnostician.Diagnosis diagnosis,
-                                              StepResult originalFailure, String userId, String taskId) {
+                                              StepResult originalFailure, String userId, String taskId,
+                                              Map<String, Object> resolvedParams) {
         String cause = diagnosis.rootCause() != null ? diagnosis.rootCause() : originalFailure.output();
 
         if ("missing_dependency".equals(diagnosis.category())) {
@@ -740,6 +741,17 @@ public class TaskOrchestrator {
                                 + "Tesseract-free libs. Do NOT use pytesseract, which still requires "
                                 + "the tesseract binary.";
 
+                // Include the original step's input param names so the generated skill knows
+                // what to accept from stdin.
+                String paramKeys = resolvedParams.entrySet().stream()
+                        .filter(e -> !e.getKey().startsWith("__"))
+                        .map(e -> e.getKey() + " (e.g. \""
+                                + String.valueOf(e.getValue()).substring(0, Math.min(40, String.valueOf(e.getValue()).length())) + "\")")
+                        .collect(java.util.stream.Collectors.joining(", "));
+                String paramNote = paramKeys.isBlank() ? "" :
+                        "\nThe skill will be called with JSON stdin containing these params: " + paramKeys
+                                + "\nAccept them via: params = json.loads(sys.stdin.read())";
+
                 String genPrompt = """
                         Create a Python skill to: %s
                         The previous approach called the '%s' binary (via shell_command) which is NOT installed.
@@ -749,8 +761,12 @@ public class TaskOrchestrator {
                         - Do NOT use Python libraries that are just wrappers around missing binaries
                           (e.g. pytesseract still requires tesseract to be installed, so avoid it).
                         - USE HTTP APIs or pure-Python implementations that have no system binary dependency.
-                        Name the skill after the CAPABILITY it provides (e.g., 'image_ocr', 'text_from_pdf').
-                        """.formatted(goalDesc, binary, altHint);
+                        - Do NOT scrape websites by parsing HTML — use official structured JSON/REST APIs.
+                        - Make the skill REUSABLE: accept generic input params (e.g. "query", "location")
+                          rather than hard-coding specific values into the script.
+                        - ALL third-party imports MUST be inside try/except ImportError.
+                        Name the skill after the CAPABILITY it provides (e.g., 'image_ocr', 'web_search').%s
+                        """.formatted(goalDesc, binary, altHint, paramNote);
 
                 try {
                     eventLog.info(userId, taskId, "skill.auto_generate_alternative",
@@ -764,11 +780,25 @@ public class TaskOrchestrator {
                         skillManifest.reload();
                         eventLog.info(userId, taskId, "skill.alternative_created",
                                 "Auto-generated '" + gen.skillName() + "' as alternative for missing '" + binary + "'");
-                        String fullOutput = cause
-                                + "\nAuto-generated alternative skill: '" + gen.skillName() + "' can perform this task."
-                                + "\nHint for next attempt: Use skill '" + gen.skillName() + "' instead of shell_command.";
-                        return StepResult.failure(step.id(), fullOutput,
-                                originalFailure.exitCode(), originalFailure.durationMs());
+                        // Immediately retry the current step with the newly generated skill.
+                        // This avoids a full follow-up planning round just to use the new skill.
+                        TaskStep altStep = new TaskStep(step.id(), gen.skillName(), step.description(),
+                                step.params(), step.dependsOn(), step.condition(),
+                                step.onFail(), step.reversible());
+                        StepResult altResult = skillRunner.executeStep(altStep, userId, taskId, resolvedParams, Map.of());
+                        if (altResult.success()) {
+                            eventLog.info(userId, taskId, "skill.alternative_succeeded",
+                                    "Auto-generated '" + gen.skillName() + "' succeeded on first run");
+                        } else {
+                            eventLog.warn(userId, taskId, "skill.alternative_failed",
+                                    "Auto-generated '" + gen.skillName() + "' also failed — follow-up planner will retry");
+                            return StepResult.failure(step.id(),
+                                    cause + "\nAuto-generated alternative skill: '" + gen.skillName()
+                                            + "' was created but also failed: " + altResult.output()
+                                            + "\nHint: Try to fix skill '" + gen.skillName() + "'.",
+                                    originalFailure.exitCode(), originalFailure.durationMs());
+                        }
+                        return altResult;
                     }
                 } catch (Exception e) {
                     log.warn("Auto-generation of alternative for '{}' failed: {}", binary, e.getMessage());
@@ -831,27 +861,36 @@ public class TaskOrchestrator {
      * Ensures the result is never the same as the failing skill name (e.g. 'shell_command').
      */
     private String deriveCapabilitySkillName(TaskStep step, String binary) {
-        String base = null;
-
-        // Prefer step description: take first ~5 words, sanitise to snake_case
+        // Strip filler/stop words and extract up to 3 meaningful content words.
+        // Examples:
+        //   "perform a web search to find the weather forecast" → "web_search_weather"
+        //   "extract text from image using OCR"                → "image_ocr"
+        //   "run tesseract on a PNG file"                      → "tesseract_png"
         if (step.description() != null && !step.description().isBlank()) {
-            base = step.description().toLowerCase()
-                    .replaceAll("[^a-z0-9]+", "_")
-                    .replaceAll("^_+|_+$", "");
-            // Limit length and strip trailing underscores
-            if (base.length() > 40) base = base.substring(0, 40).replaceAll("_+$", "");
+            java.util.Set<String> filler = new java.util.HashSet<>(java.util.Arrays.asList(
+                    "perform", "execute", "run", "do", "a", "an", "the", "to", "for",
+                    "with", "using", "by", "via", "in", "of", "and", "or", "from", "that",
+                    "which", "find", "get", "make", "create", "generate", "retrieve", "fetch",
+                    "some", "any", "all", "try", "attempt", "this", "task", "step", "result",
+                    "on", "at", "as", "its", "it", "is", "be", "been", "being", "tomorrow",
+                    "today", "yesterday", "current", "next", "file", "text", "data"));
+            String[] words = step.description().toLowerCase().split("[^a-z0-9]+");
+            List<String> meaningful = new ArrayList<>();
+            for (String w : words) {
+                if (!w.isBlank() && !filler.contains(w)) {
+                    meaningful.add(w);
+                    if (meaningful.size() >= 3) break;
+                }
+            }
+            if (!meaningful.isEmpty()) {
+                String base = String.join("_", meaningful);
+                if (!base.equals(step.skill())) return base;
+            }
         }
 
         // Fall back to binary name + _python
-        if (base == null || base.isBlank()) {
-            base = binary.toLowerCase().replaceAll("[^a-z0-9]+", "_") + "_python";
-        }
-
-        // Never return the same name as the failing skill
-        if (base.equals(step.skill())) {
-            base = base + "_capability";
-        }
-
+        String base = binary.toLowerCase().replaceAll("[^a-z0-9]+", "_") + "_python";
+        if (base.equals(step.skill())) base = base + "_capability";
         return base;
     }
 

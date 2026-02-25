@@ -24,7 +24,7 @@ ownclaw:
 
   mentor:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.2
     api-key: ${OPENAI_API_KEY:}
     max-tokens-per-task: 10000
     temperature: 0.4
