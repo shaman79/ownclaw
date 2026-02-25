@@ -54,7 +54,7 @@ public class OpenAiProvider implements LlmProvider {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
         body.put("temperature", temperature);
-        body.put("max_tokens", maxTokens);
+        body.put("max_completion_tokens", maxTokens);
 
         if (reqConfig.jsonMode()) {
             body.putObject("response_format").put("type", "json_object");

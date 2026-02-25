@@ -329,9 +329,8 @@ public class SetupWizardService {
             case 1 -> processOpenAiKey(userInput);
             case 2 -> processOllamaUrl(userInput);
             case 3 -> processOllamaModel(userInput);
-            case 4 -> processPythonPath(userInput);
-            case 5 -> processTelegram(userInput);
-            case 6 -> finalizeSetup();
+            case 4 -> processTelegram(userInput);
+            case 5 -> finalizeSetup();
             default -> new WizardResponse(null, true);
         };
     }
@@ -375,7 +374,7 @@ public class SetupWizardService {
             .append(tgEnabled ? "enabled" : "disabled").append('\n');
 
         sb.append("\n---\n\n");
-        sb.append("**Step 1/5 — OpenAI API key**\n");
+        sb.append("**Step 1/4 — OpenAI API key**\n");
         sb.append("Paste your OpenAI API key");
         if (d.openAiKeySet) {
             sb.append(" (or `-` to keep current)");
@@ -393,7 +392,7 @@ public class SetupWizardService {
         if (!isSkip(input)) {
             sb.append("✅ OpenAI API key saved.\n\n");
         }
-        sb.append("**Step 2/5 — Ollama URL**\n");
+        sb.append("**Step 2/4 — Ollama URL**\n");
         sb.append("- Format: `http://host:port` (e.g. `http://localhost:11434`)\n");
         sb.append("- No trailing slash, no `/v1` suffix\n");
         sb.append("- Current: `").append(config.getExecutor().getUrl()).append("`\n\n");
@@ -416,7 +415,7 @@ public class SetupWizardService {
                 .append(reachable ? "reachable" : "not reachable (you can re-run `/setup` later)")
                 .append("\n\n");
 
-        sb.append("**Step 3/5 — Ollama model**\n");
+        sb.append("**Step 3/4 — Ollama model**\n");
         sb.append("- Current: `").append(config.getExecutor().getModel()).append("`\n");
         if (!lastDiscoveredModels.isEmpty()) {
             sb.append("\n**Available models**\n");
@@ -469,34 +468,26 @@ public class SetupWizardService {
         });
         sb.append("\n\n");
 
+        // Auto-detect Python and persist it — no need to ask the user
         String detected = detectPython();
-        sb.append("**Step 4/5 — Python path**");
         if (detected != null) {
-            sb.append("\nDetected: `").append(detected).append("`\n");
-            sb.append("Enter a custom path, or `-` to keep current:");
+            saveSetting("python_path", detected);
+            config.getSandbox().setPythonPath(detected);
+            sb.append("🐍 Python auto-detected: `").append(detected).append("`\n\n");
         } else {
-            sb.append("\n(Not found)\nEnter the path to your Python 3 executable:");
-        }
-        return new WizardResponse(sb.toString(), false);
-    }
-
-    private WizardResponse processPythonPath(String input) {
-        if (!isSkip(input)) {
-            saveSetting("python_path", input.strip());
-            config.getSandbox().setPythonPath(input.strip());
+            sb.append("⚠️ Python not found on PATH — skills requiring Python may fail. Install Python 3 and re-run `/setup`.\n\n");
         }
 
-        var sb = new StringBuilder();
-        sb.append("**Step 5/5 — Telegram bot (optional)**\n\n");
+        sb.append("**Step 4/4 — Telegram bot (optional)**\n\n");
         sb.append("To connect OwnClaw to Telegram:\n");
         sb.append("1) Open Telegram and search for `@BotFather`\n");
         sb.append("2) Send `/newbot` and follow the prompts\n");
         sb.append("3) BotFather will give you a token like `123456789:ABCdef...`\n");
         sb.append("4) Paste that token below\n\n");
-        String current = config.getTelegram().getBotToken();
-        boolean hasToken = current != null && !current.isBlank();
+        String currentTg = config.getTelegram().getBotToken();
+        boolean hasToken = currentTg != null && !currentTg.isBlank();
         if (hasToken) {
-            sb.append("Current token: `").append(current.substring(0, Math.min(10, current.length())))
+            sb.append("Current token: `").append(currentTg.substring(0, Math.min(10, currentTg.length())))
                 .append("...`\n");
         }
         sb.append("\nEnter your Telegram bot token, or `-` to ")
