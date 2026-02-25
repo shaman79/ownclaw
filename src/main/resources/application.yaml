@@ -88,8 +88,20 @@ ownclaw:
     ttl-hours: 168
 
   # MCP Bridge (Model Context Protocol) — external tool servers over stdio.
-  # Disabled by default. Add servers to enable.
   mcp:
     enabled: false
-    timeout-sec: 30
-    servers: []
+    timeout-sec: 60
+    servers:
+      - name: sqlite
+        command: ["npx", "-y", "@modelcontextprotocol/server-sqlite", "/opt/ownclaw/data/ownclaw.db"]
+      - name: brave-search
+        command: ["npx", "-y", "@modelcontextprotocol/server-brave-search"]
+        env:
+          BRAVE_API_KEY: "${BRAVE_SEARCH_API_KEY:}"
+      - name: fetch
+        command: ["npx", "-y", "@modelcontextprotocol/server-fetch"]
+      - name: puppeteer
+        command: ["npx", "-y", "@modelcontextprotocol/server-puppeteer"]
+        env:
+          PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"

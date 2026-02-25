@@ -76,6 +76,9 @@ public class McpStdioClient {
         if (server.getWorkingDir() != null && !server.getWorkingDir().isBlank()) {
             pb.directory(Path.of(server.getWorkingDir()).toFile());
         }
+        if (server.getEnv() != null && !server.getEnv().isEmpty()) {
+            pb.environment().putAll(server.getEnv());
+        }
         pb.redirectErrorStream(false);
 
         try {

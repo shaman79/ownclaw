@@ -68,6 +68,7 @@ sudo nano /opt/ownclaw/.env
 | `OWNCLAW_EXECUTOR_URL` | No | Ollama URL (default: `http://localhost:11434`) |
 | `OWNCLAW_EXECUTOR_MODEL` | No | Ollama model (default: `qwen2.5:14b`) |
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
+| `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
 
 **Important:** Ollama must be installed separately on the production server:
 ```bash

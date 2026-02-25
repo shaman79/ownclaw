@@ -554,6 +554,12 @@ public class TaskOrchestrator {
                                     step, userId, taskId, resolvedParams, result, MAX_SELF_HEAL_ATTEMPTS);
                             results.put(step.id(), healedResult);
                             if (!healedResult.success()) {
+                                if (healedResult.terminal()) {
+                                    // Definitive plan-level failure (e.g. bad_params): abort immediately.
+                                    // The follow-up planning loop will explain the root cause to the user.
+                                    updateTaskStateStep(taskId, step.id(), results);
+                                    return results;
+                                }
                                 eventLog.warn(userId, taskId, "step.retry_failed",
                                         "Step " + step.id() + " (" + step.skill()
                                                 + ") failed after self-heal — continuing with remaining steps");
@@ -899,6 +905,19 @@ public class TaskOrchestrator {
         String fullOutput = cause;
         if (diagnosis.lesson() != null && !diagnosis.lesson().isBlank()) {
             fullOutput = cause + "\nHint for next attempt: " + diagnosis.lesson();
+        }
+
+        // bad_params and data_format are plan-level failures — the Mentor planned wrong inputs
+        // (e.g. sent an HTML URL to pdf_parser).  Continuing with independent downstream steps
+        // would produce a garbled partial result without any clear explanation.  Mark as
+        // terminal so executePlan aborts the plan immediately and falls through to the
+        // follow-up planning loop, which will surface the diagnosis to the user.
+        boolean isTerminalFailure = "bad_params".equals(diagnosis.category())
+                || "data_format".equals(diagnosis.category());
+        if (isTerminalFailure) {
+            eventLog.warn(userId, taskId, "step.bad_params",
+                    "Step " + step.id() + " (" + step.skill() + ") aborted plan: " + truncate(fullOutput, 200));
+            return StepResult.definitiveFailure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
         }
         return StepResult.failure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
     }

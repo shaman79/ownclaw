@@ -125,8 +125,9 @@ public class SkillRunnerService {
             String sev = res.success() ? "info" : "warn";
             eventLog.log(userId, taskId, "skill.executed", sev,
                 step.skill() + " -> " + (res.success() ? "success" : "failed"), null, 0);
-            return new StepResult(step.id(), res.success(), res.output(), res.exitCode(),
-                duration, step.skill(), resolvedParams);
+            return res.success()
+                ? StepResult.successWithContext(step.id(), res.output(), duration, step.skill(), resolvedParams)
+                : StepResult.failureWithContext(step.id(), res.output(), res.exitCode(), duration, step.skill(), resolvedParams);
             } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
             String msg = e.getMessage() != null ? e.getMessage() : "Native skill failed";

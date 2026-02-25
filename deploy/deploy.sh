@@ -6,8 +6,8 @@
 #   ./deploy.sh              # Full deploy (first time or force)
 #   ./deploy.sh --update     # Only deploy if there are new commits (for cron)
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
-#                            #   Installs: JDK 21, Python 3 + venv, git, systemd service,
-#                            #   sudoers rule, builds JAR, pre-provisions skill venvs.
+#                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, git, systemd service,
+#                            #   sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
 #   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
@@ -221,6 +221,15 @@ do_setup() {
         apt-get update -qq && apt-get install -y -qq python3-pip
     fi
 
+    # Install Node.js 20 LTS if missing (needed for MCP stdio servers)
+    if ! command -v node &>/dev/null || ! node --version 2>/dev/null | grep -qE '^v(18|20|21|22|23|24)'; then
+        log "Installing Node.js 20 LTS..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+        apt-get install -y -qq nodejs
+    else
+        log "Node.js already installed: $(node --version)"
+    fi
+
     # Clone or update repo
     git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
     if [ ! -d "$REPO_DIR/.git" ]; then
@@ -277,6 +286,9 @@ do_setup() {
     chown -R ownclaw:ownclaw "$DEPLOY_DIR"
     chmod +x "$REPO_DIR/deploy/deploy.sh"
     chmod +x "$REPO_DIR/gradlew"
+
+    # Pre-provision MCP server npm packages
+    provision_mcp_servers
 
     # Initial build and deploy
     log "Running initial build..."
@@ -466,6 +478,52 @@ ensure_runtime_permissions() {
 
     chmod -R u+rwX,go-rwx "$DEPLOY_DIR"/skills/generated "$DEPLOY_DIR"/skills/_envs 2>/dev/null || true
     chmod u+rw "$DEPLOY_DIR"/skills/manifest.json 2>/dev/null || true
+}
+
+# === Pre-provision MCP server npm packages ===
+# Installs the four default MCP server packages globally so they start instantly
+# without hitting the network on first tool call.  Also installs system Chromium
+# for the Puppeteer server (PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser).
+#
+# Called from do_setup() as root.
+provision_mcp_servers() {
+    if ! command -v npm &>/dev/null; then
+        log "WARN: npm not found — skipping MCP server pre-installation"
+        return 0
+    fi
+
+    # Install system Chromium for the Puppeteer MCP server.
+    # application.yaml sets PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true and points to this binary.
+    if ! command -v chromium-browser &>/dev/null && ! command -v chromium &>/dev/null; then
+        log "Installing Chromium (required by MCP Puppeteer server)..."
+        apt-get update -qq && (
+            apt-get install -y -qq chromium-browser 2>/dev/null ||
+            apt-get install -y -qq chromium 2>/dev/null || true
+        )
+    else
+        log "Chromium already installed"
+    fi
+
+    log "Pre-installing MCP server npm packages..."
+    local failed=0
+    local pkgs=(
+        "@modelcontextprotocol/server-sqlite"
+        "@modelcontextprotocol/server-brave-search"
+        "@modelcontextprotocol/server-fetch"
+        "@modelcontextprotocol/server-puppeteer"
+    )
+    for pkg in "${pkgs[@]}"; do
+        log "  Installing $pkg ..."
+        if PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install -g --quiet "$pkg" 2>/dev/null; then
+            log "  OK: $pkg"
+        else
+            log "  WARN: npm install failed for $pkg — will be auto-downloaded by npx on first use"
+            failed=$((failed + 1))
+        fi
+    done
+
+    log "MCP server provisioning: $((${#pkgs[@]} - failed)) installed, $failed failed"
+    return 0
 }
 
 # === Pre-provision Python virtual environments for core skills ===
