@@ -278,7 +278,7 @@
         #messages::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.14) }
 
         /* Column constraint */
-        .msg, .activity-wrap, #conn-banner, #thinking {
+        .msg, #conn-banner, #thinking {
             max-width: 780px;
             width: 100%;
             margin-left: auto;
@@ -312,8 +312,8 @@
             max-width: 72%;
             background: linear-gradient(150deg, var(--user-hi), var(--user-bg) 90%);
             color: #fff;
-            padding: 10px 16px;
-            border-radius: 14px 14px 4px 14px;
+            padding: 10px 14px;
+            border-radius: 10px 10px 3px 10px;
             font-size: 15px;
             line-height: 1.65;
             white-space: pre-wrap;
@@ -419,15 +419,19 @@
         }
         @keyframes spin { to { transform: rotate(360deg) } }
 
-        /*  Activity log  */
+        /*  Activity log — pinned above the input bar, always visible  */
         .activity-wrap {
-            margin-bottom: 8px;
-            animation: msgIn .2s ease both;
+            flex-shrink: 0;
+            background: rgba(13,15,20,.9);
+            backdrop-filter: blur(12px);
+            padding: 0 20px;
         }
         #activity {
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: var(--r-md);
+            max-width: 780px;
+            margin: 0 auto;
+            background: transparent;
+            border: none;
+            border-radius: 0;
             overflow: hidden;
         }
         #activity-header {
@@ -672,6 +676,26 @@
         }
         #send svg { width: 17px; height: 17px; fill: currentColor }
 
+        #stop {
+            width: 38px; height: 38px;
+            margin: 6px 8px 6px 0;
+            flex-shrink: 0;
+            background: rgba(220, 60, 60, .85);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: opacity .15s, transform .1s;
+            box-shadow: 0 3px 10px rgba(220,60,60,.35);
+        }
+        #stop.visible { display: flex; }
+        #stop:hover { opacity: .85; transform: scale(1.04) }
+        #stop:active { transform: scale(.96) }
+        #stop svg { width: 13px; height: 13px; fill: currentColor }
+
         .input-hint {
             max-width: 780px;
             margin: 7px auto 0;
@@ -733,20 +757,21 @@
 <div id="messages">
     <div id="conn-banner"><div class="spinner"></div><span id="conn-text"></span></div>
 
-    <div class="activity-wrap" id="activity-wrap" style="display:none">
-        <div id="activity">
-            <div id="activity-header">
-                <div class="activity-spinner" id="activity-spinner"></div>
-                <span id="activity-label">Working...</span>
-                <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
-            </div>
-            <div id="activity-steps"></div>
-        </div>
-    </div>
-
     <div id="thinking">
         <div class="thinking-avatar">&#x1F980;</div>
         <div class="thinking-dots"><span></span><span></span><span></span></div>
+    </div>
+</div>
+
+<!--  Activity status — pinned above input, always visible during task execution  -->
+<div class="activity-wrap" id="activity-wrap" style="display:none">
+    <div id="activity">
+        <div id="activity-header">
+            <div class="activity-spinner" id="activity-spinner"></div>
+            <span id="activity-label">Working...</span>
+            <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
+        </div>
+        <div id="activity-steps"></div>
     </div>
 </div>
 
@@ -756,6 +781,9 @@
         <textarea id="input" rows="1" placeholder="Message OwnClaw..." autocomplete="off"></textarea>
         <button id="send" title="Send (Enter)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+        <button id="stop" title="Stop task">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
     <div class="input-hint">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</div>
@@ -779,6 +807,7 @@
     var thinkingEl      = document.getElementById('thinking');
     var inputEl         = document.getElementById('input');
     var sendBtn         = document.getElementById('send');
+    var stopBtn         = document.getElementById('stop');
     var connPill        = document.getElementById('conn-pill');
     var connLabel       = document.getElementById('conn-label');
     var connBanner      = document.getElementById('conn-banner');
@@ -1029,9 +1058,13 @@
     function setThinking(on) {
         if (on) {
             thinkingEl.classList.add('active');
+            sendBtn.disabled = true;
+            stopBtn.classList.add('visible');
             scrollBottom();
         } else {
             thinkingEl.classList.remove('active');
+            sendBtn.disabled = false;
+            stopBtn.classList.remove('visible');
             busy = false;
         }
     }
@@ -1132,6 +1165,14 @@
     });
 
     sendBtn.addEventListener('click', send);
+
+    stopBtn.addEventListener('click', function() {
+        if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'cancel' }));
+        }
+        setThinking(false);
+        doneActivity();
+    });
 
     checkAuth();
 })();

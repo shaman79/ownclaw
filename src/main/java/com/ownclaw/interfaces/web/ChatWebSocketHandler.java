@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -58,6 +59,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final SetupWizardService setupWizard;
     private final AuthService authService;
     private final SkillInteractionHandler interactionHandler;
+    private final TaskCancellationService cancellationService;
     private final ObjectMapper mapper;
 
     /** Active WebSocket sessions by user ID. */
@@ -90,6 +92,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                                 SetupWizardService setupWizard,
                                 AuthService authService,
                                 SkillInteractionHandler interactionHandler,
+                                TaskCancellationService cancellationService,
                                 ObjectMapper mapper) {
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
@@ -103,6 +106,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.setupWizard = setupWizard;
         this.authService = authService;
         this.interactionHandler = interactionHandler;
+        this.cancellationService = cancellationService;
         this.mapper = mapper;
     }
 
@@ -171,6 +175,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             if (!handled) {
                 sendToSession(session, "system", "No pending input request.");
             }
+            return;
+        }
+
+        // Cancel: user requested task interruption
+        if ("cancel".equals(messageType)) {
+            cancellationService.request(userId);
+            interactionHandler.cancelPending(userId);
+            sendToSession(session, "system", "⏹ Cancellation requested.");
             return;
         }
 

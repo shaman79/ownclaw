@@ -2,6 +2,7 @@ package com.ownclaw.core;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.core.TaskCancellationService.TaskCancelledException;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.executor.ExecutorService;
 import com.ownclaw.executor.ExecutorService.ClassificationResult;
@@ -61,6 +62,7 @@ public class TaskOrchestrator {
     private final JdbcTemplate jdbc;
     private final OwnClawConfig config;
     private final SkillInteractionHandler interactionHandler;
+    private final TaskCancellationService cancellationService;
 
     public TaskOrchestrator(ExecutorService executor, MentorService mentor,
                             SkillRunnerService skillRunner, SkillManifest skillManifest,
@@ -73,7 +75,8 @@ public class TaskOrchestrator {
                             SkillRepairer skillRepairer,
                             PreferencesManager preferencesManager,
                             ObjectMapper mapper, JdbcTemplate jdbc, OwnClawConfig config,
-                            SkillInteractionHandler interactionHandler) {
+                            SkillInteractionHandler interactionHandler,
+                            TaskCancellationService cancellationService) {
         this.executor = executor;
         this.mentor = mentor;
         this.skillRunner = skillRunner;
@@ -93,6 +96,7 @@ public class TaskOrchestrator {
         this.jdbc = jdbc;
         this.config = config;
         this.interactionHandler = interactionHandler;
+        this.cancellationService = cancellationService;
     }
 
     /**
@@ -103,6 +107,9 @@ public class TaskOrchestrator {
      * @return final response text to send back to the user
      */
     public String processMessage(String userId, String userMessage) {
+        // Clear any stale cancel flag from a previous task before starting fresh.
+        cancellationService.clear(userId);
+
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         String sessionId = conversation.getCurrentSession(userId);
         eventLog.info(userId, taskId, "task.received", "Task: " + truncate(userMessage, 100));
@@ -110,10 +117,27 @@ public class TaskOrchestrator {
         // Save user message to conversation history
         conversation.saveMessage(userId, sessionId, "user", userMessage);
 
+        // Load recent history (excluding the message we just saved — it's at index 0 in DESC order).
+        // Used to give the classifier and Mentor context for follow-up messages.
+        List<Map<String, Object>> recentForContext = conversation.getRecentMessages(userId, sessionId, 7);
+        // recentForContext[0] is the message just saved; skip it and reverse the rest to chronological
+        List<LlmMessage> classifyHistory = new ArrayList<>();
+        StringBuilder contextSb = new StringBuilder();
+        for (int i = recentForContext.size() - 1; i >= 1; i--) {
+            Map<String, Object> row = recentForContext.get(i);
+            String role = (String) row.get("role");
+            String content = (String) row.get("content");
+            classifyHistory.add("assistant".equals(role)
+                    ? LlmMessage.assistant(content)
+                    : LlmMessage.user(content));
+            contextSb.append(role).append(": ").append(truncate(content, 400)).append("\n");
+        }
+        String conversationContext = contextSb.length() > 0 ? contextSb.toString().strip() : null;
+
         try {
-            // Step 1: Executor classifies
+            // Step 1: Executor classifies (with history so follow-up messages resolve correctly)
             statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Analyzing task...");
-            ClassificationResult classification = executor.classify(userMessage);
+            ClassificationResult classification = executor.classify(userMessage, classifyHistory);
 
             eventLog.info(userId, taskId, "task.classified",
                     "Intent: " + classification.intent()
@@ -162,11 +186,14 @@ public class TaskOrchestrator {
 
                 String compressedPayload;
                 if (confidence < mentorThreshold) {
-                    compressedPayload = userMessage;
+                    // Low confidence: send raw message but still include conversation context
+                    compressedPayload = conversationContext != null
+                            ? "[Recent conversation]\n" + conversationContext + "\n[Current task]\n" + userMessage
+                            : userMessage;
                     eventLog.warn(userId, taskId, "task.low_confidence",
                             "Confidence " + String.format("%.2f", confidence) + " < threshold, sending raw to Mentor");
                 } else {
-                    compressedPayload = executor.compressForMentor(userMessage, null, classification);
+                    compressedPayload = executor.compressForMentor(userMessage, conversationContext, classification);
                 }
 
                 // Build dynamic task context from classification so the Mentor
@@ -281,6 +308,11 @@ public class TaskOrchestrator {
                 TaskContext followUpCtx = TaskContext.fromMatchesJson(classification.matchesJson());
 
                 for (int round = 1; round <= maxRounds; round++) {
+                    // Check for cancellation before each follow-up round.
+                    if (cancellationService.isCancelled(userId)) {
+                        throw new TaskCancelledException(userId);
+                    }
+
                     // Include both successes AND failure summaries so the eval
                     // knows what already failed and doesn't request impossible follow-ups
                     String rawSoFar = buildResponseForEvaluation(stepResults);
@@ -346,6 +378,8 @@ public class TaskOrchestrator {
                             log.info("Follow-up round {} had {} failure(s), continuing evaluation",
                                     round, failCount);
                         }
+                    } catch (TaskCancelledException e) {
+                        throw e; // propagate cancellation past the follow-up catch
                     } catch (Exception e) {
                         log.warn("Follow-up planning failed in round {}: {}", round, e.getMessage());
                         eventLog.warn(userId, taskId, "task.follow_up_failed",
@@ -416,6 +450,15 @@ public class TaskOrchestrator {
 
             return response;
 
+        } catch (TaskCancelledException e) {
+            log.info("Task {} cancelled by user {}", taskId, userId);
+            eventLog.info(userId, taskId, "task.cancelled", "Task cancelled by user request");
+            statusEmitter.emit(userId, StatusMessage.Type.FAILED, "Task cancelled");
+            persistTaskState(taskId, userId, "cancelled", null);
+            String cancelMsg = "⏹ Task cancelled.";
+            conversation.saveMessage(userId, sessionId, "assistant", cancelMsg);
+            return cancelMsg;
+
         } catch (Exception e) {
             log.error("Task {} failed: {}", taskId, e.getMessage(), e);
             eventLog.error(userId, taskId, "task.failed", e.getMessage());
@@ -441,6 +484,11 @@ public class TaskOrchestrator {
 
             for (TaskStep step : plan.steps()) {
                 if (completed.contains(step.id())) continue;
+
+                // Bail out immediately if the user requested cancellation.
+                if (cancellationService.isCancelled(userId)) {
+                    throw new TaskCancelledException(userId);
+                }
 
                 // Check dependencies satisfied
                 if (!completed.containsAll(step.dependsOn())) continue;

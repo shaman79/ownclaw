@@ -48,12 +48,22 @@ public class ExecutorService {
     }
 
     /**
-     * Classify a user message: determine intent, match skills, produce confidence score.
-     *
-     * @param userMessage raw user input
-     * @return classification result with matched skills and confidence
+     * Classify a user message without conversation history.
      */
     public ClassificationResult classify(String userMessage) {
+        return classify(userMessage, List.of());
+    }
+
+    /**
+     * Classify a user message: determine intent, match skills, produce confidence score.
+     * Includes recent conversation history as multi-turn context so follow-up messages
+     * like "yes, do it" or "use the previous result" are interpreted correctly.
+     *
+     * @param userMessage raw user input
+     * @param history     recent messages oldest-first (may be empty)
+     * @return classification result with matched skills and confidence
+     */
+    public ClassificationResult classify(String userMessage, List<LlmMessage> history) {
         String skillSnippet = manifest.toPromptSnippet();
 
         String systemPrompt = """
@@ -72,12 +82,16 @@ public class ExecutorService {
             Default to false — any actionable request (fetch, run, write, search, check, open, go to)
             is NOT conversational. When in doubt, set conversational = false.
             "needs_mentor" = true if task needs multiple steps or skills.
+            The conversation history above provides context — use it to understand references
+            like "yes, do it", "try again", "use that PDF", etc.
             """.formatted(platformInfo(), skillSnippet);
 
-        List<LlmMessage> messages = List.of(
-                LlmMessage.system(systemPrompt),
-                LlmMessage.user(userMessage)
-        );
+        List<LlmMessage> messages = new java.util.ArrayList<>();
+        messages.add(LlmMessage.system(systemPrompt));
+        if (history != null) {
+            messages.addAll(history);
+        }
+        messages.add(LlmMessage.user(userMessage));
 
         semaphore.acquire();
         try {
