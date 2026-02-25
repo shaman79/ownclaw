@@ -644,8 +644,16 @@ public class TaskOrchestrator {
                 || (failureContext.stderr() != null
                         && failureContext.stderr().contains("command not found"));
         if (commandNotFound && !isGeneratedSkill) {
-            String cmd = String.valueOf(resolvedParams.getOrDefault("command", "")).strip();
-            String binary = cmd.isEmpty() ? "unknown" : cmd.split("\\s+")[0];
+            // Extract the ACTUAL missing binary from the error message, not the first word of
+            // the command string.  Multi-line shell scripts often start with "set -euo pipefail"
+            // or other builtins — blindly splitting on whitespace produces false identifications
+            // (e.g. reporting "set" as the missing binary when the real missing one is "xxd").
+            String binary = extractMissingBinaryFromOutput(failureContext);
+            if (binary == null) {
+                // No error-message match — fall back to first non-builtin word of the command.
+                String cmd = String.valueOf(resolvedParams.getOrDefault("command", "")).strip();
+                binary = cmd.isEmpty() ? "unknown" : extractFirstNonBuiltin(cmd);
+            }
             eventLog.info(userId, taskId, "skill.command_not_found",
                     "exit 127: '" + binary + "' is not installed — asking user for alternative");
             var syntheticDiagnosis = new SkillDiagnostician.Diagnosis(
@@ -983,7 +991,7 @@ public class TaskOrchestrator {
     private String extractCommandName(TaskStep step, String cause) {
         Object cmd = step.params() != null ? step.params().get("command") : null;
         if (cmd instanceof String s && !s.isBlank()) {
-            return s.strip().split("\\s+")[0];
+            return extractFirstNonBuiltin(s.strip());
         }
         java.util.regex.Matcher m = java.util.regex.Pattern
                 .compile("'([^']+)'")
@@ -991,6 +999,51 @@ public class TaskOrchestrator {
         if (m.find()) return m.group(1);
         return step.skill();
     }
+
+    /**
+     * Parse stderr then stdout for the pattern "BINARY: command not found".
+     * Returns the missing binary name, or null if the pattern is not found.
+     * Skips known shell builtins to avoid false positives from scripts that
+     * start with {@code set -euo pipefail} or similar preambles.
+     */
+    private String extractMissingBinaryFromOutput(SkillFailureContext ctx) {
+        java.util.regex.Pattern p = java.util.regex.Pattern
+                .compile("(?:'([^']+)'|(\\S+)): command not found");
+        for (String output : new String[]{ctx.stderr(), ctx.stdout()}) {
+            if (output == null) continue;
+            java.util.regex.Matcher m = p.matcher(output);
+            while (m.find()) {
+                String found = m.group(1) != null ? m.group(1) : m.group(2);
+                if (found != null && !found.isBlank() && !SHELL_BUILTINS.contains(found)) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Return the first word of {@code command} that is not a shell builtin/keyword.
+     * Falls back to the raw first word when every token is a builtin (unlikely).
+     */
+    private String extractFirstNonBuiltin(String command) {
+        for (String word : command.split("[\\s;&|\\n]+")) {
+            word = word.strip();
+            if (word.isEmpty() || word.startsWith("-") || word.startsWith("$")
+                    || word.startsWith("#")) continue;
+            if (!SHELL_BUILTINS.contains(word)) return word;
+        }
+        return command.split("\\s+")[0]; // absolute fallback
+    }
+
+    /** Shell builtins/keywords that are never separately installed and cannot be "missing". */
+    private static final java.util.Set<String> SHELL_BUILTINS = java.util.Set.of(
+            "set", "export", "echo", "cd", "pwd", "source", ".", "read", "unset",
+            "exec", "exit", "return", "shift", "trap", "true", "false", "break", "continue",
+            "declare", "local", "typeset", "readonly", "if", "then", "else", "elif", "fi",
+            "for", "while", "do", "done", "case", "esac", "function", "in", "select",
+            "time", "until", "printf", "test", "[", "[[", "eval", "type", "hash",
+            "alias", "unalias", "jobs", "fg", "bg", "wait", "kill", "env", "IFS");
 
     private StepResult attemptRegenerateSkill(TaskStep step, String userId, String taskId,
                                              Map<String, Object> resolvedParams,

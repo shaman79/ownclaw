@@ -76,6 +76,16 @@ public class MentorService {
               screenshot, invoice, photo of text), use the 'image_ocr' skill directly.
               Do NOT use shell_command with tesseract or any other binary OCR tool.
               The 'image_ocr' skill uses the ocr.space HTTP API and needs no system installs.
+            - NEVER pass a local file path to pdf_parser. Skills run in isolated sandboxes
+              and cannot share filesystem state between steps. Always use the `url` param so
+              pdf_parser downloads the file itself (e.g. url="https://example.com/menu.pdf").
+              If you only have a local path from a previous step, re-download with http_request
+              or pass the original URL directly.
+            - If the user is asking HOW something was done, asking for an explanation of
+              previous steps, asking about your behavior or method, or asking a diagnostic
+              question about this system — return {"direct_answer": "<explanation>"}
+              immediately. Do NOT plan skill executions to demonstrate, replicate, or show
+              the behavior. Just explain in plain text what happened.
             
             TRIVIAL KNOWLEDGE:
             - If the answer is ALREADY in SYSTEM CONTEXT above (e.g. current date/time),
