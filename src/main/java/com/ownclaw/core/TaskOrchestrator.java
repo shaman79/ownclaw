@@ -17,6 +17,7 @@ import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.skillrunner.SkillFailureContext;
+import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.skillrunner.SkillRunnerService;
 import com.ownclaw.skills.SkillLoader;
 import com.ownclaw.skills.SkillManifest;
@@ -59,6 +60,7 @@ public class TaskOrchestrator {
     private final ObjectMapper mapper;
     private final JdbcTemplate jdbc;
     private final OwnClawConfig config;
+    private final SkillInteractionHandler interactionHandler;
 
     public TaskOrchestrator(ExecutorService executor, MentorService mentor,
                             SkillRunnerService skillRunner, SkillManifest skillManifest,
@@ -70,7 +72,8 @@ public class TaskOrchestrator {
                             SkillDiagnostician skillDiagnostician,
                             SkillRepairer skillRepairer,
                             PreferencesManager preferencesManager,
-                            ObjectMapper mapper, JdbcTemplate jdbc, OwnClawConfig config) {
+                            ObjectMapper mapper, JdbcTemplate jdbc, OwnClawConfig config,
+                            SkillInteractionHandler interactionHandler) {
         this.executor = executor;
         this.mentor = mentor;
         this.skillRunner = skillRunner;
@@ -89,6 +92,7 @@ public class TaskOrchestrator {
         this.mapper = mapper;
         this.jdbc = jdbc;
         this.config = config;
+        this.interactionHandler = interactionHandler;
     }
 
     /**
@@ -692,11 +696,62 @@ public class TaskOrchestrator {
                         step.skill() + " needs different params: " + diagnosis.rootCause());
             }
 
-            break; // No point retrying diagnosis if it says it's not fixable
+            // Diagnosis is definitive — retrying the same command won't help.
+            // For missing_dependency, ask the user for an alternative before giving up.
+            return buildDefinitiveFailure(step, diagnosis, failedResult, userId, taskId);
         }
 
+        // Loop exhausted all repair attempts without a definitive verdict —
+        // one plain retry is worthwhile in case the error was transient.
         log.info("Self-heal exhausted for step {} — executing simple retry", step.id());
         return skillRunner.executeStep(step, userId, taskId, resolvedParams, Map.of());
+    }
+
+    /**
+     * Build a StepResult for diagnostically definitive failures (fixable=false).
+     * <p>For {@code missing_dependency} failures, prompts the user for an alternative
+     * approach so the follow-up planning loop has concrete user intent to work with.
+     */
+    private StepResult buildDefinitiveFailure(TaskStep step, SkillDiagnostician.Diagnosis diagnosis,
+                                              StepResult originalFailure, String userId, String taskId) {
+        String cause = diagnosis.rootCause() != null ? diagnosis.rootCause() : originalFailure.output();
+
+        if ("missing_dependency".equals(diagnosis.category())) {
+            String binary = extractCommandName(step, cause);
+            eventLog.info(userId, taskId, "skill.missing_dependency",
+                    "'" + binary + "' not available — asking user for alternative");
+            String prompt = "**'" + binary + "' was not found on this server.**\n"
+                    + "Please tell me an alternative (e.g. an API URL or a different approach), "
+                    + "or type `cancel` to stop:";
+            try {
+                String userInput = interactionHandler.requestInput(userId, taskId, prompt);
+                if (userInput != null && !userInput.isBlank()
+                        && !"cancel".equalsIgnoreCase(userInput.strip())) {
+                    // Embed the user's answer so the follow-up planning loop can use it.
+                    return StepResult.failure(step.id(),
+                            "missing_dependency: '" + binary + "' is not installed.\n"
+                                    + "User provided: " + userInput,
+                            originalFailure.exitCode(), originalFailure.durationMs());
+                }
+            } catch (Exception e) {
+                log.debug("User did not respond to missing_dependency prompt ({})", e.getMessage());
+            }
+        }
+
+        return StepResult.failure(step.id(), cause, originalFailure.exitCode(), originalFailure.durationMs());
+    }
+
+    /** Extract the relevant command/binary name from step params or the diagnosis root cause. */
+    private String extractCommandName(TaskStep step, String cause) {
+        Object cmd = step.params() != null ? step.params().get("command") : null;
+        if (cmd instanceof String s && !s.isBlank()) {
+            return s.strip().split("\\s+")[0];
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("'([^']+)'")
+                .matcher(cause != null ? cause : "");
+        if (m.find()) return m.group(1);
+        return step.skill();
     }
 
     private StepResult attemptRegenerateSkill(TaskStep step, String userId, String taskId,
