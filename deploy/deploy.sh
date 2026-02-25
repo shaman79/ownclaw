@@ -6,6 +6,7 @@
 #   ./deploy.sh              # Full deploy (first time or force)
 #   ./deploy.sh --update     # Only deploy if there are new commits (for cron)
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
+#   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #
 # Authentication:
@@ -13,7 +14,13 @@
 #   The token is saved to /opt/ownclaw/.env for subsequent cron-based updates.
 #
 # Cron example (check for updates every 15 minutes):
-#   */15 * * * * /opt/ownclaw/deploy/deploy.sh --update >> /opt/ownclaw/logs/deploy.log 2>&1
+#   # Option A (recommended): run once to install sudoers rule (done automatically by --setup):
+#   #   sudo /opt/ownclaw/repo/deploy/deploy.sh --install-sudoers
+#   # Then run the update as ownclaw:
+#   */15 * * * * /opt/ownclaw/repo/deploy/deploy.sh --update >> /opt/ownclaw/logs/deploy.log 2>&1
+#
+#   # Option B: run the update from root's crontab (script repairs ownership, but root deploys are riskier)
+#   # */15 * * * * /opt/ownclaw/repo/deploy/deploy.sh --update >> /opt/ownclaw/logs/deploy.log 2>&1
 # =============================================================================
 set -euo pipefail
 
@@ -50,6 +57,85 @@ HEALTH_TIMEOUT=60
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 log()  { echo "[$(timestamp)] $*" >&2; }
 die()  { log "ERROR: $*"; exit 1; }
+
+can_sudo_non_interactive() {
+    command -v sudo &>/dev/null && sudo -n true &>/dev/null
+}
+
+ensure_sudoers_restart_rule() {
+    # Installs a minimal sudoers rule that allows the service user to restart OwnClaw
+    # without a password. This is required for cron-based --update runs.
+    local sudoers_file="/etc/sudoers.d/ownclaw-ownclaw-restart"
+    local rule_line="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}"
+
+    # Fast path: already present.
+    if [ -f "$sudoers_file" ] && grep -Fqx "$rule_line" "$sudoers_file" 2>/dev/null; then
+        return 0
+    fi
+
+    local tmp
+    tmp=$(mktemp /tmp/ownclaw-sudoers-XXXXXX)
+    printf '%s\n' "$rule_line" >"$tmp"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        install -o root -g root -m 0440 "$tmp" "$sudoers_file"
+        rm -f "$tmp"
+        # Best-effort validation (covers sudoers.d include)
+        if command -v visudo &>/dev/null; then
+            visudo -c &>/dev/null || die "sudoers validation failed after writing $sudoers_file"
+        fi
+        log "Installed sudoers rule: $sudoers_file"
+        return 0
+    fi
+
+    # Non-root: we can only write sudoers if we already have non-interactive sudo.
+    if can_sudo_non_interactive; then
+        sudo -n install -o root -g root -m 0440 "$tmp" "$sudoers_file"
+        rm -f "$tmp"
+        if command -v visudo &>/dev/null; then
+            sudo -n visudo -c &>/dev/null || die "sudoers validation failed after writing $sudoers_file"
+        fi
+        log "Installed sudoers rule via sudo: $sudoers_file"
+        return 0
+    fi
+
+    rm -f "$tmp"
+    return 1
+}
+
+restart_service() {
+    # Never prompt for a password (cron has no TTY).
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl restart "$SERVICE_NAME"
+        return 0
+    fi
+
+    if can_sudo_non_interactive; then
+        sudo -n systemctl restart "$SERVICE_NAME"
+        return 0
+    fi
+
+    return 1
+}
+
+restart_instructions() {
+    cat >&2 <<EOF
+
+Cannot restart systemd service '$SERVICE_NAME'.
+
+This deploy was run as user '$(id -un)' (uid=$(id -u)) and needs permission to restart the service.
+
+Fix options:
+  1) Install the sudoers rule (recommended):
+      sudo $REPO_DIR/deploy/deploy.sh --install-sudoers
+
+  2) Run the cron job as root instead.
+
+After fixing, re-run:
+  $REPO_DIR/deploy/deploy.sh --update
+
+EOF
+}
 
 # === First-time server setup (run as root) ===
 do_setup() {
@@ -155,6 +241,9 @@ do_setup() {
     cp "$REPO_DIR/deploy/ownclaw.service" /etc/systemd/system/ownclaw.service
     systemctl daemon-reload
     systemctl enable ownclaw
+
+    # Allow cron-based updates (running as ownclaw) to restart the service without password prompts.
+    ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
 
     # Fix ownership and permissions
     chown -R ownclaw:ownclaw "$DEPLOY_DIR"
@@ -308,10 +397,17 @@ deploy_jar() {
 
     ensure_runtime_permissions
 
+    # Ensure sudoers rule exists when possible (root deploys, or environments where sudo -n works).
+    # If we cannot install it here, restart_service() will still fail with instructions.
+    ensure_sudoers_restart_rule || true
+
     # Restart service (only if systemd is running — skip in setup phase)
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         log "Restarting $SERVICE_NAME..."
-        sudo systemctl restart "$SERVICE_NAME"
+        if ! restart_service; then
+            restart_instructions
+            die "Service restart failed (insufficient permissions)."
+        fi
         wait_for_health
     elif systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
         log "Service installed but not running — skipping restart."
@@ -349,7 +445,12 @@ rollback() {
 
     log "Rolling back to: $(basename "$latest_backup")"
     cp "$latest_backup" "$DEPLOY_DIR/ownclaw.jar"
-    sudo systemctl restart "$SERVICE_NAME"
+
+    ensure_sudoers_restart_rule || true
+    if ! restart_service; then
+        restart_instructions
+        die "Rollback failed (could not restart service)."
+    fi
     wait_for_health || die "Rollback also failed — manual intervention needed"
     log "Rollback successful"
 }
@@ -361,6 +462,14 @@ main() {
     case "$mode" in
         --setup)
             do_setup
+            exit 0
+            ;;
+        --install-sudoers)
+            if [ "$(id -u)" -ne 0 ]; then
+                die "Must be run as root: sudo $REPO_DIR/deploy/deploy.sh --install-sudoers"
+            fi
+            ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
+            log "Sudoers rule installed. Cron-based updates can restart the service without prompts."
             exit 0
             ;;
         --update)
