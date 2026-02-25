@@ -633,7 +633,9 @@ public class TaskOrchestrator {
 
                     log.warn("Repaired skill '{}' v{} still fails", step.skill(), repairResult.newVersion());
                     // If repairs keep failing and this is a generated skill, try regeneration once.
-                    if (isGeneratedSkill && !regenerated && attempt == boundedAttempts) {
+                    // Not for missing_dependency — regenerating skill code won't install the binary.
+                    if (isGeneratedSkill && !regenerated && attempt == boundedAttempts
+                            && !"missing_dependency".equals(diagnosis.category())) {
                         StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
                         if (regen.success()) return regen;
                         regenerated = true;
@@ -645,7 +647,8 @@ public class TaskOrchestrator {
             }
 
             // If not fixable (or low confidence) and this is a generated skill, try regeneration once.
-            if (isGeneratedSkill && !regenerated) {
+            // Not for missing_dependency — can't fix a missing binary by regenerating the Python wrapper.
+            if (isGeneratedSkill && !regenerated && !"missing_dependency".equals(diagnosis.category())) {
                 StepResult regen = attemptRegenerateSkill(step, userId, taskId, resolvedParams, failureContext);
                 regenerated = true;
                 if (regen.success()) return regen;
@@ -686,6 +689,47 @@ public class TaskOrchestrator {
 
         if ("missing_dependency".equals(diagnosis.category())) {
             String binary = extractCommandName(step, cause);
+
+            // First, try to auto-generate a purpose-built Python skill for the same capability.
+            // Regenerating the failing skill (e.g. shell_command) won't help — the binary is still
+            // missing. Instead, create a new skill that uses Python libraries or APIs.
+            if (budgetTracker.hasBudget(userId)) {
+                String goalDesc = step.description() != null && !step.description().isBlank()
+                        ? step.description()
+                        : "perform the task previously attempted via: " + binary
+                                + " (params: " + describeParams(step) + ")";
+                String altHint = diagnosis.lesson() != null && !diagnosis.lesson().isBlank()
+                        ? diagnosis.lesson()
+                        : "Use a Python library or HTTP API instead of calling the '" + binary + "' binary.";
+
+                String genPrompt = """
+                        Create a Python skill to: %s
+                        The previous approach called the '%s' binary (via shell_command) which is NOT installed.
+                        %s
+                        Name the skill after the CAPABILITY it provides (e.g., 'image_ocr', 'text_from_pdf').
+                        Do NOT use subprocess, os.system, or shell commands.
+                        """.formatted(goalDesc, binary, altHint);
+
+                try {
+                    eventLog.info(userId, taskId, "skill.auto_generate_alternative",
+                            "'" + binary + "' not installed — auto-generating a capability skill");
+                    SkillGenerator.GenerationResult gen = skillGenerator.generate(genPrompt, userId, taskId);
+                    if (gen.success()) {
+                        skillManifest.reload();
+                        eventLog.info(userId, taskId, "skill.alternative_created",
+                                "Auto-generated '" + gen.skillName() + "' as alternative for missing '" + binary + "'");
+                        String fullOutput = cause
+                                + "\nAuto-generated alternative skill: '" + gen.skillName() + "' can perform this task."
+                                + "\nHint for next attempt: Use skill '" + gen.skillName() + "' instead of shell_command.";
+                        return StepResult.failure(step.id(), fullOutput,
+                                originalFailure.exitCode(), originalFailure.durationMs());
+                    }
+                } catch (Exception e) {
+                    log.warn("Auto-generation of alternative for '{}' failed: {}", binary, e.getMessage());
+                }
+            }
+
+            // Auto-generation unavailable or failed — ask the user for an alternative.
             eventLog.info(userId, taskId, "skill.missing_dependency",
                     "'" + binary + "' not available — asking user for alternative");
             String prompt = "**'" + binary + "' was not found on this server.**\n"
@@ -713,6 +757,16 @@ public class TaskOrchestrator {
             fullOutput = cause + "\nHint for next attempt: " + diagnosis.lesson();
         }
         return StepResult.failure(step.id(), fullOutput, originalFailure.exitCode(), originalFailure.durationMs());
+    }
+
+    /** Summarise a step's params for inclusion in generation prompts (3 entries max, truncated). */
+    private String describeParams(TaskStep step) {
+        if (step.params() == null || step.params().isEmpty()) return "(none)";
+        return step.params().entrySet().stream()
+                .limit(3)
+                .map(e -> e.getKey() + "=" + String.valueOf(e.getValue())
+                        .substring(0, Math.min(60, String.valueOf(e.getValue()).length())))
+                .collect(java.util.stream.Collectors.joining(", "));
     }
 
     /** Extract the relevant command/binary name from step params or the diagnosis root cause. */

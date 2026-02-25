@@ -75,8 +75,9 @@ public class MentorService {
             
             PLAN SCHEMA:
             {
-              "steps": [{"id":int, "skill":str, "params":{},
-                         "depends_on":[int], "condition":str_or_null,
+              "steps": [{"id":int, "skill":str,
+                         "description":"one-line of what this step accomplishes",
+                         "params":{}, "depends_on":[int], "condition":str_or_null,
                          "on_fail":"report|skip|retry", "reversible":bool}]
             }
 
@@ -103,6 +104,12 @@ public class MentorService {
               Variables: $N.success (bool), $N.output (str), $N.exit_code (int)
               Operators: && || ! == != .contains("x") .isEmpty()
               Example: "$1.success && !$2.output.isEmpty()"
+            
+            FAILED STEP HINTS:
+            - Failure entries may include a "Hint for next attempt:" line from the diagnoser.
+            - ALWAYS read and act on these hints when planning follow-up steps.
+            - If a hint says a new skill was auto-generated, USE that skill by name.
+            - If a hint says to probe a base URL first, add a step that does exactly that.
             """;
 
     // ─── System-prompt constructors ──────────────────────────────────
@@ -210,6 +217,7 @@ public class MentorService {
                 steps.add(new TaskStep(
                         stepNode.path("id").asInt(),
                         stepNode.path("skill").asText(),
+                        stepNode.path("description").asText(null),
                         params != null ? params : Map.of(),
                         deps,
                         stepNode.has("condition") && !stepNode.path("condition").isNull()

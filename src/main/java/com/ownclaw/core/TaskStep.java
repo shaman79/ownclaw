@@ -9,6 +9,7 @@ import java.util.Map;
 public record TaskStep(
     int id,
     String skill,
+    String description,       // nullable — human-readable purpose of this step
     Map<String, Object> params,
     List<Integer> dependsOn,
     String condition,         // nullable — condition expression (see ConditionEvaluator)
