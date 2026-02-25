@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OwnClaw</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
@@ -49,7 +50,8 @@
         #messages::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
 
         /* Message bubbles */
-        .msg{max-width:85%;font-size:14px;line-height:1.6;animation:fadeIn .2s ease}
+           .msg{max-width:85%;font-size:14px;line-height:1.6;animation:fadeIn .2s ease;
+               overflow-wrap:anywhere;word-break:break-word}
         @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
         .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;padding:8px 14px;
@@ -58,8 +60,9 @@
         .msg.response{align-self:flex-start;background:#161b22;border:1px solid #30363d;
                       border-radius:2px 12px 12px 12px;padding:12px 16px;word-break:break-word}
 
-        .msg.system{align-self:center;color:#8b949e;font-size:12px;padding:4px 12px;
-                    background:#161b22;border-radius:16px;border:1px solid #21262d}
+        .msg.system{align-self:center;color:#8b949e;font-size:12.5px;padding:10px 14px;
+                background:#161b22;border-radius:14px;border:1px solid #21262d;
+                max-width:min(92%,760px)}
 
         /* Status messages — compact inline indicators */
         .msg.status{align-self:flex-start;color:#8b949e;font-size:13px;padding:2px 0;
@@ -101,9 +104,28 @@
         .msg.response h2{font-size:1.15em}
         .msg.response h3{font-size:1.05em}
         .msg.response hr{border:none;border-top:1px solid #30363d;margin:12px 0}
-        .msg.response table{border-collapse:collapse;margin:8px 0;width:100%}
+        .msg.response table{border-collapse:collapse;margin:8px 0;width:100%;display:block;max-width:100%;overflow-x:auto}
         .msg.response th,.msg.response td{border:1px solid #30363d;padding:6px 10px;text-align:left;font-size:13px}
         .msg.response th{background:#21262d;font-weight:600}
+        .msg.response img{max-width:100%;height:auto;border-radius:6px}
+
+        /* Markdown rendering inside system messages (setup, help, notices) */
+        .msg.system p{margin:0 0 8px 0}
+        .msg.system p:last-child{margin-bottom:0}
+        .msg.system ul,.msg.system ol{margin:6px 0 8px 18px}
+        .msg.system li{margin:2px 0}
+        .msg.system strong{color:#c9d1d9}
+        .msg.system a{color:#58a6ff;text-decoration:none}
+        .msg.system a:hover{text-decoration:underline}
+        .msg.system h1,.msg.system h2,.msg.system h3{margin:10px 0 6px;color:#c9d1d9}
+        .msg.system hr{border:none;border-top:1px solid #30363d;margin:10px 0}
+        .msg.system table{border-collapse:collapse;margin:8px 0;width:100%;display:block;max-width:100%;overflow-x:auto}
+        .msg.system th,.msg.system td{border:1px solid #30363d;padding:6px 10px;text-align:left;font-size:12.5px}
+        .msg.system th{background:#21262d;font-weight:600}
+        .msg.system code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12.5px;
+                 font-family:'Cascadia Code','Fira Code','JetBrains Mono',monospace}
+        .msg.system pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;
+                padding:10px;margin:8px 0;overflow-x:auto}
 
         /* Code blocks */
         .msg.response pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;
@@ -137,6 +159,14 @@
               height:40px;flex-shrink:0}
         #send:hover{background:#2ea043}
         #send:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+
+        /* Responsive tweaks */
+        @media (max-width: 600px) {
+            #header{padding:10px 12px}
+            #messages{padding:14px 12px}
+            #input-area{padding:12px 12px}
+            .msg{max-width:92%}
+        }
     </style>
 </head>
 <body>
