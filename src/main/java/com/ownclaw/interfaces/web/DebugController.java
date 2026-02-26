@@ -3,6 +3,7 @@ package com.ownclaw.interfaces.web;
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
+import com.ownclaw.agent.SkillManager;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -10,6 +11,7 @@ import com.ownclaw.observability.DebugSessionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.BufferedReader;
@@ -42,8 +44,10 @@ public class DebugController {
 
     private final AgentLoop agentLoop;
     private final ToolRegistry toolRegistry;
+    private final SkillManager skillManager;
     private final DebugSessionService debugService;
     private final ChatStatusEmitter statusEmitter;
+    private final JdbcTemplate jdbc;
 
     /** Stored execution traces, keyed by taskId. */
     private final Map<String, Map<String, Object>> storedTraces = new ConcurrentHashMap<>();
@@ -53,13 +57,17 @@ public class DebugController {
     public DebugController(
             AgentLoop agentLoop,
             ToolRegistry toolRegistry,
+            SkillManager skillManager,
             DebugSessionService debugService,
-            ChatStatusEmitter statusEmitter
+            ChatStatusEmitter statusEmitter,
+            JdbcTemplate jdbc
     ) {
         this.agentLoop = agentLoop;
         this.toolRegistry = toolRegistry;
+        this.skillManager = skillManager;
         this.debugService = debugService;
         this.statusEmitter = statusEmitter;
+        this.jdbc = jdbc;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -231,6 +239,50 @@ public class DebugController {
     }
 
     // ────────────────────────────────────────────────────────────────
+    //  POST /api/debug/skill — create or update a skill directly
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * Create or update a Python skill directly, bypassing the LLM.
+     * This allows an external AI assistant to inject properly-written skill code.
+     *
+     * Request body: {
+     *   "name": "web_fetch",
+     *   "description": "Fetches a web page...",
+     *   "code": "import requests\n...",
+     *   "parameters": "{\"url\":{\"type\":\"string\",\"description\":\"URL\",\"required\":true}}",
+     *   "requirements": "requests\nbeautifulsoup4",   // optional
+     *   "requires_network": true,                      // optional
+     *   "has_side_effects": false,                     // optional
+     *   "timeout": 30                                  // optional
+     * }
+     */
+    @PostMapping("/skill")
+    public ResponseEntity<?> createSkill(@RequestBody Map<String, Object> body) {
+        String name = body.get("name") != null ? body.get("name").toString() : null;
+        if (name == null || name.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Skill name is required"));
+        }
+
+        log.info("Debug API skill create/update: {}", name);
+
+        try {
+            String result = skillManager.createSkill(body);
+            boolean success = !result.startsWith("ERROR");
+            return ResponseEntity.ok(Map.of(
+                    "success", success,
+                    "name", name,
+                    "result", result
+            ));
+        } catch (Exception e) {
+            log.error("Skill creation failed: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "error", "Skill creation failed: " + e.getMessage()
+            ));
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
     //  GET /api/debug/status — system health and registered skills
     // ────────────────────────────────────────────────────────────────
 
@@ -248,6 +300,39 @@ public class DebugController {
                 "skillCount", skills.size(),
                 "skills", skills
         ));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  DELETE /api/debug/memory — clear agent memory (episodic/semantic)
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * Clear agent memory entries. Useful for removing poisoned memories from failed tests.
+     *
+     * Query params:
+     *   type=episode (default) | fact | all
+     *   userId (optional, defaults to authenticated user)
+     */
+    @DeleteMapping("/memory")
+    public ResponseEntity<?> clearMemory(
+            @RequestParam(defaultValue = "episode") String type,
+            @RequestAttribute("userId") String userId
+    ) {
+        log.info("Debug API clearing memory: type={} userId={}", type, userId);
+
+        try {
+            int deleted;
+            if ("all".equals(type)) {
+                deleted = jdbc.update("DELETE FROM agent_memory WHERE user_id = ?", userId);
+            } else if ("fact".equals(type)) {
+                deleted = jdbc.update("DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'fact'", userId);
+            } else {
+                deleted = jdbc.update("DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'episode'", userId);
+            }
+            return ResponseEntity.ok(Map.of("deleted", deleted, "type", type));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
     }
 
     // ────────────────────────────────────────────────────────────────
