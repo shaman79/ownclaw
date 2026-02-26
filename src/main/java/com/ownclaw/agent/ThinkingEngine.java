@@ -136,11 +136,27 @@ public class ThinkingEngine {
 
         // Special actions
         sb.append("## Special Actions\n");
+        sb.append("These are always available regardless of what tools exist.\n\n");
         sb.append("respond: Deliver a final answer to the user. Use when the task is complete or ");
         sb.append("you can answer directly without tools.\n");
         sb.append("  message (string, required): The response to show the user\n\n");
         sb.append("ask_user: Ask the user a clarifying question when you need more information.\n");
         sb.append("  message (string, required): The question to ask\n\n");
+
+        sb.append("skill_create: Create or update a Python skill that becomes a new tool.\n");
+        sb.append("  name (string, required): Lowercase identifier (letters, digits, underscores). E.g. 'web_fetch'\n");
+        sb.append("  description (string, required): Clear one-line description of what the skill does\n");
+        sb.append("  code (string, required): Full Python script. Must define `def run(params):` that returns a dict with 'output' key.\n");
+        sb.append("  parameters (string, required): JSON object defining input parameters. ");
+        sb.append("Each key maps to {\"type\":\"string\",\"description\":\"...\",\"required\":true/false}\n");
+        sb.append("  requirements (string, optional): pip requirements, one per line (e.g. 'requests\\nbeautifulsoup4')\n");
+        sb.append("  requires_network (boolean, optional): true if the skill needs internet access\n");
+        sb.append("  has_side_effects (boolean, optional): true if the skill modifies files, sends emails, etc.\n");
+        sb.append("  timeout (integer, optional): Max execution time in seconds (default 30)\n\n");
+
+        sb.append("skill_manage: Read, delete, list or analyze existing skills.\n");
+        sb.append("  action (string, required): One of 'read', 'delete', 'list', 'analyze'\n");
+        sb.append("  name (string, required for read/delete): The skill name to operate on\n\n");
 
         // Output format
         sb.append("## Output Format\n");
@@ -172,6 +188,18 @@ public class ThinkingEngine {
         sb.append("- When results are in a foreign language, translate or explain them for the user ");
         sb.append("based on the language they used in their original request.\n");
         sb.append("- Never assume content is in English. Always check the actual language first.\n");
+
+        // Self-improvement guidelines
+        sb.append("\n## Self-Improvement\n");
+        sb.append("You build and improve your own tools. All tools in 'Available Tools' are Python skills you can read and edit.\n");
+        sb.append("- If no suitable tool exists for a sub-task, create one with skill_create.\n");
+        sb.append("- If a tool returns poor or empty results, use skill_manage (action='read') to inspect its code, ");
+        sb.append("then use skill_create to overwrite it with an improved version.\n");
+        sb.append("- After multiple failures, pause and reconsider: is the current approach fundamentally wrong? ");
+        sb.append("Could a different tool or technique succeed where the current one fails?\n");
+        sb.append("- Prefer creating reusable, general-purpose tools over single-use scripts.\n");
+        sb.append("- When creating tools that fetch content, handle different content types ");
+        sb.append("(HTML, PDF, images, APIs) and always report what was actually received.\n");
 
         return sb.toString();
     }

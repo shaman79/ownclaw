@@ -20,12 +20,31 @@ public record AgentAction(
     /** Sentinel tool name indicating the agent wants to ask the user a question. */
     public static final String ASK_USER = "ask_user";
 
+    /** Sentinel tool name indicating the agent wants to create or update a skill. */
+    public static final String SKILL_CREATE = "skill_create";
+
+    /** Sentinel tool name indicating the agent wants to manage skills (read/delete/list/analyze). */
+    public static final String SKILL_MANAGE = "skill_manage";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
 
     public boolean isAskUser() {
         return ASK_USER.equals(tool);
+    }
+
+    public boolean isSkillCreate() {
+        return SKILL_CREATE.equals(tool);
+    }
+
+    public boolean isSkillManage() {
+        return SKILL_MANAGE.equals(tool);
+    }
+
+    /** Returns true if this action is a built-in special action (not a tool invocation). */
+    public boolean isSpecialAction() {
+        return isResponse() || isAskUser() || isSkillCreate() || isSkillManage();
     }
 
     public String responseText() {

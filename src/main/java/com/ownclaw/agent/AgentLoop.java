@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -41,6 +42,7 @@ public class AgentLoop {
     private final LlmRouter llmRouter;
     private final AgentMemory memory;
     private final SkillCuratorService curatorService;
+    private final SkillManager skillManager;
     private final DebugSessionService debugService;
     private final TaskCancellationService cancellationService;
 
@@ -53,6 +55,7 @@ public class AgentLoop {
             LlmRouter llmRouter,
             AgentMemory memory,
             SkillCuratorService curatorService,
+            SkillManager skillManager,
             DebugSessionService debugService,
             TaskCancellationService cancellationService
     ) {
@@ -64,6 +67,7 @@ public class AgentLoop {
         this.llmRouter = llmRouter;
         this.memory = memory;
         this.curatorService = curatorService;
+        this.skillManager = skillManager;
         this.debugService = debugService;
         this.cancellationService = cancellationService;
     }
@@ -194,13 +198,50 @@ public class AgentLoop {
             }
 
             if (action.isAskUser()) {
-                // For now, deliver the question as the response.
-                // A more sophisticated version would pause and wait for user input.
                 return AgentResult.completed(
                         action.responseText(),
                         context.trajectory(),
                         context.elapsedMs()
                 );
+            }
+
+            // === SKILL MANAGEMENT (special actions — always available) ===
+            if (action.isSkillCreate()) {
+                statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                        "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
+                long startMs = System.currentTimeMillis();
+                String result = skillManager.createSkill(action.params());
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "SKILL_CREATE [" + action.params().getOrDefault("name", "?") + "] "
+                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                    + truncate(result, 2000));
+                }
+                continue;
+            }
+
+            if (action.isSkillManage()) {
+                long startMs = System.currentTimeMillis();
+                String result = executeSkillManage(action.params());
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "SKILL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
+                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                    + truncate(result, 2000));
+                }
+                continue;
             }
 
             // === CRITIQUE ===
@@ -250,6 +291,9 @@ public class AgentLoop {
             } else {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.WARNING,
                         action.tool() + " failed: " + truncate(observation.output(), 100));
+
+                // Inject reflection hint after consecutive failures
+                injectReflection(context, action);
             }
         }
 
@@ -269,7 +313,12 @@ public class AgentLoop {
     private AgentObservation executeTool(AgentAction action, AgentContext context) {
         var toolOpt = toolRegistry.find(action.tool());
         if (toolOpt.isEmpty()) {
-            return AgentObservation.failure(action.tool(), "Tool not found: " + action.tool(), 0);
+            String available = String.join(", ", toolRegistry.names());
+            String hint = available.isEmpty()
+                    ? "No tools are currently registered. Use skill_create to build the tool you need."
+                    : "Available tools: " + available + ". Use skill_create to build a new tool if none of these fit.";
+            return AgentObservation.failure(action.tool(),
+                    "Tool '" + action.tool() + "' not found. " + hint, 0);
         }
 
         Tool tool = toolOpt.get();
@@ -309,6 +358,47 @@ public class AgentLoop {
                     durationMs
             );
         }
+    }
+
+    /**
+     * Dispatch a skill_manage action to the appropriate SkillManager method.
+     */
+    private String executeSkillManage(Map<String, Object> params) {
+        String action = params.get("action") != null ? params.get("action").toString() : "";
+        String name = params.get("name") != null ? params.get("name").toString() : null;
+
+        return switch (action) {
+            case "read" -> skillManager.readSkill(name);
+            case "delete" -> skillManager.deleteSkill(name);
+            case "list" -> skillManager.listSkills();
+            case "analyze" -> skillManager.analyzeSkills();
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: read, delete, list, analyze";
+        };
+    }
+
+    /**
+     * Inject a reflection observation when the agent is struggling.
+     * Called after recording a failed observation if consecutive failure count is high.
+     */
+    private void injectReflection(AgentContext context, AgentAction lastAction) {
+        int failures = context.trajectory().consecutiveFailures();
+        if (failures < 2) return;
+
+        String reflectionHint;
+        if (failures == 2) {
+            reflectionHint = "REFLECTION: Two consecutive failures. Reconsider your approach. " +
+                    "If the current tool is not producing results, inspect its code with skill_manage(action='read') " +
+                    "and improve it with skill_create, or try a fundamentally different strategy.";
+        } else {
+            reflectionHint = "REFLECTION: " + failures + " consecutive failures. STOP repeating the same approach. " +
+                    "Either create/improve a tool with skill_create, try completely different tools, " +
+                    "or respond with what you've learned so far.";
+        }
+
+        // Record reflection as a synthetic observation so the ThinkingEngine sees it
+        AgentAction reflectionAction = new AgentAction("_reflection", Map.of(), "System-injected reflection");
+        AgentObservation reflectionObs = AgentObservation.success("_reflection", reflectionHint, Map.of(), 0);
+        context.trajectory().record(reflectionAction, reflectionObs);
     }
 
     /**

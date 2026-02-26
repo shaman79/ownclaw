@@ -52,8 +52,8 @@ public class CriticAgent {
     public Verdict evaluate(AgentAction action, AgentContext context) {
         List<String> warnings = new ArrayList<>();
 
-        // 1. Responses and ask_user are always allowed
-        if (action.isResponse() || action.isAskUser()) {
+        // 1. Special actions are always allowed
+        if (action.isSpecialAction()) {
             return Verdict.allow(warnings);
         }
 
