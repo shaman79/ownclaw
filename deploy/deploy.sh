@@ -71,16 +71,18 @@ ensure_sudoers_restart_rule() {
     local sudoers_file="/etc/sudoers.d/ownclaw-ownclaw-restart"
     local rule_restart="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}"
     local rule_stop="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl stop ${SERVICE_NAME}"
+    local rule_chown="ownclaw ALL=(root) NOPASSWD: /usr/bin/chown -R ownclaw\\:ownclaw ${REPO_DIR}"
 
     # Fast path: already present.
     if [ -f "$sudoers_file" ] && grep -Fqx "$rule_restart" "$sudoers_file" 2>/dev/null \
-                               && grep -Fqx "$rule_stop"    "$sudoers_file" 2>/dev/null; then
+                               && grep -Fqx "$rule_stop"    "$sudoers_file" 2>/dev/null \
+                               && grep -Fqx "$rule_chown"   "$sudoers_file" 2>/dev/null; then
         return 0
     fi
 
     local tmp
     tmp=$(mktemp /tmp/ownclaw-sudoers-XXXXXX)
-    printf '%s\n%s\n' "$rule_restart" "$rule_stop" >"$tmp"
+    printf '%s\n%s\n%s\n' "$rule_restart" "$rule_stop" "$rule_chown" >"$tmp"
 
     if [ "$(id -u)" -eq 0 ]; then
         install -o root -g root -m 0440 "$tmp" "$sudoers_file"
@@ -552,6 +554,28 @@ install_jdk() {
     log "JDK installed: $("$JDK_DIR/bin/java" -version 2>&1 | head -1)"
 }
 
+# === Repair file ownership in the repo (e.g. after accidental sudo operations) ===
+repair_repo_perms() {
+    local target_user
+    target_user=$(stat -c '%U' "$REPO_DIR" 2>/dev/null || echo "ownclaw")
+
+    # Find files NOT owned by the expected user
+    local bad_files
+    bad_files=$(find "$REPO_DIR" -not -user "$target_user" 2>/dev/null | head -5)
+    [ -z "$bad_files" ] && return 0
+
+    log "Repairing file ownership in $REPO_DIR..."
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R "$target_user":"$target_user" "$REPO_DIR"
+        return 0
+    fi
+    if command -v sudo &>/dev/null && sudo -n chown -R "$target_user":"$target_user" "$REPO_DIR" 2>/dev/null; then
+        return 0
+    fi
+    log "Cannot fix permissions (need root). Run: sudo chown -R $target_user:$target_user $REPO_DIR"
+    return 1
+}
+
 # === Pull latest code, return 0 if there are changes ===
 pull_latest() {
     if [ ! -d "$REPO_DIR/.git" ]; then
@@ -575,7 +599,16 @@ pull_latest() {
     fi
 
     log "New commits: ${before:0:8} -> ${after:0:8}"
-    git reset --hard "origin/$BRANCH" --quiet
+
+    # Try git reset; if it fails (e.g. permission denied), repair and retry
+    if ! git reset --hard "origin/$BRANCH" --quiet 2>/dev/null; then
+        log "git reset failed — attempting permission repair..."
+        if repair_repo_perms; then
+            git reset --hard "origin/$BRANCH" --quiet
+        else
+            die "Cannot update repo: permission denied. Run: sudo chown -R ownclaw:ownclaw $REPO_DIR"
+        fi
+    fi
     return 0
 }
 
@@ -704,7 +737,10 @@ main() {
                 die "Must be run as root: sudo $REPO_DIR/deploy/deploy.sh --install-sudoers"
             fi
             ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
-            log "Sudoers rule installed. Cron-based updates can restart the service without prompts."
+            # Also fix repo ownership while we have root access
+            chown -R ownclaw:ownclaw "$REPO_DIR" 2>/dev/null || true
+            chown -R ownclaw:ownclaw "$DEPLOY_DIR/skills" 2>/dev/null || true
+            log "Sudoers rule installed + repo permissions fixed. Cron-based updates can restart the service without prompts."
             exit 0
             ;;
         --update)
