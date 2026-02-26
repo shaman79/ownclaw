@@ -42,7 +42,7 @@ ownclaw:
     max-queued-tasks: 50
 
   tasks:
-    default-timeout: 300
+    default-timeout: 600
     step-timeout: 240
     max-plan-steps: 20
 
@@ -56,7 +56,7 @@ ownclaw:
 
   sandbox:
     type: auto
-    default-timeout: 60
+    default-timeout: 120
     default-network: deny
     python-path: python
 

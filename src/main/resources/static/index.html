@@ -332,7 +332,8 @@
         .msg.response,
         .msg.error,
         .msg.question,
-        .msg.input_request {
+        .msg.input_request,
+        .msg.debug {
             display: flex;
             gap: 12px;
             align-items: flex-start;
@@ -390,6 +391,23 @@
             border: 1px solid rgba(91,95,199,.2);
             border-left: 3px solid var(--accent-hi);
         }
+
+        /* Debug variant */
+        .msg.debug .msg-avatar {
+            background: linear-gradient(135deg, #422006, #92400e);
+        }
+        .msg.debug .msg-body {
+            background: rgba(251,191,36,.04);
+            border: 1px solid rgba(251,191,36,.15);
+            border-left: 3px solid #fbbf24;
+            font-size: 12.5px;
+            line-height: 1.6;
+            color: var(--text-2);
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .msg.debug .msg-body::-webkit-scrollbar { width: 4px }
+        .msg.debug .msg-body::-webkit-scrollbar-thumb { background: rgba(251,191,36,.2); border-radius: 4px }
 
         /* ───── System messages ───── */
         /* Short: centred pill.  Long (contains newline or >80 chars): card. */
@@ -1065,6 +1083,8 @@
                 if (type === 'status') {
                     setThinking(true);
                     showActivity(content);
+                } else if (type === 'debug') {
+                    addMsg('debug', content);
                 } else if (type === 'pong' || type === 'ping') {
                     // heartbeat
                 } else {
@@ -1096,7 +1116,7 @@
     //  Message rendering 
     function addMsg(type, text) {
         var isUserMsg = type === 'user';
-        var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request');
+        var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
         var senderKey = isUserMsg ? 'user' : (isAiMsg ? 'ai' : null);
         var firstInRun = senderKey !== null && senderKey !== lastMsgSender;
         if (senderKey) lastMsgSender = senderKey;

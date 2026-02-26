@@ -10,6 +10,7 @@ import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
+import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.AuthService;
@@ -60,6 +61,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final AuthService authService;
     private final SkillInteractionHandler interactionHandler;
     private final TaskCancellationService cancellationService;
+    private final DebugSessionService debugService;
     private final ObjectMapper mapper;
 
     /** Active WebSocket sessions by user ID. */
@@ -93,6 +95,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                                 AuthService authService,
                                 SkillInteractionHandler interactionHandler,
                                 TaskCancellationService cancellationService,
+                                DebugSessionService debugService,
                                 ObjectMapper mapper) {
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
@@ -107,6 +110,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.authService = authService;
         this.interactionHandler = interactionHandler;
         this.cancellationService = cancellationService;
+        this.debugService = debugService;
         this.mapper = mapper;
     }
 
@@ -123,7 +127,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         sessions.put(userId, session);
 
         // Subscribe to status messages
-        statusEmitter.subscribe(userId, msg -> sendToSession(session, "status", msg.formatted()));
+        statusEmitter.subscribe(userId, msg -> {
+            if (msg.type() == ChatStatusEmitter.StatusMessage.Type.DEBUG) {
+                // Debug messages are rendered as full message blocks, not brief activity entries
+                sendToSession(session, "debug", msg.text());
+            } else {
+                sendToSession(session, "status", msg.formatted());
+            }
+        });
 
         log.info("WebSocket connected: user={}", userId);
 
@@ -235,6 +246,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     - `/log tokens` — Token usage today
                     - `/tokens` — Token budget summary
                     - `/skills` — List available tools
+                    - `/debug` — Toggle debug mode (shows prompts + LLM output)
                     - `/grant <tool> <credential>` — Grant credential access to a tool
                     - `/revoke <tool>` — Revoke credential access
                     - `/cred set <KEY> <VALUE>` — Store a credential
@@ -267,6 +279,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 }
                 if (command.equals("/skills")) {
                     yield handleSkillsCommand();
+                }
+                if (command.equals("/debug")) {
+                    boolean enabled = debugService.toggle(userId);
+                    yield enabled
+                            ? "\uD83D\uDC1B Debug mode **ON** — you will see full prompts, raw LLM output, critic verdicts, and tool results."
+                            : "\uD83D\uDC1B Debug mode **OFF**";
                 }
                 yield "Unknown command: " + command + ". Try /help";
             }

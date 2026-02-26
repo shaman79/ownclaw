@@ -6,6 +6,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
+import com.ownclaw.observability.DebugSessionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -39,6 +40,7 @@ public class AgentLoop {
     private final LlmRouter llmRouter;
     private final AgentMemory memory;
     private final SkillCuratorService curatorService;
+    private final DebugSessionService debugService;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -48,7 +50,8 @@ public class AgentLoop {
             OwnClawConfig config,
             LlmRouter llmRouter,
             AgentMemory memory,
-            SkillCuratorService curatorService
+            SkillCuratorService curatorService,
+            DebugSessionService debugService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -58,6 +61,7 @@ public class AgentLoop {
         this.llmRouter = llmRouter;
         this.memory = memory;
         this.curatorService = curatorService;
+        this.debugService = debugService;
     }
 
     /**
@@ -159,7 +163,16 @@ public class AgentLoop {
             statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                     "Thinking... (step " + (step + 1) + ")");
 
-            AgentAction action = thinkingEngine.decideNextAction(context, provider);
+            boolean debug = debugService.isEnabled(context.userId());
+
+            ThinkResult thinkResult = thinkingEngine.decideNextActionFull(context, provider);
+            AgentAction action = thinkResult.action();
+
+            // Emit debug info when debug mode is active
+            if (debug) {
+                emitDebugPrompt(context.userId(), thinkResult, step + 1);
+            }
+
             log.info("Task {} step {}: tool={} reasoning={}",
                     context.taskId(), step + 1, action.tool(),
                     truncate(action.reasoning(), 100));
@@ -187,6 +200,9 @@ public class AgentLoop {
             CriticAgent.Verdict verdict = criticAgent.evaluate(action, context);
             if (!verdict.allowed()) {
                 log.warn("Task {} step {} blocked by critic: {}", context.taskId(), step + 1, verdict.blockReason());
+                if (debug) {
+                    emitDebug(context.userId(), "CRITIC BLOCKED: " + verdict.blockReason());
+                }
                 // Feed the block reason back as an observation so the ThinkingEngine can adjust
                 AgentObservation blockObs = AgentObservation.failure(
                         action.tool(),
@@ -208,6 +224,14 @@ public class AgentLoop {
 
             // === OBSERVE ===
             context.trajectory().record(action, observation);
+
+            if (debug) {
+                emitDebug(context.userId(),
+                        "TOOL RESULT [" + action.tool() + "] "
+                                + (observation.success() ? "OK" : "FAIL")
+                                + " (" + observation.durationMs() + "ms)\n"
+                                + truncate(observation.output(), 2000));
+            }
 
             // Track tool usage for skill curation analytics
             curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
@@ -355,5 +379,41 @@ public class AgentLoop {
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    // ── Debug helpers ──
+
+    private void emitDebug(String userId, String text) {
+        statusEmitter.emit(userId, StatusMessage.Type.DEBUG, text);
+    }
+
+    /**
+     * Emit the full prompt and raw LLM response for a thinking step.
+     */
+    private void emitDebugPrompt(String userId, ThinkResult result, int step) {
+        var sb = new StringBuilder();
+        sb.append("### Step ").append(step).append(" — Thinking\n\n");
+
+        sb.append("**Prompt messages** (").append(result.promptMessages().size()).append("):\n");
+        for (var msg : result.promptMessages()) {
+            sb.append("\n---\n**[").append(msg.role().name()).append("]**\n");
+            String content = msg.content();
+            if (content.length() > 4000) {
+                content = content.substring(0, 4000) + "\n\n...[truncated, " + msg.content().length() + " chars total]";
+            }
+            sb.append(content).append('\n');
+        }
+
+        sb.append("\n---\n**Raw LLM output** (").append(result.totalTokens()).append(" tokens):\n```json\n");
+        String raw = result.rawLlmOutput();
+        if (raw != null && raw.length() > 2000) {
+            raw = raw.substring(0, 2000) + "\n...[truncated]";
+        }
+        sb.append(raw != null ? raw : "(null)").append("\n```\n");
+
+        sb.append("**Parsed action**: tool=`").append(result.action().tool())
+                .append("` reasoning=").append(truncate(result.action().reasoning(), 300));
+
+        emitDebug(userId, sb.toString());
     }
 }

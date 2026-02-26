@@ -42,6 +42,14 @@ public class ThinkingEngine {
      * @return the next action to take
      */
     public AgentAction decideNextAction(AgentContext context, LlmProvider provider) {
+        return decideNextActionFull(context, provider).action();
+    }
+
+    /**
+     * Full variant that returns the prompt, raw LLM output, and parsed action
+     * for debug/observability use.
+     */
+    public ThinkResult decideNextActionFull(AgentContext context, LlmProvider provider) {
         List<LlmMessage> messages = buildMessages(context);
 
         LlmRequestConfig requestConfig = new LlmRequestConfig(
@@ -55,13 +63,14 @@ public class ThinkingEngine {
             LlmResponse response = provider.chat(messages, requestConfig);
             log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
                     truncate(response.content(), 200));
-            return parseAction(response.content());
+            AgentAction action = parseAction(response.content());
+            return new ThinkResult(action, messages, response.content(), response.totalTokens());
         } catch (LlmException e) {
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
-            // On LLM failure, respond with an error message rather than crashing
-            return new AgentAction(AgentAction.RESPOND,
+            AgentAction action = new AgentAction(AgentAction.RESPOND,
                     Map.of("message", "I encountered an error while reasoning about this task. Please try again."),
                     "LLM call failed: " + e.getMessage());
+            return new ThinkResult(action, messages, "ERROR: " + e.getMessage(), 0);
         }
     }
 
