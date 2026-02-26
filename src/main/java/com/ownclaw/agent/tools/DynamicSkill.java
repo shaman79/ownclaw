@@ -8,6 +8,7 @@ import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -25,9 +26,11 @@ import java.util.Map;
  *   requirements.txt   — optional pip dependencies
  * </pre>
  *
- * <p>Python contract: skill.py reads a JSON object from stdin containing the
- * tool parameters, and prints a JSON object to stdout:
- * {@code {"success": true/false, "output": "text", "data": {}}}
+ * <p>Python contract: skill.py defines a {@code def run(params)} function that
+ * receives the tool parameters as a dict and returns a dict. The execution is
+ * bootstrapped by a runner harness that handles stdin reading, calling run(),
+ * and printing the JSON result to stdout. This means skill authors only need to
+ * write the {@code run()} function — no stdin/stdout boilerplate needed.
  *
  * <p>This class is NOT a Spring component — instances are created by
  * {@link DynamicSkillRegistry} and registered into {@link ToolRegistry} at runtime.
@@ -71,6 +74,55 @@ public class DynamicSkill implements Tool {
     /** The directory containing this skill's files. */
     public Path skillDir() { return skillDir; }
 
+    /**
+     * The runner harness that bootstraps skill execution.
+     *
+     * <p>We do NOT run skill.py directly — instead we run this thin wrapper that:
+     * <ol>
+     *   <li>Reads JSON parameters from stdin</li>
+     *   <li>Imports skill.py and calls its {@code run(params)} function</li>
+     *   <li>Prints the returned dict as JSON to stdout</li>
+     *   <li>Catches and reports any exception as a structured failure</li>
+     * </ol>
+     *
+     * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
+     * from the process-level stdin/stdout contract.
+     */
+    private static final String RUNNER_HARNESS = String.join("\n",
+        "import sys, json, os, io, importlib.util, traceback",
+        "try:",
+        "    params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
+        "    skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'skill.py')",
+        "    spec = importlib.util.spec_from_file_location('skill', skill_path)",
+        "    mod = importlib.util.module_from_spec(spec)",
+        "    _real_stdout = sys.stdout",
+        "    _capture = io.StringIO()",
+        "    sys.stdout = _capture",
+        "    spec.loader.exec_module(mod)",
+        "    if not hasattr(mod, 'run'):",
+        "        sys.stdout = _real_stdout",
+        "        print(json.dumps({'success': False, 'output': 'skill.py does not define a run(params) function'}))",
+        "        sys.exit(0)",
+        "    result = mod.run(params)",
+        "    sys.stdout = _real_stdout",
+        "    captured = _capture.getvalue()",
+        "    if not isinstance(result, dict):",
+        "        result = {'output': str(result) if result is not None else ''}",
+        "    if 'success' not in result:",
+        "        result['success'] = True",
+        "    if captured and captured.strip():",
+        "        result.setdefault('output', '')",
+        "        if result['output']:",
+        "            result['output'] += '\\n[skill stdout: ' + captured.strip() + ']'",
+        "        else:",
+        "            result['output'] = captured.strip()",
+        "    print(json.dumps(result, default=str))",
+        "except Exception as e:",
+        "    sys.stdout = sys.__stdout__",
+        "    print(json.dumps({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}))",
+        ""
+    );
+
     @Override
     public ToolResult execute(Map<String, Object> params, ToolExecutionContext context) {
         Path scriptPath = skillDir.resolve("skill.py");
@@ -78,17 +130,26 @@ public class DynamicSkill implements Tool {
             return ToolResult.failure("Skill script not found: " + scriptPath);
         }
 
+        Path runnerScript = null;
         try {
             // Resolve Python (creates venv + installs requirements if needed)
             var resolution = pythonEnv.resolveExecution(skillDir, name);
+
+            // Write the runner harness with a unique name to avoid conflicts
+            // when the same skill is executed concurrently by different users
+            String runnerId = Long.toHexString(Thread.currentThread().getId())
+                    + "_" + Long.toHexString(System.nanoTime());
+            runnerScript = skillDir.resolve("_runner_" + runnerId + ".py");
+            Files.writeString(runnerScript, RUNNER_HARNESS, java.nio.charset.StandardCharsets.UTF_8);
 
             // Serialize input parameters as JSON for stdin
             String inputJson = mapper.writeValueAsString(params != null ? params : Map.of());
 
             Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
 
+            // Run: python _runner.py skill.py   (runner reads stdin, imports skill, calls run())
             SandboxResult result = sandbox.execute(
-                    resolution.python(), scriptPath, skillDir,
+                    resolution.python(), runnerScript, skillDir,
                     inputJson, envVars, timeoutSec
             );
 
@@ -107,6 +168,11 @@ public class DynamicSkill implements Tool {
         } catch (Exception e) {
             log.error("Dynamic skill '{}' execution failed: {}", name, e.getMessage());
             return ToolResult.failure("Execution error: " + e.getMessage());
+        } finally {
+            // Clean up the temp runner script
+            if (runnerScript != null) {
+                try { Files.deleteIfExists(runnerScript); } catch (IOException ignored) {}
+            }
         }
     }
 
@@ -155,8 +221,42 @@ public class DynamicSkill implements Tool {
 
             return success ? ToolResult.success(output, data) : ToolResult.failure(output, data);
         } catch (Exception e) {
-            // Not valid JSON — treat raw stdout as a successful text result
-            return ToolResult.success(stdout.strip());
+            // Full stdout isn't valid JSON — try parsing the last non-empty line
+            // (skills may print debug info on earlier lines, with the JSON result last)
+            String lastLine = lastNonEmptyLine(stdout);
+            if (lastLine != null && lastLine.startsWith("{")) {
+                try {
+                    Map<String, Object> fallback = mapper.readValue(lastLine, new TypeReference<>() {});
+                    boolean ok = Boolean.TRUE.equals(fallback.get("success"));
+                    String out = fallback.containsKey("output") ? String.valueOf(fallback.get("output")) : lastLine;
+                    return ok ? ToolResult.success(out) : ToolResult.failure(out);
+                } catch (Exception ignored) {}
+            }
+            // Non-JSON output from the runner harness means something went wrong.
+            // Treat as failure so the agent gets a signal to investigate.
+            String detail = (stderr != null && !stderr.isBlank())
+                    ? " stderr: " + stderr.strip() : "";
+            return ToolResult.failure(
+                    "Tool produced non-JSON output (possible runner error): "
+                    + truncateStr(stdout.strip(), 500) + detail
+                    + " Use skill_manage(action='read') to inspect and skill_create to fix.");
         }
+    }
+
+    /** Return the last non-empty line in a multi-line string, or null. */
+    private static String lastNonEmptyLine(String text) {
+        if (text == null) return null;
+        String[] lines = text.split("\n");
+        for (int i = lines.length - 1; i >= 0; i--) {
+            String line = lines[i].strip();
+            if (!line.isEmpty()) return line;
+        }
+        return null;
+    }
+
+    /** Truncate a string with ellipsis. */
+    private static String truncateStr(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 }

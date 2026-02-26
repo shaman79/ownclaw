@@ -68,6 +68,9 @@ public class ProcessSandbox implements SandboxManager {
                     os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
                     os.flush();
                 }
+            } else {
+                // Close stdin immediately so the process sees EOF if it tries to read
+                process.getOutputStream().close();
             }
 
             // Drain stderr async to prevent pipe-buffer deadlock.

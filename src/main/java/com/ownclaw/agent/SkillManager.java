@@ -115,6 +115,9 @@ public class SkillManager {
             if (requirements != null && !requirements.isBlank()) {
                 Files.writeString(skillDir.resolve("requirements.txt"),
                         requirements.strip() + "\n", StandardCharsets.UTF_8);
+            } else {
+                // Remove stale requirements.txt so the old venv isn't used
+                Files.deleteIfExists(skillDir.resolve("requirements.txt"));
             }
 
             DynamicSkill skill = dynamicSkillRegistry.loadSkill(skillDir);
