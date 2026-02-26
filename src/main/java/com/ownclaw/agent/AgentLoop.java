@@ -12,9 +12,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import com.ownclaw.llm.*;
+
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
@@ -222,8 +222,12 @@ public class AgentLoop {
             if (action.isSkillCreate()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
+
+                // Regenerate skill code using the cloud LLM for superior quality
+                Map<String, Object> enhancedParams = enhanceSkillCodeWithCloud(action.params(), context);
+
                 long startMs = System.currentTimeMillis();
-                String result = skillManager.createSkill(action.params());
+                String result = skillManager.createSkill(enhancedParams);
                 long durationMs = System.currentTimeMillis() - startMs;
                 boolean ok = !result.startsWith("ERROR");
                 AgentObservation obs = ok
@@ -232,7 +236,7 @@ public class AgentLoop {
                 context.trajectory().record(action, obs);
                 if (debug) {
                     emitDebug(context.userId(),
-                            "SKILL_CREATE [" + action.params().getOrDefault("name", "?") + "] "
+                            "SKILL_CREATE [" + enhancedParams.getOrDefault("name", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + truncate(result, 2000));
                 }
@@ -493,6 +497,205 @@ public class AgentLoop {
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    // ── Cloud-escalated skill code generation ──
+
+    /**
+     * Enhance skill code by regenerating it with the cloud LLM.
+     *
+     * <p>The local model decides WHAT skill to create (name, description, parameter
+     * intent) — that's fast routing.  The cloud model writes the actual Python
+     * code — that's where quality matters most.
+     *
+     * <p>If the cloud provider is unavailable or the call fails, falls back to
+     * the original (local-generated) code so skill creation never blocks.
+     */
+    private Map<String, Object> enhanceSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
+        LlmProvider cloud = llmRouter.cloud();
+        if (!cloud.isAvailable()) {
+            log.info("Cloud provider unavailable, using local-generated skill code");
+            return originalParams;
+        }
+
+        String name = str(originalParams, "name");
+        String description = str(originalParams, "description");
+        String parameters = str(originalParams, "parameters");
+        String requirements = str(originalParams, "requirements");
+        String localCode = str(originalParams, "code");
+
+        statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                "Generating skill code with cloud LLM...");
+
+        try {
+            List<LlmMessage> messages = buildSkillCodePrompt(
+                    name, description, parameters, requirements, localCode, context);
+
+            LlmRequestConfig codeGenConfig = new LlmRequestConfig(
+                    null,   // use provider default model
+                    0.2,    // low temperature for precise code generation
+                    8192,   // generous token budget for complete code
+                    false   // no JSON mode — we want raw Python code
+            );
+
+            LlmResponse response = cloud.chat(messages, codeGenConfig);
+            String cloudCode = extractPythonCode(response.content());
+
+            if (cloudCode != null && !cloudCode.isBlank()) {
+                log.info("Cloud LLM generated {} chars of skill code for '{}' ({} tokens)",
+                        cloudCode.length(), name, response.totalTokens());
+
+                // Build enhanced params with cloud-generated code
+                Map<String, Object> enhanced = new HashMap<>(originalParams);
+                enhanced.put("code", cloudCode);
+
+                // Cloud may also suggest better requirements — extract if present
+                String cloudRequirements = extractRequirements(response.content());
+                if (cloudRequirements != null) {
+                    enhanced.put("requirements", cloudRequirements);
+                }
+
+                return enhanced;
+            } else {
+                log.warn("Cloud LLM returned no extractable Python code, falling back to local");
+                return originalParams;
+            }
+        } catch (Exception e) {
+            log.warn("Cloud skill code generation failed for '{}': {}, falling back to local",
+                    name, e.getMessage());
+            return originalParams;
+        }
+    }
+
+    /**
+     * Build a specialized prompt for the cloud LLM to generate high-quality skill code.
+     */
+    private List<LlmMessage> buildSkillCodePrompt(
+            String name, String description, String parameters,
+            String requirements, String localDraft, AgentContext context) {
+
+        List<LlmMessage> messages = new ArrayList<>();
+
+        // System prompt: expert Python code generator
+        var sys = new StringBuilder();
+        sys.append("You are an expert Python developer generating production-quality code for a skill ");
+        sys.append("in an autonomous agent system.\n\n");
+
+        sys.append("## Skill Contract\n");
+        sys.append("- The script MUST define `def run(params):` as the entry point.\n");
+        sys.append("- `params` is a dict with the parameters defined in the skill spec.\n");
+        sys.append("- The function MUST return a dict with an 'output' key containing the result string.\n");
+        sys.append("- On failure, return `{'output': 'ERROR: <description>'}` — never raise unhandled exceptions.\n\n");
+
+        sys.append("## Quality Standards\n");
+        sys.append("- **Encoding**: Always handle character encoding properly. For HTTP responses, use ");
+        sys.append("`response.encoding = response.apparent_encoding` or detect charset from headers/content. ");
+        sys.append("Support UTF-8, Latin-1, Windows-1250, and other common encodings.\n");
+        sys.append("- **Content types**: Detect and handle different content types (HTML, PDF, JSON, XML, ");
+        sys.append("plain text, binary). Check Content-Type headers and file extensions.\n");
+        sys.append("- **HTML processing**: Use BeautifulSoup to extract clean, readable text. Strip scripts, ");
+        sys.append("styles, navigation boilerplate. Preserve document structure (headings, lists, tables).\n");
+        sys.append("- **Error handling**: Catch all exceptions. Report HTTP status codes, connection errors, ");
+        sys.append("and timeouts clearly. Never let the skill crash.\n");
+        sys.append("- **Large content**: If output might exceed 10KB, truncate intelligently — return the ");
+        sys.append("most relevant portion with a note about truncation.\n");
+        sys.append("- **Network**: Set reasonable timeouts (10-30s). Use proper User-Agent headers. ");
+        sys.append("Follow redirects.\n");
+        sys.append("- **Robustness**: Handle edge cases — empty responses, invalid URLs, missing data, ");
+        sys.append("unexpected formats. The skill must work reliably across diverse inputs.\n\n");
+
+        sys.append("## Output Format\n");
+        sys.append("Return ONLY the Python code inside a ```python code fence. No explanations before or after.\n");
+        sys.append("If you suggest pip requirements beyond what was specified, add them in a separate ");
+        sys.append("```requirements fence after the code.\n");
+
+        messages.add(LlmMessage.system(sys.toString()));
+
+        // User prompt: the skill specification
+        var user = new StringBuilder();
+        user.append("Generate the Python code for this skill:\n\n");
+        user.append("**Name**: ").append(name).append("\n");
+        user.append("**Description**: ").append(description).append("\n");
+        user.append("**Parameters**: ").append(parameters).append("\n");
+        if (requirements != null && !requirements.isBlank()) {
+            user.append("**Available pip packages**: ").append(requirements).append("\n");
+        }
+
+        // Include the task context so the cloud knows what the skill needs to accomplish
+        user.append("\n**Context**: The agent is working on this task: \"");
+        user.append(truncate(context.originalMessage(), 500));
+        user.append("\"\n");
+
+        // Include the local model's draft as a starting point
+        if (localDraft != null && !localDraft.isBlank()) {
+            user.append("\n**Draft code** (from a smaller model — improve and fix it):\n```python\n");
+            user.append(localDraft);
+            user.append("\n```\n");
+        }
+
+        messages.add(LlmMessage.user(user.toString()));
+
+        return messages;
+    }
+
+    /**
+     * Extract Python code from a cloud LLM response.
+     * Handles ```python fences, plain ``` fences, and raw code.
+     */
+    private String extractPythonCode(String response) {
+        if (response == null || response.isBlank()) return null;
+
+        // Try to find ```python ... ``` fence
+        int start = response.indexOf("```python");
+        if (start >= 0) {
+            start = response.indexOf('\n', start) + 1;
+            int end = response.indexOf("```", start);
+            if (end > start) {
+                return response.substring(start, end).strip();
+            }
+        }
+
+        // Try plain ``` fence
+        start = response.indexOf("```");
+        if (start >= 0) {
+            start = response.indexOf('\n', start) + 1;
+            int end = response.indexOf("```", start);
+            if (end > start) {
+                return response.substring(start, end).strip();
+            }
+        }
+
+        // If the response looks like raw Python code (starts with import or def), use it directly
+        String trimmed = response.strip();
+        if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("def ")) {
+            return trimmed;
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract pip requirements from a cloud LLM response if it included a
+     * ```requirements fence.
+     */
+    private String extractRequirements(String response) {
+        if (response == null) return null;
+
+        int start = response.indexOf("```requirements");
+        if (start < 0) return null;
+
+        start = response.indexOf('\n', start) + 1;
+        int end = response.indexOf("```", start);
+        if (end > start) {
+            String reqs = response.substring(start, end).strip();
+            return reqs.isBlank() ? null : reqs;
+        }
+        return null;
+    }
+
+    private String str(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        return v != null ? v.toString() : null;
     }
 
     // ── Debug helpers ──
