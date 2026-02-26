@@ -182,9 +182,46 @@ public class ThinkingEngine {
         return sb.toString();
     }
 
+    // Regex that matches multi-line block comments in JSON
+    private static final java.util.regex.Pattern BLOCK_COMMENT =
+            java.util.regex.Pattern.compile("/\\*.*?\\*/", java.util.regex.Pattern.DOTALL);
+
+    /**
+     * Strip JavaScript-style comments from an LLM-produced JSON string.
+     * LLMs sometimes add // annotations in JSON which Jackson rejects.
+     */
+    private String stripJsonComments(String json) {
+        if (json == null) return json;
+        // Remove block comments first, then line comments
+        json = BLOCK_COMMENT.matcher(json).replaceAll("");
+        // Only strip // comments that are NOT inside a quoted string.
+        // Simple heuristic: split by lines and strip trailing // that aren't inside quotes.
+        var sb = new StringBuilder();
+        for (String line : json.split("\n", -1)) {
+            sb.append(stripLineComment(line)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Remove trailing // comment from a single line, being careful not to strip inside string values. */
+    private String stripLineComment(String line) {
+        boolean inString = false;
+        char prev = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"' && prev != '\\') {
+                inString = !inString;
+            } else if (!inString && c == '/' && prev == '/') {
+                return line.substring(0, i - 1);
+            }
+            prev = c;
+        }
+        return line;
+    }
+
     /**
      * Parse the LLM's JSON response into an AgentAction.
-     * Handles common LLM output quirks (code fences, extra text, etc.).
+     * Handles common LLM output quirks (code fences, comments, extra text, etc.).
      */
     AgentAction parseAction(String raw) {
         if (raw == null || raw.isBlank()) {
@@ -205,6 +242,9 @@ public class ThinkingEngine {
                     Map.of("message", raw.strip()),
                     "LLM did not produce structured output; delivering raw response");
         }
+
+        // Strip JS-style comments that LLMs sometimes inject into JSON
+        cleaned = stripJsonComments(cleaned);
 
         try {
             Map<String, Object> parsed = mapper.readValue(cleaned, new TypeReference<>() {});

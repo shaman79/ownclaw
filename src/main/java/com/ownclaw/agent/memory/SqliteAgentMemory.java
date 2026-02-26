@@ -68,29 +68,33 @@ public class SqliteAgentMemory implements AgentMemory {
                 );
             }
 
-            // Build a scoring query — episodes matching more keywords rank higher
-            // SQLite doesn't have full-text search without FTS extension, so we use LIKE
-            StringBuilder sql = new StringBuilder();
-            sql.append("SELECT id, content, outcome, tags, created_at, (");
+            // Build a scoring query — episodes matching more keywords rank higher.
+            // SQLite doesn't have full-text search without FTS extension, so we use LIKE.
+            // We wrap in a subquery because SQLite rejects HAVING on non-aggregate queries.
+            StringBuilder inner = new StringBuilder();
+            inner.append("SELECT id, content, outcome, tags, created_at, (");
             List<Object> params = new ArrayList<>();
 
             for (int i = 0; i < keywords.size(); i++) {
-                if (i > 0) sql.append(" + ");
-                sql.append("(CASE WHEN (tags LIKE ? OR content LIKE ?) THEN 1 ELSE 0 END)");
+                if (i > 0) inner.append(" + ");
+                inner.append("(CASE WHEN (tags LIKE ? OR content LIKE ?) THEN 1 ELSE 0 END)");
                 String pattern = "%" + keywords.get(i) + "%";
                 params.add(pattern);
                 params.add(pattern);
             }
 
-            sql.append(") AS relevance FROM agent_memory ")
-                    .append("WHERE user_id = ? AND memory_type = 'episode' ")
-                    .append("HAVING relevance > 0 ")
-                    .append("ORDER BY relevance DESC, created_at DESC ")
-                    .append("LIMIT ?");
+            inner.append(") AS relevance FROM agent_memory ")
+                    .append("WHERE user_id = ? AND memory_type = 'episode'");
             params.add(userId);
+
+            String sql = "SELECT id, content, outcome, tags, created_at, relevance "
+                    + "FROM (" + inner + ") "
+                    + "WHERE relevance > 0 "
+                    + "ORDER BY relevance DESC, created_at DESC "
+                    + "LIMIT ?";
             params.add(maxResults);
 
-            return jdbc.query(sql.toString(),
+            return jdbc.query(sql,
                     (rs, rowNum) -> new MemoryEntry(
                             rs.getString("id"),
                             rs.getString("content"),
