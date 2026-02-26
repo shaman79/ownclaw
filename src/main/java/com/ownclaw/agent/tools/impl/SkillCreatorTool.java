@@ -10,6 +10,7 @@ import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -45,7 +46,7 @@ public class SkillCreatorTool implements Tool {
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
 
-    public SkillCreatorTool(DynamicSkillRegistry dynamicSkillRegistry, ToolRegistry toolRegistry,
+    public SkillCreatorTool(DynamicSkillRegistry dynamicSkillRegistry, @Lazy ToolRegistry toolRegistry,
                             OwnClawConfig config, SandboxManager sandbox,
                             PythonEnvironmentService pythonEnv) {
         this.dynamicSkillRegistry = dynamicSkillRegistry;
