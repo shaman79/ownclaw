@@ -81,6 +81,25 @@ public class AgentLoop {
      * @return the agent's final response string
      */
     public String execute(String userId, String message) {
+        try {
+            AgentResult result = executeFull(userId, message);
+            return result.response();
+        } catch (Exception e) {
+            log.error("AgentLoop fatal error for user={}: {}", userId, e.getMessage(), e);
+            statusEmitter.emit(userId, StatusMessage.Type.FAILED, "An unexpected error occurred.");
+            return "I encountered an unexpected error while processing your request. Please try again.";
+        }
+    }
+
+    /**
+     * Execute the agent loop and return the full AgentResult (with trajectory).
+     * Used by the debug API for full execution trace visibility.
+     *
+     * @param userId  the user who submitted the task
+     * @param message the user's message
+     * @return the full AgentResult including trajectory, steps, and timing
+     */
+    public AgentResult executeFull(String userId, String message) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
 
@@ -109,19 +128,13 @@ public class AgentLoop {
 
         statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Processing your request...");
 
-        try {
-            AgentResult result = runLoop(context);
-            emitResult(userId, result);
+        AgentResult result = runLoop(context);
+        emitResult(userId, result);
 
-            // Store this execution as an episodic memory
-            storeEpisode(context, result);
+        // Store this execution as an episodic memory
+        storeEpisode(context, result);
 
-            return result.response();
-        } catch (Exception e) {
-            log.error("AgentLoop fatal error for user={} task={}: {}", userId, taskId, e.getMessage(), e);
-            statusEmitter.emit(userId, StatusMessage.Type.FAILED, "An unexpected error occurred.");
-            return "I encountered an unexpected error while processing your request. Please try again.";
-        }
+        return result;
     }
 
     /**
