@@ -176,6 +176,12 @@ public class ThinkingEngine {
         sb.append("- When the task is complete, always use 'respond' to deliver the final answer.\n");
         sb.append("- If you cannot complete the task after reasonable effort, use 'respond' to explain what you tried and why it didn't work.\n");
         sb.append("- Never fabricate tool outputs or assume a tool succeeded without observing the result.\n");
+        sb.append("- Information is often not on the first page you fetch. Explore: follow links, ");
+        sb.append("check sub-pages, look for embedded resources (PDFs, documents, data files).\n");
+        sb.append("- Before responding with 'not found', verify you have explored all plausible paths — ");
+        sb.append("link targets, navigation menus, download links, and alternative content formats.\n");
+        sb.append("- Verify your results make sense. If output is garbled, empty, or suspiciously short, ");
+        sb.append("the tool or approach likely needs fixing — don't present broken data to the user.\n");
 
         // Language awareness
         sb.append("\n## Language & Locale Awareness\n");
@@ -198,13 +204,24 @@ public class ThinkingEngine {
         sb.append("- After multiple failures, pause and reconsider: is the current approach fundamentally wrong? ");
         sb.append("Could a different tool or technique succeed where the current one fails?\n");
         sb.append("- Prefer creating reusable, general-purpose tools over single-use scripts.\n");
-        sb.append("- When creating tools that fetch content, handle different content types ");
-        sb.append("(HTML, PDF, images, APIs) and always report what was actually received.\n");
-        sb.append("\n## Critical: Tool Output Quality\n");
-        sb.append("Your tool outputs are included in your reasoning context. Follow these rules:\n");
-        sb.append("- Tools that fetch structured content (HTML, XML, etc.) should extract readable text, not return raw markup.\n");
-        sb.append("- Return only meaningful content — strip boilerplate, navigation, and formatting artifacts.\n");
+        sb.append("- When creating tools that process remote content, handle:\n");
+        sb.append("  - Character encoding: detect and handle charset properly (UTF-8, Latin-1, etc.). ");
+        sb.append("If text looks garbled (mojibake), fix the encoding logic.\n");
+        sb.append("  - Content types: HTML pages, PDFs, JSON/XML APIs, images — detect the format and process accordingly.\n");
+        sb.append("  - Large content: truncate or summarize to avoid overwhelming context. Return the most relevant portion.\n");
+        sb.append("  - Error handling: report HTTP status codes, connection errors, and empty responses clearly.\n");
+        sb.append("- When creating tools that parse structured content (HTML, XML, JSON):\n");
+        sb.append("  - Extract readable text, not raw markup. Strip scripts, styles, navigation, and boilerplate.\n");
+        sb.append("  - Preserve document structure (headings, lists, tables) as clean text.\n");
+        sb.append("  - Support filtering by selector/path when appropriate.\n");
+        sb.append("\n## Critical: Data Quality\n");
+        sb.append("Your tool outputs are included in your reasoning context. They must be clean and useful.\n");
+        sb.append("- Extract readable text from structured formats — never return raw HTML, XML, or binary data.\n");
+        sb.append("- Strip boilerplate (navigation, headers, footers, ads) — return only meaningful content.\n");
         sb.append("- If a tool returns too much data, improve it to focus on the relevant section.\n");
+        sb.append("- If output contains garbled or corrupted text (wrong encoding), fix the tool — don't pass broken data to the user.\n");
+        sb.append("- When content is behind links or in downloadable files (PDF, DOCX, CSV), ");
+        sb.append("fetch and extract the actual content rather than just reporting the link exists.\n");
 
         return sb.toString();
     }
