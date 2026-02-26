@@ -200,6 +200,11 @@ public class ThinkingEngine {
         sb.append("- Prefer creating reusable, general-purpose tools over single-use scripts.\n");
         sb.append("- When creating tools that fetch content, handle different content types ");
         sb.append("(HTML, PDF, images, APIs) and always report what was actually received.\n");
+        sb.append("\n## Critical: Tool Output Quality\n");
+        sb.append("Your tool outputs are included in your reasoning context. Follow these rules:\n");
+        sb.append("- Tools that fetch structured content (HTML, XML, etc.) should extract readable text, not return raw markup.\n");
+        sb.append("- Return only meaningful content — strip boilerplate, navigation, and formatting artifacts.\n");
+        sb.append("- If a tool returns too much data, improve it to focus on the relevant section.\n");
 
         return sb.toString();
     }

@@ -88,10 +88,12 @@ public class AgentTrajectory {
     }
 
     /**
-     * Build a compact textual representation of the trajectory for LLM context.
+     * Build a textual representation of the trajectory for LLM context.
+     * No truncation — local models have no token cost, so the agent sees everything.
      */
     public String toPromptSummary() {
         if (turns.isEmpty()) return "";
+
         var sb = new StringBuilder();
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
@@ -99,17 +101,19 @@ public class AgentTrajectory {
             sb.append("Tool: ").append(turn.action().tool());
             sb.append(" | Status: ").append(turn.observation().success() ? "OK" : "FAILED");
             sb.append(" | Duration: ").append(turn.observation().durationMs()).append("ms");
-            sb.append("\nReasoning: ").append(turn.action().reasoning());
+
+            String reasoning = turn.action().reasoning();
+            if (reasoning != null && !reasoning.isBlank()) {
+                sb.append("\nReasoning: ").append(reasoning);
+            }
+
             String output = turn.observation().output();
             if (output != null && !output.isBlank()) {
-                // Truncate long outputs to keep context manageable
-                if (output.length() > 500) {
-                    output = output.substring(0, 500) + "...[truncated]";
-                }
                 sb.append("\nOutput: ").append(output);
             }
             sb.append("\n\n");
         }
+
         return sb.toString();
     }
 }
