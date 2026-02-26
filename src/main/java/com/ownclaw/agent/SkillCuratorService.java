@@ -7,6 +7,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.llm.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -40,7 +41,7 @@ public class SkillCuratorService {
     private final DynamicSkillRegistry dynamicSkillRegistry;
 
     public SkillCuratorService(JdbcTemplate jdbc, LlmRouter llmRouter,
-                               ToolRegistry toolRegistry,
+                               @Lazy ToolRegistry toolRegistry,
                                DynamicSkillRegistry dynamicSkillRegistry) {
         this.jdbc = jdbc;
         this.llmRouter = llmRouter;
