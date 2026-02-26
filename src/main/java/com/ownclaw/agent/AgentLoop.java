@@ -291,10 +291,10 @@ public class AgentLoop {
             } else {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.WARNING,
                         action.tool() + " failed: " + truncate(observation.output(), 100));
-
-                // Inject reflection hint after consecutive failures
-                injectReflection(context, action);
             }
+
+            // Inject reflection after consecutive failures OR consecutive hollow results
+            injectReflection(context, action);
         }
 
         // Exhausted max steps
@@ -378,21 +378,25 @@ public class AgentLoop {
 
     /**
      * Inject a reflection observation when the agent is struggling.
-     * Called after recording a failed observation if consecutive failure count is high.
+     * Triggers on consecutive failures OR consecutive hollow (empty-output) results.
      */
     private void injectReflection(AgentContext context, AgentAction lastAction) {
         int failures = context.trajectory().consecutiveFailures();
-        if (failures < 2) return;
+        int hollow = context.trajectory().consecutiveHollowResults();
+        int trouble = Math.max(failures, hollow);
+        if (trouble < 2) return;
 
         String reflectionHint;
-        if (failures == 2) {
-            reflectionHint = "REFLECTION: Two consecutive failures. Reconsider your approach. " +
-                    "If the current tool is not producing results, inspect its code with skill_manage(action='read') " +
-                    "and improve it with skill_create, or try a fundamentally different strategy.";
+        if (trouble == 2) {
+            reflectionHint = "REFLECTION: The last " + trouble + " tool calls " +
+                    (failures >= 2 ? "failed" : "returned empty/useless output") + ". " +
+                    "Reconsider your approach. Inspect the tool's code with skill_manage(action='read') " +
+                    "to find the bug, then fix it with skill_create. Or try a fundamentally different strategy.";
         } else {
-            reflectionHint = "REFLECTION: " + failures + " consecutive failures. STOP repeating the same approach. " +
-                    "Either create/improve a tool with skill_create, try completely different tools, " +
-                    "or respond with what you've learned so far.";
+            reflectionHint = "REFLECTION: " + trouble + " consecutive " +
+                    (failures >= trouble ? "failures" : "empty results") + ". " +
+                    "STOP repeating the same approach. Read the skill code, fix it, or try " +
+                    "a completely different technique. If nothing works, respond with what you know.";
         }
 
         // Record reflection as a synthetic observation so the ThinkingEngine sees it

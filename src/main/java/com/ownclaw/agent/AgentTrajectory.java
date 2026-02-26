@@ -51,6 +51,25 @@ public class AgentTrajectory {
     }
 
     /**
+     * Count consecutive "hollow" results at the tail — tool calls that technically
+     * succeeded but produced empty or trivially short output, suggesting the tool
+     * is broken or returning nothing useful.
+     */
+    public int consecutiveHollowResults() {
+        int count = 0;
+        for (int i = turns.size() - 1; i >= 0; i--) {
+            var obs = turns.get(i).observation();
+            String out = obs.output();
+            if (obs.success() && (out == null || out.isBlank() || out.length() < 10)) {
+                count++;
+            } else {
+                break;
+            }
+        }
+        return count;
+    }
+
+    /**
      * Count how many times a specific tool has been invoked.
      */
     public long toolInvocationCount(String toolName) {
