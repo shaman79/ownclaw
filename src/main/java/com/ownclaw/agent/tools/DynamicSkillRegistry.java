@@ -8,6 +8,7 @@ import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
@@ -42,7 +43,7 @@ public class DynamicSkillRegistry {
 
     private final Map<String, DynamicSkill> dynamicSkills = new ConcurrentHashMap<>();
 
-    public DynamicSkillRegistry(OwnClawConfig config, ToolRegistry toolRegistry,
+    public DynamicSkillRegistry(OwnClawConfig config, @Lazy ToolRegistry toolRegistry,
                                 SandboxManager sandbox, PythonEnvironmentService pythonEnv) {
         this.config = config;
         this.toolRegistry = toolRegistry;
