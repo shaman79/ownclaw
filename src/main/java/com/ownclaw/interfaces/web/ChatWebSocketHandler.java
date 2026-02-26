@@ -132,7 +132,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // Debug messages are rendered as full message blocks, not brief activity entries
                 sendToSession(session, "debug", msg.text());
             } else {
-                sendToSession(session, "status", msg.formatted());
+                // Include the raw status sub-type so the frontend can detect terminal statuses
+                sendStatusToSession(session, msg);
             }
         });
 
@@ -467,6 +468,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
+    }
+
+    private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
+        try {
+            String json = mapper.writeValueAsString(Map.of(
+                    "type", "status",
+                    "content", msg.formatted(),
+                    "status", msg.type().name().toLowerCase()
+            ));
+            session.sendMessage(new TextMessage(json));
+        } catch (Exception e) {
+            log.warn("Failed to send status to WebSocket: {}", e.getMessage());
+        }
     }
 
     private void sendToSession(WebSocketSession session, String type, String content) {

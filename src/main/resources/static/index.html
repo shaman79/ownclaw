@@ -871,6 +871,7 @@
     var busy = false;
     var lastMsgSender = null;
     var heartbeatTimer = null;
+    var thinkingSafetyTimer = null;
 
     marked.setOptions({ breaks: true, gfm: true });
 
@@ -1081,8 +1082,15 @@
                 var type    = data.type    || 'response';
                 var content = data.content || '';
                 if (type === 'status') {
-                    setThinking(true);
-                    showActivity(content);
+                    var sub = data.status || '';
+                    if (sub === 'completed' || sub === 'failed' || sub === 'rollback') {
+                        showActivity(content);
+                        setThinking(false);
+                        doneActivity();
+                    } else {
+                        setThinking(true);
+                        showActivity(content);
+                    }
                 } else if (type === 'debug') {
                     addMsg('debug', content);
                 } else if (type === 'pong' || type === 'ping') {
@@ -1100,16 +1108,32 @@
     }
 
     function setThinking(on) {
+        if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
         if (on) {
             thinkingEl.classList.add('active');
             sendBtn.disabled = true;
             stopBtn.classList.add('visible');
             scrollBottom();
+            // Safety net: auto-hide if no messages arrive for 90 seconds
+            thinkingSafetyTimer = setTimeout(function() {
+                setThinking(false);
+                doneActivity();
+            }, 90000);
         } else {
             thinkingEl.classList.remove('active');
             sendBtn.disabled = false;
             stopBtn.classList.remove('visible');
             busy = false;
+        }
+    }
+
+    function resetThinkingSafetyTimer() {
+        if (thinkingSafetyTimer) {
+            clearTimeout(thinkingSafetyTimer);
+            thinkingSafetyTimer = setTimeout(function() {
+                setThinking(false);
+                doneActivity();
+            }, 90000);
         }
     }
 
