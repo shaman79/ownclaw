@@ -19,7 +19,7 @@ import java.util.Map;
 public class WebFetchTool implements Tool {
 
     private static final Logger log = LoggerFactory.getLogger(WebFetchTool.class);
-    private static final int MAX_TEXT_LENGTH = 50_000;
+    private static final int DEFAULT_MAX_LENGTH = 50_000;
     private static final int CONNECT_TIMEOUT_MS = 15_000;
 
     @Override
@@ -28,7 +28,8 @@ public class WebFetchTool implements Tool {
     @Override
     public String description() {
         return "Fetch a web page and extract its readable text content. " +
-                "Returns cleaned text without HTML tags. Optionally extracts specific CSS selectors.";
+                "Returns cleaned text without HTML tags. Supports pagination via offset/max_length " +
+                "to retrieve large pages in chunks. Optionally extracts specific CSS selectors.";
     }
 
     @Override
@@ -40,6 +41,12 @@ public class WebFetchTool implements Tool {
                 "If omitted, extracts all body text."));
         schema.put("include_links", ToolParam.optional("boolean",
                 "Whether to include link URLs in the output (default: false)"));
+        schema.put("offset", ToolParam.optional("integer",
+                "Character offset to start reading from (default: 0). " +
+                "Use this to paginate through large pages when previous output was truncated."));
+        schema.put("max_length", ToolParam.optional("integer",
+                "Maximum number of characters to return (default: 50000). " +
+                "Use a smaller value for focused extraction, or set higher if needed."));
         return schema;
     }
 
@@ -58,6 +65,10 @@ public class WebFetchTool implements Tool {
 
         String selector = params.containsKey("selector") ? params.get("selector").toString() : null;
         boolean includeLinks = Boolean.TRUE.equals(params.get("include_links"));
+        int offset = toInt(params.get("offset"), 0);
+        int maxLength = toInt(params.get("max_length"), DEFAULT_MAX_LENGTH);
+        if (maxLength <= 0) maxLength = DEFAULT_MAX_LENGTH;
+        if (offset < 0) offset = 0;
 
         try {
             Document doc = Jsoup.connect(url)
@@ -67,27 +78,50 @@ public class WebFetchTool implements Tool {
                     .get();
 
             String title = doc.title();
-            String text;
+            String fullText;
 
             if (selector != null && !selector.isBlank()) {
                 var elements = doc.select(selector);
                 if (elements.isEmpty()) {
                     return ToolResult.failure("No elements matched selector '" + selector + "' on page: " + url);
                 }
-                text = elements.text();
+                fullText = elements.text();
             } else {
-                text = doc.body() != null ? doc.body().text() : "";
+                fullText = doc.body() != null ? doc.body().text() : "";
             }
 
-            // Optionally extract links
+            int totalLength = fullText.length();
+
+            // Apply pagination window
+            String text;
+            boolean hasMore;
+            if (offset >= totalLength) {
+                text = "";
+                hasMore = false;
+            } else {
+                int end = Math.min(offset + maxLength, totalLength);
+                text = fullText.substring(offset, end);
+                hasMore = end < totalLength;
+            }
+
+            // Build output
             StringBuilder output = new StringBuilder();
             output.append("Title: ").append(title).append("\n");
-            output.append("URL: ").append(url).append("\n\n");
-
-            if (text.length() > MAX_TEXT_LENGTH) {
-                text = text.substring(0, MAX_TEXT_LENGTH) + "\n...[content truncated]";
+            output.append("URL: ").append(url).append("\n");
+            output.append("Content length: ").append(totalLength).append(" chars");
+            if (offset > 0 || hasMore) {
+                output.append(" | Showing: ").append(offset).append("-").append(offset + text.length())
+                        .append(" of ").append(totalLength);
             }
+            output.append("\n\n");
             output.append(text);
+
+            if (hasMore) {
+                int remaining = totalLength - (offset + text.length());
+                output.append("\n\n...[").append(remaining)
+                        .append(" more chars — use offset=").append(offset + text.length())
+                        .append(" to continue reading]");
+            }
 
             if (includeLinks) {
                 var links = doc.select("a[href]");
@@ -112,13 +146,27 @@ public class WebFetchTool implements Tool {
             Map<String, Object> structured = Map.of(
                     "title", title,
                     "url", url,
-                    "text_length", text.length()
+                    "total_length", totalLength,
+                    "offset", offset,
+                    "returned_length", text.length(),
+                    "has_more", hasMore
             );
 
             return ToolResult.success(output.toString(), structured);
         } catch (Exception e) {
             log.error("Web fetch failed for {}: {}", url, e.getMessage());
             return ToolResult.failure("Failed to fetch page: " + e.getMessage());
+        }
+    }
+
+    /** Safely parse an integer from a param value (may be Number, String, or null). */
+    private int toInt(Object value, int defaultValue) {
+        if (value == null) return defaultValue;
+        if (value instanceof Number n) return n.intValue();
+        try {
+            return Integer.parseInt(value.toString().strip());
+        } catch (NumberFormatException e) {
+            return defaultValue;
         }
     }
 }

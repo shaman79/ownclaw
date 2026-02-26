@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.memory.AgentMemory;
 import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -41,6 +42,7 @@ public class AgentLoop {
     private final AgentMemory memory;
     private final SkillCuratorService curatorService;
     private final DebugSessionService debugService;
+    private final TaskCancellationService cancellationService;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -51,7 +53,8 @@ public class AgentLoop {
             LlmRouter llmRouter,
             AgentMemory memory,
             SkillCuratorService curatorService,
-            DebugSessionService debugService
+            DebugSessionService debugService,
+            TaskCancellationService cancellationService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -62,6 +65,7 @@ public class AgentLoop {
         this.memory = memory;
         this.curatorService = curatorService;
         this.debugService = debugService;
+        this.cancellationService = cancellationService;
     }
 
     /**
@@ -95,6 +99,9 @@ public class AgentLoop {
         } catch (Exception e) {
             log.debug("Failed to recall memories for user {}: {}", userId, e.getMessage());
         }
+
+        // Clear any stale cancel flag from a previous task
+        cancellationService.clear(userId);
 
         statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Processing your request...");
 
@@ -137,8 +144,8 @@ public class AgentLoop {
         long timeoutMs = config.getTasks().getDefaultTimeout() * 1000L;
 
         for (int step = 0; step < maxSteps; step++) {
-            // Check cancellation
-            if (context.isCancelled()) {
+            // Check cancellation — both local flag and service flag from WebSocket cancel button
+            if (context.isCancelled() || cancellationService.isCancelled(context.userId())) {
                 log.info("Task {} cancelled by user", context.taskId());
                 return AgentResult.cancelled(
                         "Task was cancelled.",

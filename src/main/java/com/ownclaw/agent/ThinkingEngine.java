@@ -27,10 +27,12 @@ public class ThinkingEngine {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final ToolRegistry toolRegistry;
+    private final ToolSelector toolSelector;
     private final OwnClawConfig config;
 
-    public ThinkingEngine(ToolRegistry toolRegistry, OwnClawConfig config) {
+    public ThinkingEngine(ToolRegistry toolRegistry, ToolSelector toolSelector, OwnClawConfig config) {
         this.toolRegistry = toolRegistry;
+        this.toolSelector = toolSelector;
         this.config = config;
     }
 
@@ -118,9 +120,19 @@ public class ThinkingEngine {
             sb.append(context.userPreferences()).append("\n\n");
         }
 
-        // Available tools
+        // Smart tool selection — include only relevant tools in detail
+        ToolSelector.Selection selection = toolSelector.select(
+                context.originalMessage(), context.trajectory());
+
         sb.append("## Available Tools\n");
-        sb.append(toolRegistry.generateManifest()).append("\n\n");
+        sb.append(toolRegistry.generateManifest(selection.detailed())).append("\n");
+
+        // If some tools were omitted, list them by name so the LLM knows they exist
+        if (!selection.otherNames().isEmpty()) {
+            sb.append("\n## Other Available Tools (use by name if needed)\n");
+            sb.append(String.join(", ", selection.otherNames())).append("\n");
+        }
+        sb.append("\n");
 
         // Special actions
         sb.append("## Special Actions\n");
@@ -148,6 +160,18 @@ public class ThinkingEngine {
         sb.append("- When the task is complete, always use 'respond' to deliver the final answer.\n");
         sb.append("- If you cannot complete the task after reasonable effort, use 'respond' to explain what you tried and why it didn't work.\n");
         sb.append("- Never fabricate tool outputs or assume a tool succeeded without observing the result.\n");
+
+        // Language awareness
+        sb.append("\n## Language & Locale Awareness\n");
+        sb.append("- Detect the language of the user's message and respond in the same language.\n");
+        sb.append("- When working with web pages, documents or data, identify their language from ");
+        sb.append("the content and adapt your strategy accordingly.\n");
+        sb.append("- Use search keywords, queries, and extraction selectors in the SAME LANGUAGE as the ");
+        sb.append("target content. For example, if a web page is in Czech, search for Czech terms, ");
+        sb.append("not English translations.\n");
+        sb.append("- When results are in a foreign language, translate or explain them for the user ");
+        sb.append("based on the language they used in their original request.\n");
+        sb.append("- Never assume content is in English. Always check the actual language first.\n");
 
         return sb.toString();
     }

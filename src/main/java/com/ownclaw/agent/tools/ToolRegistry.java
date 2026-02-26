@@ -79,7 +79,14 @@ public class ToolRegistry {
      *     param_name (type, required|optional): description
      */
     public String generateManifest() {
-        return tools.values().stream()
+        return generateManifest(tools.values());
+    }
+
+    /**
+     * Generate a manifest for a specific subset of tools.
+     */
+    public String generateManifest(Collection<Tool> subset) {
+        return subset.stream()
                 .sorted(Comparator.comparing(Tool::name))
                 .map(this::formatToolEntry)
                 .collect(Collectors.joining("\n\n"));
