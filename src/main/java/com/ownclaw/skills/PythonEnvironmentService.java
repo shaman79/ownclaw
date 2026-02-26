@@ -76,7 +76,7 @@ public class PythonEnvironmentService {
     }
 
     private void resolveWritableEnvDirs() {
-        Path preferred = Path.of(config.getSkills().getCorePath()).getParent().resolve("_envs");
+        Path preferred = Path.of(config.getSkills().getGeneratedPath()).getParent().resolve("_envs");
         Path fallback = runtimeSkillsDir().resolve("_envs");
 
         Path chosen = tryEnsureWritableDir(preferred) ? preferred : fallback;

@@ -38,6 +38,7 @@ public class AgentLoop {
     private final OwnClawConfig config;
     private final LlmRouter llmRouter;
     private final AgentMemory memory;
+    private final SkillCuratorService curatorService;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -46,7 +47,8 @@ public class AgentLoop {
             ChatStatusEmitter statusEmitter,
             OwnClawConfig config,
             LlmRouter llmRouter,
-            AgentMemory memory
+            AgentMemory memory,
+            SkillCuratorService curatorService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -55,6 +57,7 @@ public class AgentLoop {
         this.config = config;
         this.llmRouter = llmRouter;
         this.memory = memory;
+        this.curatorService = curatorService;
     }
 
     /**
@@ -205,6 +208,10 @@ public class AgentLoop {
 
             // === OBSERVE ===
             context.trajectory().record(action, observation);
+
+            // Track tool usage for skill curation analytics
+            curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
+                    observation.success(), observation.durationMs());
 
             if (observation.success()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,

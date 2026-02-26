@@ -11,11 +11,9 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 ├── jdk/                 # Adoptium Temurin 21
 ├── .env                 # Secrets (not in git)
 ├── data/                # SQLite database
-├── skills/              # Core + generated skills
-│   ├── core/
-│   ├── generated/
-│   ├── _envs/
-│   └── manifest.json
+├── skills/              # Dynamic skills (agent-created)
+│   ├── generated/       # Skill directories (SKILL.yaml + skill.py)
+│   └── _envs/           # Python virtual environments
 ├── logs/                # Deploy log
 ├── backups/             # Last 5 JARs for rollback
 ├── repo/                # Git checkout (build workspace)
@@ -106,7 +104,7 @@ This checks for new commits on `main` every 15 minutes. If changes are found, it
 sudo -u ownclaw /opt/ownclaw/repo/deploy/deploy.sh
 ```
 
-Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). If files under `/opt/ownclaw/skills/` become root-owned (especially `manifest.json`), the `ownclaw` service user cannot update the manifest during skill generation/self-heal.
+Avoid running deploy as root (plain `sudo /opt/ownclaw/repo/deploy/deploy.sh`). If files under `/opt/ownclaw/skills/` become root-owned, the `ownclaw` service user cannot create or update skills at runtime.
 
 ### Rollback to previous version
 

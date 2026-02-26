@@ -7,10 +7,10 @@ import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.agent.tools.Tool;
+import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.EventLogService;
-import com.ownclaw.skills.SkillManifest;
-import com.ownclaw.skills.SkillModel;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.AuthService;
 import com.ownclaw.users.CredentialGrantService;
@@ -54,7 +54,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final EventLogService eventLog;
     private final CredentialGrantService credentialGrants;
     private final CredentialVault credentialVault;
-    private final SkillManifest skillManifest;
+    private final ToolRegistry toolRegistry;
     private final TokenBudgetTracker budgetTracker;
     private final SetupWizardService setupWizard;
     private final AuthService authService;
@@ -87,7 +87,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                                 ChatStatusEmitter statusEmitter, EventLogService eventLog,
                                 CredentialGrantService credentialGrants,
                                 CredentialVault credentialVault,
-                                SkillManifest skillManifest,
+                                ToolRegistry toolRegistry,
                                 TokenBudgetTracker budgetTracker,
                                 SetupWizardService setupWizard,
                                 AuthService authService,
@@ -101,7 +101,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.eventLog = eventLog;
         this.credentialGrants = credentialGrants;
         this.credentialVault = credentialVault;
-        this.skillManifest = skillManifest;
+        this.toolRegistry = toolRegistry;
         this.budgetTracker = budgetTracker;
         this.setupWizard = setupWizard;
         this.authService = authService;
@@ -234,9 +234,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     - `/log errors` — Recent errors
                     - `/log tokens` — Token usage today
                     - `/tokens` — Token budget summary
-                    - `/skills` — List available skills
-                    - `/grant <skill>` — Grant credential access to a skill
-                    - `/revoke <skill>` — Revoke credential access
+                    - `/skills` — List available tools
+                    - `/grant <tool> <credential>` — Grant credential access to a tool
+                    - `/revoke <tool>` — Revoke credential access
                     - `/cred set <KEY> <VALUE>` — Store a credential
                     - `/cred list` — List stored credential keys
                     - `/cred delete <KEY>` — Delete a credential
@@ -384,30 +384,34 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         };
     }
 
-    private String handleGrantCommand(String userId, String skillName) {
-        if (skillName.isEmpty()) return "Usage: /grant <skill_name>";
-        Optional<SkillModel> skill = skillManifest.findByName(skillName);
-        if (skill.isEmpty()) return "Skill not found: " + skillName;
-        List<String> creds = skill.get().credentials();
-        if (creds.isEmpty()) return "Skill '" + skillName + "' does not require any credentials.";
-        credentialGrants.grantPermanent(userId, skillName, creds);
-        return "\u2705 Permanent credential access granted for '" + skillName + "': " + String.join(", ", creds);
+    private String handleGrantCommand(String userId, String args) {
+        String[] parts = args.split("\\s+", 2);
+        if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            return "Usage: /grant <tool_name> <credential_key>";
+        }
+        String toolName = parts[0];
+        String credential = parts[1].toUpperCase();
+        if (toolRegistry.find(toolName).isEmpty()) return "Tool not found: " + toolName;
+        credentialGrants.grantPermanent(userId, toolName, List.of(credential));
+        return "\u2705 Permanent credential access granted for '" + toolName + "': " + credential;
     }
 
-    private String handleRevokeCommand(String userId, String skillName) {
-        if (skillName.isEmpty()) return "Usage: /revoke <skill_name>";
-        credentialGrants.resetGrants(userId, skillName);
-        return "\u274c Credential grants revoked for '" + skillName + "'";
+    private String handleRevokeCommand(String userId, String toolName) {
+        if (toolName.isEmpty()) return "Usage: /revoke <tool_name>";
+        credentialGrants.resetGrants(userId, toolName);
+        return "\u274c Credential grants revoked for '" + toolName + "'";
     }
 
     private String handleSkillsCommand() {
-        List<SkillModel> skills = skillManifest.allSkills();
-        if (skills.isEmpty()) return "No skills loaded.";
-        var sb = new StringBuilder("Available skills (" + skills.size() + "):\n");
-        for (var skill : skills) {
-            sb.append("  - **").append(skill.name()).append("**: ")
-                    .append(skill.summary() != null ? skill.summary() : "(no description)")
-                    .append(" [").append(String.join(", ", skill.keywords())).append("]\n");
+        var tools = toolRegistry.all();
+        if (tools.isEmpty()) return "No tools loaded.";
+        var sb = new StringBuilder("Available tools (" + tools.size() + "):\n");
+        for (Tool tool : tools.stream().sorted(java.util.Comparator.comparing(Tool::name)).toList()) {
+            sb.append("  - **").append(tool.name()).append("**: ")
+                    .append(tool.description())
+                    .append(tool.requiresNetwork() ? " [network]" : "")
+                    .append(tool.hasSideEffects() ? " [side-effects]" : "")
+                    .append("\n");
         }
         return sb.toString();
     }

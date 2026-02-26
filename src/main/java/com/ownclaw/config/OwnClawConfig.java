@@ -136,19 +136,10 @@ public class OwnClawConfig {
     }
 
     public static class Skills {
-        private String corePath = "./skills/core";
         private String generatedPath = "./skills/generated";
-        private String manifestPath = "./skills/manifest.json";
-        private int maxVersionsKept = 5;
 
-        public String getCorePath() { return corePath; }
-        public void setCorePath(String v) { this.corePath = v; }
         public String getGeneratedPath() { return generatedPath; }
         public void setGeneratedPath(String v) { this.generatedPath = v; }
-        public String getManifestPath() { return manifestPath; }
-        public void setManifestPath(String v) { this.manifestPath = v; }
-        public int getMaxVersionsKept() { return maxVersionsKept; }
-        public void setMaxVersionsKept(int v) { this.maxVersionsKept = v; }
     }
 
     public static class Database {

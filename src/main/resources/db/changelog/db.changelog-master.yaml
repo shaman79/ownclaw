@@ -17,3 +17,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/006-agent-memory.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/007-skill-usage.sql
+      relativeToChangelogFile: false

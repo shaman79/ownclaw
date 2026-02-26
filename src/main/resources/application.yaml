@@ -61,10 +61,7 @@ ownclaw:
     python-path: python
 
   skills:
-    core-path: ./skills/core
     generated-path: ./skills/generated
-    manifest-path: ./skills/manifest.json
-    max-versions-kept: 5
 
   database:
     path: ./data/ownclaw.db

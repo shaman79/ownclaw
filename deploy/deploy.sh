@@ -195,7 +195,7 @@ do_setup() {
 
     # Create directory structure
     log "Creating directories..."
-    mkdir -p "$DEPLOY_DIR"/{data,logs,backups,skills/_envs,skills/core,skills/generated}
+    mkdir -p "$DEPLOY_DIR"/{data,logs,backups,skills/_envs,skills/generated}
     mkdir -p "$REPO_DIR"
 
     # Install JDK 21
@@ -322,12 +322,10 @@ do_reset() {
     echo "    CLEAR  — all users (will need to re-register)"
     echo "    CLEAR  — all teaching log and user preferences"
     echo "    CLEAR  — all generated skills and their Python virtualenvs"
-    echo "    RESET  — skill manifest restored from repo"
     echo ""
     echo "  Preserved:"
     echo "    KEEP   — .env  (OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, OWNCLAW_EXECUTOR_*, etc.)"
     echo "    KEEP   — system_settings rows for connection/API config (URL, model, port, token)"
-    echo "    KEEP   — core skills (never modified by reset)"
     echo "    BACKUP — database backed up to $DEPLOY_DIR/backups/ before deletion"
     echo ""
     read -r -p "  Type YES to confirm reset: " _reset_confirm
@@ -404,14 +402,6 @@ do_reset() {
         log "Removed $_env_dirs skill virtualenv(s)"
     fi
 
-    # ── Step 6: Restore manifest from repo ──────────────────────────────────
-    if [ -f "$REPO_DIR/skills/manifest.json" ]; then
-        cp "$REPO_DIR/skills/manifest.json" "$DEPLOY_DIR/skills/manifest.json"
-        log "Manifest restored from repo"
-    else
-        log "WARN: No manifest.json found in repo at $REPO_DIR/skills/manifest.json"
-    fi
-
     ensure_runtime_permissions
 
     # ── Step 7: Start service — Liquibase recreates the schema ───────────────
@@ -474,16 +464,14 @@ do_reset() {
 
 ensure_runtime_permissions() {
     # This deploy script is sometimes (accidentally) run as root.
-    # If we copy/rsync skills as root, manifest.json becomes root-owned and the service user can't write it.
-    # Fix that deterministically here.
-    mkdir -p "$DEPLOY_DIR"/skills/{core,generated,_envs} "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
+    # Fix ownership so the service user can write generated skills and data.
+    mkdir -p "$DEPLOY_DIR"/skills/{generated,_envs} "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
 
     if [ "$(id -u)" -eq 0 ]; then
         chown -R ownclaw:ownclaw "$DEPLOY_DIR"/skills "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
     fi
 
     chmod -R u+rwX,go-rwx "$DEPLOY_DIR"/skills/generated "$DEPLOY_DIR"/skills/_envs 2>/dev/null || true
-    chmod u+rw "$DEPLOY_DIR"/skills/manifest.json 2>/dev/null || true
 }
 
 # === Pre-provision MCP server npm packages ===
@@ -529,83 +517,6 @@ provision_mcp_servers() {
     done
 
     log "MCP server provisioning: $((${#pkgs[@]} - failed)) installed, $failed failed"
-    return 0
-}
-
-# === Pre-provision Python virtual environments for core skills ===
-# Creates venvs as root (or the current user) so the service user never needs
-# to create them from scratch at runtime, avoiding "externally managed" pip
-# errors on Debian/Ubuntu systems.
-#
-# Called from do_setup() and deploy_jar() after core skills are synced.
-provision_skill_venvs() {
-    local core_dir="$DEPLOY_DIR/skills/core"
-    local envs_dir="$DEPLOY_DIR/skills/_envs"
-
-    if ! command -v python3 &>/dev/null; then
-        log "WARN: python3 not found — skipping venv provisioning"
-        return 0
-    fi
-
-    if ! python3 -c "import ensurepip" 2>/dev/null; then
-        log "WARN: python3 ensurepip not available — skipping venv provisioning"
-        log "      Fix: apt-get install -y python3-full python3-venv"
-        return 0
-    fi
-
-    mkdir -p "$envs_dir"
-
-    local provisioned=0
-    local failed=0
-
-    # Walk every requirements.txt under core skills.
-    # Path form: $core_dir/<skillname>/vN/requirements.txt → venv name = <skillname>
-    while IFS= read -r req_file; do
-        local rel="${req_file#"$core_dir"/}"
-        local skillname="${rel%%/*}"
-        local venv_dir="$envs_dir/$skillname"
-
-        # Skip if requirements is empty
-        local content
-        content=$(grep -v '^\s*#' "$req_file" | grep -v '^\s*$' || true)
-        if [ -z "$content" ]; then
-            log "  Skipping $skillname — requirements.txt is empty"
-            continue
-        fi
-
-        log "  Provisioning venv for skill: $skillname"
-
-        # Create (or re-use) the venv
-        if ! python3 -m venv "$venv_dir" 2>/dev/null; then
-            log "  WARN: Failed to create venv for '$skillname' — skipping"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        local pip="$venv_dir/bin/pip"
-        if [ ! -x "$pip" ]; then
-            log "  WARN: pip not found in venv for '$skillname' — skipping"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        if "$pip" install --quiet --disable-pip-version-check -r "$req_file" 2>/dev/null; then
-            log "  OK: $skillname venv ready"
-            provisioned=$((provisioned + 1))
-        else
-            # Non-quiet retry to surface the error
-            log "  WARN: pip install failed for '$skillname' (retrying with output):"
-            "$pip" install --disable-pip-version-check -r "$req_file" >&2 || true
-            failed=$((failed + 1))
-        fi
-    done < <(find "$core_dir" -name "requirements.txt" -type f 2>/dev/null | sort)
-
-    # Fix ownership so the service user can update the envs at runtime
-    if [ "$(id -u)" -eq 0 ]; then
-        chown -R ownclaw:ownclaw "$envs_dir"
-    fi
-
-    log "Python venv provisioning: ${provisioned} skill(s) ready, ${failed} failed"
     return 0
 }
 
@@ -719,18 +630,7 @@ deploy_jar() {
     mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
     log "Deployed new JAR"
 
-    # Sync skills and config from repo
-    # Avoid preserving root ownership if deploy is run with sudo.
-    rsync -a --no-owner --no-group --delete "$REPO_DIR/skills/core/" "$DEPLOY_DIR/skills/core/"
-    rsync -a --no-owner --no-group "$REPO_DIR/skills/manifest.json" "$DEPLOY_DIR/skills/manifest.json"
-    log "Synced skills and manifest"
-
     ensure_runtime_permissions
-
-    # Pre-provision Python venvs for core skills that have requirements.txt.
-    # Running as root (or ownclaw) here means the service never has to do first-time
-    # venv creation, avoiding "externally managed" pip errors on Debian/Ubuntu.
-    provision_skill_venvs || true
 
     # Ensure sudoers rule exists when possible (root deploys, or environments where sudo -n works).
     # If we cannot install it here, restart_service() will still fail with instructions.
