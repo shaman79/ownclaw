@@ -9,10 +9,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Tracks per-user cancellation requests.
  *
  * <p>When a user sends a "cancel" message over WebSocket, the flag for that user
- * is set to {@code true}. {@link TaskOrchestrator} checks the flag at each
- * inter-step checkpoint and aborts execution by throwing
- * {@link TaskCancelledException}. The flag is cleared at the start of every new
- * task so stale cancels don't affect subsequent work.
+ * is set to {@code true}. The {@code AgentLoop} checks the flag at each
+ * iteration checkpoint and stops execution gracefully. The flag is cleared
+ * at the start of every new task so stale cancels don't affect subsequent work.
  */
 @Service
 public class TaskCancellationService {

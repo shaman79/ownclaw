@@ -1,5 +1,6 @@
 package com.ownclaw.core;
 
+import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -22,7 +23,7 @@ public class TaskQueue {
 
     private static final Logger log = LoggerFactory.getLogger(TaskQueue.class);
 
-    private final TaskOrchestrator orchestrator;
+    private final AgentLoop agentLoop;
     private final EventLogService eventLog;
     private final ChatStatusEmitter statusEmitter;
     private final int maxQueuedTasks;
@@ -31,9 +32,9 @@ public class TaskQueue {
     private final AtomicInteger queueSize = new AtomicInteger(0);
     private ExecutorService workerPool;
 
-    public TaskQueue(TaskOrchestrator orchestrator, EventLogService eventLog,
+    public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
                      ChatStatusEmitter statusEmitter, OwnClawConfig config) {
-        this.orchestrator = orchestrator;
+        this.agentLoop = agentLoop;
         this.eventLog = eventLog;
         this.statusEmitter = statusEmitter;
         this.maxQueuedTasks = config.getQueue().getMaxQueuedTasks();
@@ -42,7 +43,7 @@ public class TaskQueue {
     @PostConstruct
     public void start() {
         // Single worker thread — tasks are serialized (Ollama is the bottleneck).
-        // Cloud LLM calls within TaskOrchestrator run on the calling thread (blocking OK here).
+        // LLM calls within AgentLoop run on the calling thread (blocking OK here).
         workerPool = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "task-queue-worker");
             t.setDaemon(true);
@@ -102,7 +103,7 @@ public class TaskQueue {
                 queueSize.decrementAndGet();
 
                 try {
-                    String response = orchestrator.processMessage(task.userId(), task.message());
+                    String response = agentLoop.execute(task.userId(), task.message());
                     task.future().complete(response);
                 } catch (Exception e) {
                     log.error("Task processing failed for user {}: {}", task.userId(), e.getMessage(), e);

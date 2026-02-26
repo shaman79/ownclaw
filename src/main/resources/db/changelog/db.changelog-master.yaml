@@ -14,3 +14,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/005-phase2-vault-auth.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/006-agent-memory.sql
+      relativeToChangelogFile: false
