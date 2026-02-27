@@ -13,6 +13,10 @@ spring:
 
 server:
   port: ${OWNCLAW_SERVER_PORT:${ownclaw.server.port:8080}}
+  servlet:
+    encoding:
+      charset: UTF-8
+      force-response: true
 
 ownclaw:
   executor:
