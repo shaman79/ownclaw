@@ -115,48 +115,60 @@ public class DynamicSkill implements Tool {
      */
     /**
      * Fix mojibake: if a string contains UTF-8 bytes misread as Latin-1 or CP1252,
-     * re-encode to CP1252 bytes and decode as UTF-8.
-     * Example: "GulÃ¡Å¡ovka" → "Gulášovka"
+     * re-encode to bytes and decode as UTF-8.
      *
-     * <p>Uses CP1252 (not Latin-1) because Python's {@code requests} and
-     * other libs sometimes decode raw bytes as Windows-1252 — which maps bytes
-     * 0x80-0x9F to Unicode chars outside the Latin-1 range (e.g. ™ = U+2122),
-     * causing {@code encode('latin-1')} to fail and skip the ENTIRE fix.
-     * CP1252 is a superset of Latin-1 for these byte ranges.
-     *
-     * <p>Falls back to line-by-line, then word-by-word, so one unfixable
-     * segment doesn't prevent the rest from being repaired.
+     * <p>Tries latin-1 first (identity mapping for 0x00-0xFF, handles C1 control chars),
+     * then cp1252 as fallback (handles characters like ™ etc.).
+     * Falls back to line-by-line, then word-by-word.
      */
     private static final String MOJIBAKE_FIX = String.join("\n",
         "def _fix_mojibake(s):",
         "    if not isinstance(s, str) or not s:",
         "        return s",
-        "    try:",
-        "        return s.encode('cp1252').decode('utf-8')",
-        "    except (UnicodeDecodeError, UnicodeEncodeError):",
-        "        pass",
+        "    def _try_fix(text):",
+        "        for enc in ('latin-1', 'cp1252'):",
+        "            try:",
+        "                fixed = text.encode(enc).decode('utf-8')",
+        "                if fixed != text:",
+        "                    return fixed",
+        "            except (UnicodeDecodeError, UnicodeEncodeError):",
+        "                continue",
+        "        return text",
+        "    # Try whole string",
+        "    result = _try_fix(s)",
+        "    if result != s:",
+        "        import sys as _s",
+        "        _s.stderr.write('[mojibake-fix] whole-string fix applied\\n')",
+        "        return result",
+        "    # Try line by line",
         "    lines = s.split('\\n')",
         "    fixed = []",
         "    changed = False",
         "    for line in lines:",
-        "        try:",
-        "            f = line.encode('cp1252').decode('utf-8')",
-        "            fixed.append(f)",
-        "            if f != line:",
-        "                changed = True",
-        "        except (UnicodeDecodeError, UnicodeEncodeError):",
-        "            words = line.split(' ')",
-        "            fw = []",
-        "            for w in words:",
-        "                try:",
-        "                    r = w.encode('cp1252').decode('utf-8')",
-        "                    fw.append(r)",
-        "                    if r != w:",
-        "                        changed = True",
-        "                except (UnicodeDecodeError, UnicodeEncodeError):",
-        "                    fw.append(w)",
-        "            fixed.append(' '.join(fw))",
-        "    return '\\n'.join(fixed) if changed else s"
+        "        f = _try_fix(line)",
+        "        fixed.append(f)",
+        "        if f != line:",
+        "            changed = True",
+        "    if changed:",
+        "        import sys as _s",
+        "        _s.stderr.write('[mojibake-fix] line-level fix applied\\n')",
+        "        return '\\n'.join(fixed)",
+        "    # Try word by word",
+        "    fixed2 = []",
+        "    changed2 = False",
+        "    for line in lines:",
+        "        words = line.split(' ')",
+        "        fw = [_try_fix(w) for w in words]",
+        "        fixed2.append(' '.join(fw))",
+        "        if any(a != b for a, b in zip(words, fw)):",
+        "            changed2 = True",
+        "    if changed2:",
+        "        import sys as _s",
+        "        _s.stderr.write('[mojibake-fix] word-level fix applied\\n')",
+        "        return '\\n'.join(fixed2)",
+        "    import sys as _s",
+        "    _s.stderr.write('[mojibake-fix] no fix needed or all attempts failed\\n')",
+        "    return s"
     );
 
     private static final String RUNNER_HARNESS = String.join("\n",
@@ -190,7 +202,11 @@ public class DynamicSkill implements Tool {
         "            result['output'] = captured.strip()",
         "    # Fix mojibake in output (UTF-8 bytes misread as Latin-1)",
         "    if 'output' in result and isinstance(result['output'], str):",
+        "        _orig = result['output'][:80]",
         "        result['output'] = _fix_mojibake(result['output'])",
+        "        import sys as _s2",
+        "        _s2.stderr.write('[mojibake-debug] before=' + repr(_orig) + '\\n')",
+        "        _s2.stderr.write('[mojibake-debug] after=' + repr(result['output'][:80]) + '\\n')",
         "    print(json.dumps(result, default=str, ensure_ascii=False))",
         "except Exception as e:",
         "    sys.stdout = sys.__stdout__",
