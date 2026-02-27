@@ -12,7 +12,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * A dynamically created Python-based tool, loaded from disk.
@@ -39,6 +42,28 @@ public class DynamicSkill implements Tool {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicSkill.class);
     private static final ObjectMapper mapper = new ObjectMapper();
+
+    /** Detect ModuleNotFoundError / ImportError in Python output. */
+    private static final Pattern MODULE_NOT_FOUND = Pattern.compile(
+            "ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]" +
+            "|ImportError: No module named ([A-Za-z0-9_.]+)");
+
+    /** Module name → pip package name (only when they differ). */
+    private static final Map<String, String> MODULE_TO_PACKAGE = Map.ofEntries(
+            Map.entry("bs4", "beautifulsoup4"),
+            Map.entry("yaml", "pyyaml"),
+            Map.entry("PIL", "pillow"),
+            Map.entry("cv2", "opencv-python"),
+            Map.entry("sklearn", "scikit-learn"),
+            Map.entry("lxml", "lxml"),
+            Map.entry("fitz", "PyMuPDF"),
+            Map.entry("docx", "python-docx"),
+            Map.entry("pptx", "python-pptx"),
+            Map.entry("dotenv", "python-dotenv"),
+            Map.entry("dateutil", "python-dateutil"),
+            Map.entry("attr", "attrs"),
+            Map.entry("jwt", "PyJWT")
+    );
 
     private final String name;
     private final String description;
@@ -158,11 +183,57 @@ public class DynamicSkill implements Tool {
             }
 
             if (result.isSuccess()) {
-                return parseOutput(result.stdout(), result.stderr());
+                ToolResult toolResult = parseOutput(result.stdout(), result.stderr());
+
+                // Self-heal: ModuleNotFoundError → install missing package → retry once
+                if (!toolResult.success()) {
+                    String missingModule = extractMissingModule(toolResult.output());
+                    if (missingModule != null) {
+                        String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
+                        log.info("Self-healing skill '{}': installing missing package '{}' (module '{}')",
+                                name, pkg, missingModule);
+
+                        boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
+                        if (installed) {
+                            // Re-resolve and retry
+                            var healedResolution = pythonEnv.resolveExecution(skillDir, name);
+                            Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                            SandboxResult retry = sandbox.execute(
+                                    healedResolution.python(), runnerScript, skillDir,
+                                    inputJson, healedEnv, timeoutSec);
+                            if (!retry.timedOut() && retry.isSuccess()) {
+                                log.info("Self-heal succeeded for skill '{}'", name);
+                                return parseOutput(retry.stdout(), retry.stderr());
+                            }
+                        }
+                    }
+                }
+
+                return toolResult;
             } else {
                 String error = result.stderr().isBlank()
                         ? "Exit code: " + result.exitCode()
                         : result.stderr();
+
+                // Self-heal stderr-based ModuleNotFoundError too
+                String missingModule = extractMissingModule(error);
+                if (missingModule != null) {
+                    String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
+                    log.info("Self-healing skill '{}' (stderr): installing '{}' for module '{}'",
+                            name, pkg, missingModule);
+                    if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
+                        var healedResolution = pythonEnv.resolveExecution(skillDir, name);
+                        Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                        SandboxResult retry = sandbox.execute(
+                                healedResolution.python(), runnerScript, skillDir,
+                                inputJson, healedEnv, timeoutSec);
+                        if (!retry.timedOut() && retry.isSuccess()) {
+                            log.info("Self-heal (stderr) succeeded for skill '{}'", name);
+                            return parseOutput(retry.stdout(), retry.stderr());
+                        }
+                    }
+                }
+
                 return ToolResult.failure(error);
             }
         } catch (Exception e) {
@@ -258,5 +329,18 @@ public class DynamicSkill implements Tool {
     private static String truncateStr(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    /** Extract the missing module name from a Python error message, or null. */
+    private static String extractMissingModule(String outputText) {
+        if (outputText == null || outputText.isBlank()) return null;
+        Matcher m = MODULE_NOT_FOUND.matcher(outputText);
+        if (!m.find()) return null;
+        String mod = m.group(1) != null ? m.group(1) : m.group(2);
+        if (mod == null || mod.isBlank()) return null;
+        // Top-level package only (e.g. "bs4.element" → "bs4")
+        int dot = mod.indexOf('.');
+        if (dot > 0) mod = mod.substring(0, dot);
+        return mod.strip();
     }
 }
