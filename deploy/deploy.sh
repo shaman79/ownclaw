@@ -586,6 +586,9 @@ pull_latest() {
 
     cd "$REPO_DIR"
 
+    # Ensure the remote URL uses current credentials
+    git remote set-url origin "$REPO_URL" 2>/dev/null || true
+
     # Fetch and check for changes
     local before
     before=$(git rev-parse HEAD)
@@ -621,7 +624,7 @@ build_jar() {
     export GRADLE_USER_HOME="$DEPLOY_DIR/.gradle"
     mkdir -p "$GRADLE_USER_HOME" 2>/dev/null || true
     chmod +x gradlew 2>/dev/null || true
-    ./gradlew build -x test --no-daemon >&2
+    ./gradlew clean build -x test --no-daemon >&2
 
     local jar="$REPO_DIR/build/libs/ownclaw-0.1.0.jar"
     [ -f "$jar" ] || die "Build failed — JAR not found at $jar"
