@@ -113,8 +113,26 @@ public class DynamicSkill implements Tool {
      * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
      * from the process-level stdin/stdout contract.
      */
+    /**
+     * Fix mojibake: if a string contains UTF-8 bytes misread as Latin-1,
+     * re-encode to Latin-1 bytes and decode as UTF-8.
+     * Example: "GulÃ¡Å¡ovka" → "Gulášovka"
+     * Safe: if encode('latin-1') or decode('utf-8') fails, the original is kept.
+     */
+    private static final String MOJIBAKE_FIX = String.join("\n",
+        "def _fix_mojibake(s):",
+        "    if not isinstance(s, str) or not s:",
+        "        return s",
+        "    try:",
+        "        fixed = s.encode('latin-1').decode('utf-8')",
+        "        return fixed",
+        "    except (UnicodeDecodeError, UnicodeEncodeError):",
+        "        return s"
+    );
+
     private static final String RUNNER_HARNESS = String.join("\n",
         "import sys, json, os, io, importlib.util, traceback",
+        MOJIBAKE_FIX,
         "try:",
         "    params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
         "    skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'skill.py')",
@@ -141,10 +159,13 @@ public class DynamicSkill implements Tool {
         "            result['output'] += '\\n[skill stdout: ' + captured.strip() + ']'",
         "        else:",
         "            result['output'] = captured.strip()",
-        "    print(json.dumps(result, default=str))",
+        "    # Fix mojibake in output (UTF-8 bytes misread as Latin-1)",
+        "    if 'output' in result and isinstance(result['output'], str):",
+        "        result['output'] = _fix_mojibake(result['output'])",
+        "    print(json.dumps(result, default=str, ensure_ascii=False))",
         "except Exception as e:",
         "    sys.stdout = sys.__stdout__",
-        "    print(json.dumps({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}))",
+        "    print(json.dumps({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}, ensure_ascii=False))",
         ""
     );
 
