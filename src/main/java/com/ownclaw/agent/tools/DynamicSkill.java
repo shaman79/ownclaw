@@ -190,7 +190,7 @@ public class DynamicSkill implements Tool {
                     String missingModule = extractMissingModule(toolResult.output());
                     if (missingModule != null) {
                         String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
-                        log.info("Self-healing skill '{}': installing missing package '{}' (module '{}')",
+                        log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
                                 name, pkg, missingModule);
 
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
