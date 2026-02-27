@@ -29,6 +29,7 @@ import java.util.stream.Collectors;
  *   POST /api/debug/prompt    — inject a test prompt and get full execution trace
  *   GET  /api/debug/output/{taskId} — retrieve stored trace from a previous run
  *   POST /api/debug/deploy    — trigger git pull + build + restart on the server
+ *   POST /api/debug/restart   — force JVM exit so systemd restarts with current JAR
  *   GET  /api/debug/status    — system health: registered skills, queue info
  *
  * All endpoints are JWT-protected (handled by JwtAuthFilter).
@@ -236,6 +237,39 @@ public class DebugController {
                     "durationMs", durationMs
             ));
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  POST /api/debug/restart — force JVM exit so systemd restarts
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * Emergency restart: calls System.exit(1) to terminate the JVM.
+     * systemd's Restart=on-failure will automatically restart the service,
+     * picking up whatever JAR is currently on disk.
+     *
+     * Use this when the normal deploy --update can't restart (e.g. missing sudoers).
+     *
+     * Response: { "message": "Restarting in 2 seconds..." }
+     * (response is sent before the JVM exits)
+     */
+    @PostMapping("/restart")
+    public ResponseEntity<?> restart() {
+        log.warn("Debug API restart triggered — JVM will exit in 2 seconds");
+
+        // Schedule exit on a separate thread so the HTTP response can be sent first
+        Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {}
+            log.warn("Executing System.exit(1) for restart");
+            System.exit(1);
+        });
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Restarting in 2 seconds...",
+                "note", "systemd Restart=on-failure will bring the service back up within ~12 seconds"
+        ));
     }
 
     // ────────────────────────────────────────────────────────────────
