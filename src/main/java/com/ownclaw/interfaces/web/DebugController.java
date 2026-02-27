@@ -179,14 +179,16 @@ public class DebugController {
     // ────────────────────────────────────────────────────────────────
 
     /**
-     * Trigger deployment by running deploy.sh --update on the server.
-     * Returns the script output and exit code.
+     * Trigger deployment by running deploy.sh on the server.
+     *
+     * <p>By default runs {@code --update} (skip build if no new commits).
+     * Use {@code ?force=true} to force a full rebuild even when up-to-date.
      *
      * Response: { "success": true, "exitCode": 0, "output": "...", "durationMs": 30000 }
      */
     @PostMapping("/deploy")
-    public ResponseEntity<?> deploy() {
-        log.info("Debug API deploy triggered");
+    public ResponseEntity<?> deploy(@RequestParam(defaultValue = "false") boolean force) {
+        log.info("Debug API deploy triggered (force={})", force);
 
         // Locate deploy.sh relative to the running JAR or repo
         String deployScript = findDeployScript();
@@ -198,7 +200,11 @@ public class DebugController {
 
         long startMs = System.currentTimeMillis();
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", deployScript, "--update");
+            // --update = incremental (skip if no changes); no flag = full rebuild
+            List<String> cmd = force
+                    ? List.of("bash", deployScript)
+                    : List.of("bash", deployScript, "--update");
+            ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.redirectErrorStream(true);
             pb.environment().put("TERM", "dumb");
 
