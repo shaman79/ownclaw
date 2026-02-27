@@ -272,10 +272,29 @@ public class AgentLoop {
             }
 
             if (action.isSkillManage()) {
+                // Apply critic evaluation for loop detection on skill_manage
+                CriticAgent.Verdict smVerdict = criticAgent.evaluate(action, context);
+                if (!smVerdict.allowed()) {
+                    log.warn("Task {} step {} skill_manage blocked by critic: {}",
+                            context.taskId(), step + 1, smVerdict.blockReason());
+                    if (debug) emitDebug(context.userId(), "CRITIC BLOCKED skill_manage: " + smVerdict.blockReason());
+                    AgentObservation blockObs = AgentObservation.failure(
+                            action.tool(), "BLOCKED: " + smVerdict.blockReason(), 0);
+                    context.trajectory().record(action, blockObs);
+                    continue;
+                }
+
                 long startMs = System.currentTimeMillis();
                 String result = executeSkillManage(action.params());
                 long durationMs = System.currentTimeMillis() - startMs;
                 boolean ok = !result.startsWith("ERROR");
+
+                // If listing returned empty inventory, append guidance
+                String manageAction = action.params().getOrDefault("action", "").toString();
+                if ("list".equals(manageAction) && toolRegistry.all().isEmpty()) {
+                    result += "\n\nNo tools are registered. Use skill_create to build tools for your task.";
+                }
+
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);

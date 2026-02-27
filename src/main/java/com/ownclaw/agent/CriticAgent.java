@@ -52,8 +52,27 @@ public class CriticAgent {
     public Verdict evaluate(AgentAction action, AgentContext context) {
         List<String> warnings = new ArrayList<>();
 
-        // 1. Special actions are always allowed
-        if (action.isSpecialAction()) {
+        // 1. Response/ask/skill_create are always allowed
+        if (action.isResponse() || action.isAskUser() || action.isSkillCreate()) {
+            return Verdict.allow(warnings);
+        }
+
+        // 1b. skill_manage gets loop detection — prevent endless list/analyze cycles
+        if (action.isSkillManage()) {
+            AgentTrajectory trajectory = context.trajectory();
+            int identicalCount = countIdenticalTrailingActions(trajectory, action);
+            if (identicalCount >= 2) {
+                return Verdict.block("You have called skill_manage with the same parameters " +
+                        identicalCount + " times in a row. The inventory is not going to change. " +
+                        "Use 'skill_create' to build the tool you need for this task instead.");
+            }
+            // Also detect any excessive skill_manage calls (different params but same tool)
+            long totalManage = trajectory.toolInvocationCount("skill_manage");
+            if (totalManage >= 4) {
+                return Verdict.block("You have called skill_manage " + totalManage +
+                        " times total. Stop managing and start CREATING. " +
+                        "Use 'skill_create' to build the tool you need.");
+            }
             return Verdict.allow(warnings);
         }
 

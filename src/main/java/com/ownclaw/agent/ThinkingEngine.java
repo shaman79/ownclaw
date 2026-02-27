@@ -131,12 +131,23 @@ public class ThinkingEngine {
                 context.originalMessage(), context.trajectory());
 
         sb.append("## Available Tools\n");
-        sb.append(toolRegistry.generateManifest(selection.detailed())).append("\n");
+        String manifest = toolRegistry.generateManifest(selection.detailed());
+        sb.append(manifest).append("\n");
 
         // If some tools were omitted, list them by name so the LLM knows they exist
         if (!selection.otherNames().isEmpty()) {
             sb.append("\n## Other Available Tools (use by name if needed)\n");
             sb.append(String.join(", ", selection.otherNames())).append("\n");
+        }
+
+        // Bootstrapping: when no tools exist, give the agent a strong push to create them
+        if (manifest.isBlank()) {
+            sb.append("\n## IMPORTANT: No tools are available.\n");
+            sb.append("You have NO tools yet. Your FIRST action MUST be 'skill_create' to build ");
+            sb.append("the tool you need for this task. Do NOT call 'skill_manage' to list tools — ");
+            sb.append("the list above is already the complete inventory and it is empty.\n");
+            sb.append("Analyze the user's request, determine what capability you need ");
+            sb.append("(e.g. fetch a web page, parse HTML, download a file), and create it now.\n");
         }
         sb.append("\n");
 
