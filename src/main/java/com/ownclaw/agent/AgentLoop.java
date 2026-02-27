@@ -223,11 +223,16 @@ public class AgentLoop {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
 
-                // Regenerate skill code using the cloud LLM for superior quality
-                Map<String, Object> enhancedParams = enhanceSkillCodeWithCloud(action.params(), context);
-
-                // Auto-infer pip requirements from import statements in the code
-                enhancedParams = ensureRequirements(enhancedParams);
+                // Generate skill code exclusively with cloud LLM — never use local model for code gen
+                Map<String, Object> enhancedParams = generateSkillCodeWithCloud(action.params(), context);
+                if (enhancedParams == null) {
+                    long durationMs = System.currentTimeMillis() - System.currentTimeMillis();
+                    String errMsg = "ERROR: Cloud LLM unavailable — cannot generate skill code. " +
+                            "Skill creation requires the cloud provider.";
+                    context.trajectory().record(action, AgentObservation.failure(action.tool(), errMsg, 0));
+                    if (debug) emitDebug(context.userId(), "SKILL_CREATE FAILED: cloud unavailable");
+                    continue;
+                }
 
                 long startMs = System.currentTimeMillis();
                 String result = skillManager.createSkill(enhancedParams);
@@ -502,223 +507,37 @@ public class AgentLoop {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
-    // ── Auto-infer pip requirements from Python imports ──
+    // ── Cloud skill code generation ──
 
     /**
-     * Standard library modules that do NOT need pip install.
-     * This list covers Python 3.10+ stdlib modules commonly used in skill code.
-     */
-    private static final Set<String> PYTHON_STDLIB = Set.of(
-            "abc", "argparse", "ast", "asyncio", "base64", "binascii",
-            "builtins", "calendar", "cgi", "cmath", "codecs", "collections",
-            "concurrent", "configparser", "contextlib", "copy", "csv",
-            "ctypes", "dataclasses", "datetime", "decimal", "difflib",
-            "dis", "email", "enum", "errno", "fnmatch", "fractions",
-            "ftplib", "functools", "gc", "getpass", "gettext", "glob",
-            "gzip", "hashlib", "heapq", "hmac", "html", "http",
-            "imaplib", "importlib", "inspect", "io", "ipaddress",
-            "itertools", "json", "keyword", "linecache", "locale",
-            "logging", "lzma", "math", "mimetypes", "multiprocessing",
-            "numbers", "operator", "os", "pathlib", "pdb", "pickle",
-            "pkgutil", "platform", "pprint", "profile", "pstats",
-            "queue", "random", "re", "readline", "reprlib", "resource",
-            "runpy", "sched", "secrets", "select", "shelve", "shlex",
-            "shutil", "signal", "site", "smtplib", "socket", "socketserver",
-            "sqlite3", "ssl", "stat", "statistics", "string", "struct",
-            "subprocess", "sys", "sysconfig", "syslog", "tarfile",
-            "tempfile", "textwrap", "threading", "time", "timeit",
-            "token", "tokenize", "tomllib", "trace", "traceback",
-            "tracemalloc", "tty", "turtle", "types", "typing",
-            "unicodedata", "unittest", "urllib", "uu", "uuid",
-            "venv", "warnings", "weakref", "webbrowser", "xml",
-            "xmlrpc", "zipfile", "zipimport", "zlib",
-            // typing extensions
-            "typing_extensions",
-            // Common sub-modules users import from
-            "os.path", "urllib.parse", "urllib.request", "collections.abc",
-            "concurrent.futures", "email.mime", "html.parser",
-            "http.client", "http.server", "xml.etree", "xml.dom"
-    );
-
-    /**
-     * Map from Python import module name → pip package name.
-     * Only needed when the module name differs from the pip package name.
-     */
-    private static final Map<String, String> MODULE_TO_PIP = Map.ofEntries(
-            Map.entry("bs4", "beautifulsoup4"),
-            Map.entry("PIL", "Pillow"),
-            Map.entry("cv2", "opencv-python"),
-            Map.entry("sklearn", "scikit-learn"),
-            Map.entry("yaml", "PyYAML"),
-            Map.entry("docx", "python-docx"),
-            Map.entry("pptx", "python-pptx"),
-            Map.entry("attr", "attrs"),
-            Map.entry("dotenv", "python-dotenv"),
-            Map.entry("gi", "PyGObject"),
-            Map.entry("serial", "pyserial"),
-            Map.entry("usb", "pyusb"),
-            Map.entry("magic", "python-magic"),
-            Map.entry("dateutil", "python-dateutil"),
-            Map.entry("Bio", "biopython"),
-            Map.entry("wx", "wxPython"),
-            Map.entry("Crypto", "pycryptodome"),
-            Map.entry("jose", "python-jose"),
-            Map.entry("jwt", "PyJWT"),
-            Map.entry("github", "PyGithub"),
-            Map.entry("googleapiclient", "google-api-python-client"),
-            Map.entry("fitz", "PyMuPDF"),
-            Map.entry("chardet", "chardet"),
-            Map.entry("lxml", "lxml"),
-            Map.entry("openpyxl", "openpyxl"),
-            Map.entry("tabulate", "tabulate"),
-            Map.entry("tqdm", "tqdm"),
-            Map.entry("numpy", "numpy"),
-            Map.entry("pandas", "pandas"),
-            Map.entry("matplotlib", "matplotlib"),
-            Map.entry("scipy", "scipy"),
-            Map.entry("flask", "flask"),
-            Map.entry("fastapi", "fastapi"),
-            Map.entry("uvicorn", "uvicorn"),
-            Map.entry("pydantic", "pydantic"),
-            Map.entry("httpx", "httpx"),
-            Map.entry("aiohttp", "aiohttp"),
-            Map.entry("selenium", "selenium"),
-            Map.entry("playwright", "playwright"),
-            Map.entry("pymongo", "pymongo"),
-            Map.entry("redis", "redis"),
-            Map.entry("celery", "celery"),
-            Map.entry("boto3", "boto3"),
-            Map.entry("paramiko", "paramiko"),
-            Map.entry("cryptography", "cryptography"),
-            Map.entry("jinja2", "Jinja2"),
-            Map.entry("Jinja2", "Jinja2"),
-            Map.entry("markupsafe", "MarkupSafe"),
-            Map.entry("requests", "requests"),
-            Map.entry("pdfplumber", "pdfplumber"),
-            Map.entry("PyPDF2", "PyPDF2"),
-            Map.entry("pypdf", "pypdf"),
-            Map.entry("camelot", "camelot-py"),
-            Map.entry("pytesseract", "pytesseract"),
-            Map.entry("feedparser", "feedparser"),
-            Map.entry("xmltodict", "xmltodict"),
-            Map.entry("toml", "toml"),
-            Map.entry("arrow", "arrow"),
-            Map.entry("pendulum", "pendulum"),
-            Map.entry("rich", "rich"),
-            Map.entry("click", "click"),
-            Map.entry("typer", "typer"),
-            Map.entry("colorama", "colorama")
-    );
-
-    /**
-     * Ensure the skill params include all pip requirements needed by the code.
-     * Parses import statements and maps module names to pip packages.
-     * Merges with any explicitly specified requirements.
-     */
-    private Map<String, Object> ensureRequirements(Map<String, Object> params) {
-        String code = str(params, "code");
-        if (code == null || code.isBlank()) return params;
-
-        String existingReqs = str(params, "requirements");
-        Set<String> existing = new LinkedHashSet<>();
-        if (existingReqs != null && !existingReqs.isBlank()) {
-            for (String line : existingReqs.split("\n")) {
-                String trimmed = line.strip();
-                if (!trimmed.isEmpty() && !trimmed.startsWith("#")) {
-                    // Extract bare package name (strip version specifiers)
-                    String pkg = trimmed.split("[>=<\\[!~]")[0].strip().toLowerCase();
-                    existing.add(pkg);
-                }
-            }
-        }
-
-        Set<String> inferred = inferRequirementsFromCode(code);
-
-        // Remove packages already in existing requirements (case-insensitive)
-        inferred.removeIf(pkg -> existing.contains(pkg.toLowerCase()));
-
-        if (inferred.isEmpty()) return params;
-
-        // Merge: existing requirements + inferred ones
-        StringBuilder merged = new StringBuilder();
-        if (existingReqs != null && !existingReqs.isBlank()) {
-            merged.append(existingReqs.strip()).append('\n');
-        }
-        for (String pkg : inferred) {
-            merged.append(pkg).append('\n');
-        }
-
-        log.info("Auto-inferred pip requirements for skill: {} (merged with existing: {})",
-                inferred, existing);
-
-        Map<String, Object> updated = new HashMap<>(params);
-        updated.put("requirements", merged.toString().strip());
-        return updated;
-    }
-
-    /**
-     * Infer pip package requirements from Python import statements.
-     * Returns a set of pip package names needed by the code.
-     */
-    private Set<String> inferRequirementsFromCode(String code) {
-        Set<String> packages = new LinkedHashSet<>();
-
-        // Match: import X, from X import Y, from X.Y import Z
-        var importPattern = java.util.regex.Pattern.compile(
-                "^\\s*(?:import|from)\\s+([a-zA-Z_][a-zA-Z0-9_.]*)",
-                java.util.regex.Pattern.MULTILINE
-        );
-
-        var matcher = importPattern.matcher(code);
-        while (matcher.find()) {
-            String module = matcher.group(1);
-            // Get the top-level module name
-            String topLevel = module.contains(".") ? module.substring(0, module.indexOf('.')) : module;
-
-            // Skip stdlib modules
-            if (PYTHON_STDLIB.contains(topLevel) || PYTHON_STDLIB.contains(module)) {
-                continue;
-            }
-
-            // Map to pip package name
-            String pipPkg = MODULE_TO_PIP.getOrDefault(topLevel, topLevel);
-            packages.add(pipPkg);
-        }
-
-        return packages;
-    }
-
-    // ── Cloud-escalated skill code generation ──
-
-    /**
-     * Enhance skill code by regenerating it with the cloud LLM.
+     * Generate skill code using the cloud LLM exclusively.
      *
      * <p>The local model decides WHAT skill to create (name, description, parameter
      * intent) — that's fast routing.  The cloud model writes the actual Python
-     * code — that's where quality matters most.
+     * code — that's where quality matters most.  Skill code is never generated
+     * by the local model: it is too sensitive to LLM quality.
      *
-     * <p>If the cloud provider is unavailable or the call fails, falls back to
-     * the original (local-generated) code so skill creation never blocks.
+     * @return enhanced params with cloud-generated code, or {@code null} if cloud
+     *         generation fails (caller should record the failure).
      */
-    private Map<String, Object> enhanceSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
+    private Map<String, Object> generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
         LlmProvider cloud = llmRouter.cloud();
         if (!cloud.isAvailable()) {
-            log.info("Cloud provider unavailable, using local-generated skill code");
-            return originalParams;
+            log.error("Cloud provider unavailable — cannot generate skill code");
+            return null;
         }
 
         String name = str(originalParams, "name");
         String description = str(originalParams, "description");
         String parameters = str(originalParams, "parameters");
         String requirements = str(originalParams, "requirements");
-        String localCode = str(originalParams, "code");
 
         statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                 "Generating skill code with cloud LLM...");
 
         try {
             List<LlmMessage> messages = buildSkillCodePrompt(
-                    name, description, parameters, requirements, localCode, context);
+                    name, description, parameters, requirements, context);
 
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
@@ -746,13 +565,12 @@ public class AgentLoop {
 
                 return enhanced;
             } else {
-                log.warn("Cloud LLM returned no extractable Python code, falling back to local");
-                return originalParams;
+                log.error("Cloud LLM returned no extractable Python code for '{}'", name);
+                return null;
             }
         } catch (Exception e) {
-            log.warn("Cloud skill code generation failed for '{}': {}, falling back to local",
-                    name, e.getMessage());
-            return originalParams;
+            log.error("Cloud skill code generation failed for '{}': {}", name, e.getMessage());
+            return null;
         }
     }
 
@@ -761,7 +579,7 @@ public class AgentLoop {
      */
     private List<LlmMessage> buildSkillCodePrompt(
             String name, String description, String parameters,
-            String requirements, String localDraft, AgentContext context) {
+            String requirements, AgentContext context) {
 
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -799,8 +617,11 @@ public class AgentLoop {
 
         sys.append("## Output Format\n");
         sys.append("Return ONLY the Python code inside a ```python code fence. No explanations before or after.\n");
-        sys.append("If you suggest pip requirements beyond what was specified, add them in a separate ");
-        sys.append("```requirements fence after the code.\n");
+        sys.append("You MUST ALWAYS include a ```requirements fence after the code listing ALL third-party ");
+        sys.append("pip packages the code needs (one per line). Do NOT include Python standard library modules. ");
+        sys.append("Use the correct pip package name — e.g. `beautifulsoup4` not `bs4`, `Pillow` not `PIL`, ");
+        sys.append("`PyMuPDF` not `fitz`, `scikit-learn` not `sklearn`. If no third-party packages are needed, ");
+        sys.append("include an empty ```requirements fence.\n");
 
         messages.add(LlmMessage.system(sys.toString()));
 
@@ -818,13 +639,6 @@ public class AgentLoop {
         user.append("\n**Context**: The agent is working on this task: \"");
         user.append(truncate(context.originalMessage(), 500));
         user.append("\"\n");
-
-        // Include the local model's draft as a starting point
-        if (localDraft != null && !localDraft.isBlank()) {
-            user.append("\n**Draft code** (from a smaller model — improve and fix it):\n```python\n");
-            user.append(localDraft);
-            user.append("\n```\n");
-        }
 
         messages.add(LlmMessage.user(user.toString()));
 
