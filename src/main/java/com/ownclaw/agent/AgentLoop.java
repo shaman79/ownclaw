@@ -646,7 +646,12 @@ public class AgentLoop {
         sys.append("- **Content types**: Detect and handle different content types (HTML, PDF, JSON, XML, ");
         sys.append("plain text, binary). Check Content-Type headers and file extensions.\n");
         sys.append("- **HTML processing**: Use BeautifulSoup to extract clean, readable text. Strip scripts, ");
-        sys.append("styles, navigation boilerplate. Preserve document structure (headings, lists, tables).\n");
+        sys.append("styles, and navigation boilerplate. Preserve document structure (headings, lists, tables).\n");
+        sys.append("- **CRITICAL — Return ALL content**: NEVER filter or select specific sections of a web page. ");
+        sys.append("Return the COMPLETE readable text content of the page. Modern web pages use tabs, ");
+        sys.append("accordions, and hidden sections that contain important data in the HTML source. ");
+        sys.append("Use soup.get_text() on the ENTIRE body — do NOT select individual divs or sections. ");
+        sys.append("The agent will analyze and filter the relevant parts from the full output.\n");
         sys.append("- **Link extraction**: For HTML, ALWAYS extract and include navigation links (hrefs) ");
         sys.append("at the end of the output under a '## Links' section. Format: `[link text](url)`. ");
         sys.append("Resolve relative URLs to absolute URLs using urllib.parse.urljoin. ");

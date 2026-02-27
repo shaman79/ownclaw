@@ -203,8 +203,10 @@ public class ThinkingEngine {
         sb.append("- Before responding with 'not found', verify you have explored all plausible paths — ");
         sb.append("link targets, navigation menus, download links, and alternative content formats.\n");
         sb.append("- Verify your results make sense. If output is garbled, empty, or suspiciously short, ");
-        sb.append("the tool or approach likely needs fixing — don't present broken data to the user.\n");
-
+        sb.append("the tool or approach likely needs fixing — don't present broken data to the user.\n");        sb.append("- When you find partial data (e.g. wrong day, wrong section, incomplete results), ");
+        sb.append("inspect the skill code with skill_manage(action='read'), then fix it with skill_create. ");
+        sb.append("Web pages often have tabbed or hidden content \u2014 the skill may need to extract ALL content, ");
+        sb.append("not just the visible/active section.\n");
         // Language awareness
         sb.append("\n## Language & Locale Awareness\n");
         sb.append("- Detect the language of the user's message and respond in the same language.\n");
