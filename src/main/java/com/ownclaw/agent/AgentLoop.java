@@ -226,6 +226,9 @@ public class AgentLoop {
                 // Regenerate skill code using the cloud LLM for superior quality
                 Map<String, Object> enhancedParams = enhanceSkillCodeWithCloud(action.params(), context);
 
+                // Auto-infer pip requirements from import statements in the code
+                enhancedParams = ensureRequirements(enhancedParams);
+
                 long startMs = System.currentTimeMillis();
                 String result = skillManager.createSkill(enhancedParams);
                 long durationMs = System.currentTimeMillis() - startMs;
@@ -499,6 +502,192 @@ public class AgentLoop {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
+    // ── Auto-infer pip requirements from Python imports ──
+
+    /**
+     * Standard library modules that do NOT need pip install.
+     * This list covers Python 3.10+ stdlib modules commonly used in skill code.
+     */
+    private static final Set<String> PYTHON_STDLIB = Set.of(
+            "abc", "argparse", "ast", "asyncio", "base64", "binascii",
+            "builtins", "calendar", "cgi", "cmath", "codecs", "collections",
+            "concurrent", "configparser", "contextlib", "copy", "csv",
+            "ctypes", "dataclasses", "datetime", "decimal", "difflib",
+            "dis", "email", "enum", "errno", "fnmatch", "fractions",
+            "ftplib", "functools", "gc", "getpass", "gettext", "glob",
+            "gzip", "hashlib", "heapq", "hmac", "html", "http",
+            "imaplib", "importlib", "inspect", "io", "ipaddress",
+            "itertools", "json", "keyword", "linecache", "locale",
+            "logging", "lzma", "math", "mimetypes", "multiprocessing",
+            "numbers", "operator", "os", "pathlib", "pdb", "pickle",
+            "pkgutil", "platform", "pprint", "profile", "pstats",
+            "queue", "random", "re", "readline", "reprlib", "resource",
+            "runpy", "sched", "secrets", "select", "shelve", "shlex",
+            "shutil", "signal", "site", "smtplib", "socket", "socketserver",
+            "sqlite3", "ssl", "stat", "statistics", "string", "struct",
+            "subprocess", "sys", "sysconfig", "syslog", "tarfile",
+            "tempfile", "textwrap", "threading", "time", "timeit",
+            "token", "tokenize", "tomllib", "trace", "traceback",
+            "tracemalloc", "tty", "turtle", "types", "typing",
+            "unicodedata", "unittest", "urllib", "uu", "uuid",
+            "venv", "warnings", "weakref", "webbrowser", "xml",
+            "xmlrpc", "zipfile", "zipimport", "zlib",
+            // typing extensions
+            "typing_extensions",
+            // Common sub-modules users import from
+            "os.path", "urllib.parse", "urllib.request", "collections.abc",
+            "concurrent.futures", "email.mime", "html.parser",
+            "http.client", "http.server", "xml.etree", "xml.dom"
+    );
+
+    /**
+     * Map from Python import module name → pip package name.
+     * Only needed when the module name differs from the pip package name.
+     */
+    private static final Map<String, String> MODULE_TO_PIP = Map.ofEntries(
+            Map.entry("bs4", "beautifulsoup4"),
+            Map.entry("PIL", "Pillow"),
+            Map.entry("cv2", "opencv-python"),
+            Map.entry("sklearn", "scikit-learn"),
+            Map.entry("yaml", "PyYAML"),
+            Map.entry("docx", "python-docx"),
+            Map.entry("pptx", "python-pptx"),
+            Map.entry("attr", "attrs"),
+            Map.entry("dotenv", "python-dotenv"),
+            Map.entry("gi", "PyGObject"),
+            Map.entry("serial", "pyserial"),
+            Map.entry("usb", "pyusb"),
+            Map.entry("magic", "python-magic"),
+            Map.entry("dateutil", "python-dateutil"),
+            Map.entry("Bio", "biopython"),
+            Map.entry("wx", "wxPython"),
+            Map.entry("Crypto", "pycryptodome"),
+            Map.entry("jose", "python-jose"),
+            Map.entry("jwt", "PyJWT"),
+            Map.entry("github", "PyGithub"),
+            Map.entry("googleapiclient", "google-api-python-client"),
+            Map.entry("fitz", "PyMuPDF"),
+            Map.entry("chardet", "chardet"),
+            Map.entry("lxml", "lxml"),
+            Map.entry("openpyxl", "openpyxl"),
+            Map.entry("tabulate", "tabulate"),
+            Map.entry("tqdm", "tqdm"),
+            Map.entry("numpy", "numpy"),
+            Map.entry("pandas", "pandas"),
+            Map.entry("matplotlib", "matplotlib"),
+            Map.entry("scipy", "scipy"),
+            Map.entry("flask", "flask"),
+            Map.entry("fastapi", "fastapi"),
+            Map.entry("uvicorn", "uvicorn"),
+            Map.entry("pydantic", "pydantic"),
+            Map.entry("httpx", "httpx"),
+            Map.entry("aiohttp", "aiohttp"),
+            Map.entry("selenium", "selenium"),
+            Map.entry("playwright", "playwright"),
+            Map.entry("pymongo", "pymongo"),
+            Map.entry("redis", "redis"),
+            Map.entry("celery", "celery"),
+            Map.entry("boto3", "boto3"),
+            Map.entry("paramiko", "paramiko"),
+            Map.entry("cryptography", "cryptography"),
+            Map.entry("jinja2", "Jinja2"),
+            Map.entry("Jinja2", "Jinja2"),
+            Map.entry("markupsafe", "MarkupSafe"),
+            Map.entry("requests", "requests"),
+            Map.entry("pdfplumber", "pdfplumber"),
+            Map.entry("PyPDF2", "PyPDF2"),
+            Map.entry("pypdf", "pypdf"),
+            Map.entry("camelot", "camelot-py"),
+            Map.entry("pytesseract", "pytesseract"),
+            Map.entry("feedparser", "feedparser"),
+            Map.entry("xmltodict", "xmltodict"),
+            Map.entry("toml", "toml"),
+            Map.entry("arrow", "arrow"),
+            Map.entry("pendulum", "pendulum"),
+            Map.entry("rich", "rich"),
+            Map.entry("click", "click"),
+            Map.entry("typer", "typer"),
+            Map.entry("colorama", "colorama")
+    );
+
+    /**
+     * Ensure the skill params include all pip requirements needed by the code.
+     * Parses import statements and maps module names to pip packages.
+     * Merges with any explicitly specified requirements.
+     */
+    private Map<String, Object> ensureRequirements(Map<String, Object> params) {
+        String code = str(params, "code");
+        if (code == null || code.isBlank()) return params;
+
+        String existingReqs = str(params, "requirements");
+        Set<String> existing = new LinkedHashSet<>();
+        if (existingReqs != null && !existingReqs.isBlank()) {
+            for (String line : existingReqs.split("\n")) {
+                String trimmed = line.strip();
+                if (!trimmed.isEmpty() && !trimmed.startsWith("#")) {
+                    // Extract bare package name (strip version specifiers)
+                    String pkg = trimmed.split("[>=<\\[!~]")[0].strip().toLowerCase();
+                    existing.add(pkg);
+                }
+            }
+        }
+
+        Set<String> inferred = inferRequirementsFromCode(code);
+
+        // Remove packages already in existing requirements (case-insensitive)
+        inferred.removeIf(pkg -> existing.contains(pkg.toLowerCase()));
+
+        if (inferred.isEmpty()) return params;
+
+        // Merge: existing requirements + inferred ones
+        StringBuilder merged = new StringBuilder();
+        if (existingReqs != null && !existingReqs.isBlank()) {
+            merged.append(existingReqs.strip()).append('\n');
+        }
+        for (String pkg : inferred) {
+            merged.append(pkg).append('\n');
+        }
+
+        log.info("Auto-inferred pip requirements for skill: {} (merged with existing: {})",
+                inferred, existing);
+
+        Map<String, Object> updated = new HashMap<>(params);
+        updated.put("requirements", merged.toString().strip());
+        return updated;
+    }
+
+    /**
+     * Infer pip package requirements from Python import statements.
+     * Returns a set of pip package names needed by the code.
+     */
+    private Set<String> inferRequirementsFromCode(String code) {
+        Set<String> packages = new LinkedHashSet<>();
+
+        // Match: import X, from X import Y, from X.Y import Z
+        var importPattern = java.util.regex.Pattern.compile(
+                "^\\s*(?:import|from)\\s+([a-zA-Z_][a-zA-Z0-9_.]*)",
+                java.util.regex.Pattern.MULTILINE
+        );
+
+        var matcher = importPattern.matcher(code);
+        while (matcher.find()) {
+            String module = matcher.group(1);
+            // Get the top-level module name
+            String topLevel = module.contains(".") ? module.substring(0, module.indexOf('.')) : module;
+
+            // Skip stdlib modules
+            if (PYTHON_STDLIB.contains(topLevel) || PYTHON_STDLIB.contains(module)) {
+                continue;
+            }
+
+            // Map to pip package name
+            String pipPkg = MODULE_TO_PIP.getOrDefault(topLevel, topLevel);
+            packages.add(pipPkg);
+        }
+
+        return packages;
+    }
+
     // ── Cloud-escalated skill code generation ──
 
     /**
@@ -595,6 +784,10 @@ public class AgentLoop {
         sys.append("plain text, binary). Check Content-Type headers and file extensions.\n");
         sys.append("- **HTML processing**: Use BeautifulSoup to extract clean, readable text. Strip scripts, ");
         sys.append("styles, navigation boilerplate. Preserve document structure (headings, lists, tables).\n");
+        sys.append("- **Link extraction**: For HTML, ALWAYS extract and include navigation links (hrefs) ");
+        sys.append("at the end of the output under a '## Links' section. Format: `[link text](url)`. ");
+        sys.append("Resolve relative URLs to absolute URLs using urllib.parse.urljoin. ");
+        sys.append("This is CRITICAL — the agent navigates websites by following these links.\n");
         sys.append("- **Error handling**: Catch all exceptions. Report HTTP status codes, connection errors, ");
         sys.append("and timeouts clearly. Never let the skill crash.\n");
         sys.append("- **Large content**: If output might exceed 10KB, truncate intelligently — return the ");
