@@ -203,6 +203,26 @@ public class AgentLoop {
 
             // === RESPOND / ASK ===
             if (action.isResponse()) {
+                // Detect LLM parse failures masquerading as responses — retry instead of terminating
+                String reasoning = action.reasoning() != null ? action.reasoning() : "";
+                boolean isFallback = reasoning.equals("Fallback response")
+                        || reasoning.startsWith("LLM did not produce structured output")
+                        || reasoning.startsWith("Failed to parse structured output")
+                        || reasoning.startsWith("LLM call failed");
+
+                if (isFallback && step < maxSteps - 1) {
+                    log.warn("Task {} step {}: LLM produced fallback response ('{}'), retrying...",
+                            context.taskId(), step + 1, truncate(action.responseText(), 80));
+                    // Record this as a failed thinking step so the LLM sees it in trajectory
+                    AgentObservation failedThink = AgentObservation.failure(
+                            "_thinking",
+                            "LLM failed to produce a valid action. The model may be confused by the current context. " +
+                            "Try a different approach or tool.",
+                            0);
+                    context.trajectory().record(action, failedThink);
+                    continue;
+                }
+
                 return AgentResult.completed(
                         action.responseText(),
                         context.trajectory(),
@@ -595,9 +615,14 @@ public class AgentLoop {
         sys.append("- On failure, return `{'output': 'ERROR: <description>'}` — never raise unhandled exceptions.\n\n");
 
         sys.append("## Quality Standards\n");
-        sys.append("- **Encoding**: Always handle character encoding properly. For HTTP responses, use ");
-        sys.append("`response.encoding = response.apparent_encoding` or detect charset from headers/content. ");
-        sys.append("Support UTF-8, Latin-1, Windows-1250, and other common encodings.\n");
+        sys.append("- **Encoding (MANDATORY)**: Character encoding is the #1 source of bugs. You MUST follow this pattern:\n");
+        sys.append("  ```python\n");
+        sys.append("  response = requests.get(url, ...)\n");
+        sys.append("  response.encoding = response.apparent_encoding  # ALWAYS set this before using response.text\n");
+        sys.append("  text = response.text\n");
+        sys.append("  ```\n");
+        sys.append("  Without this line, the `requests` library defaults to ISO-8859-1 for HTML, causing mojibake.\n");
+        sys.append("  This is NON-NEGOTIABLE — every HTTP fetch skill MUST include this line.\n");
         sys.append("- **Content types**: Detect and handle different content types (HTML, PDF, JSON, XML, ");
         sys.append("plain text, binary). Check Content-Type headers and file extensions.\n");
         sys.append("- **HTML processing**: Use BeautifulSoup to extract clean, readable text. Strip scripts, ");

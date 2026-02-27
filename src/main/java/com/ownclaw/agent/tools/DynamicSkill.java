@@ -171,6 +171,10 @@ public class DynamicSkill implements Tool {
             String inputJson = mapper.writeValueAsString(params != null ? params : Map.of());
 
             Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
+            // Force UTF-8 for Python's stdin/stdout/stderr — prevents mojibake when
+            // skills produce non-ASCII output (Czech, CJK, accented chars, etc.)
+            envVars.put("PYTHONIOENCODING", "utf-8");
+            envVars.put("PYTHONUTF8", "1");
 
             // Run: python _runner.py skill.py   (runner reads stdin, imports skill, calls run())
             SandboxResult result = sandbox.execute(
