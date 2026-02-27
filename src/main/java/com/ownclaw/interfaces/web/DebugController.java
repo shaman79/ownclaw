@@ -323,6 +323,18 @@ public class DebugController {
     }
 
     // ────────────────────────────────────────────────────────────────
+    //  DELETE /api/debug/skill/{name} — delete a generated skill
+    // ────────────────────────────────────────────────────────────────
+
+    @DeleteMapping("/skill/{name}")
+    public ResponseEntity<?> deleteSkill(@PathVariable String name) {
+        log.info("Debug API skill delete: {}", name);
+        String result = skillManager.deleteSkill(name);
+        boolean success = !result.startsWith("ERROR");
+        return ResponseEntity.ok(Map.of("success", success, "result", result));
+    }
+
+    // ────────────────────────────────────────────────────────────────
     //  GET /api/debug/status — system health and registered skills
     // ────────────────────────────────────────────────────────────────
 
