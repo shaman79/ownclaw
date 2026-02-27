@@ -191,6 +191,9 @@ public class ThinkingEngine {
         sb.append("- Think carefully before each action. Consider what information you have and what you still need.\n");
         sb.append("- If you can answer the user directly from your knowledge, use 'respond' immediately.\n");
         sb.append("- If a tool fails, analyze the error and try a different approach rather than repeating the same action.\n");
+        sb.append("- NEVER give up after a single tool failure. Try at least 2-3 different approaches before responding.\n");
+        sb.append("- When a skill returns an error or crashes, inspect it with skill_manage(action='read'), ");
+        sb.append("fix it with skill_create, or create a completely different skill.\n");
         sb.append("- Use the minimum number of tool calls needed. Do not use tools unnecessarily.\n");
         sb.append("- When the task is complete, always use 'respond' to deliver the final answer.\n");
         sb.append("- If you cannot complete the task after reasonable effort, use 'respond' to explain what you tried and why it didn't work.\n");

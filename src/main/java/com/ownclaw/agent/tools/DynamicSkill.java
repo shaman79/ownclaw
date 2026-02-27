@@ -273,6 +273,12 @@ public class DynamicSkill implements Tool {
             boolean success = Boolean.TRUE.equals(parsed.get("success"));
             String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : stdout;
 
+            // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
+            if (success && output != null && output.startsWith("ERROR:")) {
+                log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
+                success = false;
+            }
+
             // Treat empty output content as failure even if success=true
             if (success && (output == null || output.isBlank() || "null".equals(output))) {
                 String hint = (stderr != null && !stderr.isBlank())

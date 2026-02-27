@@ -631,7 +631,8 @@ public class AgentLoop {
         sys.append("- The script MUST define `def run(params):` as the entry point.\n");
         sys.append("- `params` is a dict with the parameters defined in the skill spec.\n");
         sys.append("- The function MUST return a dict with an 'output' key containing the result string.\n");
-        sys.append("- On failure, return `{'output': 'ERROR: <description>'}` — never raise unhandled exceptions.\n\n");
+        sys.append("- On failure, return `{'success': False, 'output': 'ERROR: <description>'}` — never raise unhandled exceptions.\n");
+        sys.append("- ALWAYS include 'success': True or 'success': False in the returned dict. Do NOT omit it.\n\n");
 
         sys.append("## Quality Standards\n");
         sys.append("- **Encoding (MANDATORY)**: Character encoding is the #1 source of bugs. You MUST follow this pattern:\n");
