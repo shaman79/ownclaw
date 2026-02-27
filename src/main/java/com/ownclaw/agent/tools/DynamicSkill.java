@@ -114,20 +114,49 @@ public class DynamicSkill implements Tool {
      * from the process-level stdin/stdout contract.
      */
     /**
-     * Fix mojibake: if a string contains UTF-8 bytes misread as Latin-1,
-     * re-encode to Latin-1 bytes and decode as UTF-8.
+     * Fix mojibake: if a string contains UTF-8 bytes misread as Latin-1 or CP1252,
+     * re-encode to CP1252 bytes and decode as UTF-8.
      * Example: "GulÃ¡Å¡ovka" → "Gulášovka"
-     * Safe: if encode('latin-1') or decode('utf-8') fails, the original is kept.
+     *
+     * <p>Uses CP1252 (not Latin-1) because Python's {@code requests} and
+     * other libs sometimes decode raw bytes as Windows-1252 — which maps bytes
+     * 0x80-0x9F to Unicode chars outside the Latin-1 range (e.g. ™ = U+2122),
+     * causing {@code encode('latin-1')} to fail and skip the ENTIRE fix.
+     * CP1252 is a superset of Latin-1 for these byte ranges.
+     *
+     * <p>Falls back to line-by-line, then word-by-word, so one unfixable
+     * segment doesn't prevent the rest from being repaired.
      */
     private static final String MOJIBAKE_FIX = String.join("\n",
         "def _fix_mojibake(s):",
         "    if not isinstance(s, str) or not s:",
         "        return s",
         "    try:",
-        "        fixed = s.encode('latin-1').decode('utf-8')",
-        "        return fixed",
+        "        return s.encode('cp1252').decode('utf-8')",
         "    except (UnicodeDecodeError, UnicodeEncodeError):",
-        "        return s"
+        "        pass",
+        "    lines = s.split('\\n')",
+        "    fixed = []",
+        "    changed = False",
+        "    for line in lines:",
+        "        try:",
+        "            f = line.encode('cp1252').decode('utf-8')",
+        "            fixed.append(f)",
+        "            if f != line:",
+        "                changed = True",
+        "        except (UnicodeDecodeError, UnicodeEncodeError):",
+        "            words = line.split(' ')",
+        "            fw = []",
+        "            for w in words:",
+        "                try:",
+        "                    r = w.encode('cp1252').decode('utf-8')",
+        "                    fw.append(r)",
+        "                    if r != w:",
+        "                        changed = True",
+        "                except (UnicodeDecodeError, UnicodeEncodeError):",
+        "                    fw.append(w)",
+        "            fixed.append(' '.join(fw))",
+        "    return '\\n'.join(fixed) if changed else s"
     );
 
     private static final String RUNNER_HARNESS = String.join("\n",
