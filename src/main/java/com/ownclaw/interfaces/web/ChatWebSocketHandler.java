@@ -139,6 +139,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         log.info("WebSocket connected: user={}", userId);
 
+        // Send the active session info so the frontend can sync
+        sendActiveSessionInfo(session, userId);
+
         // Check if first-run wizard is needed
         if (setupWizard.isSetupNeeded()) {
             startSetupWizardIfNeeded(userId);
@@ -181,6 +184,24 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         log.debug("WS message from {}: {}", userId, userMessage);
 
+        // Handle session switching via WebSocket
+        if ("switch_session".equals(messageType)) {
+            String targetSession = userMessage;
+            if (targetSession != null && !targetSession.isBlank()) {
+                conversationService.setActiveSession(userId, targetSession);
+                sendActiveSessionInfo(session, userId);
+            }
+            return;
+        }
+
+        // Handle new session creation via WebSocket
+        if ("new_session".equals(messageType)) {
+            String title = (userMessage != null && !userMessage.isBlank()) ? userMessage : "New Chat";
+            conversationService.createSession(userId, title);
+            sendActiveSessionInfo(session, userId);
+            return;
+        }
+
         // Handle input_response for skill interaction (need_input)
         if ("input_response".equals(messageType)) {
             boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
@@ -215,9 +236,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        // Auto-generate title from first user message in a session
+        String currentSessionId = conversationService.getCurrentSession(userId);
+        conversationService.autoTitleIfNeeded(userId, currentSessionId, userMessage);
+
         // Submit to task queue — orchestrator handles conversation persistence
         taskQueue.submit(userId, userMessage)
-                .thenAccept(response -> sendToSession(session, "response", response))
+                .thenAccept(response -> {
+                    sendToSession(session, "response", response);
+                    // Notify frontend to refresh session list (title/preview may have changed)
+                    sendToSession(session, "session_updated", currentSessionId);
+                })
                 .exceptionally(ex -> {
                     log.error("Task failed for {}: {}", userId, ex.getMessage());
                     sendToSession(session, "response", "Something went wrong: " + ex.getMessage());
@@ -490,6 +519,24 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             session.sendMessage(new TextMessage(json));
         } catch (IOException e) {
             log.warn("Failed to send WS message: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Send the active session info to the client.
+     */
+    private void sendActiveSessionInfo(WebSocketSession session, String userId) {
+        try {
+            String sessionId = conversationService.getCurrentSession(userId);
+            var sessions = conversationService.listSessions(userId, false);
+            String json = mapper.writeValueAsString(Map.of(
+                    "type", "session_info",
+                    "activeSessionId", sessionId,
+                    "sessions", sessions
+            ));
+            session.sendMessage(new TextMessage(json));
+        } catch (Exception e) {
+            log.warn("Failed to send session info: {}", e.getMessage());
         }
     }
 
