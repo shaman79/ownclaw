@@ -1283,7 +1283,12 @@
 
             item.addEventListener('click', function(e) {
                 if (e.target.closest('.session-action-btn')) return;
-                if (s.id === activeSessionId) return;
+                if (s.id === activeSessionId) {
+                    // Already active — just reload messages (in case chat was cleared)
+                    loadSessionMessages(s.id);
+                    sidebar.classList.remove('mobile-open');
+                    return;
+                }
                 switchToSession(s.id);
                 sidebar.classList.remove('mobile-open');
             });
@@ -1579,6 +1584,10 @@
                 if (type === 'session_info') {
                     // Session list update from server
                     renderSessionList(data.sessions || [], data.activeSessionId || '');
+                    // Load messages for the active session (e.g. on initial connect or reconnect)
+                    if (data.activeSessionId) {
+                        loadSessionMessages(data.activeSessionId);
+                    }
                 } else if (type === 'session_updated') {
                     // A session was updated (new message, title change) — refresh sidebar
                     refreshSessionList();
