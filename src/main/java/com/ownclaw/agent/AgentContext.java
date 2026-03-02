@@ -20,6 +20,10 @@ public class AgentContext {
     private String conversationSummary;
     private String userPreferences;
 
+    // Per-task token usage counters
+    private int localTokens;
+    private int cloudTokens;
+
     public AgentContext(String userId, String taskId, String originalMessage) {
         this.userId = userId;
         this.taskId = taskId;
@@ -49,4 +53,12 @@ public class AgentContext {
 
     public String userPreferences() { return userPreferences; }
     public void setUserPreferences(String prefs) { this.userPreferences = prefs; }
+
+    // ── Token tracking ──
+
+    public void addLocalTokens(int tokens) { this.localTokens += tokens; }
+    public void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
+    public int localTokens() { return localTokens; }
+    public int cloudTokens() { return cloudTokens; }
+    public int totalTokens() { return localTokens + cloudTokens; }
 }

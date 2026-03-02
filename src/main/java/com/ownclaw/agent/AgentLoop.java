@@ -133,7 +133,7 @@ public class AgentLoop {
         statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Processing your request...");
 
         AgentResult result = runLoop(context);
-        emitResult(userId, result);
+        emitResult(context, result);
 
         // Store this execution as an episodic memory
         storeEpisode(context, result);
@@ -195,6 +195,13 @@ public class AgentLoop {
 
             ThinkResult thinkResult = thinkingEngine.decideNextActionFull(context, provider);
             AgentAction action = thinkResult.action();
+
+            // Track token usage per provider
+            if ("ollama".equals(provider.name())) {
+                context.addLocalTokens(thinkResult.totalTokens());
+            } else {
+                context.addCloudTokens(thinkResult.totalTokens());
+            }
 
             // Emit debug info when debug mode is active
             if (debug) {
@@ -670,7 +677,8 @@ public class AgentLoop {
         }
     }
 
-    private void emitResult(String userId, AgentResult result) {
+    private void emitResult(AgentContext context, AgentResult result) {
+        String userId = context.userId();
         if (result.success()) {
             statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
                     "Task completed in " + result.totalSteps() + " steps (" +
@@ -678,6 +686,18 @@ public class AgentLoop {
         } else {
             statusEmitter.emit(userId, StatusMessage.Type.FAILED,
                     "Task ended: " + result.terminationReason());
+        }
+
+        // Emit token usage summary as a status message
+        int local = context.localTokens();
+        int cloud = context.cloudTokens();
+        if (local > 0 || cloud > 0) {
+            StringBuilder sb = new StringBuilder("Tokens: ");
+            if (cloud > 0) sb.append("Mentor ").append(String.format("%,d", cloud));
+            if (cloud > 0 && local > 0) sb.append(" · ");
+            if (local > 0) sb.append("Local ").append(String.format("%,d", local));
+            sb.append(" · Total ").append(String.format("%,d", local + cloud));
+            statusEmitter.emit(userId, StatusMessage.Type.STEP, sb.toString());
         }
     }
 
@@ -727,6 +747,9 @@ public class AgentLoop {
 
             LlmResponse response = cloud.chat(messages, codeGenConfig);
             String cloudCode = extractPythonCode(response.content());
+
+            // Track cloud tokens for skill code generation
+            context.addCloudTokens(response.totalTokens());
 
             if (cloudCode != null && !cloudCode.isBlank()) {
                 log.info("Cloud LLM generated {} chars of skill code for '{}' ({} tokens)",
