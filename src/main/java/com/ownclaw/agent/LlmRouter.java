@@ -10,20 +10,18 @@ import org.springframework.stereotype.Component;
 /**
  * Routes LLM requests to the appropriate provider based on context.
  *
- * Strategy: local-first with cloud escalation.
- * - Start with the local provider (e.g., Ollama) for speed and cost
- * - Escalate to the cloud provider (e.g., OpenAI) when:
- *   a) The local provider is unavailable
- *   b) The task has had multiple consecutive failures (the local model may be struggling)
- *   c) The trajectory shows low progress (many steps with no successful tool calls)
+ * Strategy: cloud-first for user task reasoning.
+ * - Use the cloud provider (e.g., OpenAI) by default for reliable
+ *   understanding of complex user prompts and multi-step reasoning.
+ * - Fall back to the local provider (e.g., Ollama) when:
+ *   a) The cloud provider is unavailable
+ * - Use local() directly for simple, high-volume operations
+ *   (summarization, content analysis, etc.)
  */
 @Component
 public class LlmRouter {
 
     private static final Logger log = LoggerFactory.getLogger(LlmRouter.class);
-
-    /** Number of consecutive failures before escalating to cloud. */
-    private static final int ESCALATION_FAILURE_THRESHOLD = 3;
 
     private final LlmProvider localProvider;
     private final LlmProvider cloudProvider;
@@ -40,24 +38,26 @@ public class LlmRouter {
     }
 
     /**
-     * Select the best provider for the current reasoning step.
+     * Select the best provider for user task reasoning.
+     * Cloud-first: the cloud/mentor LLM understands complex user prompts
+     * far more reliably than the local model.
      */
     public LlmProvider selectProvider(AgentContext context) {
-        // If local provider is down, use cloud
-        if (!localProvider.isAvailable()) {
-            log.debug("Local provider unavailable, using cloud");
+        // Prefer cloud for reliable understanding of user intent
+        if (cloudProvider.isAvailable()) {
+            log.debug("Using cloud provider for task reasoning");
             return cloudProvider;
         }
 
-        // If there have been several consecutive failures, try cloud for better reasoning
-        int failures = context.trajectory().consecutiveFailures();
-        if (failures >= ESCALATION_FAILURE_THRESHOLD && cloudProvider.isAvailable()) {
-            log.info("Escalating to cloud provider after {} consecutive failures", failures);
-            return cloudProvider;
+        // Fall back to local if cloud is unavailable
+        if (localProvider.isAvailable()) {
+            log.warn("Cloud provider unavailable, falling back to local");
+            return localProvider;
         }
 
-        // Default: use local
-        return localProvider;
+        // Last resort: return cloud and let it fail with a clear error
+        log.error("No LLM providers available!");
+        return cloudProvider;
     }
 
     /**

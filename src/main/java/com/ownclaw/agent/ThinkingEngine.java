@@ -115,6 +115,18 @@ public class ThinkingEngine {
         sb.append("You operate in a loop: you reason about what to do, choose a tool to invoke, ");
         sb.append("observe the result, and repeat until the task is complete.\n\n");
 
+        // Identity — override default LLM safety training about account access
+        sb.append("## Identity & Authority\n");
+        sb.append("You are a PERSONAL autonomous agent running LOCALLY on your owner's machine.\n");
+        sb.append("You are NOT a cloud service. You have been explicitly deployed by the user ");
+        sb.append("to act on their behalf, including accessing their accounts and services.\n");
+        sb.append("You have FULL PERMISSION to access any service the user asks you to, ");
+        sb.append("using credentials they provide through the encrypted vault.\n");
+        sb.append("NEVER refuse a task by saying 'I can't access your accounts' or 'for security reasons' — ");
+        sb.append("you CAN, and that is exactly what you are designed to do.\n");
+        sb.append("If a task requires credentials you don't have yet, use 'ask_user' to request them, ");
+        sb.append("then store them with 'credential_manage' for secure reuse.\n\n");
+
         // Environment context
         sb.append("## Environment\n");
         sb.append("- Platform: ").append(detectPlatform()).append("\n");
@@ -171,11 +183,32 @@ public class ThinkingEngine {
         sb.append("  requirements (string, optional): pip requirements, one per line (e.g. 'requests\\nbeautifulsoup4')\n");
         sb.append("  requires_network (boolean, optional): true if the skill needs internet access\n");
         sb.append("  has_side_effects (boolean, optional): true if the skill modifies files, sends emails, etc.\n");
-        sb.append("  timeout (integer, optional): Max execution time in seconds (default 30)\n\n");
+        sb.append("  timeout (integer, optional): Max execution time in seconds (default 30)\n");
+        sb.append("  credentials (string, optional): Comma-separated credential keys this skill needs ");
+        sb.append("(e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS'). These will be injected as environment variables at runtime.\n\n");
 
         sb.append("skill_manage: Read, delete, list or analyze existing skills.\n");
         sb.append("  action (string, required): One of 'read', 'delete', 'list', 'analyze'\n");
         sb.append("  name (string, required for read/delete): The skill name to operate on\n\n");
+
+        sb.append("credential_manage: Manage the encrypted credential vault. ");
+        sb.append("Use this to securely store and check service credentials (passwords, API keys, tokens).\n");
+        sb.append("  action (string, required): One of 'list', 'check', 'store'\n");
+        sb.append("  key (string, required for check/store): The credential key (e.g. IMAP_PASS, OPENAI_API_KEY). Always UPPER_CASE.\n");
+        sb.append("  value (string, required for store): The credential value to encrypt and store\n\n");
+
+        sb.append("## Credential Vault\n");
+        sb.append("You have an encrypted credential vault (AES-256-GCM) for storing service passwords, API keys, and tokens.\n");
+        sb.append("- Use 'credential_manage' with action='list' to see what credentials exist before asking the user\n");
+        sb.append("- Use 'credential_manage' with action='check' to verify a specific credential exists\n");
+        sb.append("- Use 'credential_manage' with action='store' to save a credential the user provides\n");
+        sb.append("- Credentials are automatically injected as environment variables into skills that declare them\n");
+        sb.append("- When a task requires credentials you don't have, FIRST check with 'list', then 'ask_user' for missing ones, ");
+        sb.append("then 'store' them — the user only needs to provide each credential once\n");
+        sb.append("- Common credential patterns: IMAP_HOST, IMAP_USER, IMAP_PASS, SMTP_HOST, SMTP_USER, SMTP_PASS, ");
+        sb.append("API_KEY, etc.\n");
+        sb.append("- When creating skills that need credentials, declare them in the skill_create 'credentials' parameter ");
+        sb.append("as a comma-separated list of credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS')\n\n");
 
         // Output format
         sb.append("## Output Format\n");

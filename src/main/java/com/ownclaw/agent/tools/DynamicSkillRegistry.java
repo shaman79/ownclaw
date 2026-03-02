@@ -6,6 +6,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.skills.PythonEnvironmentService;
+import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
@@ -40,15 +41,18 @@ public class DynamicSkillRegistry {
     private final ToolRegistry toolRegistry;
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
+    private final CredentialVault credentialVault;
 
     private final Map<String, DynamicSkill> dynamicSkills = new ConcurrentHashMap<>();
 
     public DynamicSkillRegistry(OwnClawConfig config, @Lazy ToolRegistry toolRegistry,
-                                SandboxManager sandbox, PythonEnvironmentService pythonEnv) {
+                                SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                                CredentialVault credentialVault) {
         this.config = config;
         this.toolRegistry = toolRegistry;
         this.sandbox = sandbox;
         this.pythonEnv = pythonEnv;
+        this.credentialVault = credentialVault;
     }
 
     @PostConstruct
@@ -108,9 +112,35 @@ public class DynamicSkillRegistry {
         boolean requiresNetwork = Boolean.TRUE.equals(yaml.get("requires_network"));
         boolean hasSideEffects = Boolean.TRUE.equals(yaml.get("has_side_effects"));
         int timeout = yaml.containsKey("timeout") ? toInt(yaml.get("timeout"), 30) : 30;
+        List<String> credentials = parseCredentials(yaml);
 
         return new DynamicSkill(name, description, parameters, skillDir,
-                requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv);
+                requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
+                credentials, credentialVault);
+    }
+
+    /**
+     * Parse the credentials field from SKILL.yaml.
+     * Supports both a YAML list and a comma-separated string.
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> parseCredentials(Map<String, Object> yaml) {
+        Object credObj = yaml.get("credentials");
+        if (credObj == null) return List.of();
+        if (credObj instanceof List<?> list) {
+            return list.stream()
+                    .map(Object::toString)
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+        }
+        if (credObj instanceof String str && !str.isBlank()) {
+            return Arrays.stream(str.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+        }
+        return List.of();
     }
 
     @SuppressWarnings("unchecked")

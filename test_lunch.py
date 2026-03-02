@@ -26,7 +26,7 @@ print(f"Skills after cleanup: {status['skillCount']}")
 assert status['skillCount'] == 0, f"Expected 0, got {status['skillCount']}"
 
 # ── Step 2: run test prompt ──
-prompt = "What was on menu on Tuesday here: https://www.hospoda-orechovska.cz/"
+prompt = "go to hospodanadedine.cz and tell me what will be on lunch menu today."
 print(f"\n{'='*60}")
 print(f"PROMPT: {prompt}")
 print(f"{'='*60}")
@@ -55,14 +55,14 @@ print(f"{'='*60}")
 
 # ── Step 5: verification ──
 expected = [
-    'celestýnsk',
-    'Svíčková',
-    'kotleta',
-    'houbách',
-    'panenk',
-    'Smažené',
-    'hermelín',
-    'hranolky',
+    'Pátek',
+    'Kapustová',
+    'klobás',
+    'Burger',
+    'kuřet',
+    'Králík',
+    'smetaně',
+    'knedlík',
 ]
 print("\n--- CHECKS ---")
 ok_all = True

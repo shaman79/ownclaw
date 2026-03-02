@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
+import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,10 +75,13 @@ public class DynamicSkill implements Tool {
     private final int timeoutSec;
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
+    private final List<String> requiredCredentials;
+    private final CredentialVault credentialVault;
 
     public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
                         Path skillDir, boolean requiresNetwork, boolean hasSideEffects,
-                        int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv) {
+                        int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                        List<String> requiredCredentials, CredentialVault credentialVault) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
@@ -87,6 +91,8 @@ public class DynamicSkill implements Tool {
         this.timeoutSec = timeoutSec;
         this.sandbox = sandbox;
         this.pythonEnv = pythonEnv;
+        this.requiredCredentials = requiredCredentials != null ? requiredCredentials : List.of();
+        this.credentialVault = credentialVault;
     }
 
     @Override public String name() { return name; }
@@ -175,6 +181,24 @@ public class DynamicSkill implements Tool {
             // skills produce non-ASCII output (Czech, CJK, accented chars, etc.)
             envVars.put("PYTHONIOENCODING", "utf-8");
             envVars.put("PYTHONUTF8", "1");
+
+            // Inject credentials from the encrypted vault as environment variables
+            if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
+                Map<String, String> creds = credentialVault.getCredentials(
+                        context.userId(), requiredCredentials);
+                envVars.putAll(creds);
+                if (creds.size() < requiredCredentials.size()) {
+                    List<String> missing = requiredCredentials.stream()
+                            .filter(k -> !creds.containsKey(k))
+                            .toList();
+                    log.warn("Skill '{}' missing credentials: {}", name, missing);
+                    return ToolResult.failure(
+                            "Missing required credentials: " + String.join(", ", missing)
+                            + ". Use credential_manage(action='store') to store them first, "
+                            + "or ask the user to provide them with ask_user.");
+                }
+                log.debug("Injected {} credentials for skill '{}'", creds.size(), name);
+            }
 
             // Run: python _runner.py skill.py   (runner reads stdin, imports skill, calls run())
             SandboxResult result = sandbox.execute(

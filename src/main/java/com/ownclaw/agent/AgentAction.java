@@ -26,6 +26,9 @@ public record AgentAction(
     /** Sentinel tool name indicating the agent wants to manage skills (read/delete/list/analyze). */
     public static final String SKILL_MANAGE = "skill_manage";
 
+    /** Sentinel tool name indicating the agent wants to manage credentials (list/check/store). */
+    public static final String CREDENTIAL_MANAGE = "credential_manage";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
@@ -42,9 +45,13 @@ public record AgentAction(
         return SKILL_MANAGE.equals(tool);
     }
 
+    public boolean isCredentialManage() {
+        return CREDENTIAL_MANAGE.equals(tool);
+    }
+
     /** Returns true if this action is a built-in special action (not a tool invocation). */
     public boolean isSpecialAction() {
-        return isResponse() || isAskUser() || isSkillCreate() || isSkillManage();
+        return isResponse() || isAskUser() || isSkillCreate() || isSkillManage() || isCredentialManage();
     }
 
     public String responseText() {

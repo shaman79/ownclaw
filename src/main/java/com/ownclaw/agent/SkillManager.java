@@ -101,6 +101,7 @@ public class SkillManager {
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
         boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
+        String credentials = str(params, "credentials");
 
         // --- Write to disk & register ---
 
@@ -109,7 +110,7 @@ public class SkillManager {
             Files.createDirectories(skillDir);
 
             Files.writeString(skillDir.resolve("SKILL.yaml"),
-                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects, timeout),
+                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects, timeout, credentials),
                     StandardCharsets.UTF_8);
             Files.writeString(skillDir.resolve("skill.py"), code, StandardCharsets.UTF_8);
             if (requirements != null && !requirements.isBlank()) {
@@ -260,7 +261,8 @@ public class SkillManager {
     }
 
     private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
-                                  boolean requiresNetwork, boolean hasSideEffects, int timeout)
+                                  boolean requiresNetwork, boolean hasSideEffects, int timeout,
+                                  String credentials)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
@@ -272,6 +274,15 @@ public class SkillManager {
         yaml.put("requires_network", requiresNetwork);
         yaml.put("has_side_effects", hasSideEffects);
         yaml.put("timeout", timeout);
+        if (credentials != null && !credentials.isBlank()) {
+            List<String> credList = Arrays.stream(credentials.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+            if (!credList.isEmpty()) {
+                yaml.put("credentials", credList);
+            }
+        }
         return yamlMapper.writeValueAsString(yaml);
     }
 

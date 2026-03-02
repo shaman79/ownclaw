@@ -8,6 +8,7 @@ import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -45,6 +46,7 @@ public class AgentLoop {
     private final SkillManager skillManager;
     private final DebugSessionService debugService;
     private final TaskCancellationService cancellationService;
+    private final CredentialVault credentialVault;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -57,7 +59,8 @@ public class AgentLoop {
             SkillCuratorService curatorService,
             SkillManager skillManager,
             DebugSessionService debugService,
-            TaskCancellationService cancellationService
+            TaskCancellationService cancellationService,
+            CredentialVault credentialVault
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -70,6 +73,7 @@ public class AgentLoop {
         this.skillManager = skillManager;
         this.debugService = debugService;
         this.cancellationService = cancellationService;
+        this.credentialVault = credentialVault;
     }
 
     /**
@@ -308,6 +312,25 @@ public class AgentLoop {
                 continue;
             }
 
+            // === CREDENTIAL MANAGEMENT (special action) ===
+            if (action.isCredentialManage()) {
+                long startMs = System.currentTimeMillis();
+                String result = executeCredentialManage(action.params(), context.userId());
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
+                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                    + truncate(result, 500));
+                }
+                continue;
+            }
+
             // === CRITIQUE ===
             CriticAgent.Verdict verdict = criticAgent.evaluate(action, context);
             if (!verdict.allowed()) {
@@ -437,6 +460,51 @@ public class AgentLoop {
             case "list" -> skillManager.listSkills();
             case "analyze" -> skillManager.analyzeSkills();
             default -> "ERROR: Unknown action '" + action + "'. Use one of: read, delete, list, analyze";
+        };
+    }
+
+    /**
+     * Dispatch a credential_manage action to the CredentialVault.
+     * Supports: list, check, store.
+     */
+    private String executeCredentialManage(Map<String, Object> params, String userId) {
+        String action = params.get("action") != null ? params.get("action").toString() : "";
+        String key = params.get("key") != null ? params.get("key").toString().toUpperCase() : null;
+        String value = params.get("value") != null ? params.get("value").toString() : null;
+
+        return switch (action) {
+            case "list" -> {
+                List<String> keys = credentialVault.listCredentialKeys(userId);
+                if (keys.isEmpty()) {
+                    yield "No credentials stored. Ask the user for needed credentials and store them with action='store'.";
+                }
+                yield "Stored credentials: " + String.join(", ", keys);
+            }
+            case "check" -> {
+                if (key == null || key.isBlank()) {
+                    yield "ERROR: 'key' parameter is required for action='check'";
+                }
+                boolean exists = credentialVault.hasCredential(userId, key);
+                yield exists
+                        ? "Credential '" + key + "' exists in the vault."
+                        : "Credential '" + key + "' NOT found. Use ask_user to request it from the user, then store it with action='store'.";
+            }
+            case "store" -> {
+                if (key == null || key.isBlank()) {
+                    yield "ERROR: 'key' parameter is required for action='store'";
+                }
+                if (value == null || value.isBlank()) {
+                    yield "ERROR: 'value' parameter is required for action='store'";
+                }
+                try {
+                    credentialVault.storeCredential(userId, key, value);
+                    yield "Credential '" + key + "' stored securely (AES-256-GCM encrypted).";
+                } catch (Exception e) {
+                    log.error("Failed to store credential '{}': {}", key, e.getMessage());
+                    yield "ERROR: Failed to store credential: " + e.getMessage();
+                }
+            }
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: list, check, store";
         };
     }
 
@@ -664,6 +732,14 @@ public class AgentLoop {
         sys.append("Follow redirects.\n");
         sys.append("- **Robustness**: Handle edge cases — empty responses, invalid URLs, missing data, ");
         sys.append("unexpected formats. The skill must work reliably across diverse inputs.\n\n");
+
+        sys.append("## Credentials\n");
+        sys.append("- If the skill needs API keys, passwords, or tokens, read them from environment variables.\n");
+        sys.append("- Use `os.environ.get('CREDENTIAL_NAME')` — NEVER hardcode secrets.\n");
+        sys.append("- The agent framework injects credential env vars automatically based on the skill's ");
+        sys.append("SKILL.yaml `credentials` list.\n");
+        sys.append("- If a required credential is missing, return a clear error telling the user to store it ");
+        sys.append("(e.g. \"ERROR: Missing credential 'GMAIL_APP_PASSWORD'. Please store it first.\").\n\n");
 
         sys.append("## Output Format\n");
         sys.append("Return ONLY the Python code inside a ```python code fence. No explanations before or after.\n");
