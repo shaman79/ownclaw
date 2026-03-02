@@ -131,12 +131,14 @@ public class DynamicSkillRegistry {
             return list.stream()
                     .map(Object::toString)
                     .map(String::trim)
+                    .map(String::toUpperCase)
                     .filter(s -> !s.isBlank())
                     .toList();
         }
         if (credObj instanceof String str && !str.isBlank()) {
             return Arrays.stream(str.split(","))
                     .map(String::trim)
+                    .map(String::toUpperCase)
                     .filter(s -> !s.isBlank())
                     .toList();
         }

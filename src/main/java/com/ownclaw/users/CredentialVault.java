@@ -72,6 +72,8 @@ public class CredentialVault {
      * @param value  plaintext credential value
      */
     public void storeCredential(String userId, String key, String value) {
+        key = key.strip().toUpperCase();
+        value = value.strip();
         try {
             String salt = getOrCreateUserSalt(userId);
             SecretKey secretKey = deriveKey(salt);
@@ -109,6 +111,7 @@ public class CredentialVault {
      * @return decrypted plaintext value, or empty if not found
      */
     public Optional<String> getCredential(String userId, String key) {
+        key = key.strip().toUpperCase();
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT encrypted_value, iv FROM credential_vault WHERE user_id = ? AND credential_key = ?",
                 userId, key);
@@ -163,6 +166,7 @@ public class CredentialVault {
      * Delete a credential.
      */
     public void deleteCredential(String userId, String key) {
+        key = key.strip().toUpperCase();
         jdbc.update("DELETE FROM credential_vault WHERE user_id = ? AND credential_key = ?", userId, key);
         log.info("Deleted credential: user={}, key={}", userId, key);
     }
@@ -171,6 +175,7 @@ public class CredentialVault {
      * Check if a credential exists for a user.
      */
     public boolean hasCredential(String userId, String key) {
+        key = key.strip().toUpperCase();
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM credential_vault WHERE user_id = ? AND credential_key = ?",
                 Integer.class, userId, key);

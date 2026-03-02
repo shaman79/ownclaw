@@ -469,8 +469,8 @@ public class AgentLoop {
      */
     private String executeCredentialManage(Map<String, Object> params, String userId) {
         String action = params.get("action") != null ? params.get("action").toString() : "";
-        String key = params.get("key") != null ? params.get("key").toString().toUpperCase() : null;
-        String value = params.get("value") != null ? params.get("value").toString() : null;
+        String key = params.get("key") != null ? params.get("key").toString().strip().toUpperCase() : null;
+        String value = params.get("value") != null ? params.get("value").toString().strip() : null;
 
         return switch (action) {
             case "list" -> {
