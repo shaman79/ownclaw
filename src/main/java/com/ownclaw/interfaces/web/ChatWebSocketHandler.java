@@ -244,6 +244,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // history is available when AgentLoop loads context for the LLM.
         conversationService.saveMessage(userId, currentSessionId, "user", userMessage);
 
+        // Immediately refresh the sidebar so message count and preview update
+        sendToSession(session, "session_updated", currentSessionId);
+
         // Submit to task queue
         taskQueue.submit(userId, userMessage)
                 .thenAccept(response -> {
