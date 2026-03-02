@@ -312,6 +312,25 @@ public class AgentLoop {
                 continue;
             }
 
+            // === MEMORY MANAGEMENT (special action) ===
+            if (action.isMemoryManage()) {
+                long startMs = System.currentTimeMillis();
+                String result = executeMemoryManage(action.params(), context.userId());
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "MEMORY_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
+                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                    + truncate(result, 500));
+                }
+                continue;
+            }
+
             // === CREDENTIAL MANAGEMENT (special action) ===
             if (action.isCredentialManage()) {
                 long startMs = System.currentTimeMillis();
@@ -505,6 +524,59 @@ public class AgentLoop {
                 }
             }
             default -> "ERROR: Unknown action '" + action + "'. Use one of: list, check, store";
+        };
+    }
+
+    /**
+     * Dispatch a memory_manage action to the AgentMemory.
+     * Supports: store, list, delete.
+     */
+    private String executeMemoryManage(Map<String, Object> params, String userId) {
+        String action = params.get("action") != null ? params.get("action").toString() : "";
+        String key = params.get("key") != null ? params.get("key").toString().strip() : null;
+        String content = params.get("content") != null ? params.get("content").toString().strip() : null;
+
+        return switch (action) {
+            case "list" -> {
+                List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
+                if (facts.isEmpty()) {
+                    yield "No facts stored. Use action='store' to save user preferences and instructions.";
+                }
+                var sb = new StringBuilder("Stored facts:\n");
+                for (var fact : facts) {
+                    String factKey = (fact.tags() != null && !fact.tags().isEmpty()) ? fact.tags().getFirst() : "?";
+                    sb.append("- [" + factKey + "] " + fact.content() + "\n");
+                }
+                yield sb.toString();
+            }
+            case "store" -> {
+                if (key == null || key.isBlank()) {
+                    yield "ERROR: 'key' parameter is required for action='store'. Use a short identifier like 'lunch_preference' or 'email_style'.";
+                }
+                if (content == null || content.isBlank()) {
+                    yield "ERROR: 'content' parameter is required for action='store'. This is the fact or instruction to remember.";
+                }
+                try {
+                    memory.storeFact(userId, key, content);
+                    yield "Remembered: [" + key + "] " + content;
+                } catch (Exception e) {
+                    yield "ERROR: Failed to store fact: " + e.getMessage();
+                }
+            }
+            case "delete" -> {
+                if (key == null || key.isBlank()) {
+                    yield "ERROR: 'key' parameter is required for action='delete'.";
+                }
+                try {
+                    boolean deleted = memory.deleteFact(userId, key);
+                    yield deleted
+                            ? "Fact '" + key + "' deleted."
+                            : "Fact '" + key + "' not found — nothing to delete.";
+                } catch (Exception e) {
+                    yield "ERROR: Failed to delete fact: " + e.getMessage();
+                }
+            }
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: store, list, delete";
         };
     }
 

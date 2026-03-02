@@ -45,6 +45,15 @@ public interface AgentMemory {
     void storeFact(String userId, String key, String fact);
 
     /**
+     * Delete a semantic fact by key.
+     *
+     * @param userId the user this fact belongs to
+     * @param key    the fact key to delete
+     * @return true if a fact was deleted, false if not found
+     */
+    boolean deleteFact(String userId, String key);
+
+    /**
      * Retrieve all semantic facts for a user.
      */
     List<MemoryEntry> getFacts(String userId);

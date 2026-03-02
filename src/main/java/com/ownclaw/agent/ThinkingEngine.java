@@ -197,6 +197,12 @@ public class ThinkingEngine {
         sb.append("  key (string, required for check/store): The credential key (e.g. IMAP_PASS, OPENAI_API_KEY). Always UPPER_CASE.\n");
         sb.append("  value (string, required for store): The credential value to encrypt and store\n\n");
 
+        sb.append("memory_manage: Manage your persistent memory. ");
+        sb.append("Use this to remember user preferences, instructions, and facts across conversations.\n");
+        sb.append("  action (string, required): One of 'store', 'list', 'delete'\n");
+        sb.append("  key (string, required for store/delete): A short identifier for this fact (e.g. 'lunch_preference', 'email_style', 'timezone')\n");
+        sb.append("  content (string, required for store): The fact, preference, or instruction to remember\n\n");
+
         sb.append("## Credential Vault\n");
         sb.append("You have an encrypted credential vault (AES-256-GCM) for storing service passwords, API keys, and tokens.\n");
         sb.append("- Use 'credential_manage' with action='list' to see what credentials exist before asking the user\n");
@@ -209,6 +215,16 @@ public class ThinkingEngine {
         sb.append("API_KEY, etc.\n");
         sb.append("- When creating skills that need credentials, declare them in the skill_create 'credentials' parameter ");
         sb.append("as a comma-separated list of credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS')\n\n");
+
+        sb.append("## Persistent Memory\n");
+        sb.append("You have a persistent fact memory that survives across conversations.\n");
+        sb.append("- When the user says 'remember this', 'note that', 'keep in mind', or gives you a standing instruction, ");
+        sb.append("use 'memory_manage' with action='store' to persist it as a fact\n");
+        sb.append("- Use action='list' to see all stored facts\n");
+        sb.append("- Use action='delete' to remove outdated facts\n");
+        sb.append("- Facts are automatically loaded into your context at the start of every task as 'User Preferences'\n");
+        sb.append("- Good fact keys: 'lunch_preference', 'language', 'email_format', 'timezone', 'coding_style', etc.\n");
+        sb.append("- ALWAYS store when the user explicitly asks you to remember something — do NOT just acknowledge it\n\n");
 
         // Output format
         sb.append("## Output Format\n");

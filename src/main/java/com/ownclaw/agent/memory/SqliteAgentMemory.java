@@ -130,6 +130,23 @@ public class SqliteAgentMemory implements AgentMemory {
     }
 
     @Override
+    public boolean deleteFact(String userId, String key) {
+        try {
+            int deleted = jdbc.update(
+                    "DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'fact' AND tags = ?",
+                    userId, key
+            );
+            if (deleted > 0) {
+                log.debug("Deleted fact '{}' for user={}", key, userId);
+            }
+            return deleted > 0;
+        } catch (Exception e) {
+            log.warn("Failed to delete fact: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public List<MemoryEntry> getFacts(String userId) {
         try {
             return jdbc.query(
