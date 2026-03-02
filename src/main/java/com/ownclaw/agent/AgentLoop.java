@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.memory.AgentMemory;
 import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -47,6 +48,10 @@ public class AgentLoop {
     private final DebugSessionService debugService;
     private final TaskCancellationService cancellationService;
     private final CredentialVault credentialVault;
+    private final ConversationService conversationService;
+
+    /** Max recent messages to include as conversation context for the LLM. */
+    private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -60,7 +65,8 @@ public class AgentLoop {
             SkillManager skillManager,
             DebugSessionService debugService,
             TaskCancellationService cancellationService,
-            CredentialVault credentialVault
+            CredentialVault credentialVault,
+            ConversationService conversationService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -74,6 +80,7 @@ public class AgentLoop {
         this.debugService = debugService;
         this.cancellationService = cancellationService;
         this.credentialVault = credentialVault;
+        this.conversationService = conversationService;
     }
 
     /**
@@ -107,6 +114,9 @@ public class AgentLoop {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
 
+        // Load conversation history so the LLM sees prior exchanges
+        loadConversationContext(context, userId);
+
         // Recall relevant past experiences to enrich context
         try {
             List<AgentMemory.MemoryEntry> relevantMemories = memory.recallEpisodes(userId, message, 3);
@@ -139,6 +149,62 @@ public class AgentLoop {
         storeEpisode(context, result);
 
         return result;
+    }
+
+    /**
+     * Load conversation history from the database and set it as the conversation
+     * summary on the AgentContext. This gives the LLM visibility into prior
+     * exchanges so it doesn't re-ask questions the user already answered.
+     *
+     * Includes:
+     *   - Rolling summary of older messages (compressed by ConversationCompressor)
+     *   - Last N recent messages in full (the active conversation window)
+     */
+    private void loadConversationContext(AgentContext context, String userId) {
+        try {
+            String sessionId = conversationService.getCurrentSession(userId);
+
+            // Load the compressed summary of older messages (if any)
+            String sessionSummary = conversationService.getSessionSummary(userId, sessionId);
+
+            // Load recent messages (excluding the current message which is already in context.originalMessage).
+            // The current user message was saved by ChatWebSocketHandler before queue submission,
+            // so it will be at index 0 (DESC order). Skip it and reverse the rest to chronological.
+            List<Map<String, Object>> recent = conversationService.getRecentMessages(
+                    userId, sessionId, CONVERSATION_CONTEXT_MESSAGES + 1);
+
+            StringBuilder sb = new StringBuilder();
+
+            // Include compressed summary of older conversation if available
+            if (sessionSummary != null && !sessionSummary.isBlank()) {
+                sb.append("### Compressed history of earlier messages\n");
+                sb.append(sessionSummary).append("\n\n");
+            }
+
+            // Include recent messages in chronological order (skip index 0 = current message).
+            // Messages are included in FULL — no truncation. Cutting mid-sentence can cause
+            // the LLM to misunderstand what was said. The ConversationCompressor already keeps
+            // the overall context bounded by summarizing older messages.
+            if (recent.size() > 1) {
+                sb.append("### Recent conversation\n");
+                for (int i = recent.size() - 1; i >= 1; i--) {
+                    Map<String, Object> row = recent.get(i);
+                    String role = (String) row.get("role");
+                    String content = (String) row.get("content");
+                    sb.append(role.toUpperCase()).append(": ").append(content).append("\n");
+                }
+            }
+
+            String conversationContext = sb.toString().strip();
+            if (!conversationContext.isEmpty()) {
+                context.setConversationSummary(conversationContext);
+                log.debug("Loaded conversation context for user {} session {}: {} chars, {} recent messages",
+                        userId, sessionId, conversationContext.length(), Math.max(0, recent.size() - 1));
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load conversation context for user {}: {}", userId, e.getMessage());
+            // Non-fatal — the agent can still process the message without history
+        }
     }
 
     /**

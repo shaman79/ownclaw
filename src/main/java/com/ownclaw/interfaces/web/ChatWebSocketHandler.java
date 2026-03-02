@@ -240,9 +240,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String currentSessionId = conversationService.getCurrentSession(userId);
         conversationService.autoTitleIfNeeded(userId, currentSessionId, userMessage);
 
-        // Submit to task queue — orchestrator handles conversation persistence
+        // Persist user message BEFORE submitting to the agent loop so conversation
+        // history is available when AgentLoop loads context for the LLM.
+        conversationService.saveMessage(userId, currentSessionId, "user", userMessage);
+
+        // Submit to task queue
         taskQueue.submit(userId, userMessage)
                 .thenAccept(response -> {
+                    // Persist the assistant response for conversation history
+                    conversationService.saveMessage(userId, currentSessionId, "assistant", response);
                     sendToSession(session, "response", response);
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToSession(session, "session_updated", currentSessionId);
