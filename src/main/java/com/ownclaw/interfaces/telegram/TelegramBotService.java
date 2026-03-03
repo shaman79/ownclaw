@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.UserRepository;
@@ -32,6 +33,7 @@ public class TelegramBotService {
     private final UserRepository userRepo;
     private final ChatStatusEmitter statusEmitter;
     private final SkillInteractionHandler interactionHandler;
+    private final CommandHandler commandHandler;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
@@ -44,12 +46,14 @@ public class TelegramBotService {
                               UserRepository userRepo,
                               ChatStatusEmitter statusEmitter, ObjectMapper mapper,
                               SkillInteractionHandler interactionHandler,
-                              SetupWizardService setupWizard) {
+                              SetupWizardService setupWizard,
+                              CommandHandler commandHandler) {
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
         this.statusEmitter = statusEmitter;
         this.interactionHandler = interactionHandler;
+        this.commandHandler = commandHandler;
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
@@ -173,6 +177,16 @@ public class TelegramBotService {
 
         // Subscribe to status messages for this user → send to Telegram
         statusEmitter.subscribe(userId, msg -> sendMessage(chatId, msg.formatted()));
+
+        // Handle slash commands consistently with the Web UI
+        if (text.startsWith("/")) {
+            var cmdResult = commandHandler.handle(userId, text);
+            if (cmdResult.isPresent()) {
+                sendMessage(chatId, cmdResult.get());
+                return;
+            }
+            // Not a recognized command — fall through to agent
+        }
 
         // Interactive skill input: if a skill is waiting for user input, route this message
         // to the pending need_input prompt instead of starting a new task.

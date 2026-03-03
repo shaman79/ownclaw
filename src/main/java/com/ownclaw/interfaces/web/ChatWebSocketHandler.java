@@ -6,16 +6,11 @@ import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
-import com.ownclaw.core.TokenBudgetTracker;
-import com.ownclaw.agent.tools.Tool;
-import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.DebugSessionService;
-import com.ownclaw.observability.EventLogService;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.AuthService;
-import com.ownclaw.users.CredentialGrantService;
-import com.ownclaw.users.CredentialVault;
 import com.ownclaw.users.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,7 +23,6 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -52,11 +46,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final UserRepository userRepo;
     private final ConversationService conversationService;
     private final ChatStatusEmitter statusEmitter;
-    private final EventLogService eventLog;
-    private final CredentialGrantService credentialGrants;
-    private final CredentialVault credentialVault;
-    private final ToolRegistry toolRegistry;
-    private final TokenBudgetTracker budgetTracker;
+    private final CommandHandler commandHandler;
     private final SetupWizardService setupWizard;
     private final AuthService authService;
     private final SkillInteractionHandler interactionHandler;
@@ -86,11 +76,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     public ChatWebSocketHandler(TaskQueue taskQueue, UserRepository userRepo,
                                 ConversationService conversationService,
-                                ChatStatusEmitter statusEmitter, EventLogService eventLog,
-                                CredentialGrantService credentialGrants,
-                                CredentialVault credentialVault,
-                                ToolRegistry toolRegistry,
-                                TokenBudgetTracker budgetTracker,
+                                ChatStatusEmitter statusEmitter,
+                                CommandHandler commandHandler,
                                 SetupWizardService setupWizard,
                                 AuthService authService,
                                 SkillInteractionHandler interactionHandler,
@@ -101,11 +88,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.userRepo = userRepo;
         this.conversationService = conversationService;
         this.statusEmitter = statusEmitter;
-        this.eventLog = eventLog;
-        this.credentialGrants = credentialGrants;
-        this.credentialVault = credentialVault;
-        this.toolRegistry = toolRegistry;
-        this.budgetTracker = budgetTracker;
+        this.commandHandler = commandHandler;
         this.setupWizard = setupWizard;
         this.authService = authService;
         this.interactionHandler = interactionHandler;
@@ -276,58 +259,28 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void handleCommand(String userId, String sessionId, String command,
                                WebSocketSession session) {
-        // Delegate to a command handler (inline for Phase 1)
-        String response = switch (command.trim().toLowerCase()) {
-            case "/help" -> """
-                    ### Commands
-                    - `/log` — Last 10 events
-                    - `/log errors` — Recent errors
-                    - `/log tokens` — Token usage today
-                    - `/tokens` — Token budget summary
-                    - `/skills` — List available tools
-                    - `/debug` — Toggle debug mode (shows prompts + LLM output)
-                    - `/grant <tool> <credential>` — Grant credential access to a tool
-                    - `/revoke <tool>` — Revoke credential access
-                    - `/cred set <KEY> <VALUE>` — Store a credential
-                    - `/cred list` — List stored credential keys
-                    - `/cred delete <KEY>` — Delete a credential
-                    - `/setup` — Run setup wizard
-                    - `/status` — System status
-                    - `/help` — This message""";
-            case "/setup" -> {
-                startSetupWizardIfNeeded(userId);
-                yield "";
-            }
-            case "/status" -> "Queue size: " + taskQueue.getQueueSize()
+        String cmd = command.trim();
+        String cmdLower = cmd.toLowerCase();
+
+        // Web-only commands handled locally
+        String response;
+        if (cmdLower.equals("/setup")) {
+            startSetupWizardIfNeeded(userId);
+            response = "";
+        } else if (cmdLower.equals("/debug")) {
+            boolean enabled = debugService.toggle(userId);
+            response = enabled
+                    ? "\uD83D\uDC1B Debug mode **ON** — you will see full prompts, raw LLM output, critic verdicts, and tool results."
+                    : "\uD83D\uDC1B Debug mode **OFF**";
+        } else if (cmdLower.equals("/status")) {
+            // Shared status + Web-specific info
+            response = commandHandler.handle(userId, cmd).orElse("")
                     + " | Connected sessions: " + sessions.size();
-            default -> {
-                if (command.startsWith("/log")) {
-                    yield handleLogCommand(userId, command);
-                }
-                if (command.startsWith("/grant ")) {
-                    yield handleGrantCommand(userId, command.substring(7).strip());
-                }
-                if (command.startsWith("/revoke ")) {
-                    yield handleRevokeCommand(userId, command.substring(8).strip());
-                }
-                if (command.startsWith("/cred ")) {
-                    yield handleCredCommand(userId, command.substring(6).strip());
-                }
-                if (command.equals("/tokens")) {
-                    yield budgetTracker.getUsageSummary(userId);
-                }
-                if (command.equals("/skills")) {
-                    yield handleSkillsCommand();
-                }
-                if (command.equals("/debug")) {
-                    boolean enabled = debugService.toggle(userId);
-                    yield enabled
-                            ? "\uD83D\uDC1B Debug mode **ON** — you will see full prompts, raw LLM output, critic verdicts, and tool results."
-                            : "\uD83D\uDC1B Debug mode **OFF**";
-                }
-                yield "Unknown command: " + command + ". Try /help";
-            }
-        };
+        } else {
+            // Delegate to shared CommandHandler
+            var result = commandHandler.handle(userId, cmd);
+            response = result.orElse("Unknown command: " + command + ". Try /help");
+        }
 
         if (response != null && !response.isBlank()) {
             conversationService.saveMessage(userId, sessionId, "system", response);
@@ -401,111 +354,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (ws != null && ws.isOpen()) {
             sendToSession(ws, "system", message);
         }
-    }
-
-    private String handleLogCommand(String userId, String command) {
-        String sub = command.length() > 4 ? command.substring(4).strip().toLowerCase() : "";
-
-        return switch (sub) {
-            case "errors" -> {
-                List<Map<String, Object>> errors = eventLog.recentErrors(userId, 10);
-                if (errors.isEmpty()) yield "No recent errors.";
-                var sb = new StringBuilder("Recent errors:\n");
-                for (var e : errors) {
-                    sb.append("  [").append(e.get("timestamp")).append("] ")
-                            .append(e.get("event_type")).append(": ").append(e.get("summary")).append('\n');
-                }
-                yield sb.toString();
-            }
-            case "tokens" -> {
-                Map<String, Object> usage = eventLog.tokenUsageToday(userId);
-                yield "Token usage today: " + usage.get("total_tokens")
-                        + " tokens across " + usage.get("total_events") + " events";
-            }
-            default -> {
-                List<Map<String, Object>> events = eventLog.recentEvents(userId, 10);
-                if (events.isEmpty()) yield "No recent events.";
-                var sb = new StringBuilder("Last 10 events:\n");
-                for (var e : events) {
-                    String sev = String.valueOf(e.get("severity"));
-                    String icon = switch (sev) {
-                        case "error" -> "\u274c";
-                        case "warn" -> "\u26a0\ufe0f";
-                        default -> "\u2139\ufe0f";
-                    };
-                    sb.append("  ").append(icon).append(" [").append(e.get("timestamp")).append("] ")
-                            .append(e.get("event_type")).append(": ").append(e.get("summary")).append('\n');
-                }
-                yield sb.toString();
-            }
-        };
-    }
-
-    private String handleGrantCommand(String userId, String args) {
-        String[] parts = args.split("\\s+", 2);
-        if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
-            return "Usage: /grant <tool_name> <credential_key>";
-        }
-        String toolName = parts[0];
-        String credential = parts[1].toUpperCase();
-        if (toolRegistry.find(toolName).isEmpty()) return "Tool not found: " + toolName;
-        credentialGrants.grantPermanent(userId, toolName, List.of(credential));
-        return "\u2705 Permanent credential access granted for '" + toolName + "': " + credential;
-    }
-
-    private String handleRevokeCommand(String userId, String toolName) {
-        if (toolName.isEmpty()) return "Usage: /revoke <tool_name>";
-        credentialGrants.resetGrants(userId, toolName);
-        return "\u274c Credential grants revoked for '" + toolName + "'";
-    }
-
-    private String handleSkillsCommand() {
-        var tools = toolRegistry.all();
-        if (tools.isEmpty()) return "No tools loaded.";
-        var sb = new StringBuilder("Available tools (" + tools.size() + "):\n");
-        for (Tool tool : tools.stream().sorted(java.util.Comparator.comparing(Tool::name)).toList()) {
-            sb.append("  - **").append(tool.name()).append("**: ")
-                    .append(tool.description())
-                    .append(tool.requiresNetwork() ? " [network]" : "")
-                    .append(tool.hasSideEffects() ? " [side-effects]" : "")
-                    .append("\n");
-        }
-        return sb.toString();
-    }
-
-    private String handleCredCommand(String userId, String args) {
-        if (args.isEmpty()) {
-            return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
-        }
-
-        if (args.equals("list")) {
-            List<String> keys = credentialVault.listCredentialKeys(userId);
-            if (keys.isEmpty()) return "No credentials stored. Use /cred set <KEY> <VALUE> to store one.";
-            var sb = new StringBuilder("\uD83D\uDD10 Stored credentials:\n");
-            for (String key : keys) {
-                sb.append("  \u2022 ").append(key).append("\n");
-            }
-            return sb.toString();
-        }
-
-        if (args.startsWith("set ")) {
-            String rest = args.substring(4).strip();
-            int space = rest.indexOf(' ');
-            if (space < 1) return "Usage: /cred set <KEY> <VALUE>";
-            String key = rest.substring(0, space).toUpperCase();
-            String value = rest.substring(space + 1).strip();
-            credentialVault.storeCredential(userId, key, value);
-            return "\u2705 Credential '" + key + "' stored (encrypted).";
-        }
-
-        if (args.startsWith("delete ")) {
-            String key = args.substring(7).strip().toUpperCase();
-            if (key.isEmpty()) return "Usage: /cred delete <KEY>";
-            credentialVault.deleteCredential(userId, key);
-            return "\u274c Credential '" + key + "' deleted.";
-        }
-
-        return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
     }
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
