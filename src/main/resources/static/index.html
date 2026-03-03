@@ -1333,19 +1333,25 @@
             method: 'DELETE',
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function() {
-            if (wasActive) clearMessages();
-            // refreshSessionList will call getCurrentSession on the server,
-            // which auto-creates a new session if the active one was deleted.
-            return refreshSessionList();
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('Delete failed: ' + resp.status);
+            return resp.json();
         })
-        .then(function() {
-            // After sidebar refreshes, load messages for the (possibly new) active session
-            if (wasActive && activeSessionId) {
-                loadSessionMessages(activeSessionId);
+        .then(function(data) {
+            // Server returns updated session list + activeSessionId
+            renderSessionList(data.sessions || [], data.activeSessionId || '');
+            if (wasActive) {
+                clearMessages();
+                if (data.activeSessionId) {
+                    loadSessionMessages(data.activeSessionId);
+                }
             }
         })
-        .catch(function(e) { console.error('Delete failed:', e); });
+        .catch(function(e) {
+            console.error('Delete failed:', e);
+            // Refresh sidebar from server to show accurate state
+            refreshSessionList();
+        });
     }
 
     function refreshSessionList() {

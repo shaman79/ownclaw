@@ -115,6 +115,7 @@ public class ChatHistoryController {
     /**
      * Permanently delete a chat session.
      * DELETE /api/chats/{sessionId}
+     * Returns the updated session list and active session so the frontend can refresh in one call.
      */
     @DeleteMapping("/{sessionId}")
     public ResponseEntity<?> deleteSession(HttpServletRequest request,
@@ -122,7 +123,16 @@ public class ChatHistoryController {
         String userId = (String) request.getAttribute("userId");
         conversationService.deleteSession(userId, sessionId);
         log.info("Chat session deleted: user={}, session={}", userId, sessionId);
-        return ResponseEntity.ok(Map.of("deleted", true, "sessionId", sessionId));
+
+        // Return updated state so frontend can refresh sidebar without a second call
+        String activeSessionId = conversationService.getCurrentSession(userId);
+        List<Map<String, Object>> sessions = conversationService.listSessions(userId, false);
+        return ResponseEntity.ok(Map.of(
+                "deleted", true,
+                "sessionId", sessionId,
+                "activeSessionId", activeSessionId,
+                "sessions", sessions
+        ));
     }
 
     /**

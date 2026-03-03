@@ -153,16 +153,32 @@ public class ConversationService {
 
     /**
      * Permanently delete a session and its messages.
+     * If the deleted session was the active one, switches to the most recent remaining session.
      */
     public void deleteSession(String userId, String sessionId) {
+        // Remove the active pointer first (references chat_sessions via FK)
+        jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
+                userId, sessionId);
         jdbc.update("DELETE FROM conversations WHERE user_id = ? AND session_id = ?",
                 userId, sessionId);
         jdbc.update("DELETE FROM session_summaries WHERE user_id = ? AND session_id = ?",
                 userId, sessionId);
         jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
                 sessionId, userId);
-        jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
+
+        // If there is no active session now, switch to the most recent remaining session
+        List<String> active = jdbc.queryForList(
+                "SELECT session_id FROM active_session WHERE user_id = ?",
+                String.class, userId);
+        if (active.isEmpty()) {
+            List<String> remaining = jdbc.queryForList(
+                    "SELECT id FROM chat_sessions WHERE user_id = ? AND archived = 0 ORDER BY updated_at DESC LIMIT 1",
+                    String.class, userId);
+            if (!remaining.isEmpty()) {
+                setActiveSession(userId, remaining.getFirst());
+            }
+            // If no sessions remain, getCurrentSession() will create one when needed
+        }
     }
 
     /**
