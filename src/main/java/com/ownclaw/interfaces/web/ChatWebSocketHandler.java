@@ -286,6 +286,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             conversationService.saveMessage(userId, sessionId, "system", response);
             sendToSession(session, "system", response);
         }
+
+        // Session-management commands (/new, /switch) change the active session —
+        // refresh the sidebar so the frontend sees the updated session list.
+        if (commandHandler.isSessionCommand(command)) {
+            sendActiveSessionInfo(session, userId);
+        }
     }
 
     private void startSetupWizardIfNeeded(String userId) {

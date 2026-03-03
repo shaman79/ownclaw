@@ -1159,6 +1159,7 @@
     var thinkingSafetyTimer = null;
     var activeSessionId = null;
     var searchDebounce = null;
+    var needsInitialLoad = false;
 
     marked.setOptions({ breaks: true, gfm: true });
 
@@ -1327,26 +1328,29 @@
 
     function deleteSession(sessionId) {
         if (!authToken) return;
+        var wasActive = (sessionId === activeSessionId);
         fetch('/api/chats/' + sessionId, {
             method: 'DELETE',
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(function() {
-            if (sessionId === activeSessionId) {
-                // Create a new session since we deleted the active one
-                if (ws && ws.readyState === 1) {
-                    ws.send(JSON.stringify({ type: 'new_session', message: '' }));
-                    clearMessages();
-                }
+            if (wasActive) clearMessages();
+            // refreshSessionList will call getCurrentSession on the server,
+            // which auto-creates a new session if the active one was deleted.
+            return refreshSessionList();
+        })
+        .then(function() {
+            // After sidebar refreshes, load messages for the (possibly new) active session
+            if (wasActive && activeSessionId) {
+                loadSessionMessages(activeSessionId);
             }
-            refreshSessionList();
         })
         .catch(function(e) { console.error('Delete failed:', e); });
     }
 
     function refreshSessionList() {
-        if (!authToken) return;
-        fetch('/api/chats', {
+        if (!authToken) return Promise.resolve();
+        return fetch('/api/chats', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(function(r) { return r.json(); })
@@ -1556,6 +1560,7 @@
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         var tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
         ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam);
+        needsInitialLoad = true;
 
         ws.onopen = function() {
             setConnState(true, 'Connected');
@@ -1584,9 +1589,11 @@
                 if (type === 'session_info') {
                     // Session list update from server
                     renderSessionList(data.sessions || [], data.activeSessionId || '');
-                    // Load messages for the active session (e.g. on initial connect or reconnect)
-                    if (data.activeSessionId) {
+                    // Only load messages on initial connect / reconnect, not on every
+                    // switch/new_session (those handle message loading themselves).
+                    if (needsInitialLoad && data.activeSessionId) {
                         loadSessionMessages(data.activeSessionId);
+                        needsInitialLoad = false;
                     }
                 } else if (type === 'session_updated') {
                     // A session was updated (new message, title change) — refresh sidebar

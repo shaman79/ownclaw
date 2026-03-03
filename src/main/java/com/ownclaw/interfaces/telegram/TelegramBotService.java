@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
+import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -17,6 +18,8 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -32,6 +35,7 @@ public class TelegramBotService {
     private final TaskQueue taskQueue;
     private final UserRepository userRepo;
     private final ChatStatusEmitter statusEmitter;
+    private final ConversationService conversationService;
     private final SkillInteractionHandler interactionHandler;
     private final CommandHandler commandHandler;
     private final ObjectMapper mapper;
@@ -45,6 +49,7 @@ public class TelegramBotService {
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
                               UserRepository userRepo,
                               ChatStatusEmitter statusEmitter, ObjectMapper mapper,
+                              ConversationService conversationService,
                               SkillInteractionHandler interactionHandler,
                               SetupWizardService setupWizard,
                               CommandHandler commandHandler) {
@@ -52,6 +57,7 @@ public class TelegramBotService {
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
         this.statusEmitter = statusEmitter;
+        this.conversationService = conversationService;
         this.interactionHandler = interactionHandler;
         this.commandHandler = commandHandler;
         this.mapper = mapper;
@@ -84,6 +90,9 @@ public class TelegramBotService {
             return;
         }
         log.info("Telegram bot verified: @{}", botName);
+
+        // Register bot menu commands so users see a / menu in Telegram
+        registerBotCommands(token);
 
         running = true;
         pollingThread = new Thread(this::pollLoop, "telegram-poller");
@@ -198,8 +207,14 @@ public class TelegramBotService {
             return;
         }
 
+        // Persist user message for conversation history
+        String currentSessionId = conversationService.getCurrentSession(userId);
+        conversationService.autoTitleIfNeeded(userId, currentSessionId, text);
+        conversationService.saveMessage(userId, currentSessionId, "user", text);
+
         // Submit to task queue — orchestrator handles conversation persistence
         taskQueue.submit(userId, text).thenAccept(response -> {
+            conversationService.saveMessage(userId, currentSessionId, "assistant", response);
             sendMessage(chatId, response);
         });
     }
@@ -229,5 +244,34 @@ public class TelegramBotService {
 
     private String apiUrl(String method) {
         return "https://api.telegram.org/bot" + config.getBotToken() + "/" + method;
+    }
+
+    /** Register slash commands so Telegram shows a native “/” menu button. */
+    private void registerBotCommands(String token) {
+        try {
+            var commands = List.of(
+                    Map.of("command", "new",     "description", "Start a new chat session"),
+                    Map.of("command", "history", "description", "List recent chat sessions"),
+                    Map.of("command", "help",    "description", "Show available commands"),
+                    Map.of("command", "skills",  "description", "List available tools"),
+                    Map.of("command", "status",  "description", "System status"),
+                    Map.of("command", "tokens",  "description", "Token budget summary"),
+                    Map.of("command", "log",     "description", "Last 10 events")
+            );
+            String json = mapper.writeValueAsString(Map.of("commands", commands));
+            Request req = new Request.Builder()
+                    .url("https://api.telegram.org/bot" + token + "/setMyCommands")
+                    .post(RequestBody.create(json, MediaType.get("application/json")))
+                    .build();
+            try (Response resp = httpClient.newCall(req).execute()) {
+                if (resp.isSuccessful()) {
+                    log.info("Telegram bot menu registered ({} commands)", commands.size());
+                } else {
+                    log.warn("Failed to register Telegram bot commands: HTTP {}", resp.code());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to register Telegram bot commands: {}", e.getMessage());
+        }
     }
 }

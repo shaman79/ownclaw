@@ -2,6 +2,7 @@ package com.ownclaw.interfaces;
 
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.EventLogService;
@@ -9,6 +10,9 @@ import com.ownclaw.users.CredentialGrantService;
 import com.ownclaw.users.CredentialVault;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -26,16 +30,19 @@ import java.util.Optional;
 public class CommandHandler {
 
     private final ToolRegistry toolRegistry;
+    private final ConversationService conversationService;
     private final EventLogService eventLog;
     private final TokenBudgetTracker budgetTracker;
     private final CredentialVault credentialVault;
     private final CredentialGrantService credentialGrants;
     private final TaskQueue taskQueue;
 
-    public CommandHandler(ToolRegistry toolRegistry, EventLogService eventLog,
-                          TokenBudgetTracker budgetTracker, CredentialVault credentialVault,
+    public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
+                          EventLogService eventLog, TokenBudgetTracker budgetTracker,
+                          CredentialVault credentialVault,
                           CredentialGrantService credentialGrants, TaskQueue taskQueue) {
         this.toolRegistry = toolRegistry;
+        this.conversationService = conversationService;
         this.eventLog = eventLog;
         this.budgetTracker = budgetTracker;
         this.credentialVault = credentialVault;
@@ -63,7 +70,14 @@ public class CommandHandler {
             case "/skills" -> Optional.of(skillsText());
             case "/status" -> Optional.of(statusText());
             case "/tokens" -> Optional.of(budgetTracker.getUsageSummary(userId));
+            case "/history" -> Optional.of(handleHistory(userId));
             default -> {
+                if (command.equals("/new") || command.startsWith("/new ")) {
+                    yield Optional.of(handleNew(userId, message.trim()));
+                }
+                if (command.startsWith("/switch ")) {
+                    yield Optional.of(handleSwitch(userId, message.trim().substring(8).strip()));
+                }
                 if (command.startsWith("/log")) {
                     yield Optional.of(handleLog(userId, command));
                 }
@@ -88,6 +102,9 @@ public class CommandHandler {
     private String helpText() {
         return """
                 ### Commands
+                - `/new [title]` — Start a new chat session
+                - `/history` — List recent chat sessions
+                - `/switch <N>` — Switch to session N from history
                 - `/log` — Last 10 events
                 - `/log errors` — Recent errors
                 - `/log tokens` — Token usage today
@@ -102,6 +119,70 @@ public class CommandHandler {
                 - `/setup` — Run setup wizard (Web UI only)
                 - `/status` — System status
                 - `/help` — This message""";
+    }
+
+    // ── Session management ──
+
+    private String handleNew(String userId, String raw) {
+        String title = raw.length() > 4 ? raw.substring(4).strip() : "";
+        if (title.isEmpty()) title = "New Chat";
+        String sessionId = conversationService.createSession(userId, title);
+        return "\u2705 New session created: **" + title + "**";
+    }
+
+    private String handleHistory(String userId) {
+        List<Map<String, Object>> sessions = conversationService.listSessions(userId, false);
+        if (sessions.isEmpty()) return "No chat sessions found.";
+
+        var sb = new StringBuilder("### Chat History\n");
+        var fmt = DateTimeFormatter.ofPattern("MMM d, HH:mm").withZone(ZoneId.systemDefault());
+        int n = 0;
+        for (var s : sessions) {
+            n++;
+            if (n > 15) break; // cap at 15
+            String title = String.valueOf(s.get("title"));
+            Object msgCount = s.get("message_count");
+            Object updatedAt = s.get("updated_at");
+            String timeStr = "";
+            try {
+                timeStr = " (" + fmt.format(Instant.parse(String.valueOf(updatedAt))) + ")";
+            } catch (Exception ignored) { }
+            sb.append("  **").append(n).append(".** ").append(title)
+                    .append(" — ").append(msgCount).append(" msgs").append(timeStr).append("\n");
+        }
+        sb.append("\nUse `/switch <N>` to switch to a session.");
+        return sb.toString();
+    }
+
+    private String handleSwitch(String userId, String arg) {
+        int num;
+        try {
+            num = Integer.parseInt(arg);
+        } catch (NumberFormatException e) {
+            return "Usage: /switch <number> — use /history to see session numbers.";
+        }
+        List<Map<String, Object>> sessions = conversationService.listSessions(userId, false);
+        if (num < 1 || num > sessions.size()) {
+            return "Invalid session number. Use /history to see available sessions (1-" + sessions.size() + ").";
+        }
+        var target = sessions.get(num - 1);
+        String sessionId = String.valueOf(target.get("id"));
+        String title = String.valueOf(target.get("title"));
+        conversationService.setActiveSession(userId, sessionId);
+        return "\u2705 Switched to session: **" + title + "**";
+    }
+
+    /**
+     * Returns true if the given command is a session-management command
+     * ({@code /new}, {@code /history}, {@code /switch}) that may require
+     * the caller to refresh session UI state.
+     */
+    public boolean isSessionCommand(String message) {
+        if (message == null) return false;
+        String cmd = message.trim().toLowerCase();
+        return cmd.equals("/new") || cmd.startsWith("/new ")
+                || cmd.equals("/history")
+                || cmd.startsWith("/switch ");
     }
 
     // ── Skills ──
