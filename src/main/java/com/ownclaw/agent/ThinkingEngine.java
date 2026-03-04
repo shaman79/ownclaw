@@ -164,7 +164,9 @@ public class ThinkingEngine {
         sb.append("  NEVER use ask_user to request permission or confirm before acting. Just act.\n\n");
 
         sb.append("skill_create: Create/update a Python skill (code is AUTO-GENERATED — specify WHAT, not HOW).\n");
-        sb.append("  name (string, required): Lowercase identifier (e.g. 'web_fetch')\n");
+        sb.append("  Skills are Python scripts running LOCALLY on the user's machine with FULL system access.\n");
+        sb.append("  They can run shell commands (subprocess), ANYTHING Python can do.\n");
+        sb.append("  name (string, required): Lowercase identifier (e.g. 'web_fetch', 'network_scanner', 'shell_exec')\n");
         sb.append("  description (string, required): Detailed behavior spec including edge cases and output format\n");
         sb.append("  parameters (string, required): JSON — each key maps to {\"type\":\"string\",\"description\":\"...\",\"required\":true/false}\n");
         sb.append("  requirements (string, optional): pip packages, one per line\n");

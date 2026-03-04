@@ -925,6 +925,16 @@ public class AgentLoop {
         sys.append("- **Network**: Timeouts 10-30s. Proper User-Agent. Follow redirects.\n");
         sys.append("- **Robustness**: Handle empty responses, invalid URLs, missing data, unexpected formats.\n\n");
 
+        sys.append("## Local Command Execution\n");
+        sys.append("Skills run LOCALLY on the user's machine with FULL system access.\n");
+        sys.append("- **Shell commands**: Use `subprocess.run()` with `capture_output=True, text=True`. ");
+        sys.append("Return stdout as output. Check returncode for errors.\n");
+        sys.append("- **Platform awareness**: Check `sys.platform` ('win32', 'linux', 'darwin') and use appropriate commands.\n");
+        sys.append("- **Common tools**: nmap, ping, arp, ip/ifconfig, netstat, curl, dig, traceroute, systemctl, etc.\n");
+        sys.append("- **Filesystem**: Use `os`, `pathlib`, `shutil` for file/directory operations.\n");
+        sys.append("- **Permissions**: Skills run as the OwnClaw service user. Use sudo only when needed and available.\n");
+        sys.append("- **Security**: Never expose credentials in command args — use env vars or temp files with 0600 permissions.\n\n");
+
         sys.append("## Credentials\n");
         sys.append("Read from env vars: `os.environ.get('KEY')`. Never hardcode secrets.\n");
         sys.append("Missing credential → return clear error telling user to store it.\n\n");
