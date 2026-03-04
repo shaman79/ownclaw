@@ -44,6 +44,7 @@ This will:
 - Create `ownclaw` system user
 - Install JDK 21 (Adoptium Temurin)
 - Install git, python3, python3-venv, python3-pip if missing
+- Install Docker or Podman (for sandboxed skill execution with system packages)
 - Clone the repository
 - Build the JAR
 - Install the systemd service (`ownclaw.service`)

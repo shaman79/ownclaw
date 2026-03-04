@@ -102,6 +102,7 @@ public class SkillManager {
         boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
         String credentials = str(params, "credentials");
+        String systemPackagesStr = str(params, "system_packages");
 
         // --- Write to disk & register ---
 
@@ -110,7 +111,8 @@ public class SkillManager {
             Files.createDirectories(skillDir);
 
             Files.writeString(skillDir.resolve("SKILL.yaml"),
-                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects, timeout, credentials),
+                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
+                            timeout, credentials, systemPackagesStr),
                     StandardCharsets.UTF_8);
             Files.writeString(skillDir.resolve("skill.py"), code, StandardCharsets.UTF_8);
             if (requirements != null && !requirements.isBlank()) {
@@ -262,7 +264,7 @@ public class SkillManager {
 
     private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
-                                  String credentials)
+                                  String credentials, String systemPackages)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
@@ -281,6 +283,18 @@ public class SkillManager {
                     .toList();
             if (!credList.isEmpty()) {
                 yaml.put("credentials", credList);
+            }
+        }
+        if (systemPackages != null && !systemPackages.isBlank()) {
+            // Support comma-separated or space-separated
+            String delimiter = systemPackages.contains(",") ? "," : "\\s+";
+            List<String> pkgList = Arrays.stream(systemPackages.split(delimiter))
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .filter(s -> s.matches("[a-zA-Z0-9._+:-]+")) // sanitize
+                    .toList();
+            if (!pkgList.isEmpty()) {
+                yaml.put("system_packages", pkgList);
             }
         }
         return yamlMapper.writeValueAsString(yaml);

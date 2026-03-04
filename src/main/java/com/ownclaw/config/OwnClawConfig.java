@@ -139,6 +139,8 @@ public class OwnClawConfig {
         private int defaultTimeout = 60;
         private String defaultNetwork = "deny";
         private String pythonPath = "python3";
+        private String containerRuntime = "auto";
+        private String containerBaseImage = "python:3.11-slim";
 
         public String getType() { return type; }
         public void setType(String type) { this.type = type; }
@@ -148,6 +150,10 @@ public class OwnClawConfig {
         public void setDefaultNetwork(String v) { this.defaultNetwork = v; }
         public String getPythonPath() { return pythonPath; }
         public void setPythonPath(String v) { this.pythonPath = v; }
+        public String getContainerRuntime() { return containerRuntime; }
+        public void setContainerRuntime(String v) { this.containerRuntime = v; }
+        public String getContainerBaseImage() { return containerBaseImage; }
+        public void setContainerBaseImage(String v) { this.containerBaseImage = v; }
     }
 
     public static class Skills {

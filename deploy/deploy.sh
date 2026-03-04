@@ -6,8 +6,8 @@
 #   ./deploy.sh              # Full deploy (first time or force)
 #   ./deploy.sh --update     # Only deploy if there are new commits (for cron)
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
-#                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, git, systemd service,
-#                            #   sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
+#                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, Docker/Podman, git,
+#                            #   systemd service, sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
 #   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
@@ -236,6 +236,34 @@ do_setup() {
         apt-get install -y -qq nodejs
     else
         log "Node.js already installed: $(node --version)"
+    fi
+
+    # Install Docker or Podman (needed for skills that require system packages like nmap, ffmpeg, etc.)
+    # Skills declaring system_packages run inside a container where those packages are auto-installed.
+    # Prefer Podman (rootless, daemonless) but fall back to Docker.
+    if ! command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
+        log "Installing container runtime (for sandboxed skill execution)..."
+        # Try Podman first (rootless, no daemon, better for single-user servers)
+        if apt-cache show podman &>/dev/null 2>&1; then
+            log "  Installing Podman..."
+            apt-get update -qq && apt-get install -y -qq podman
+        else
+            # Fall back to Docker
+            log "  Podman not available in repos, installing Docker..."
+            if ! command -v docker &>/dev/null; then
+                curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+                # Allow the ownclaw user to run docker without sudo
+                usermod -aG docker ownclaw 2>/dev/null || true
+            fi
+        fi
+    else
+        if command -v podman &>/dev/null; then
+            log "Container runtime already installed: podman $(podman --version 2>/dev/null | head -1)"
+        else
+            log "Container runtime already installed: $(docker --version 2>/dev/null | head -1)"
+            # Ensure ownclaw user is in docker group
+            usermod -aG docker ownclaw 2>/dev/null || true
+        fi
     fi
 
     # Clone or update repo

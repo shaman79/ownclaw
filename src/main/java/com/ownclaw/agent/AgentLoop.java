@@ -933,7 +933,10 @@ public class AgentLoop {
         sys.append("- **Common tools**: nmap, ping, arp, ip/ifconfig, netstat, curl, dig, traceroute, systemctl, etc.\n");
         sys.append("- **Filesystem**: Use `os`, `pathlib`, `shutil` for file/directory operations.\n");
         sys.append("- **Permissions**: Skills run as the OwnClaw service user. Use sudo only when needed and available.\n");
-        sys.append("- **Security**: Never expose credentials in command args — use env vars or temp files with 0600 permissions.\n\n");
+        sys.append("- **Security**: Never expose credentials in command args — use env vars or temp files with 0600 permissions.\n");
+        sys.append("- **System packages**: If the skill description mentions system_packages (e.g. nmap, ffmpeg), ");
+        sys.append("the skill will run inside a container where those packages are pre-installed. ");
+        sys.append("Write the code as if the tools are available on PATH — they will be.\n\n");
 
         sys.append("## Credentials\n");
         sys.append("Read from env vars: `os.environ.get('KEY')`. Never hardcode secrets.\n");

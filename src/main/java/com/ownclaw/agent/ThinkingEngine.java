@@ -173,7 +173,10 @@ public class ThinkingEngine {
         sb.append("  requires_network (boolean, optional): needs internet?\n");
         sb.append("  has_side_effects (boolean, optional): modifies files, sends emails, etc.?\n");
         sb.append("  timeout (integer, optional): max seconds (default 30)\n");
-        sb.append("  credentials (string, optional): comma-separated credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS') — injected as env vars\n\n");
+        sb.append("  credentials (string, optional): comma-separated credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS') — injected as env vars\n");
+        sb.append("  system_packages (string, optional): space-separated OS packages (apt) needed by the skill (e.g. 'nmap net-tools iputils-ping').\n");
+        sb.append("    When specified, the skill runs inside a Docker/Podman container where these packages are auto-installed — no sudo needed.\n");
+        sb.append("    Use this for tools like nmap, traceroute, tcpdump, ffmpeg, imagemagick, etc. that are not pip-installable.\n\n");
 
         sb.append("skill_manage: Read, delete, list, or analyze existing skills.\n");
         sb.append("  action (string, required): 'read', 'delete', 'list', or 'analyze'\n");

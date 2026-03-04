@@ -2,6 +2,7 @@ package com.ownclaw.agent.tools;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
@@ -77,11 +78,14 @@ public class DynamicSkill implements Tool {
     private final PythonEnvironmentService pythonEnv;
     private final List<String> requiredCredentials;
     private final CredentialVault credentialVault;
+    private final List<String> systemPackages;
+    private final ContainerSandbox containerSandbox;
 
     public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
                         Path skillDir, boolean requiresNetwork, boolean hasSideEffects,
                         int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
-                        List<String> requiredCredentials, CredentialVault credentialVault) {
+                        List<String> requiredCredentials, CredentialVault credentialVault,
+                        List<String> systemPackages, ContainerSandbox containerSandbox) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
@@ -93,6 +97,8 @@ public class DynamicSkill implements Tool {
         this.pythonEnv = pythonEnv;
         this.requiredCredentials = requiredCredentials != null ? requiredCredentials : List.of();
         this.credentialVault = credentialVault;
+        this.systemPackages = systemPackages != null ? systemPackages : List.of();
+        this.containerSandbox = containerSandbox;
     }
 
     @Override public String name() { return name; }
@@ -104,6 +110,24 @@ public class DynamicSkill implements Tool {
 
     /** The directory containing this skill's files. */
     public Path skillDir() { return skillDir; }
+
+    /** System packages required by this skill (e.g. nmap, net-tools). */
+    public List<String> systemPackages() { return systemPackages; }
+
+    /**
+     * Read the requirements.txt file content, or null if not present.
+     */
+    private String readRequirements() {
+        Path reqFile = skillDir.resolve("requirements.txt");
+        if (Files.exists(reqFile)) {
+            try {
+                return Files.readString(reqFile, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                log.warn("Failed to read requirements.txt for skill '{}': {}", name, e.getMessage());
+            }
+        }
+        return null;
+    }
 
     /**
      * The runner harness that bootstraps skill execution.
@@ -227,13 +251,31 @@ public class DynamicSkill implements Tool {
                 log.debug("Injected {} credentials for skill '{}'", creds.size(), name);
             }
 
-            // Run: python _runner.py skill.py   (runner reads stdin, imports skill, calls run())
-            // Use progress-aware execution if a callback is provided (for long-running tasks)
-            SandboxResult result = sandbox.execute(
-                    resolution.python(), runnerScript, skillDir,
-                    inputJson, envVars, timeoutSec,
-                    context.progressCallback()
-            );
+            // Run the skill: choose container or direct process execution.
+            // Skills with system_packages run in a Docker/Podman container so packages
+            // can be installed without sudo. Falls back to direct execution if no
+            // container runtime is available.
+            SandboxResult result;
+            if (!systemPackages.isEmpty() && containerSandbox != null && containerSandbox.isAvailable()) {
+                // Container execution: build image with system packages + pip deps, run inside
+                String pipReqs = readRequirements();
+                String imageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                result = containerSandbox.execute(
+                        imageTag, "python3", runnerScript, skillDir,
+                        inputJson, envVars, timeoutSec,
+                        context.progressCallback());
+            } else {
+                if (!systemPackages.isEmpty()) {
+                    log.warn("Skill '{}' needs system packages {} but no container runtime available — "
+                            + "running directly (may fail if packages not installed on host)",
+                            name, systemPackages);
+                }
+                // Direct process execution (original path)
+                result = sandbox.execute(
+                        resolution.python(), runnerScript, skillDir,
+                        inputJson, envVars, timeoutSec,
+                        context.progressCallback());
+            }
 
             if (result.timedOut()) {
                 return ToolResult.failure("Skill '" + name + "' timed out after " + timeoutSec + "s.");

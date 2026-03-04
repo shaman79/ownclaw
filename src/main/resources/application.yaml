@@ -68,6 +68,8 @@ ownclaw:
     default-timeout: 120
     default-network: deny
     python-path: python
+    container-runtime: auto    # auto, docker, podman, or none
+    container-base-image: python:3.11-slim
 
   skills:
     generated-path: ./skills/generated

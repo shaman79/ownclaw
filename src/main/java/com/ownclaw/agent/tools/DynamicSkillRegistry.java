@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.skills.PythonEnvironmentService;
 import com.ownclaw.users.CredentialVault;
@@ -40,17 +41,20 @@ public class DynamicSkillRegistry {
     private final OwnClawConfig config;
     private final ToolRegistry toolRegistry;
     private final SandboxManager sandbox;
+    private final ContainerSandbox containerSandbox;
     private final PythonEnvironmentService pythonEnv;
     private final CredentialVault credentialVault;
 
     private final Map<String, DynamicSkill> dynamicSkills = new ConcurrentHashMap<>();
 
     public DynamicSkillRegistry(OwnClawConfig config, @Lazy ToolRegistry toolRegistry,
-                                SandboxManager sandbox, PythonEnvironmentService pythonEnv,
+                                SandboxManager sandbox, ContainerSandbox containerSandbox,
+                                PythonEnvironmentService pythonEnv,
                                 CredentialVault credentialVault) {
         this.config = config;
         this.toolRegistry = toolRegistry;
         this.sandbox = sandbox;
+        this.containerSandbox = containerSandbox;
         this.pythonEnv = pythonEnv;
         this.credentialVault = credentialVault;
     }
@@ -113,10 +117,11 @@ public class DynamicSkillRegistry {
         boolean hasSideEffects = Boolean.TRUE.equals(yaml.get("has_side_effects"));
         int timeout = yaml.containsKey("timeout") ? toInt(yaml.get("timeout"), 30) : 30;
         List<String> credentials = parseCredentials(yaml);
+        List<String> systemPackages = parseStringList(yaml, "system_packages");
 
         return new DynamicSkill(name, description, parameters, skillDir,
                 requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
-                credentials, credentialVault);
+                credentials, credentialVault, systemPackages, containerSandbox);
     }
 
     /**
@@ -139,6 +144,31 @@ public class DynamicSkillRegistry {
             return Arrays.stream(str.split(","))
                     .map(String::trim)
                     .map(String::toUpperCase)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+        }
+        return List.of();
+    }
+
+    /**
+     * Parse a generic string list field from SKILL.yaml.
+     * Supports YAML list, comma-separated string, or space-separated string.
+     */
+    private List<String> parseStringList(Map<String, Object> yaml, String key) {
+        Object obj = yaml.get(key);
+        if (obj == null) return List.of();
+        if (obj instanceof List<?> list) {
+            return list.stream()
+                    .map(Object::toString)
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+        }
+        if (obj instanceof String str && !str.isBlank()) {
+            // Support both comma-separated and space-separated
+            String delimiter = str.contains(",") ? "," : "\\s+";
+            return Arrays.stream(str.split(delimiter))
+                    .map(String::trim)
                     .filter(s -> !s.isBlank())
                     .toList();
         }
