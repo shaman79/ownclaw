@@ -52,6 +52,7 @@ public class AgentLoop {
     private final CredentialVault credentialVault;
     private final ConversationService conversationService;
     private final LongRunningTaskManager longRunningTaskManager;
+    private final CapabilityResolver capabilityResolver;
 
     /** Max recent messages to include as conversation context for the LLM. */
     private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
@@ -70,7 +71,8 @@ public class AgentLoop {
             TaskCancellationService cancellationService,
             CredentialVault credentialVault,
             ConversationService conversationService,
-            LongRunningTaskManager longRunningTaskManager
+            LongRunningTaskManager longRunningTaskManager,
+            CapabilityResolver capabilityResolver
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -86,6 +88,7 @@ public class AgentLoop {
         this.credentialVault = credentialVault;
         this.conversationService = conversationService;
         this.longRunningTaskManager = longRunningTaskManager;
+        this.capabilityResolver = capabilityResolver;
     }
 
     /**
@@ -140,6 +143,21 @@ public class AgentLoop {
             }
         } catch (Exception e) {
             log.debug("Failed to recall memories for user {}: {}", userId, e.getMessage());
+        }
+
+        // Deterministic capability gap detection — if the task requires a known
+        // capability (network scanning, media processing, etc.) and no existing
+        // skill covers it, inject a specific hint so the LLM doesn't need to
+        // figure out that it should use skill_create + system_packages.
+        try {
+            CapabilityResolver.CapabilityHint hint = capabilityResolver.resolve(message);
+            if (hint != null) {
+                context.setCapabilityHint(hint);
+                log.info("Capability gap detected for task {}: {} → suggesting skill '{}'",
+                        taskId, hint.category(), hint.suggestedName());
+            }
+        } catch (Exception e) {
+            log.debug("Capability resolution failed (non-fatal): {}", e.getMessage());
         }
 
         // Clear any stale cancel flag from a previous task
@@ -266,12 +284,80 @@ public class AgentLoop {
                 );
             }
 
+            boolean debug = debugService.isEnabled(context.userId());
+
+            // === DETERMINISTIC SKILL CREATION ===
+            // When CapabilityResolver detected a gap (step 0 only), bypass the
+            // ThinkingEngine entirely: synthesize the skill_create action from
+            // the deterministic hint and go straight to cloud code generation.
+            // This removes ALL LLM involvement from the routing decision —
+            // no thinking call, no risk of refusal, no wasted tokens.
+            // The cloud LLM is only used for code generation (its strength).
+            if (step == 0 && context.capabilityHint() != null) {
+                CapabilityResolver.CapabilityHint hint = context.capabilityHint();
+
+                log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
+                        context.taskId(), hint.suggestedName());
+
+                statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                        "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
+
+                // Build skill_create params directly from the hint
+                Map<String, Object> skillParams = new HashMap<>();
+                skillParams.put("name", hint.suggestedName());
+                skillParams.put("description", hint.description());
+                skillParams.put("parameters", hint.parametersJson());
+                skillParams.put("timeout", String.valueOf(hint.timeout()));
+                if (!hint.systemPackages().isEmpty()) {
+                    skillParams.put("system_packages", String.join(" ", hint.systemPackages()));
+                }
+                if (!hint.pipPackages().isEmpty()) {
+                    skillParams.put("requirements", String.join("\n", hint.pipPackages()));
+                }
+
+                AgentAction action = new AgentAction(
+                        AgentAction.SKILL_CREATE, skillParams,
+                        "CapabilityResolver detected missing " + hint.category()
+                                + " capability — creating skill deterministically");
+
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "DETERMINISTIC SKILL_CREATE: " + hint.suggestedName()
+                                    + " (bypassed ThinkingEngine, no LLM call)");
+                }
+
+                // Generate code with cloud LLM and create the skill
+                Map<String, Object> enhancedParams = generateSkillCodeWithCloud(skillParams, context);
+                if (enhancedParams != null) {
+                    long startMs = System.currentTimeMillis();
+                    String result = skillManager.createSkill(enhancedParams);
+                    long durationMs = System.currentTimeMillis() - startMs;
+                    boolean ok = !result.startsWith("ERROR");
+                    AgentObservation obs = ok
+                            ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                            : AgentObservation.failure(action.tool(), result, durationMs);
+                    context.trajectory().record(action, obs);
+                    if (debug) {
+                        emitDebug(context.userId(),
+                                "SKILL_CREATE [" + hint.suggestedName() + "] "
+                                        + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                        + truncate(result, 2000));
+                    }
+                } else {
+                    context.trajectory().record(action,
+                            AgentObservation.failure(action.tool(),
+                                    "ERROR: Cloud LLM unavailable — cannot generate skill code", 0));
+                }
+
+                // Clear the hint so subsequent steps don't re-trigger
+                context.setCapabilityHint(null);
+                continue;
+            }
+
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
             statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                     "Thinking... (step " + (step + 1) + ")");
-
-            boolean debug = debugService.isEnabled(context.userId());
 
             ThinkResult thinkResult = thinkingEngine.decideNextActionFull(context, provider);
             AgentAction action = thinkResult.action();

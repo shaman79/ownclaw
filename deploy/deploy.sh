@@ -159,6 +159,32 @@ After fixing, re-run:
 EOF
 }
 
+# === Configure rootless Podman for the ownclaw user ===
+# Rootless Podman needs subuid/subgid entries for user namespace mapping.
+# Without these, 'podman build' fails with: lchown /etc/gshadow: invalid argument
+setup_podman_rootless() {
+    local uid
+    uid=$(id -u ownclaw 2>/dev/null) || return 0
+
+    # Ensure subuid entry exists for ownclaw
+    if ! grep -q "^ownclaw:" /etc/subuid 2>/dev/null; then
+        log "  Configuring subuid for ownclaw user (needed for rootless Podman)..."
+        usermod --add-subuids 100000-165535 ownclaw 2>/dev/null || \
+            echo "ownclaw:100000:65536" >> /etc/subuid
+    fi
+
+    # Ensure subgid entry exists for ownclaw
+    if ! grep -q "^ownclaw:" /etc/subgid 2>/dev/null; then
+        log "  Configuring subgid for ownclaw user (needed for rootless Podman)..."
+        usermod --add-subgids 100000-165535 ownclaw 2>/dev/null || \
+            echo "ownclaw:100000:65536" >> /etc/subgid
+    fi
+
+    # Apply the new namespace mapping
+    podman system migrate 2>/dev/null || true
+    log "  Podman rootless namespace mapping configured for ownclaw"
+}
+
 # === First-time server setup (run as root) ===
 do_setup() {
     log "=== OwnClaw Server Setup ==="
@@ -247,6 +273,9 @@ do_setup() {
         if apt-cache show podman &>/dev/null 2>&1; then
             log "  Installing Podman..."
             apt-get update -qq && apt-get install -y -qq podman
+            # Rootless Podman requires subuid/subgid entries for user namespace mapping.
+            # Without these, 'podman build' fails with lchown errors.
+            setup_podman_rootless
         else
             # Fall back to Docker
             log "  Podman not available in repos, installing Docker..."
@@ -259,6 +288,8 @@ do_setup() {
     else
         if command -v podman &>/dev/null; then
             log "Container runtime already installed: podman $(podman --version 2>/dev/null | head -1)"
+            # Ensure rootless setup is correct even if podman was pre-installed
+            setup_podman_rootless
         else
             log "Container runtime already installed: $(docker --version 2>/dev/null | head -1)"
             # Ensure ownclaw user is in docker group

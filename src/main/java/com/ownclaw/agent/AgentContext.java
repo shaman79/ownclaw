@@ -20,6 +20,9 @@ public class AgentContext {
     private String conversationSummary;
     private String userPreferences;
 
+    /** Deterministic capability hint from CapabilityResolver (null if no gap detected). */
+    private CapabilityResolver.CapabilityHint capabilityHint;
+
     // Per-task token usage counters
     private int localTokens;
     private int cloudTokens;
@@ -53,6 +56,9 @@ public class AgentContext {
 
     public String userPreferences() { return userPreferences; }
     public void setUserPreferences(String prefs) { this.userPreferences = prefs; }
+
+    public CapabilityResolver.CapabilityHint capabilityHint() { return capabilityHint; }
+    public void setCapabilityHint(CapabilityResolver.CapabilityHint hint) { this.capabilityHint = hint; }
 
     // ── Token tracking ──
 

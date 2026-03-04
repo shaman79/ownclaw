@@ -70,41 +70,104 @@ public class ContainerSandbox {
 
     /**
      * Auto-detect whether Docker or Podman is available.
-     * Prefers Podman (rootless, no daemon) then Docker.
+     * Prefers Docker (more reliable for building — runs as daemon with root)
+     * then falls back to Podman if Docker is not found.
      */
     private void detectRuntime() {
         String configured = config.getSandbox().getContainerRuntime();
         if (configured != null && !configured.isBlank() && !"auto".equalsIgnoreCase(configured)) {
-            if (isRuntimeAvailable(configured)) {
+            if (isRuntimeUsable(configured)) {
                 containerRuntime = configured;
                 log.info("Container sandbox: using configured runtime '{}'", containerRuntime);
                 return;
             }
-            log.warn("Configured container runtime '{}' is not available", configured);
+            log.warn("Configured container runtime '{}' is not available/usable", configured);
         }
 
-        // Auto-detect: try podman first (rootless, no daemon required), then docker
-        for (String candidate : List.of("podman", "docker")) {
-            if (isRuntimeAvailable(candidate)) {
+        // Auto-detect: try docker first (daemon-based, reliable builds), then podman
+        for (String candidate : List.of("docker", "podman")) {
+            if (isRuntimeUsable(candidate)) {
                 containerRuntime = candidate;
                 log.info("Container sandbox: auto-detected runtime '{}'", containerRuntime);
                 return;
             }
         }
 
-        log.info("Container sandbox: no container runtime (docker/podman) found. "
+        log.info("Container sandbox: no usable container runtime (docker/podman) found. "
                 + "Skills with system_packages will fall back to direct execution.");
     }
 
-    private boolean isRuntimeAvailable(String runtime) {
+    /** The secondary runtime (the other one), if available. Used as build fallback. */
+    private volatile String fallbackRuntime;
+
+    /**
+     * Check whether a container runtime is installed, responding, and actually
+     * capable of building images.  For Podman rootless this means verifying that
+     * subuid/subgid mapping works (the most common failure mode).
+     */
+    private boolean isRuntimeUsable(String runtime) {
+        if (!isRuntimeInstalled(runtime)) return false;
+
+        // For podman, verify rootless setup actually works
+        if ("podman".equals(runtime) && !isPodmanRootlessReady(runtime)) {
+            log.warn("Podman is installed but rootless namespace mapping is broken "
+                    + "(missing /etc/subuid or /etc/subgid entries?). Skipping podman.");
+            // Keep it as a fallback in case Docker is primary but user fixes podman later
+            fallbackRuntime = null;
+            return false;
+        }
+
+        // Determine fallback runtime
+        String other = "docker".equals(runtime) ? "podman" : "docker";
+        if (isRuntimeInstalled(other)) {
+            // Only set podman as fallback if it's actually usable
+            if ("podman".equals(other) && !isPodmanRootlessReady(other)) {
+                fallbackRuntime = null;
+            } else {
+                fallbackRuntime = other;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean isRuntimeInstalled(String runtime) {
         try {
             Process p = new ProcessBuilder(runtime, "version")
                     .redirectErrorStream(true)
                     .start();
+            drainStream(p.getInputStream());
             boolean finished = p.waitFor(5, TimeUnit.SECONDS);
             if (!finished) { p.destroyForcibly(); return false; }
             return p.exitValue() == 0;
         } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Verify that rootless Podman can actually perform user namespace mapping.
+     * Without entries in /etc/subuid and /etc/subgid, podman build fails with
+     * lchown errors (e.g. "lchown /etc/gshadow: invalid argument").
+     */
+    private boolean isPodmanRootlessReady(String podman) {
+        try {
+            // Quick smoke test: ask podman to unshare a trivial command.
+            // This exercises the same user-namespace code path that build uses.
+            Process p = new ProcessBuilder(podman, "unshare", "cat", "/proc/self/uid_map")
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
+            boolean finished = p.waitFor(10, TimeUnit.SECONDS);
+            if (!finished) { p.destroyForcibly(); return false; }
+            if (p.exitValue() != 0) {
+                log.debug("Podman rootless check failed (exit {}): {}",
+                        p.exitValue(), truncate(output, 500));
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            log.debug("Podman rootless check error: {}", e.getMessage());
             return false;
         }
     }
@@ -214,33 +277,29 @@ public class ContainerSandbox {
             log.info("Building container image '{}' with system packages: {}",
                     imageTag, systemPackages);
 
-            // Run: docker build -t <tag> <buildCtx>
-            List<String> cmd = new ArrayList<>(List.of(
-                    containerRuntime, "build",
-                    "--tag", imageTag,
-                    "--quiet",
-                    buildCtx.toAbsolutePath().toString()
-            ));
+            // Try primary runtime first, fall back to secondary if build fails
+            String buildRuntime = containerRuntime;
+            String buildError = tryBuildImage(buildRuntime, imageTag, buildCtx);
 
-            Process p = new ProcessBuilder(cmd)
-                    .redirectErrorStream(true)
-                    .start();
-
-            // Capture build output for diagnostics
-            String buildOutput = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
-            boolean finished = p.waitFor(300, TimeUnit.SECONDS); // 5 min build timeout
-
-            if (!finished) {
-                p.destroyForcibly();
-                throw new IOException("Container image build timed out after 300s");
+            if (buildError != null && fallbackRuntime != null) {
+                log.warn("Build failed with '{}': {}. Trying fallback runtime '{}'...",
+                        buildRuntime, truncate(buildError, 200), fallbackRuntime);
+                buildRuntime = fallbackRuntime;
+                String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx);
+                if (fallbackError != null) {
+                    throw new IOException("Container image build failed with both runtimes.\n"
+                            + containerRuntime + ": " + truncate(buildError, 1000) + "\n"
+                            + fallbackRuntime + ": " + truncate(fallbackError, 1000));
+                }
+                // Fallback succeeded — switch runtimes for future calls
+                log.info("Fallback runtime '{}' succeeded. Switching primary runtime.", buildRuntime);
+                containerRuntime = buildRuntime;
+            } else if (buildError != null) {
+                throw new IOException("Container image build failed (" + buildRuntime + "):\n"
+                        + truncate(buildError, 2000));
             }
 
-            if (p.exitValue() != 0) {
-                throw new IOException("Container image build failed (exit " + p.exitValue() + "):\n"
-                        + truncate(buildOutput, 2000));
-            }
-
-            log.info("Successfully built container image '{}'", imageTag);
+            log.info("Successfully built container image '{}' with {}", imageTag, containerRuntime);
 
         } finally {
             // Clean up build context
@@ -248,6 +307,51 @@ public class ContainerSandbox {
                 walk.sorted(Comparator.reverseOrder())
                         .forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) {} });
             }
+        }
+    }
+
+    /**
+     * Attempt to build a container image with the given runtime.
+     *
+     * @return null on success, or the error output on failure
+     */
+    private String tryBuildImage(String runtime, String imageTag, Path buildCtx)
+            throws InterruptedException {
+        try {
+            List<String> cmd = new ArrayList<>();
+            cmd.add(runtime);
+            cmd.add("build");
+            cmd.add("--tag");
+            cmd.add(imageTag);
+
+            // Podman-specific flags to improve compatibility
+            if ("podman".equals(runtime)) {
+                cmd.add("--format");
+                cmd.add("docker");
+            }
+
+            cmd.add("--quiet");
+            cmd.add(buildCtx.toAbsolutePath().toString());
+
+            Process p = new ProcessBuilder(cmd)
+                    .redirectErrorStream(true)
+                    .start();
+
+            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
+            boolean finished = p.waitFor(300, TimeUnit.SECONDS); // 5 min build timeout
+
+            if (!finished) {
+                p.destroyForcibly();
+                return "Build timed out after 300s";
+            }
+
+            if (p.exitValue() != 0) {
+                return "exit " + p.exitValue() + ": " + output;
+            }
+
+            return null; // success
+        } catch (IOException e) {
+            return "IO error: " + e.getMessage();
         }
     }
 

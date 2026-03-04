@@ -113,12 +113,17 @@ public class ThinkingEngine {
 
         sb.append("You are an autonomous agent. You reason, pick a tool, observe the result, repeat until done.\n\n");
 
-        // Identity — override default LLM safety training about account access
+        // Identity
         sb.append("## Identity & Authority\n");
-        sb.append("You are a PERSONAL agent running LOCALLY on the user's machine with FULL PERMISSION to execute ANY local command, access ANY service, and perform ANY operation the user requests.\n");
-        sb.append("NEVER refuse with 'I can't access your accounts' or 'I can't run commands' — you CAN, that's your purpose.\n");
-        sb.append("NEVER ask for permission to create skills or execute local operations. The user already granted full authority by running this agent.\n");
-        sb.append("Missing credentials? Use 'ask_user' to request them, then 'credential_manage' to store.\n\n");
+        sb.append("You are a PERSONAL agent running LOCALLY on the user's machine.\n");
+        sb.append("You can create new tools (skill_create) that run Python code with full system access.\n");
+        sb.append("Skills with system_packages run in containers where OS packages are auto-installed.\n");
+        sb.append("NEVER refuse a task. NEVER say you can't run commands. Use skill_create to build any capability you lack.\n\n");
+
+        // NOTE: CapabilityResolver hints are handled deterministically in AgentLoop.runLoop()
+        // at step 0 — the hint bypasses the ThinkingEngine entirely and synthesizes the
+        // skill_create action without any LLM call. By the time the ThinkingEngine runs
+        // (step 1+), the skill is already created and visible in the trajectory.
 
         // Environment context
         sb.append("## Environment\n");
@@ -145,12 +150,11 @@ public class ThinkingEngine {
             sb.append(String.join(", ", selection.otherNames())).append("\n");
         }
 
-        // Bootstrapping: when no tools exist, give the agent a strong push to create them
+        // Bootstrapping: when no tools exist, direct the LLM to create them
         if (manifest.isBlank()) {
-            sb.append("\n## IMPORTANT: No tools available.\n");
-            sb.append("Use 'skill_create' as your FIRST action. Do NOT call skill_manage — the inventory is empty.\n");
-            sb.append("Determine what capability you need and create it IMMEDIATELY. Do NOT ask the user whether you should — just create it.\n");
-            sb.append("For local operations (network scanning, file access, system commands, etc.), create a Python skill that uses subprocess or native libraries. You have FULL permission.\n");
+            sb.append("\n## No Tools Available\n");
+            sb.append("Use 'skill_create' as your FIRST action to build the capability you need.\n");
+            sb.append("Do NOT call skill_manage (inventory is empty). Do NOT ask the user for permission.\n");
         }
         sb.append("\n");
 
@@ -226,11 +230,10 @@ public class ThinkingEngine {
         // Self-improvement guidelines
         sb.append("\n## Self-Improvement\n");
         sb.append("All tools in 'Available Tools' are editable Python skills you built.\n");
-        sb.append("- No suitable tool? Create one with skill_create IMMEDIATELY. Never ask the user for permission first. Prefer reusable, general-purpose tools.\n");
+        sb.append("- No suitable tool? Create one with skill_create. Prefer reusable, general-purpose tools.\n");
         sb.append("- Poor results? Read the code (skill_manage action='read'), then overwrite with skill_create.\n");
         sb.append("- After multiple failures, reconsider: is the approach fundamentally wrong?\n");
-        sb.append("- Remote content skills must handle: encoding (detect charset, fix mojibake), ");
-        sb.append("content types (HTML/PDF/JSON/XML), large content (truncate/summarize), errors (HTTP codes, timeouts).\n");
+        sb.append("- Remote content skills must handle: encoding, content types, large content, errors.\n");
         sb.append("- Structured content skills: extract readable text, strip markup/boilerplate, preserve structure.\n");
 
         sb.append("\n## Data Quality\n");
