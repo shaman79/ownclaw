@@ -683,7 +683,11 @@ build_jar() {
     export GRADLE_USER_HOME="$DEPLOY_DIR/.gradle"
     mkdir -p "$GRADLE_USER_HOME" 2>/dev/null || true
     chmod +x gradlew 2>/dev/null || true
-    ./gradlew clean build -x test --no-daemon >&2
+    # Skip 'clean' — the running JVM may have files locked in build/.
+    # Gradle's incremental build handles staleness correctly without clean.
+    if ! ./gradlew build -x test --no-daemon >&2; then
+        die "Gradle build failed"
+    fi
 
     local jar="$REPO_DIR/build/libs/ownclaw-0.1.0.jar"
     [ -f "$jar" ] || die "Build failed — JAR not found at $jar"
