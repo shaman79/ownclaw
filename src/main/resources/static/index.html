@@ -503,6 +503,14 @@
             color: var(--text-2);
             font-weight: 500;
         }
+        #activity-elapsed {
+            font-size: 11px;
+            color: var(--text-3);
+            font-variant-numeric: tabular-nums;
+            letter-spacing: .02em;
+            min-width: 36px;
+            text-align: right;
+        }
         .activity-toggle {
             font-size: 10px;
             color: var(--text-3);
@@ -1084,6 +1092,7 @@
         <div id="activity-header">
             <div class="activity-spinner" id="activity-spinner"></div>
             <span id="activity-label">Working...</span>
+            <span id="activity-elapsed"></span>
             <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
         </div>
         <div id="activity-steps"></div>
@@ -1134,6 +1143,7 @@
     var activityWrap    = document.getElementById('activity-wrap');
     var activitySpinner = document.getElementById('activity-spinner');
     var activityLabel   = document.getElementById('activity-label');
+    var activityElapsed = document.getElementById('activity-elapsed');
     var activityStepsEl = document.getElementById('activity-steps');
     var activityToggle  = document.getElementById('activity-toggle');
     var activityHeader  = document.getElementById('activity-header');
@@ -1158,6 +1168,8 @@
     var heartbeatTimer = null;
     var thinkingSafetyTimer = null;
     var activeSessionId = null;
+    var thinkingStartedAt = null;
+    var elapsedTimer = null;
     var searchDebounce = null;
     var needsInitialLoad = false;
 
@@ -1410,7 +1422,7 @@
                 activityStepsEl.innerHTML = '';
                 activityStepList = [];
             }
-        }, 1800);
+        }, 5000);
     }
 
     function resetActivity() {
@@ -1612,6 +1624,7 @@
                         doneActivity();
                     } else {
                         setThinking(true);
+                        resetThinkingSafetyTimer();
                         showActivity(content);
                     }
                 } else if (type === 'debug') {
@@ -1637,16 +1650,23 @@
             sendBtn.disabled = true;
             stopBtn.classList.add('visible');
             scrollBottom();
-            // Safety net: auto-hide if no messages arrive for 90 seconds
+            // Start elapsed timer
+            if (!thinkingStartedAt) {
+                thinkingStartedAt = Date.now();
+                startElapsedTimer();
+            }
+            // Safety net: auto-hide if no messages arrive for 15 minutes
             thinkingSafetyTimer = setTimeout(function() {
                 setThinking(false);
                 doneActivity();
-            }, 90000);
+            }, 900000);
         } else {
             thinkingEl.classList.remove('active');
             sendBtn.disabled = false;
             stopBtn.classList.remove('visible');
             busy = false;
+            thinkingStartedAt = null;
+            stopElapsedTimer();
         }
     }
 
@@ -1656,7 +1676,30 @@
             thinkingSafetyTimer = setTimeout(function() {
                 setThinking(false);
                 doneActivity();
-            }, 90000);
+            }, 900000);
+        }
+    }
+
+    function startElapsedTimer() {
+        stopElapsedTimer();
+        updateElapsed();
+        elapsedTimer = setInterval(updateElapsed, 1000);
+    }
+
+    function stopElapsedTimer() {
+        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+        activityElapsed.textContent = '';
+    }
+
+    function updateElapsed() {
+        if (!thinkingStartedAt) return;
+        var sec = Math.floor((Date.now() - thinkingStartedAt) / 1000);
+        if (sec < 60) {
+            activityElapsed.textContent = sec + 's';
+        } else {
+            var m = Math.floor(sec / 60);
+            var s = sec % 60;
+            activityElapsed.textContent = m + ':' + (s < 10 ? '0' : '') + s;
         }
     }
 

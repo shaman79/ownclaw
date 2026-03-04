@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import com.ownclaw.llm.*;
 
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
@@ -359,7 +360,14 @@ public class AgentLoop {
             statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                     "Thinking... (step " + (step + 1) + ")");
 
-            ThinkResult thinkResult = thinkingEngine.decideNextActionFull(context, provider);
+            ScheduledFuture<?> thinkHeartbeat = startLlmHeartbeat(context.userId(),
+                    "Thinking (step " + (step + 1) + ")");
+            ThinkResult thinkResult;
+            try {
+                thinkResult = thinkingEngine.decideNextActionFull(context, provider);
+            } finally {
+                stopHeartbeat(thinkHeartbeat);
+            }
             AgentAction action = thinkResult.action();
 
             // Track token usage per provider
@@ -547,7 +555,16 @@ public class AgentLoop {
             }
 
             // === ACT ===
-            AgentObservation observation = executeTool(action, context);
+            statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                    "Running " + action.tool() + "...");
+            ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context.userId(),
+                    "Running " + action.tool());
+            AgentObservation observation;
+            try {
+                observation = executeTool(action, context);
+            } finally {
+                stopHeartbeat(toolHeartbeat);
+            }
 
             // === OBSERVE ===
             context.trajectory().record(action, observation);
@@ -947,7 +964,14 @@ public class AgentLoop {
                     null    // use provider default read timeout
             );
 
-            LlmResponse response = cloud.chat(messages, codeGenConfig);
+            ScheduledFuture<?> heartbeat = startLlmHeartbeat(context.userId(),
+                    "Generating code for '" + name + "'");
+            LlmResponse response;
+            try {
+                response = cloud.chat(messages, codeGenConfig);
+            } finally {
+                stopHeartbeat(heartbeat);
+            }
             String cloudCode = extractPythonCode(response.content());
 
             // Track cloud tokens for skill code generation
@@ -1140,5 +1164,42 @@ public class AgentLoop {
                 .append("` reasoning=").append(truncate(result.action().reasoning(), 300));
 
         emitDebug(userId, sb.toString());
+    }
+
+    // ── LLM heartbeat ──
+
+    /**
+     * Start a periodic heartbeat that emits PROGRESS status messages while
+     * the LLM inference call is blocking. Keeps the UI activity indicator
+     * alive so users know the system isn't hung.
+     *
+     * @param userId      target user for status messages
+     * @param description what's happening (e.g. "Generating code")
+     * @return a ScheduledFuture to cancel when the LLM call completes
+     */
+    private ScheduledFuture<?> startLlmHeartbeat(String userId, String description) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "llm-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+        long[] startMs = { System.currentTimeMillis() };
+        return scheduler.scheduleAtFixedRate(() -> {
+            long elapsed = (System.currentTimeMillis() - startMs[0]) / 1000;
+            String time;
+            if (elapsed < 60) {
+                time = elapsed + "s";
+            } else {
+                time = (elapsed / 60) + "m " + (elapsed % 60) + "s";
+            }
+            statusEmitter.emit(userId, StatusMessage.Type.PROGRESS,
+                    description + " (" + time + " elapsed, please wait...)");
+        }, 10, 15, TimeUnit.SECONDS);
+    }
+
+    private void stopHeartbeat(ScheduledFuture<?> heartbeat) {
+        if (heartbeat != null) {
+            heartbeat.cancel(false);
+        }
     }
 }
