@@ -557,7 +557,7 @@ public class AgentLoop {
                         "TOOL RESULT [" + action.tool() + "] "
                                 + (observation.success() ? "OK" : "FAIL")
                                 + " (" + observation.durationMs() + "ms)\n"
-                                + truncate(observation.output(), 2000));
+                                + truncate(observation.output(), 50_000));
             }
 
             // Track tool usage for skill curation analytics
@@ -841,9 +841,6 @@ public class AgentLoop {
                     && !turn.observation().output().isBlank()) {
                 sb.append("\nLast successful result:\n");
                 String output = turn.observation().output();
-                if (output.length() > 1000) {
-                    output = output.substring(0, 1000) + "...[truncated]";
-                }
                 sb.append(output);
                 break;
             }
@@ -1131,18 +1128,11 @@ public class AgentLoop {
         sb.append("**Prompt messages** (").append(result.promptMessages().size()).append("):\n");
         for (var msg : result.promptMessages()) {
             sb.append("\n---\n**[").append(msg.role().name()).append("]**\n");
-            String content = msg.content();
-            if (content.length() > 4000) {
-                content = content.substring(0, 4000) + "\n\n...[truncated, " + msg.content().length() + " chars total]";
-            }
-            sb.append(content).append('\n');
+            sb.append(msg.content()).append('\n');
         }
 
         sb.append("\n---\n**Raw LLM output** (").append(result.totalTokens()).append(" tokens):\n```json\n");
         String raw = result.rawLlmOutput();
-        if (raw != null && raw.length() > 2000) {
-            raw = raw.substring(0, 2000) + "\n...[truncated]";
-        }
         sb.append(raw != null ? raw : "(null)").append("\n```\n");
 
         sb.append("**Parsed action**: tool=`").append(result.action().tool())

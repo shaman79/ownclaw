@@ -34,7 +34,7 @@ public class OllamaProvider implements LlmProvider {
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)  // local inference can be slow
+                .readTimeout(600, TimeUnit.SECONDS)  // local inference is slow, especially for code generation
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .build();
     }

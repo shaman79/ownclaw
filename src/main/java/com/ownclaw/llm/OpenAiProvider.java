@@ -35,7 +35,7 @@ public class OpenAiProvider implements LlmProvider {
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(300, TimeUnit.SECONDS)  // code generation can be slow
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .build();
     }

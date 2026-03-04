@@ -181,7 +181,6 @@ public class SkillCuratorService {
                 sb.append("\n### ").append(skill.name()).append("\n```python\n");
                 try {
                     String code = Files.readString(skill.skillDir().resolve("skill.py"), StandardCharsets.UTF_8);
-                    if (code.length() > 2000) code = code.substring(0, 2000) + "\n...[truncated]";
                     sb.append(code);
                 } catch (Exception e) {
                     sb.append("(could not read source)");
