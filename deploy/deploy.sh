@@ -692,12 +692,14 @@ build_jar() {
         rm -rf "$REPO_DIR/build.stale.$$" 2>/dev/null &  # background cleanup
     fi
 
-    # Clean up stale Gradle compile transaction stash-dir from previous failed builds.
-    # These leftover .class files cause "Unable to delete directory" errors.
-    local stash_dir="$REPO_DIR/build/tmp/compileJava/compileTransaction/stash-dir"
-    if [ -d "$stash_dir" ]; then
-        log "Cleaning stale compile stash-dir..."
-        rm -rf "$stash_dir" 2>/dev/null || true
+    # Clean up stale Gradle compile transaction dirs from previous failed builds.
+    # These may be root-owned (from --setup), so rm -rf can fail.
+    # Use mv trick: ownclaw owns the parent dir, so rename always works.
+    local compile_tmp="$REPO_DIR/build/tmp/compileJava"
+    if [ -d "$compile_tmp" ]; then
+        log "Cleaning stale compile temp dir..."
+        mv "$compile_tmp" "$REPO_DIR/build/tmp/compileJava.stale.$$" 2>/dev/null || true
+        rm -rf "$REPO_DIR/build/tmp/compileJava.stale.$$" 2>/dev/null &
     fi
 
     # Skip 'clean' — the running JVM may have files locked in build/.
