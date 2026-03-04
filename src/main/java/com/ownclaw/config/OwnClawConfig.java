@@ -93,6 +93,8 @@ public class OwnClawConfig {
         private int longRunningThreshold = 120;
         private int stallTimeout = 300;
         private int heartbeatInterval = 30;
+        private int schedulerPollInterval = 30;
+        private int maxScheduledTasksPerUser = 50;
 
         public int getDefaultTimeout() { return defaultTimeout; }
         public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
@@ -106,6 +108,10 @@ public class OwnClawConfig {
         public void setStallTimeout(int v) { this.stallTimeout = v; }
         public int getHeartbeatInterval() { return heartbeatInterval; }
         public void setHeartbeatInterval(int v) { this.heartbeatInterval = v; }
+        public int getSchedulerPollInterval() { return schedulerPollInterval; }
+        public void setSchedulerPollInterval(int v) { this.schedulerPollInterval = v; }
+        public int getMaxScheduledTasksPerUser() { return maxScheduledTasksPerUser; }
+        public void setMaxScheduledTasksPerUser(int v) { this.maxScheduledTasksPerUser = v; }
     }
 
     public static class Telegram {

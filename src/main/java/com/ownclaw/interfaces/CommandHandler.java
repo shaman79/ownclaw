@@ -3,6 +3,7 @@ package com.ownclaw.interfaces;
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.EventLogService;
@@ -36,11 +37,13 @@ public class CommandHandler {
     private final CredentialVault credentialVault;
     private final CredentialGrantService credentialGrants;
     private final TaskQueue taskQueue;
+    private final ScheduledTaskService scheduledTaskService;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
                           CredentialVault credentialVault,
-                          CredentialGrantService credentialGrants, TaskQueue taskQueue) {
+                          CredentialGrantService credentialGrants, TaskQueue taskQueue,
+                          ScheduledTaskService scheduledTaskService) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -48,6 +51,7 @@ public class CommandHandler {
         this.credentialVault = credentialVault;
         this.credentialGrants = credentialGrants;
         this.taskQueue = taskQueue;
+        this.scheduledTaskService = scheduledTaskService;
     }
 
     /**
@@ -90,6 +94,9 @@ public class CommandHandler {
                 if (command.startsWith("/cred ")) {
                     yield Optional.of(handleCred(userId, message.trim().substring(6).strip()));
                 }
+                if (command.startsWith("/schedule")) {
+                    yield Optional.of(handleSchedule(userId, message.trim()));
+                }
                 // Not a recognized shared command — caller may handle interface-specific
                 // commands (like /debug, /setup) or treat as unknown.
                 yield Optional.empty();
@@ -116,6 +123,10 @@ public class CommandHandler {
                 - `/cred set <KEY> <VALUE>` — Store a credential
                 - `/cred list` — List stored credential keys
                 - `/cred delete <KEY>` — Delete a credential
+                - `/schedule` — List scheduled/deferred tasks
+                - `/schedule in <time> <task>` — Run a task after a delay
+                - `/schedule every <schedule> : <task>` — Recurring task
+                - `/schedule cancel|pause|resume <id>` — Manage tasks
                 - `/setup` — Run setup wizard (Web UI only)
                 - `/status` — System status
                 - `/help` — This message""";
@@ -281,6 +292,169 @@ public class CommandHandler {
         }
 
         return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
+    }
+
+    // ── Scheduled Tasks ──
+
+    private String handleSchedule(String userId, String rawCommand) {
+        // /schedule → list all
+        // /schedule list → list all
+        // /schedule cancel <id> → cancel a task
+        // /schedule pause <id> → pause a task
+        // /schedule resume <id> → resume a task
+        // /schedule in <time> <task> → deferred task
+        // /schedule every <schedule> : <task> → recurring task
+        // /schedule cron <expression> : <task> → raw cron task
+
+        String args = rawCommand.length() > 9 ? rawCommand.substring(9).strip() : "";
+        String argsLower = args.toLowerCase();
+
+        if (args.isEmpty() || argsLower.equals("list")) {
+            return scheduledTaskService.formatTasksSummary(userId);
+        }
+
+        if (argsLower.startsWith("cancel ")) {
+            return handleScheduleCancel(userId, args.substring(7).strip());
+        }
+        if (argsLower.startsWith("pause ")) {
+            return handleSchedulePause(userId, args.substring(6).strip());
+        }
+        if (argsLower.startsWith("resume ")) {
+            return handleScheduleResume(userId, args.substring(7).strip());
+        }
+
+        if (argsLower.startsWith("in ")) {
+            return handleScheduleDeferred(userId, args.substring(3).strip());
+        }
+
+        if (argsLower.startsWith("every ") || argsLower.startsWith("cron ")) {
+            return handleScheduleRecurring(userId, args);
+        }
+
+        return """
+                ### Schedule Commands
+                - `/schedule` — List scheduled tasks
+                - `/schedule in <time> <task>` — Run task after delay
+                  - Example: `/schedule in 2 hours backup my notes`
+                  - Example: `/schedule in 30 minutes check server status`
+                - `/schedule every <schedule> : <task>` — Recurring task
+                  - Example: `/schedule every day at 3am : backup my notes`
+                  - Example: `/schedule every monday at 9:00 : send weekly report`
+                - `/schedule cron <expr> : <task>` — Raw cron expression
+                  - Example: `/schedule cron 0 0 3 * * * : nightly backup`
+                - `/schedule cancel <id>` — Cancel a scheduled task
+                - `/schedule pause <id>` — Pause a scheduled task
+                - `/schedule resume <id>` — Resume a paused task""";
+    }
+
+    private String handleScheduleDeferred(String userId, String args) {
+        // Parse: "<time expression> <task description>"
+        // Try to find where the time expression ends and the task begins.
+        // Strategy: try progressively longer prefixes as time expressions.
+        String[] words = args.split("\\s+");
+        String timeExpr = null;
+        String taskDesc = null;
+
+        for (int i = 1; i <= Math.min(words.length - 1, 6); i++) {
+            String candidate = String.join(" ", java.util.Arrays.copyOfRange(words, 0, i));
+            var parsed = scheduledTaskService.parseTimeExpression(candidate);
+            if (parsed.isPresent()) {
+                timeExpr = candidate;
+                taskDesc = String.join(" ", java.util.Arrays.copyOfRange(words, i, words.length));
+            }
+        }
+
+        if (timeExpr == null || taskDesc == null || taskDesc.isBlank()) {
+            return "Could not parse time expression. Examples:\n"
+                    + "  `/schedule in 2 hours check server status`\n"
+                    + "  `/schedule in 30 minutes remind me to call John`\n"
+                    + "  `/schedule in 1 day run backup`";
+        }
+
+        var runAt = scheduledTaskService.parseTimeExpression(timeExpr);
+        if (runAt.isEmpty()) {
+            return "Could not parse time: \"" + timeExpr + "\"";
+        }
+
+        try {
+            long id = scheduledTaskService.scheduleDeferred(userId, taskDesc, runAt.get());
+            var fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d, HH:mm")
+                    .withZone(java.time.ZoneId.systemDefault());
+            return "✅ Task **#" + id + "** scheduled for **" + fmt.format(runAt.get())
+                    + "**: " + taskDesc;
+        } catch (IllegalStateException e) {
+            return "❌ " + e.getMessage();
+        }
+    }
+
+    private String handleScheduleRecurring(String userId, String args) {
+        // Parse: "every <schedule> : <task>" or "cron <expr> : <task>"
+        int colonIdx = args.indexOf(':');
+        if (colonIdx < 0) {
+            return "Use `:` to separate the schedule from the task.\n"
+                    + "Example: `/schedule every day at 3am : backup my notes`";
+        }
+
+        String schedulePart = args.substring(0, colonIdx).strip();
+        String taskDesc = args.substring(colonIdx + 1).strip();
+
+        if (taskDesc.isBlank()) {
+            return "Task description is required after the `:`";
+        }
+
+        String cronExpr;
+        if (schedulePart.toLowerCase().startsWith("cron ")) {
+            cronExpr = schedulePart.substring(5).strip();
+        } else {
+            var parsed = scheduledTaskService.parseScheduleExpression(schedulePart);
+            if (parsed.isEmpty()) {
+                return "Could not parse schedule: \"" + schedulePart + "\"\n"
+                        + "Examples: `every day at 3am`, `every monday at 9:00`, `every 30 minutes`";
+            }
+            cronExpr = parsed.get();
+        }
+
+        try {
+            long id = scheduledTaskService.scheduleRecurring(userId, taskDesc, cronExpr, null);
+            return "✅ Recurring task **#" + id + "** created [" + cronExpr + "]: " + taskDesc;
+        } catch (IllegalArgumentException e) {
+            return "❌ Invalid cron expression: " + e.getMessage();
+        } catch (IllegalStateException e) {
+            return "❌ " + e.getMessage();
+        }
+    }
+
+    private String handleScheduleCancel(String userId, String idStr) {
+        long id = parseTaskId(idStr);
+        if (id < 0) return "Usage: `/schedule cancel <id>` — use `/schedule list` to see task IDs.";
+        boolean ok = scheduledTaskService.cancel(userId, id);
+        return ok ? "✅ Task #" + id + " cancelled."
+                  : "❌ Task #" + id + " not found or already completed.";
+    }
+
+    private String handleSchedulePause(String userId, String idStr) {
+        long id = parseTaskId(idStr);
+        if (id < 0) return "Usage: `/schedule pause <id>`";
+        boolean ok = scheduledTaskService.pause(userId, id);
+        return ok ? "⏸️ Task #" + id + " paused."
+                  : "❌ Task #" + id + " not found or not active.";
+    }
+
+    private String handleScheduleResume(String userId, String idStr) {
+        long id = parseTaskId(idStr);
+        if (id < 0) return "Usage: `/schedule resume <id>`";
+        boolean ok = scheduledTaskService.resume(userId, id);
+        return ok ? "▶️ Task #" + id + " resumed."
+                  : "❌ Task #" + id + " not found or not paused.";
+    }
+
+    private long parseTaskId(String str) {
+        try {
+            String cleaned = str.replace("#", "").strip();
+            return Long.parseLong(cleaned);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     // ── Grants ──

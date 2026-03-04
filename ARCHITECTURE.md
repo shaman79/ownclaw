@@ -1820,7 +1820,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [ ] Multi-provider cloud LLM support (OpenAI, DeepSeek, Mistral)
 - [ ] Skill generalization (merge similar skills)
 - [ ] Teaching pipeline (Mentor → Executor knowledge transfer, distillation)
-- [ ] Long-running / deferred / scheduled tasks
+- [x] Long-running / deferred / scheduled tasks
 - [ ] WebUI: event timeline, skill management, token usage dashboard
 - [ ] Registration flow (invite codes, admin approval)
 - [x] Prompt anti-bloat (bounded teaching log, periodic distillation)

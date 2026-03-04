@@ -50,7 +50,7 @@ public class ChatStatusEmitter {
 
         public enum Type {
             QUEUED, STARTED, STEP, PROGRESS, NEED_INPUT, CREDENTIAL,
-            MENTOR, COMPLETED, FAILED, ROLLBACK, WARNING, DEBUG
+            MENTOR, COMPLETED, FAILED, ROLLBACK, WARNING, DEBUG, SCHEDULED
         }
 
         /** Format with icon prefix for display. */
@@ -68,6 +68,7 @@ public class ChatStatusEmitter {
                 case ROLLBACK   -> "⏪ " + text;
                 case WARNING    -> "⚠\uFE0F " + text;       // ⚠️
                 case DEBUG      -> "\uD83D\uDC1B " + text;  // 🐛
+                case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
             };
         }
     }

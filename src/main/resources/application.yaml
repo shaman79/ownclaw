@@ -52,6 +52,8 @@ ownclaw:
     long-running-threshold: 120
     stall-timeout: 300
     heartbeat-interval: 30
+    scheduler-poll-interval: 30
+    max-scheduled-tasks-per-user: 50
 
   telegram:
     enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}
