@@ -692,6 +692,14 @@ build_jar() {
         rm -rf "$REPO_DIR/build.stale.$$" 2>/dev/null &  # background cleanup
     fi
 
+    # Clean up stale Gradle compile transaction stash-dir from previous failed builds.
+    # These leftover .class files cause "Unable to delete directory" errors.
+    local stash_dir="$REPO_DIR/build/tmp/compileJava/compileTransaction/stash-dir"
+    if [ -d "$stash_dir" ]; then
+        log "Cleaning stale compile stash-dir..."
+        rm -rf "$stash_dir" 2>/dev/null || true
+    fi
+
     # Skip 'clean' — the running JVM may have files locked in build/.
     # Gradle's incremental build handles staleness correctly without clean.
     if ! ./gradlew build -x test --no-daemon >&2; then
