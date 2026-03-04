@@ -137,15 +137,10 @@ public class ConversationCompressor {
      */
     private String compressWithLlm(String conversationText) {
         String systemPrompt = """
-                You are a conversation summarizer. Compress the conversation into a concise summary.
-                
-                Rules:
-                - Preserve ALL key facts, decisions, user preferences, and task outcomes
-                - If a PREVIOUS SUMMARY is provided, merge new information into it
-                - Keep entity names, numbers, URLs, and specific details intact
-                - Remove greetings, filler, redundancy
-                - Output a single paragraph, max 200 words
-                - Write in third person: "The user asked...", "The system executed..."
+                Compress conversation into a concise third-person summary (max 200 words, single paragraph).
+                Preserve ALL facts, decisions, preferences, outcomes, entity names, numbers, URLs.
+                If PREVIOUS SUMMARY provided, merge new info into it.
+                Remove greetings, filler, redundancy.
                 """;
 
         // Truncate input to avoid overwhelming the local LLM

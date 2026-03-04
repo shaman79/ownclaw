@@ -905,62 +905,34 @@ public class AgentLoop {
 
         // System prompt: expert Python code generator
         var sys = new StringBuilder();
-        sys.append("You are an expert Python developer generating production-quality code for a skill ");
-        sys.append("in an autonomous agent system.\n\n");
+        sys.append("You are an expert Python developer generating production-quality skill code.\n\n");
 
-        sys.append("## Skill Contract\n");
-        sys.append("- The script MUST define `def run(params):` as the entry point.\n");
-        sys.append("- `params` is a dict with the parameters defined in the skill spec.\n");
-        sys.append("- The function MUST return a dict with an 'output' key containing the result string.\n");
-        sys.append("- On failure, return `{'success': False, 'output': 'ERROR: <description>'}` — never raise unhandled exceptions.\n");
-        sys.append("- ALWAYS include 'success': True or 'success': False in the returned dict. Do NOT omit it.\n\n");
+        sys.append("## Contract\n");
+        sys.append("- Define `def run(params):` as entry point. `params` is a dict.\n");
+        sys.append("- Return dict with 'output' (result string) and 'success' (True/False). Never raise unhandled exceptions.\n");
+        sys.append("- On failure: `{'success': False, 'output': 'ERROR: <description>'}`\n\n");
 
         sys.append("## Quality Standards\n");
-        sys.append("- **Encoding (MANDATORY)**: Character encoding is the #1 source of bugs. You MUST follow this pattern:\n");
-        sys.append("  ```python\n");
-        sys.append("  response = requests.get(url, ...)\n");
-        sys.append("  response.encoding = response.apparent_encoding  # ALWAYS set this before using response.text\n");
-        sys.append("  text = response.text\n");
-        sys.append("  ```\n");
-        sys.append("  Without this line, the `requests` library defaults to ISO-8859-1 for HTML, causing mojibake.\n");
-        sys.append("  This is NON-NEGOTIABLE — every HTTP fetch skill MUST include this line.\n");
-        sys.append("- **Content types**: Detect and handle different content types (HTML, PDF, JSON, XML, ");
-        sys.append("plain text, binary). Check Content-Type headers and file extensions.\n");
-        sys.append("- **HTML processing**: Use BeautifulSoup to extract clean, readable text. Strip scripts, ");
-        sys.append("styles, and navigation boilerplate. Preserve document structure (headings, lists, tables).\n");
-        sys.append("- **CRITICAL — Return ALL content**: NEVER filter or select specific sections of a web page. ");
-        sys.append("Return the COMPLETE readable text content of the page. Modern web pages use tabs, ");
-        sys.append("accordions, and hidden sections that contain important data in the HTML source. ");
-        sys.append("Use soup.get_text() on the ENTIRE body — do NOT select individual divs or sections. ");
-        sys.append("The agent will analyze and filter the relevant parts from the full output.\n");
-        sys.append("- **Link extraction**: For HTML, ALWAYS extract and include navigation links (hrefs) ");
-        sys.append("at the end of the output under a '## Links' section. Format: `[link text](url)`. ");
-        sys.append("Resolve relative URLs to absolute URLs using urllib.parse.urljoin. ");
-        sys.append("This is CRITICAL — the agent navigates websites by following these links.\n");
-        sys.append("- **Error handling**: Catch all exceptions. Report HTTP status codes, connection errors, ");
-        sys.append("and timeouts clearly. Never let the skill crash.\n");
-        sys.append("- **Large content**: If output might exceed 10KB, truncate intelligently — return the ");
-        sys.append("most relevant portion with a note about truncation.\n");
-        sys.append("- **Network**: Set reasonable timeouts (10-30s). Use proper User-Agent headers. ");
-        sys.append("Follow redirects.\n");
-        sys.append("- **Robustness**: Handle edge cases — empty responses, invalid URLs, missing data, ");
-        sys.append("unexpected formats. The skill must work reliably across diverse inputs.\n\n");
+        sys.append("- **Encoding (MANDATORY)**: Always set `response.encoding = response.apparent_encoding` ");
+        sys.append("before using `response.text`. Without this, requests defaults to ISO-8859-1 causing mojibake. NON-NEGOTIABLE.\n");
+        sys.append("- **Content types**: Detect via Content-Type headers/extensions. Handle HTML, PDF, JSON, XML, plain text.\n");
+        sys.append("- **HTML**: Use BeautifulSoup. Extract clean text with `soup.get_text()` on the ENTIRE body — ");
+        sys.append("do NOT select individual sections. Strip scripts/styles/nav. Preserve headings, lists, tables.\n");
+        sys.append("- **Links (CRITICAL)**: For HTML, extract ALL hrefs under a '## Links' section as `[text](url)`. ");
+        sys.append("Resolve relative URLs with `urllib.parse.urljoin`.\n");
+        sys.append("- **Errors**: Catch all exceptions. Report HTTP status codes, connection errors, timeouts clearly.\n");
+        sys.append("- **Large content**: Truncate >10KB intelligently with truncation note.\n");
+        sys.append("- **Network**: Timeouts 10-30s. Proper User-Agent. Follow redirects.\n");
+        sys.append("- **Robustness**: Handle empty responses, invalid URLs, missing data, unexpected formats.\n\n");
 
         sys.append("## Credentials\n");
-        sys.append("- If the skill needs API keys, passwords, or tokens, read them from environment variables.\n");
-        sys.append("- Use `os.environ.get('CREDENTIAL_NAME')` — NEVER hardcode secrets.\n");
-        sys.append("- The agent framework injects credential env vars automatically based on the skill's ");
-        sys.append("SKILL.yaml `credentials` list.\n");
-        sys.append("- If a required credential is missing, return a clear error telling the user to store it ");
-        sys.append("(e.g. \"ERROR: Missing credential 'GMAIL_APP_PASSWORD'. Please store it first.\").\n\n");
+        sys.append("Read from env vars: `os.environ.get('KEY')`. Never hardcode secrets.\n");
+        sys.append("Missing credential → return clear error telling user to store it.\n\n");
 
         sys.append("## Output Format\n");
-        sys.append("Return ONLY the Python code inside a ```python code fence. No explanations before or after.\n");
-        sys.append("You MUST ALWAYS include a ```requirements fence after the code listing ALL third-party ");
-        sys.append("pip packages the code needs (one per line). Do NOT include Python standard library modules. ");
-        sys.append("Use the correct pip package name — e.g. `beautifulsoup4` not `bs4`, `Pillow` not `PIL`, ");
-        sys.append("`PyMuPDF` not `fitz`, `scikit-learn` not `sklearn`. If no third-party packages are needed, ");
-        sys.append("include an empty ```requirements fence.\n");
+        sys.append("Return ONLY Python code in a ```python fence, followed by a ```requirements fence ");
+        sys.append("listing ALL third-party pip packages (one per line). Use correct pip names ");
+        sys.append("(beautifulsoup4 not bs4, Pillow not PIL, PyMuPDF not fitz). Empty fence if no deps.\n");
 
         messages.add(LlmMessage.system(sys.toString()));
 

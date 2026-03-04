@@ -159,8 +159,7 @@ public class SkillCuratorService {
     public String analyzeLibrary() {
         var sb = new StringBuilder();
 
-        sb.append("You are a tool library curator. Analyze the following inventory ");
-        sb.append("and recommend improvements to keep the library lean and effective.\n\n");
+        sb.append("Analyze this tool inventory. Recommend improvements to keep the library lean.\n\n");
 
         // All tools
         sb.append("## All Tools\n");
@@ -212,9 +211,8 @@ public class SkillCuratorService {
             }
         }
 
-        // Instructions for analysis
         sb.append("\n## Instructions\n");
-        sb.append("Analyze this library and provide recommendations as JSON:\n");
+        sb.append("Provide recommendations as JSON:\n");
         sb.append("{\n");
         sb.append("  \"summary\": \"brief overall assessment of library health\",\n");
         sb.append("  \"redundant\": [{\"name\": \"...\", \"overlaps_with\": \"...\", ");
