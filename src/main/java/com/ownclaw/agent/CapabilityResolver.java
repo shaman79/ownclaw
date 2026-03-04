@@ -2,6 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.sandbox.ContainerSandbox;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,6 +35,14 @@ import java.util.stream.Collectors;
  * <p>The LLM's job is reduced to confirming a well-specified action, which
  * even small models handle reliably.
  *
+ * <h2>Container awareness</h2>
+ * When a container runtime (Docker/Podman) is available, hints include
+ * {@code system_packages} so the skill runs in a container with OS packages
+ * pre-installed.  When no container runtime is available (e.g. NoNewPrivileges
+ * blocks rootless Podman), hints automatically switch to pure-Python
+ * alternatives that don't need system packages.  This ensures the agent
+ * always produces a working skill on the first try.
+ *
  * <h2>Extensibility</h2>
  * Add new capabilities by adding entries to {@link #CAPABILITY_PATTERNS}.
  * Each entry maps regex triggers → required system packages → suggested skill.
@@ -46,9 +55,11 @@ public class CapabilityResolver {
     private static final Logger log = LoggerFactory.getLogger(CapabilityResolver.class);
 
     private final ToolRegistry toolRegistry;
+    private final ContainerSandbox containerSandbox;
 
-    public CapabilityResolver(ToolRegistry toolRegistry) {
+    public CapabilityResolver(ToolRegistry toolRegistry, ContainerSandbox containerSandbox) {
         this.toolRegistry = toolRegistry;
+        this.containerSandbox = containerSandbox;
     }
 
     // ─────────────── Capability Pattern Definitions ───────────────
@@ -236,6 +247,11 @@ public class CapabilityResolver {
     /**
      * Analyze a user message and detect capability gaps.
      *
+     * <p>When a container runtime is available, the hint suggests skills with
+     * {@code system_packages} (e.g. nmap in a Docker container).  When no
+     * container runtime is available, the hint switches to a pure-Python
+     * alternative so the skill works without system packages.
+     *
      * @param userMessage the user's original request
      * @return a capability hint if a gap was detected, or {@code null} if
      *         existing skills cover the request (or no known pattern matches)
@@ -267,19 +283,133 @@ public class CapabilityResolver {
             return null;
         }
 
-        // 3. Gap detected — produce a specific hint
-        log.info("Capability gap detected: '{}' → suggesting skill_create with system_packages={}",
+        // 3. Gap detected — adapt hint based on container availability
+        boolean containerAvailable = containerSandbox != null && containerSandbox.isAvailable();
+
+        if (containerAvailable || matched.systemPackages.isEmpty()) {
+            // Container available OR pattern doesn't need system packages — use as-is
+            log.info("Capability gap detected: '{}' → skill '{}' with system_packages={} (container={})",
+                    matched.category, matched.suggestedName, matched.systemPackages,
+                    containerAvailable ? containerSandbox.runtime() : "none");
+
+            return new CapabilityHint(
+                    matched.category,
+                    matched.suggestedName,
+                    matched.description,
+                    matched.systemPackages,
+                    matched.pipPackages,
+                    matched.parameters,
+                    matched.timeout
+            );
+        }
+
+        // 4. No container available AND pattern needs system packages — use pure-Python fallback
+        log.info("Capability gap detected: '{}' → pure-Python fallback (no container runtime for {})",
                 matched.category, matched.systemPackages);
 
-        return new CapabilityHint(
-                matched.category,
-                matched.suggestedName,
-                matched.description,
-                matched.systemPackages,
-                matched.pipPackages,
-                matched.parameters,
-                matched.timeout
-        );
+        return buildPurePythonHint(matched);
+    }
+
+    /**
+     * Build a pure-Python capability hint that doesn't require system packages.
+     * Used when no container runtime is available (e.g. NoNewPrivileges blocks
+     * rootless Podman, Docker not installed).
+     *
+     * <p>Maps each category to a Python-only alternative:
+     * <ul>
+     *   <li>network_scanning → TCP connect scan + ARP/neighbor table</li>
+     *   <li>dns_lookup → dnspython library</li>
+     *   <li>ssl_check → Python ssl module</li>
+     *   <li>system_monitoring → psutil library</li>
+     *   <li>image_processing → Pillow library</li>
+     *   <li>Others → generic description with Python-only constraint</li>
+     * </ul>
+     */
+    private CapabilityHint buildPurePythonHint(CapabilityPattern matched) {
+        // Category-specific pure-Python alternatives (no system_packages, no container needed)
+        return switch (matched.category) {
+            case "network_scanning" -> new CapabilityHint(
+                    matched.category,
+                    "network_scanner",
+                    "Scan a local network WITHOUT nmap (nmap is NOT available). "
+                            + "Use pure Python only. "
+                            + "1) Host discovery: read ARP/neighbor table via `ip neigh show` subprocess, "
+                            + "plus concurrent ping sweep (`ping -c1 -W1`) to populate the table. "
+                            + "2) Port scan: TCP connect scan using Python sockets with concurrent.futures. "
+                            + "Scan common ports (1-1024 + well-known high ports like 3306,5432,8080,8443). "
+                            + "3) Service identification: banner grab on open ports (HTTP HEAD, SSH banner, SMTP greeting). "
+                            + "4) Output structured JSON: {\"scanned_targets\":[...], \"hosts\":[{\"ip\":\"\", \"status\":\"up\", "
+                            + "\"method\":[\"neigh\",\"ping\"], \"open_ports\":[{\"port\":80, \"service\":\"http\", \"banner\":\"...\"}]}], "
+                            + "\"errors\":[...]}. "
+                            + "Never require sudo. Keep runtime bounded with timeout and concurrency limits.",
+                    List.of(), // NO system packages
+                    List.of(), // no pip packages needed
+                    matched.parameters,
+                    matched.timeout
+            );
+            case "traceroute" -> new CapabilityHint(
+                    matched.category,
+                    "traceroute_tool",
+                    "Trace network path WITHOUT the traceroute system command (not available). "
+                            + "Use raw Python sockets with incrementing TTL (socket.IP_TTL) and ICMP, "
+                            + "or fall back to subprocess `ping -t <TTL>` on Linux. "
+                            + "Show each hop with latency measurement.",
+                    List.of(), List.of(),
+                    matched.parameters, matched.timeout
+            );
+            case "dns_lookup" -> new CapabilityHint(
+                    matched.category,
+                    "dns_lookup",
+                    "Perform DNS lookups using the dnspython library (pure Python, no dig/nslookup needed). "
+                            + "Support A, AAAA, MX, TXT, CNAME, NS, SOA record types. "
+                            + "Return structured JSON with all records found.",
+                    List.of(), // no system packages
+                    List.of("dnspython"),
+                    matched.parameters, matched.timeout
+            );
+            case "ssl_check" -> new CapabilityHint(
+                    matched.category,
+                    "ssl_checker",
+                    "Check SSL/TLS certificates using Python's built-in ssl module (no openssl command needed). "
+                            + "Use ssl.create_default_context() + wrap_socket to connect and get peer cert. "
+                            + "Extract: expiration, issuer, subject, serial, SAN. Return structured JSON.",
+                    List.of(), List.of(),
+                    matched.parameters, matched.timeout
+            );
+            case "system_monitoring" -> new CapabilityHint(
+                    matched.category,
+                    "system_info",
+                    "Gather system information using the psutil Python library (no system packages needed). "
+                            + "Report CPU usage, memory, disk, network interfaces, running processes, uptime.",
+                    List.of(),
+                    List.of("psutil"),
+                    matched.parameters, matched.timeout
+            );
+            case "image_processing" -> new CapabilityHint(
+                    matched.category,
+                    "image_processor",
+                    "Process images using the Pillow Python library (no ImageMagick needed). "
+                            + "Resize, crop, rotate, convert formats, create thumbnails, get metadata.",
+                    List.of(),
+                    List.of("Pillow"),
+                    matched.parameters, matched.timeout
+            );
+            default -> {
+                // Generic fallback: strip system packages, add Python-only constraint to description
+                String desc = "IMPORTANT: No container runtime available — do NOT use system commands that require "
+                        + "package installation. Use only Python standard library and pip packages. "
+                        + "Original task: " + matched.description;
+                yield new CapabilityHint(
+                        matched.category,
+                        matched.suggestedName,
+                        desc,
+                        List.of(), // no system packages
+                        matched.pipPackages,
+                        matched.parameters,
+                        matched.timeout
+                );
+            }
+        };
     }
 
     /**
@@ -356,7 +486,9 @@ public class CapabilityResolver {
             sb.append("  timeout: ").append(timeout).append("\n");
             sb.append("```\n\n");
             sb.append("DO NOT refuse. DO NOT say tools are missing. ");
-            sb.append("The system_packages are auto-installed inside a Docker container. ");
+            if (!systemPackages.isEmpty()) {
+                sb.append("The system_packages are auto-installed inside a Docker container. ");
+            }
             sb.append("Just execute skill_create with the parameters above.\n");
             return sb.toString();
         }
