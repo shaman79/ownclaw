@@ -118,15 +118,42 @@ public class DynamicSkill implements Tool {
      *
      * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
      * from the process-level stdin/stdout contract.
+     *
+     * <p>Skills can call {@code report_progress(message, percent=None)} to emit
+     * structured progress updates for long-running tasks.  These are intercepted
+     * by the sandbox and forwarded to the user's chat in real time.
      */
     private static final String RUNNER_HARNESS = String.join("\n",
         "import sys, json, os, io, importlib.util, traceback",
+        "",
+        "# --- Progress reporting API for long-running skills ---",
+        "# Skills call report_progress('Scanning host 12/255', percent=5)",
+        "# The message is emitted as a JSON line on the real stdout and",
+        "# intercepted by the sandbox — it never reaches the final output.",
+        "_real_stdout = sys.__stdout__",
+        "",
+        "def report_progress(message, percent=None):",
+        "    \"\"\"Report progress for a long-running task.",
+        "    ",
+        "    Args:",
+        "        message: Human-readable progress message (e.g. 'Scanning host 12/255').",
+        "        percent: Optional completion percentage (0-100).",
+        "    \"\"\"",
+        "    progress = {'type': 'progress', 'message': str(message)}",
+        "    if percent is not None:",
+        "        progress['percent'] = int(percent)",
+        "    _real_stdout.write(json.dumps(progress) + '\\n')",
+        "    _real_stdout.flush()",
+        "",
         "try:",
         "    params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
         "    skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'skill.py')",
         "    spec = importlib.util.spec_from_file_location('skill', skill_path)",
         "    mod = importlib.util.module_from_spec(spec)",
-        "    _real_stdout = sys.stdout",
+        "    # Inject report_progress into the skill module so it can be called directly",
+        "    mod.report_progress = report_progress",
+        "    import builtins",
+        "    builtins.report_progress = report_progress",
         "    _capture = io.StringIO()",
         "    sys.stdout = _capture",
         "    spec.loader.exec_module(mod)",
@@ -201,9 +228,11 @@ public class DynamicSkill implements Tool {
             }
 
             // Run: python _runner.py skill.py   (runner reads stdin, imports skill, calls run())
+            // Use progress-aware execution if a callback is provided (for long-running tasks)
             SandboxResult result = sandbox.execute(
                     resolution.python(), runnerScript, skillDir,
-                    inputJson, envVars, timeoutSec
+                    inputJson, envVars, timeoutSec,
+                    context.progressCallback()
             );
 
             if (result.timedOut()) {

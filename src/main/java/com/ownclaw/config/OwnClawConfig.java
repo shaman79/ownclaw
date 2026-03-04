@@ -90,6 +90,9 @@ public class OwnClawConfig {
         private int defaultTimeout = 300;
         private int stepTimeout = 60;
         private int maxPlanSteps = 20;
+        private int longRunningThreshold = 120;
+        private int stallTimeout = 300;
+        private int heartbeatInterval = 30;
 
         public int getDefaultTimeout() { return defaultTimeout; }
         public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
@@ -97,6 +100,12 @@ public class OwnClawConfig {
         public void setStepTimeout(int v) { this.stepTimeout = v; }
         public int getMaxPlanSteps() { return maxPlanSteps; }
         public void setMaxPlanSteps(int v) { this.maxPlanSteps = v; }
+        public int getLongRunningThreshold() { return longRunningThreshold; }
+        public void setLongRunningThreshold(int v) { this.longRunningThreshold = v; }
+        public int getStallTimeout() { return stallTimeout; }
+        public void setStallTimeout(int v) { this.stallTimeout = v; }
+        public int getHeartbeatInterval() { return heartbeatInterval; }
+        public void setHeartbeatInterval(int v) { this.heartbeatInterval = v; }
     }
 
     public static class Telegram {

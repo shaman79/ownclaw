@@ -4,11 +4,13 @@ import com.ownclaw.agent.memory.AgentMemory;
 import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,6 +51,7 @@ public class AgentLoop {
     private final TaskCancellationService cancellationService;
     private final CredentialVault credentialVault;
     private final ConversationService conversationService;
+    private final LongRunningTaskManager longRunningTaskManager;
 
     /** Max recent messages to include as conversation context for the LLM. */
     private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
@@ -66,7 +69,8 @@ public class AgentLoop {
             DebugSessionService debugService,
             TaskCancellationService cancellationService,
             CredentialVault credentialVault,
-            ConversationService conversationService
+            ConversationService conversationService,
+            LongRunningTaskManager longRunningTaskManager
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -81,6 +85,7 @@ public class AgentLoop {
         this.cancellationService = cancellationService;
         this.credentialVault = credentialVault;
         this.conversationService = conversationService;
+        this.longRunningTaskManager = longRunningTaskManager;
     }
 
     /**
@@ -234,6 +239,10 @@ public class AgentLoop {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
             if (context.isCancelled() || cancellationService.isCancelled(context.userId())) {
                 log.info("Task {} cancelled by user", context.taskId());
+                // Clean up any long-running task tracking
+                if (longRunningTaskManager.isActive(context.taskId())) {
+                    longRunningTaskManager.cancel(context.taskId());
+                }
                 return AgentResult.cancelled(
                         "Task was cancelled.",
                         context.trajectory(),
@@ -244,6 +253,11 @@ public class AgentLoop {
             // Check timeout
             if (context.elapsedMs() > timeoutMs) {
                 log.warn("Task {} timed out after {}ms", context.taskId(), context.elapsedMs());
+                // Clean up any long-running task tracking
+                if (longRunningTaskManager.isActive(context.taskId())) {
+                    longRunningTaskManager.fail(context.taskId(),
+                            "Task timed out after " + (context.elapsedMs() / 1000) + "s");
+                }
                 return AgentResult.timeout(
                         "I ran out of time working on this task. Here's what I found so far:\n" +
                                 summarizeProgress(context),
@@ -501,17 +515,49 @@ public class AgentLoop {
         }
 
         Tool tool = toolOpt.get();
+
+        // Build a progress callback that routes through LongRunningTaskManager.
+        // The callback is available to every skill; only skills that call
+        // report_progress() will actually use it.  On the first progress report
+        // the task is auto-registered as long-running.
+        SandboxManager.ProgressCallback progressCallback = new SandboxManager.ProgressCallback() {
+            private volatile boolean registered = false;
+
+            @Override
+            public void onProgress(String message, Integer percent) {
+                if (!registered) {
+                    registered = true;
+                    String desc = truncate(context.originalMessage(), 200);
+                    longRunningTaskManager.register(
+                            context.taskId(), context.userId(), desc, action.tool());
+                }
+                longRunningTaskManager.reportProgress(context.taskId(), message, percent);
+            }
+        };
+
         ToolExecutionContext execCtx = new ToolExecutionContext(
                 context.userId(),
                 context.taskId(),
                 null, // workDir — can be extended later
-                context::isCancelled
+                context::isCancelled,
+                progressCallback
         );
 
         long startMs = System.currentTimeMillis();
         try {
             ToolResult result = tool.execute(action.params(), execCtx);
             long durationMs = System.currentTimeMillis() - startMs;
+
+            // If this tool was tracked as long-running, finalize it
+            if (longRunningTaskManager.isActive(context.taskId())) {
+                if (result.success()) {
+                    longRunningTaskManager.complete(context.taskId(),
+                            truncate(result.output(), 200));
+                } else {
+                    longRunningTaskManager.fail(context.taskId(),
+                            truncate(result.output(), 200));
+                }
+            }
 
             if (result.success()) {
                 return AgentObservation.success(
@@ -531,6 +577,12 @@ public class AgentLoop {
         } catch (Exception e) {
             long durationMs = System.currentTimeMillis() - startMs;
             log.error("Tool '{}' threw exception: {}", action.tool(), e.getMessage(), e);
+
+            // Finalize as failed if tracked
+            if (longRunningTaskManager.isActive(context.taskId())) {
+                longRunningTaskManager.fail(context.taskId(), e.getMessage());
+            }
+
             return AgentObservation.failure(
                     action.tool(),
                     "Tool execution error: " + e.getMessage(),

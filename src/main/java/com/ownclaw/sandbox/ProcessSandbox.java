@@ -151,6 +151,129 @@ public class ProcessSandbox implements SandboxManager {
         return t.startsWith("{") && t.contains("\"need_input\"");
     }
 
+    /**
+     * Returns true if a stdout line looks like a progress JSON message.
+     */
+    private static boolean isProgressLine(String line) {
+        String t = line.trim();
+        return t.startsWith("{") && t.contains("\"progress\"");
+    }
+
+    /**
+     * Execute with a progress callback.  Progress lines emitted by the skill
+     * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted
+     * and forwarded via the callback.  They are NOT included in the final stdout.
+     */
+    @Override
+    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
+                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
+                                 ProgressCallback progressCallback) {
+        if (progressCallback == null) {
+            return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
+        }
+
+        long startTime = System.currentTimeMillis();
+
+        ProcessBuilder pb = new ProcessBuilder(python, scriptPath.toAbsolutePath().toString());
+        pb.directory(workingDir.toFile());
+        pb.redirectErrorStream(false);
+
+        if (envVars != null) {
+            pb.environment().putAll(envVars);
+        }
+
+        try {
+            Process process = pb.start();
+
+            // Write JSON input to stdin
+            if (stdinJson != null) {
+                try (OutputStream os = process.getOutputStream()) {
+                    os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                }
+            } else {
+                process.getOutputStream().close();
+            }
+
+            // Drain stderr async
+            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
+                    () -> drainStream(process.getErrorStream()));
+
+            // Read stdout line-by-line; intercept progress and need_input lines.
+            AtomicBoolean needInputDetected = new AtomicBoolean(false);
+            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        String trimmed = line.trim();
+
+                        // Intercept progress lines
+                        if (isProgressLine(trimmed)) {
+                            try {
+                                JsonNode node = mapper.readTree(trimmed);
+                                if ("progress".equals(node.path("type").asText(""))) {
+                                    String msg = node.path("message").asText("Working...");
+                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
+                                            ? node.get("percent").asInt() : null;
+                                    progressCallback.onProgress(msg, pct);
+                                    continue; // Don't include progress lines in the result stdout
+                                }
+                            } catch (Exception e) {
+                                log.debug("Failed to parse progress line: {}", trimmed);
+                            }
+                        }
+
+                        // Detect need_input in non-interactive mode
+                        if (isNeedInputLine(trimmed)) {
+                            needInputDetected.set(true);
+                            process.destroyForcibly();
+                            break;
+                        }
+
+                        buf.write(line.getBytes(StandardCharsets.UTF_8));
+                        buf.write('\n');
+                    }
+                } catch (IOException ignored) {}
+                return buf.toByteArray();
+            });
+
+            boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
+            long durationMs = System.currentTimeMillis() - startTime;
+            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+
+            if (needInputDetected.get()) {
+                log.warn("Sandbox aborted — need_input in non-interactive execution: {}",
+                        scriptPath.getFileName());
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            }
+
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("Sandbox timeout after {}s for {}", timeoutSec, scriptPath.getFileName());
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            }
+
+            int exitCode = process.exitValue();
+            log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
+            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
+
+        } catch (IOException e) {
+            long durationMs = System.currentTimeMillis() - startTime;
+            String errMsg = e.getMessage() != null && e.getMessage().contains("Cannot run program")
+                    ? "Python interpreter not found at '" + python + "'."
+                    : "Sandbox I/O error: " + e.getMessage();
+            log.error("Sandbox error for {}: {}", scriptPath.getFileName(), errMsg);
+            return new SandboxResult(-1, "", errMsg, durationMs, false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            long durationMs = System.currentTimeMillis() - startTime;
+            return new SandboxResult(-1, "", "Interrupted", durationMs, false);
+        }
+    }
+
     /** Read an InputStream fully into a byte array. Safe to call from a background thread. */
     private static byte[] drainStream(InputStream is) {
         try {

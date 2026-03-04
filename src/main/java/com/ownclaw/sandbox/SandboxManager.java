@@ -9,6 +9,22 @@ import java.util.Map;
 public interface SandboxManager {
 
     /**
+     * Callback interface for receiving progress updates from a running skill.
+     * Skills emit {@code {"type":"progress","message":"...","percent":N}} lines on stdout;
+     * the sandbox detects these and forwards them through this callback.
+     */
+    @FunctionalInterface
+    interface ProgressCallback {
+        /**
+         * Called when the skill emits a progress update.
+         *
+         * @param message human-readable progress message
+         * @param percent completion percentage (0–100), or null if unknown
+         */
+        void onProgress(String message, Integer percent);
+    }
+
+    /**
      * Execute a Python script in a sandboxed environment.
      *
      * @param scriptPath   path to the skill.py script
@@ -27,6 +43,19 @@ public interface SandboxManager {
     default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir,
                                   String stdinJson, Map<String, String> envVars, int timeoutSec) {
         return execute(scriptPath, workingDir, stdinJson, envVars, timeoutSec);
+    }
+
+    /**
+     * Execute with a specific Python executable and progress callback.
+     * Progress lines emitted by the skill ({@code {"type":"progress",...}}) are intercepted
+     * and forwarded via the callback instead of being included in stdout.
+     *
+     * @param progressCallback receives progress updates (may be null for no-op)
+     */
+    default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir,
+                                  String stdinJson, Map<String, String> envVars, int timeoutSec,
+                                  ProgressCallback progressCallback) {
+        return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
     }
 
     /**
