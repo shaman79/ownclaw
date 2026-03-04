@@ -683,6 +683,15 @@ build_jar() {
     export GRADLE_USER_HOME="$DEPLOY_DIR/.gradle"
     mkdir -p "$GRADLE_USER_HOME" 2>/dev/null || true
     chmod +x gradlew 2>/dev/null || true
+
+    # If build/ is owned by root (from initial --setup), move it aside.
+    # We own the parent dir so rename works even without write perms inside.
+    if [ -d "$REPO_DIR/build" ] && ! [ -w "$REPO_DIR/build" ]; then
+        log "Removing root-owned build directory..."
+        mv "$REPO_DIR/build" "$REPO_DIR/build.stale.$$" 2>/dev/null || true
+        rm -rf "$REPO_DIR/build.stale.$$" 2>/dev/null &  # background cleanup
+    fi
+
     # Skip 'clean' — the running JVM may have files locked in build/.
     # Gradle's incremental build handles staleness correctly without clean.
     if ! ./gradlew build -x test --no-daemon >&2; then
