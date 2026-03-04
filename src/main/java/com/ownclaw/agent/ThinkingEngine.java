@@ -64,7 +64,8 @@ public class ThinkingEngine {
                 null,   // use provider default model
                 null,   // use provider default temperature
                 4096,   // enough for a structured action response
-                true    // JSON mode for structured output
+                true,   // JSON mode for structured output
+                null    // use provider default read timeout
         );
 
         try {

@@ -70,7 +70,7 @@ public class OllamaProvider implements LlmProvider {
                 .post(RequestBody.create(body.toString(), JSON))
                 .build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 String errBody = response.body() != null ? response.body().string() : "";
                 throw new LlmException("ollama", "HTTP " + response.code() + ": " + errBody,
@@ -125,5 +125,19 @@ public class OllamaProvider implements LlmProvider {
     @Override
     public String name() {
         return "ollama";
+    }
+
+    /**
+     * Return an OkHttpClient with the read timeout from reqConfig (if set),
+     * otherwise use the default httpClient. Uses newBuilder() so the
+     * connection pool and dispatcher are shared.
+     */
+    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
+        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
+            return httpClient.newBuilder()
+                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
+                    .build();
+        }
+        return httpClient;
     }
 }

@@ -234,7 +234,7 @@ public class SkillCuratorService {
                     ? llmRouter.cloud()
                     : llmRouter.local();
 
-            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, 4096, true);
+            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, 4096, true, null);
             LlmResponse response = provider.chat(
                     List.of(LlmMessage.user(sb.toString())),
                     requestConfig

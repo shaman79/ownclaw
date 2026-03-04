@@ -74,7 +74,7 @@ public class OpenAiProvider implements LlmProvider {
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
                 .build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
             String responseBody = response.body() != null ? response.body().string() : "";
 
             if (!response.isSuccessful()) {
@@ -116,5 +116,19 @@ public class OpenAiProvider implements LlmProvider {
     @Override
     public String name() {
         return "openai";
+    }
+
+    /**
+     * Return an OkHttpClient with the read timeout from reqConfig (if set),
+     * otherwise use the default httpClient. Uses newBuilder() so the
+     * connection pool and dispatcher are shared.
+     */
+    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
+        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
+            return httpClient.newBuilder()
+                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
+                    .build();
+        }
+        return httpClient;
     }
 }

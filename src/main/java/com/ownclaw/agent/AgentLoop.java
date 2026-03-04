@@ -943,7 +943,8 @@ public class AgentLoop {
                     null,   // use provider default model
                     0.2,    // low temperature for precise code generation
                     8192,   // generous token budget for complete code
-                    false   // no JSON mode — we want raw Python code
+                    false,  // no JSON mode — we want raw Python code
+                    null    // use provider default read timeout
             );
 
             LlmResponse response = cloud.chat(messages, codeGenConfig);
