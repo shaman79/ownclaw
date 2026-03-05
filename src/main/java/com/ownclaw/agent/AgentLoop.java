@@ -271,15 +271,19 @@ public class AgentLoop {
 
             // Check timeout
             if (context.elapsedMs() > timeoutMs) {
-                log.warn("Task {} timed out after {}ms", context.taskId(), context.elapsedMs());
+                long elapsedSec = context.elapsedMs() / 1000;
+                log.warn("Task {} timed out after {}s (limit={}s)", context.taskId(), elapsedSec, timeoutMs / 1000);
                 // Clean up any long-running task tracking
                 if (longRunningTaskManager.isActive(context.taskId())) {
                     longRunningTaskManager.fail(context.taskId(),
-                            "Task timed out after " + (context.elapsedMs() / 1000) + "s");
+                            "Task timed out after " + elapsedSec + "s");
                 }
+                String progress = summarizeProgress(context);
+                String timeStr = elapsedSec >= 60
+                        ? (elapsedSec / 60) + "m " + (elapsedSec % 60) + "s"
+                        : elapsedSec + "s";
                 return AgentResult.timeout(
-                        "I ran out of time working on this task. Here's what I found so far:\n" +
-                                summarizeProgress(context),
+                        "This task exceeded the " + timeStr + " time limit. " + progress,
                         context.trajectory(),
                         context.elapsedMs()
                 );
@@ -848,15 +852,34 @@ public class AgentLoop {
         int successCount = (int) trajectory.turns().stream()
                 .filter(t -> t.observation().success())
                 .count();
-        sb.append("I took ").append(trajectory.size()).append(" actions (")
-                .append(successCount).append(" successful).\n");
+        int total = trajectory.size();
+        sb.append("**").append(total).append(" action").append(total != 1 ? "s" : "")
+                .append(" taken** (").append(successCount).append(" successful).\n\n");
+
+        // Show each step with its outcome
+        int stepNum = 0;
+        for (var turn : trajectory.turns()) {
+            stepNum++;
+            String tool = turn.action().tool();
+            boolean ok = turn.observation().success();
+            sb.append(stepNum).append(". **").append(tool).append("** — ")
+                    .append(ok ? "✓" : "✗");
+            // Add brief context: reasoning or failure message
+            if (!ok && turn.observation().output() != null && !turn.observation().output().isBlank()) {
+                String err = truncate(turn.observation().output(), 200);
+                sb.append(" ").append(err);
+            } else if (turn.action().reasoning() != null && !turn.action().reasoning().isBlank()) {
+                sb.append(" ").append(truncate(turn.action().reasoning(), 120));
+            }
+            sb.append("\n");
+        }
 
         // Include the last successful observation's output as the partial result
         for (int i = trajectory.turns().size() - 1; i >= 0; i--) {
             var turn = trajectory.turns().get(i);
             if (turn.observation().success() && turn.observation().output() != null
                     && !turn.observation().output().isBlank()) {
-                sb.append("\nLast successful result:\n");
+                sb.append("\n**Last successful result:**\n");
                 String output = turn.observation().output();
                 sb.append(output);
                 break;

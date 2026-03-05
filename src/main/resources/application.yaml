@@ -46,8 +46,8 @@ ownclaw:
     max-queued-tasks: 50
 
   tasks:
-    default-timeout: 600
-    step-timeout: 240
+    default-timeout: 1800
+    step-timeout: 600
     max-plan-steps: 20
     long-running-threshold: 120
     stall-timeout: 300
