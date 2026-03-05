@@ -46,11 +46,12 @@ ownclaw:
     max-queued-tasks: 50
 
   tasks:
-    default-timeout: 1800
+    # No wall-clock timeout — tasks run until done.
+    # Stalled tasks (no progress for stall-timeout) are killed instead.
     step-timeout: 600
     max-plan-steps: 20
     long-running-threshold: 120
-    stall-timeout: 300
+    stall-timeout: 600
     heartbeat-interval: 30
     scheduler-poll-interval: 30
     max-scheduled-tasks-per-user: 50

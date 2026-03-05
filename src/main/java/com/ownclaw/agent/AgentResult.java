@@ -25,8 +25,10 @@ public record AgentResult(
         CANCELLED,
         /** Maximum number of steps reached. */
         MAX_STEPS,
-        /** Task-level timeout exceeded. */
+        /** Task-level timeout exceeded (legacy — prefer STALLED). */
         TIMEOUT,
+        /** Task stalled — no progress for stall-timeout seconds. */
+        STALLED,
         /** Unrecoverable error. */
         ERROR,
         /** Too many consecutive failures. */
@@ -47,6 +49,10 @@ public record AgentResult(
 
     public static AgentResult timeout(String response, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.TIMEOUT);
+    }
+
+    public static AgentResult stalled(String response, AgentTrajectory trajectory, long durationMs) {
+        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.STALLED);
     }
 
     public static AgentResult error(String response, AgentTrajectory trajectory, long durationMs) {

@@ -252,7 +252,7 @@ public class AgentLoop {
      */
     private AgentResult runLoop(AgentContext context) {
         int maxSteps = config.getTasks().getMaxPlanSteps();
-        long timeoutMs = config.getTasks().getDefaultTimeout() * 1000L;
+        long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
 
         for (int step = 0; step < maxSteps; step++) {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
@@ -269,21 +269,20 @@ public class AgentLoop {
                 );
             }
 
-            // Check timeout
-            if (context.elapsedMs() > timeoutMs) {
+            // Check stall — no forward progress for stall-timeout seconds
+            if (context.msSinceLastProgress() > stallTimeoutMs) {
+                long stallSec = context.msSinceLastProgress() / 1000;
                 long elapsedSec = context.elapsedMs() / 1000;
-                log.warn("Task {} timed out after {}s (limit={}s)", context.taskId(), elapsedSec, timeoutMs / 1000);
-                // Clean up any long-running task tracking
+                log.warn("Task {} stalled — no progress for {}s (total elapsed {}s)",
+                        context.taskId(), stallSec, elapsedSec);
                 if (longRunningTaskManager.isActive(context.taskId())) {
                     longRunningTaskManager.fail(context.taskId(),
-                            "Task timed out after " + elapsedSec + "s");
+                            "Task stalled — no progress for " + stallSec + "s");
                 }
                 String progress = summarizeProgress(context);
-                String timeStr = elapsedSec >= 60
-                        ? (elapsedSec / 60) + "m " + (elapsedSec % 60) + "s"
-                        : elapsedSec + "s";
-                return AgentResult.timeout(
-                        "This task exceeded the " + timeStr + " time limit. " + progress,
+                return AgentResult.stalled(
+                        "This task stalled (no progress for " + formatDuration(stallSec)
+                                + ", total elapsed " + formatDuration(elapsedSec) + "). " + progress,
                         context.trajectory(),
                         context.elapsedMs()
                 );
@@ -342,6 +341,7 @@ public class AgentLoop {
                             ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                             : AgentObservation.failure(action.tool(), result, durationMs);
                     context.trajectory().record(action, obs);
+                    context.markProgress();
                     if (debug) {
                         emitDebug(context.userId(),
                                 "SKILL_CREATE [" + hint.suggestedName() + "] "
@@ -352,6 +352,7 @@ public class AgentLoop {
                     context.trajectory().record(action,
                             AgentObservation.failure(action.tool(),
                                     "ERROR: Cloud LLM unavailable — cannot generate skill code", 0));
+                    context.markProgress();
                 }
 
                 // Clear the hint so subsequent steps don't re-trigger
@@ -372,6 +373,7 @@ public class AgentLoop {
             } finally {
                 stopHeartbeat(thinkHeartbeat);
             }
+            context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
 
             // Track token usage per provider
@@ -409,6 +411,7 @@ public class AgentLoop {
                             "Try a different approach or tool.",
                             0);
                     context.trajectory().record(action, failedThink);
+                    context.markProgress(); // LLM produced output (even if malformed)
                     continue;
                 }
 
@@ -439,6 +442,7 @@ public class AgentLoop {
                     String errMsg = "ERROR: Cloud LLM unavailable — cannot generate skill code. " +
                             "Skill creation requires the cloud provider.";
                     context.trajectory().record(action, AgentObservation.failure(action.tool(), errMsg, 0));
+                    context.markProgress();
                     if (debug) emitDebug(context.userId(), "SKILL_CREATE FAILED: cloud unavailable");
                     continue;
                 }
@@ -451,6 +455,7 @@ public class AgentLoop {
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
+                context.markProgress();
                 if (debug) {
                     emitDebug(context.userId(),
                             "SKILL_CREATE [" + enhancedParams.getOrDefault("name", "?") + "] "
@@ -470,6 +475,7 @@ public class AgentLoop {
                     AgentObservation blockObs = AgentObservation.failure(
                             action.tool(), "BLOCKED: " + smVerdict.blockReason(), 0);
                     context.trajectory().record(action, blockObs);
+                    context.markProgress();
                     continue;
                 }
 
@@ -488,6 +494,7 @@ public class AgentLoop {
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
+                context.markProgress();
                 if (debug) {
                     emitDebug(context.userId(),
                             "SKILL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -507,6 +514,7 @@ public class AgentLoop {
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
+                context.markProgress();
                 if (debug) {
                     emitDebug(context.userId(),
                             "MEMORY_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -526,6 +534,7 @@ public class AgentLoop {
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
+                context.markProgress();
                 if (debug) {
                     emitDebug(context.userId(),
                             "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -549,6 +558,7 @@ public class AgentLoop {
                         0
                 );
                 context.trajectory().record(action, blockObs);
+                context.markProgress();
                 continue;
             }
 
@@ -572,6 +582,7 @@ public class AgentLoop {
 
             // === OBSERVE ===
             context.trajectory().record(action, observation);
+            context.markProgress(); // tool completed — task is alive
 
             if (debug) {
                 emitDebug(context.userId(),
@@ -945,6 +956,17 @@ public class AgentLoop {
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    /** Format seconds as human-readable duration, e.g. "5m 23s" or "45s". */
+    private static String formatDuration(long totalSec) {
+        if (totalSec >= 3600) {
+            return (totalSec / 3600) + "h " + ((totalSec % 3600) / 60) + "m " + (totalSec % 60) + "s";
+        } else if (totalSec >= 60) {
+            return (totalSec / 60) + "m " + (totalSec % 60) + "s";
+        } else {
+            return totalSec + "s";
+        }
     }
 
     // ── Cloud skill code generation ──

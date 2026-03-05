@@ -15,6 +15,8 @@ public class AgentContext {
     private final AgentTrajectory trajectory;
     private final Map<String, Object> metadata;
     private final long startTimeMs;
+    /** Timestamp of the last forward progress (step completion, LLM response, etc.). */
+    private volatile long lastProgressMs;
 
     private volatile boolean cancelled;
     private String conversationSummary;
@@ -34,6 +36,7 @@ public class AgentContext {
         this.trajectory = new AgentTrajectory();
         this.metadata = new HashMap<>();
         this.startTimeMs = System.currentTimeMillis();
+        this.lastProgressMs = this.startTimeMs;
         this.cancelled = false;
     }
 
@@ -47,6 +50,12 @@ public class AgentContext {
     public long elapsedMs() {
         return System.currentTimeMillis() - startTimeMs;
     }
+
+    /** Mark forward progress (resets stall timer). */
+    public void markProgress() { this.lastProgressMs = System.currentTimeMillis(); }
+
+    /** Milliseconds since the last forward progress. */
+    public long msSinceLastProgress() { return System.currentTimeMillis() - lastProgressMs; }
 
     public boolean isCancelled() { return cancelled; }
     public void cancel() { this.cancelled = true; }
