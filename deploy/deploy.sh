@@ -74,19 +74,21 @@ ensure_sudoers_restart_rule() {
     local rule_chown="ownclaw ALL=(root) NOPASSWD: /usr/bin/chown -R ownclaw\\:ownclaw ${REPO_DIR}"
     local rule_cp_svc="ownclaw ALL=(root) NOPASSWD: /usr/bin/cp ${REPO_DIR}/deploy/ownclaw.service /etc/systemd/system/ownclaw.service"
     local rule_reload="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload"
+    local rule_linger="ownclaw ALL=(root) NOPASSWD: /usr/bin/loginctl enable-linger ownclaw"
 
     # Fast path: already present.
     if [ -f "$sudoers_file" ] && grep -Fqx "$rule_restart" "$sudoers_file" 2>/dev/null \
                                && grep -Fqx "$rule_stop"    "$sudoers_file" 2>/dev/null \
                                && grep -Fqx "$rule_chown"   "$sudoers_file" 2>/dev/null \
                                && grep -Fqx "$rule_cp_svc"  "$sudoers_file" 2>/dev/null \
-                               && grep -Fqx "$rule_reload"  "$sudoers_file" 2>/dev/null; then
+                               && grep -Fqx "$rule_reload"  "$sudoers_file" 2>/dev/null \
+                               && grep -Fqx "$rule_linger"  "$sudoers_file" 2>/dev/null; then
         return 0
     fi
 
     local tmp
     tmp=$(mktemp /tmp/ownclaw-sudoers-XXXXXX)
-    printf '%s\n%s\n%s\n%s\n%s\n' "$rule_restart" "$rule_stop" "$rule_chown" "$rule_cp_svc" "$rule_reload" >"$tmp"
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$rule_restart" "$rule_stop" "$rule_chown" "$rule_cp_svc" "$rule_reload" "$rule_linger" >"$tmp"
 
     if [ "$(id -u)" -eq 0 ]; then
         install -o root -g root -m 0440 "$tmp" "$sudoers_file"
@@ -225,6 +227,15 @@ setup_podman_rootless() {
 
     # Apply the new namespace mapping
     podman system migrate 2>/dev/null || true
+
+    # Enable lingering so the ownclaw user gets a persistent systemd user session.
+    # Without this, rootless podman can't manage cgroups properly and 'apt-get install'
+    # inside container builds fails with: sd-bus call: Interactive authentication required
+    if command -v loginctl &>/dev/null; then
+        loginctl enable-linger ownclaw 2>/dev/null || true
+        log "  Enabled lingering for ownclaw user (required for rootless Podman cgroups)"
+    fi
+
     log "  Podman rootless namespace mapping configured for ownclaw"
 }
 
