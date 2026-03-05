@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Development sandbox using Java ProcessBuilder.
@@ -73,9 +74,12 @@ public class ProcessSandbox implements SandboxManager {
                 process.getOutputStream().close();
             }
 
+            // Track last time any output was produced — used for stall detection.
+            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+
             // Drain stderr async to prevent pipe-buffer deadlock.
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getErrorStream()));
+                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line so we can detect need_input immediately.
             // If a skill emits need_input in a non-interactive run it will block forever
@@ -87,6 +91,7 @@ public class ProcessSandbox implements SandboxManager {
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
+                        lastActivity.set(System.currentTimeMillis());
                         buf.write(line.getBytes(StandardCharsets.UTF_8));
                         buf.write('\n');
                         if (isNeedInputLine(line)) {
@@ -99,8 +104,9 @@ public class ProcessSandbox implements SandboxManager {
                 return buf.toByteArray();
             });
 
-            // Wait with timeout
-            boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
+            // Stall detection: no wall-clock timeout — process runs as long as it
+            // produces output. Killed only if no stdout/stderr for timeoutSec seconds.
+            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
@@ -114,7 +120,9 @@ public class ProcessSandbox implements SandboxManager {
 
             if (!finished) {
                 process.destroyForcibly();
-                log.warn("Sandbox timeout after {}s for {}", timeoutSec, scriptPath.getFileName());
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
@@ -135,10 +143,6 @@ public class ProcessSandbox implements SandboxManager {
                 log.error("Sandbox I/O error for {}: {}", scriptPath.getFileName(), e.getMessage());
             }
             return new SandboxResult(-1, "", errMsg, durationMs, false);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            long durationMs = System.currentTimeMillis() - startTime;
-            return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
     }
 
@@ -195,9 +199,12 @@ public class ProcessSandbox implements SandboxManager {
                 process.getOutputStream().close();
             }
 
+            // Track last time any output was produced — used for stall detection.
+            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+
             // Drain stderr async
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getErrorStream()));
+                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line; intercept progress and need_input lines.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
@@ -207,6 +214,7 @@ public class ProcessSandbox implements SandboxManager {
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
+                        lastActivity.set(System.currentTimeMillis());
                         String trimmed = line.trim();
 
                         // Intercept progress lines
@@ -239,7 +247,8 @@ public class ProcessSandbox implements SandboxManager {
                 return buf.toByteArray();
             });
 
-            boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
+            // Stall detection: no wall-clock timeout.
+            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
@@ -252,7 +261,9 @@ public class ProcessSandbox implements SandboxManager {
 
             if (!finished) {
                 process.destroyForcibly();
-                log.warn("Sandbox timeout after {}s for {}", timeoutSec, scriptPath.getFileName());
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
@@ -267,10 +278,6 @@ public class ProcessSandbox implements SandboxManager {
                     : "Sandbox I/O error: " + e.getMessage();
             log.error("Sandbox error for {}: {}", scriptPath.getFileName(), errMsg);
             return new SandboxResult(-1, "", errMsg, durationMs, false);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            long durationMs = System.currentTimeMillis() - startTime;
-            return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
     }
 
@@ -287,6 +294,54 @@ public class ProcessSandbox implements SandboxManager {
         } catch (IOException e) {
             return new byte[0];
         }
+    }
+
+    /**
+     * Read an InputStream fully, updating lastActivity on each chunk.
+     * This lets stall detection know the process is still producing output.
+     */
+    private static byte[] drainStreamWithActivity(InputStream is, AtomicLong lastActivity) {
+        try {
+            ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = is.read(chunk)) != -1) {
+                lastActivity.set(System.currentTimeMillis());
+                buf.write(chunk, 0, n);
+            }
+            return buf.toByteArray();
+        } catch (IOException e) {
+            return new byte[0];
+        }
+    }
+
+    /**
+     * Wait for a process to finish with stall detection instead of a hard wall-clock timeout.
+     * The process is allowed to run indefinitely as long as it keeps producing output.
+     * If no output (stdout or stderr) is produced for {@code stallTimeoutSec} seconds,
+     * the process is considered stalled and this method returns false.
+     *
+     * @return true if the process finished normally, false if it stalled
+     */
+    private static boolean waitForWithStallDetection(Process process, int stallTimeoutSec,
+                                                     AtomicLong lastActivity) {
+        long stallTimeoutMs = stallTimeoutSec * 1000L;
+        while (process.isAlive()) {
+            try {
+                // Poll every 5 seconds
+                if (process.waitFor(5, TimeUnit.SECONDS)) {
+                    return true; // process finished
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            long sinceLastOutput = System.currentTimeMillis() - lastActivity.get();
+            if (sinceLastOutput > stallTimeoutMs) {
+                return false; // stalled
+            }
+        }
+        return true; // process finished
     }
 
     /**
@@ -329,12 +384,16 @@ public class ProcessSandbox implements SandboxManager {
             java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
 
-            long deadline = System.currentTimeMillis() + (timeoutSec * 1000L);
+            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+            long stallTimeoutMs = timeoutSec * 1000L;
             String line;
             while ((line = reader.readLine()) != null) {
+                lastActivity.set(System.currentTimeMillis());
                 allStdout.append(line).append('\n');
 
-                if (System.currentTimeMillis() > deadline) {
+                // Stall detection for interactive mode
+                long sinceLastActivity = System.currentTimeMillis() - lastActivity.get();
+                if (sinceLastActivity > stallTimeoutMs) {
                     process.destroyForcibly();
                     String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
                     long durationMs = System.currentTimeMillis() - startTime;

@@ -278,7 +278,7 @@ public class DynamicSkill implements Tool {
             }
 
             if (result.timedOut()) {
-                return ToolResult.failure("Skill '" + name + "' timed out after " + timeoutSec + "s.");
+                return ToolResult.failure("Skill '" + name + "' stalled (no output for " + timeoutSec + "s).");
             }
 
             if (result.isSuccess()) {

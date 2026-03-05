@@ -136,7 +136,7 @@ public class OwnClawConfig {
 
     public static class Sandbox {
         private String type = "auto";
-        private int defaultTimeout = 60;
+        private int stallTimeout = 120;
         private String defaultNetwork = "deny";
         private String pythonPath = "python3";
         private String containerRuntime = "auto";
@@ -144,8 +144,8 @@ public class OwnClawConfig {
 
         public String getType() { return type; }
         public void setType(String type) { this.type = type; }
-        public int getDefaultTimeout() { return defaultTimeout; }
-        public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
+        public int getStallTimeout() { return stallTimeout; }
+        public void setStallTimeout(int v) { this.stallTimeout = v; }
         public String getDefaultNetwork() { return defaultNetwork; }
         public void setDefaultNetwork(String v) { this.defaultNetwork = v; }
         public String getPythonPath() { return pythonPath; }

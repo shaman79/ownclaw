@@ -31,7 +31,7 @@ public interface SandboxManager {
      * @param workingDir   the skill's version directory (read-only context)
      * @param stdinJson    JSON input to pass via stdin
      * @param envVars      environment variables (credentials + config)
-     * @param timeoutSec   hard timeout in seconds
+     * @param timeoutSec   stall timeout — process is killed if no output for this many seconds
      * @return execution result
      */
     SandboxResult execute(Path scriptPath, Path workingDir, String stdinJson,

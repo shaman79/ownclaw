@@ -18,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Container-based sandbox for skills that need system packages (apt/yum).
@@ -337,12 +338,20 @@ public class ContainerSandbox {
                     .redirectErrorStream(true)
                     .start();
 
-            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
-            boolean finished = p.waitFor(300, TimeUnit.SECONDS); // 5 min build timeout
+            // Stall detection for builds: no hard wall-clock timeout.
+            // As long as the build produces output (downloading packages, compiling, etc.)
+            // it's allowed to continue. Killed if no output for 5 minutes.
+            AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
+            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
+                    () -> drainStreamWithActivity(p.getInputStream(), lastBuildActivity));
+
+            boolean finished = waitForWithStallDetection(p, 300, lastBuildActivity);
+            String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
                 p.destroyForcibly();
-                return "Build timed out after 300s";
+                long stallSec = (System.currentTimeMillis() - lastBuildActivity.get()) / 1000;
+                return "Build stalled (no output for " + stallSec + "s)";
             }
 
             if (p.exitValue() != 0) {
@@ -392,22 +401,27 @@ public class ContainerSandbox {
                 process.getOutputStream().close();
             }
 
+            // Track output activity for stall detection.
+            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+
             // Drain stderr async
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getErrorStream()));
+                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Drain stdout async
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getInputStream()));
+                    () -> drainStreamWithActivity(process.getInputStream(), lastActivity));
 
-            boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
+            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
                 process.destroyForcibly();
-                log.warn("Container execution timeout after {}s for {}", timeoutSec, scriptPath.getFileName());
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
@@ -421,10 +435,6 @@ public class ContainerSandbox {
             String errMsg = "Container execution error: " + e.getMessage();
             log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
             return new SandboxResult(-1, "", errMsg, durationMs, false);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            long durationMs = System.currentTimeMillis() - startTime;
-            return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
     }
 
@@ -459,8 +469,11 @@ public class ContainerSandbox {
                 process.getOutputStream().close();
             }
 
+            // Track output activity for stall detection.
+            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(process.getErrorStream()));
+                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line to intercept progress messages
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
@@ -469,6 +482,7 @@ public class ContainerSandbox {
                         new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
+                        lastActivity.set(System.currentTimeMillis());
                         String trimmed = line.trim();
                         if (trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
                             try {
@@ -490,13 +504,16 @@ public class ContainerSandbox {
                 return buf.toByteArray();
             });
 
-            boolean finished = process.waitFor(timeoutSec, TimeUnit.SECONDS);
+            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
                 process.destroyForcibly();
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
@@ -505,10 +522,6 @@ public class ContainerSandbox {
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
             return new SandboxResult(-1, "", "Container error: " + e.getMessage(), durationMs, false);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            long durationMs = System.currentTimeMillis() - startTime;
-            return new SandboxResult(-1, "", "Interrupted", durationMs, false);
         }
     }
 
@@ -589,6 +602,52 @@ public class ContainerSandbox {
         } catch (IOException e) {
             return new byte[0];
         }
+    }
+
+    /**
+     * Read an InputStream fully, updating lastActivity on each chunk.
+     * This lets stall detection know the process is still producing output.
+     */
+    private static byte[] drainStreamWithActivity(InputStream is, AtomicLong lastActivity) {
+        try {
+            ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = is.read(chunk)) != -1) {
+                lastActivity.set(System.currentTimeMillis());
+                buf.write(chunk, 0, n);
+            }
+            return buf.toByteArray();
+        } catch (IOException e) {
+            return new byte[0];
+        }
+    }
+
+    /**
+     * Wait for a process to finish with stall detection instead of a hard wall-clock timeout.
+     * The process runs indefinitely as long as it keeps producing output.
+     * If no output for {@code stallTimeoutSec} seconds, the process is considered stalled.
+     *
+     * @return true if the process finished normally, false if it stalled
+     */
+    private static boolean waitForWithStallDetection(Process process, int stallTimeoutSec,
+                                                     AtomicLong lastActivity) {
+        long stallTimeoutMs = stallTimeoutSec * 1000L;
+        while (process.isAlive()) {
+            try {
+                if (process.waitFor(5, TimeUnit.SECONDS)) {
+                    return true;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            long sinceLastOutput = System.currentTimeMillis() - lastActivity.get();
+            if (sinceLastOutput > stallTimeoutMs) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String truncate(String s, int maxLen) {
