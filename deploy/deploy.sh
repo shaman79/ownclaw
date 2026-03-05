@@ -72,17 +72,21 @@ ensure_sudoers_restart_rule() {
     local rule_restart="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}"
     local rule_stop="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl stop ${SERVICE_NAME}"
     local rule_chown="ownclaw ALL=(root) NOPASSWD: /usr/bin/chown -R ownclaw\\:ownclaw ${REPO_DIR}"
+    local rule_cp_svc="ownclaw ALL=(root) NOPASSWD: /usr/bin/cp ${REPO_DIR}/deploy/ownclaw.service /etc/systemd/system/ownclaw.service"
+    local rule_reload="ownclaw ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload"
 
     # Fast path: already present.
     if [ -f "$sudoers_file" ] && grep -Fqx "$rule_restart" "$sudoers_file" 2>/dev/null \
                                && grep -Fqx "$rule_stop"    "$sudoers_file" 2>/dev/null \
-                               && grep -Fqx "$rule_chown"   "$sudoers_file" 2>/dev/null; then
+                               && grep -Fqx "$rule_chown"   "$sudoers_file" 2>/dev/null \
+                               && grep -Fqx "$rule_cp_svc"  "$sudoers_file" 2>/dev/null \
+                               && grep -Fqx "$rule_reload"  "$sudoers_file" 2>/dev/null; then
         return 0
     fi
 
     local tmp
     tmp=$(mktemp /tmp/ownclaw-sudoers-XXXXXX)
-    printf '%s\n%s\n%s\n' "$rule_restart" "$rule_stop" "$rule_chown" >"$tmp"
+    printf '%s\n%s\n%s\n%s\n%s\n' "$rule_restart" "$rule_stop" "$rule_chown" "$rule_cp_svc" "$rule_reload" >"$tmp"
 
     if [ "$(id -u)" -eq 0 ]; then
         install -o root -g root -m 0440 "$tmp" "$sudoers_file"
@@ -110,7 +114,46 @@ ensure_sudoers_restart_rule() {
     return 1
 }
 
+# Sync the systemd service file from the repo to /etc/systemd/system/ if changed.
+# Requires the sudoers rules for cp and daemon-reload.
+sync_service_file() {
+    local src="$REPO_DIR/deploy/ownclaw.service"
+    local dst="/etc/systemd/system/ownclaw.service"
+
+    if [ ! -f "$src" ]; then
+        return 0
+    fi
+
+    # Skip if unchanged
+    if diff -q "$src" "$dst" &>/dev/null; then
+        return 0
+    fi
+
+    log "Syncing systemd service file (changed)..."
+
+    if [ "$(id -u)" -eq 0 ]; then
+        cp "$src" "$dst"
+        systemctl daemon-reload
+        log "Service file updated and daemon reloaded"
+        return 0
+    fi
+
+    if command -v sudo &>/dev/null; then
+        if sudo -n cp "$src" "$dst" 2>/dev/null && sudo -n systemctl daemon-reload 2>/dev/null; then
+            log "Service file updated and daemon reloaded (via sudo)"
+            return 0
+        fi
+    fi
+
+    log "WARN: Service file changed but cannot update /etc/systemd/system/ (need sudo). "
+    log "       Run: sudo cp $src $dst && sudo systemctl daemon-reload"
+    return 1
+}
+
 restart_service() {
+    # Sync systmed service file before restarting (picks up any hardening changes)
+    sync_service_file
+
     # Never prompt for a password (cron has no TTY).
     if [ "$(id -u)" -eq 0 ]; then
         systemctl restart "$SERVICE_NAME"
@@ -700,6 +743,14 @@ build_jar() {
         log "Cleaning stale compile temp dir..."
         mv "$compile_tmp" "$REPO_DIR/build/tmp/compileJava.stale.$$" 2>/dev/null || true
         rm -rf "$REPO_DIR/build/tmp/compileJava.stale.$$" 2>/dev/null &
+    fi
+
+    # Move aside build/classes — the running JVM can keep .class files locked
+    # (memory-mapped or lazily loaded), which prevents Gradle from deleting them.
+    if [ -d "$REPO_DIR/build/classes" ]; then
+        log "Moving aside build/classes (may be locked by running JVM)..."
+        mv "$REPO_DIR/build/classes" "$REPO_DIR/build/classes.stale.$$" 2>/dev/null || true
+        rm -rf "$REPO_DIR/build/classes.stale.$$" 2>/dev/null &
     fi
 
     # Skip 'clean' — the running JVM may have files locked in build/.

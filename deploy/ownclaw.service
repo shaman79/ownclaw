@@ -24,7 +24,9 @@ Restart=on-failure
 RestartSec=10
 
 # Security hardening
-NoNewPrivileges=true
+# NOTE: NoNewPrivileges is intentionally OFF so that Podman rootless can
+# create user namespaces for container-based skill sandboxing.
+# Container isolation replaces the privilege restriction.
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/ownclaw
