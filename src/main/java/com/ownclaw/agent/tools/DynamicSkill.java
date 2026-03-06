@@ -295,9 +295,15 @@ public class DynamicSkill implements Tool {
 
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
                         if (installed) {
-                            // Re-resolve and retry
+                            // Re-resolve and retry — re-inject credentials + encoding env vars
                             var healedResolution = pythonEnv.resolveExecution(skillDir, name);
                             Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                            healedEnv.put("PYTHONIOENCODING", "utf-8");
+                            healedEnv.put("PYTHONUTF8", "1");
+                            healedEnv.putAll(envVars.entrySet().stream()
+                                    .filter(e -> !healedEnv.containsKey(e.getKey()))
+                                    .collect(java.util.stream.Collectors.toMap(
+                                            Map.Entry::getKey, Map.Entry::getValue)));
                             SandboxResult retry = sandbox.execute(
                                     healedResolution.python(), runnerScript, skillDir,
                                     inputJson, healedEnv, timeoutSec);
@@ -324,6 +330,12 @@ public class DynamicSkill implements Tool {
                     if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
                         var healedResolution = pythonEnv.resolveExecution(skillDir, name);
                         Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                        healedEnv.put("PYTHONIOENCODING", "utf-8");
+                        healedEnv.put("PYTHONUTF8", "1");
+                        healedEnv.putAll(envVars.entrySet().stream()
+                                .filter(e -> !healedEnv.containsKey(e.getKey()))
+                                .collect(java.util.stream.Collectors.toMap(
+                                        Map.Entry::getKey, Map.Entry::getValue)));
                         SandboxResult retry = sandbox.execute(
                                 healedResolution.python(), runnerScript, skillDir,
                                 inputJson, healedEnv, timeoutSec);

@@ -1237,7 +1237,7 @@ public class AgentLoop {
 
         try {
             List<LlmMessage> messages = buildSkillCodePrompt(
-                    name, description, parameters, requirements, context);
+                    name, description, parameters, requirements, originalParams, context);
 
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
@@ -1294,7 +1294,7 @@ public class AgentLoop {
      */
     private List<LlmMessage> buildSkillCodePrompt(
             String name, String description, String parameters,
-            String requirements, AgentContext context) {
+            String requirements, Map<String, Object> originalParams, AgentContext context) {
 
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -1352,6 +1352,13 @@ public class AgentLoop {
         user.append("**Parameters**: ").append(parameters).append("\n");
         if (requirements != null && !requirements.isBlank()) {
             user.append("**Available pip packages**: ").append(requirements).append("\n");
+        }
+
+        // Tell the code generator which env var names to use for credentials
+        String credentials = str(originalParams, "credentials");
+        if (credentials != null && !credentials.isBlank()) {
+            user.append("**Credentials (auto-injected as env vars)**: ").append(credentials).append("\n");
+            user.append("Read these with `os.environ['KEY']` — they are guaranteed to be present at runtime.\n");
         }
 
         // Include the task context so the cloud knows what the skill needs to accomplish
