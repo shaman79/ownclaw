@@ -102,10 +102,9 @@ public class TokenBudgetTracker {
     public String getUsageSummary(String userId) {
         long used = getTodayUsage(userId);
         long limit = config.getBudgets().getDailyCloudTokens();
-        double cost = getTodayCost(userId);
         double pct = limit > 0 ? (used * 100.0 / limit) : 0;
-        return String.format("Today: %,d / %,d tokens (%.1f%%) | Est. cost: $%.4f",
-                used, limit, pct, cost);
+        return String.format("Today: %,d / %,d tokens (%.1f%%)",
+                used, limit, pct);
     }
 
     private void checkBudget(String userId, int justUsed) {
