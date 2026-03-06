@@ -497,4 +497,18 @@ public class DebugController {
         String result = skillManager.readSkill(name);
         return ResponseEntity.ok(Map.of("skill", name, "content", result));
     }
+
+    /**
+     * TEMPORARY DEBUG ENDPOINT — patches credentials field for an existing skill.
+     * TODO: REMOVE THIS once credential issues are resolved.
+     */
+    @PostMapping("/skill/{name}/credentials")
+    public ResponseEntity<?> patchSkillCredentials(
+            @PathVariable String name,
+            @RequestBody Map<String, String> body) {
+        String credentials = body.get("credentials");
+        log.warn("DEBUG: Patching credentials for skill '{}': {}", name, credentials);
+        String result = skillManager.patchCredentials(name, credentials);
+        return ResponseEntity.ok(Map.of("skill", name, "result", result));
+    }
 }

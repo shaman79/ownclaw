@@ -184,6 +184,53 @@ public class SkillManager {
     // ────────────────────── Delete ──────────────────────
 
     /**
+     * Patch the credentials field of an existing skill's YAML and reload it.
+     * Used to fix skills that were created before credential injection was standardized.
+     *
+     * @param name skill name
+     * @param credentials comma-separated credential keys (e.g. "SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS")
+     * @return result message
+     */
+    public String patchCredentials(String name, String credentials) {
+        if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
+        if (credentials == null || credentials.isBlank()) return "ERROR: Credentials list is required.";
+
+        var skillOpt = dynamicSkillRegistry.getDynamic(name);
+        if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
+
+        Path skillDir = skillOpt.get().skillDir();
+        Path yamlFile = skillDir.resolve("SKILL.yaml");
+
+        try {
+            String yaml = Files.readString(yamlFile, StandardCharsets.UTF_8);
+
+            // Remove existing credentials line if present
+            yaml = yaml.replaceAll("(?m)^credentials:.*\\n?", "");
+
+            // Add credentials field before requires_network or at the end
+            String credLine = "credentials: \"" + credentials.strip() + "\"\n";
+            if (yaml.contains("requires_network:")) {
+                yaml = yaml.replace("requires_network:", credLine + "requires_network:");
+            } else {
+                yaml = yaml.stripTrailing() + "\n" + credLine;
+            }
+
+            Files.writeString(yamlFile, yaml, StandardCharsets.UTF_8);
+
+            // Reload the skill
+            dynamicSkillRegistry.unregister(name);
+            DynamicSkill reloaded = dynamicSkillRegistry.loadSkill(skillDir);
+            if (reloaded == null) return "ERROR: Failed to reload skill after patching.";
+            dynamicSkillRegistry.register(reloaded);
+
+            return "Skill '" + name + "' credentials patched to [" + credentials + "] and reloaded.";
+        } catch (IOException e) {
+            log.error("Failed to patch credentials for skill '{}': {}", name, e.getMessage());
+            return "ERROR: " + e.getMessage();
+        }
+    }
+
+    /**
      * Delete a skill permanently.
      */
     public String deleteSkill(String name) {
