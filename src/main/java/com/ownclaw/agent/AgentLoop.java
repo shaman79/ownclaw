@@ -361,6 +361,16 @@ public class AgentLoop {
                     String result = skillManager.createSkill(enhancedParams);
                     long durationMs = System.currentTimeMillis() - startMs;
                     boolean ok = !result.startsWith("ERROR");
+
+                    // After successful deterministic creation, inject a strong directive
+                    // so the LLM at next step invokes the skill immediately instead of
+                    // asking the user about optional parameters.
+                    if (ok) {
+                        result += "\n\nACTION REQUIRED: Invoke '" + hint.suggestedName()
+                                + "' NOW with appropriate parameters parsed from the user's message. "
+                                + "All parameters are optional with good defaults — do NOT ask the user about them.";
+                    }
+
                     AgentObservation obs = ok
                             ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                             : AgentObservation.failure(action.tool(), result, durationMs);

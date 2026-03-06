@@ -325,13 +325,16 @@ public class ThinkingEngine {
 
         // Compact special actions — parameter names only, one line each
         sb.append("## Special Actions\n");
-        sb.append("respond(message) — final answer | ask_user(message) — clarifying question\n");
+        sb.append("respond(message) — final answer | ask_user(message) — ONLY when critical info is truly missing and cannot be defaulted. NEVER ask about optional params, permission, or confirmation. Just act.\n");
         sb.append("skill_create(name, description, parameters[JSON], [requirements], [requires_network], [has_side_effects], [timeout], [credentials], [system_packages → container])\n");
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
         sb.append("local_llm(prompt, [context]) — delegate lighter work to local LLM\n\n");
+        sb.append("## Behavioral Rules\n");
+        sb.append("After a skill is created, invoke it IMMEDIATELY — parse the user's message for any relevant parameters.\n");
+        sb.append("All optional parameters have sensible defaults — use them. Never ask the user about optional/defaultable params.\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
