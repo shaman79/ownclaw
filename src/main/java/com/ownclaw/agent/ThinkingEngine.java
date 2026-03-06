@@ -110,6 +110,13 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content.
      */
     private String buildSystemPrompt(AgentContext context) {
+        // On subsequent steps, use a condensed prompt to save cloud tokens.
+        // The full prompt (with detailed tool descriptions, guidelines, etc.) is only
+        // sent on the first reasoning step; the LLM already has the trajectory as context.
+        if (!context.trajectory().isEmpty()) {
+            return buildCompactSystemPrompt(context);
+        }
+
         var sb = new StringBuilder();
 
         sb.append("You are an autonomous agent. You reason, pick a tool, observe the result, repeat until done.\n\n");
@@ -259,6 +266,58 @@ public class ThinkingEngine {
         sb.append("- Extract text, never return raw HTML/XML/binary. Strip boilerplate.\n");
         sb.append("- Garbled text = wrong encoding — fix the tool.\n");
         sb.append("- Content behind links or in files (PDF, DOCX, CSV): fetch and extract, don't just report the link.\n");
+
+        return sb.toString();
+    }
+
+    /**
+     * Condensed system prompt for reasoning steps 2+.
+     * Omits verbose behavioral guidelines, detailed parameter descriptions,
+     * and instructional sections that the LLM has already seen on step 1.
+     * Saves ~700 cloud tokens per step.
+     */
+    private String buildCompactSystemPrompt(AgentContext context) {
+        var sb = new StringBuilder(2048);
+
+        sb.append("You are an autonomous agent. Reason, pick tools, observe, repeat. Never refuse tasks. Use skill_create for new capabilities.\n\n");
+
+        // Environment (always — dynamic datetime)
+        sb.append("## Environment\n");
+        sb.append("- Platform: ").append(detectPlatform()).append("\n");
+        sb.append("- DateTime: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+
+        // User preferences (always — dynamic per user)
+        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
+            sb.append("## User Preferences\n");
+            sb.append(context.userPreferences()).append("\n\n");
+        }
+
+        // Available Tools (always — dynamic tool selection based on trajectory)
+        ToolSelector.Selection selection = toolSelector.select(
+                context.originalMessage(), context.trajectory());
+        sb.append("## Available Tools\n");
+        String manifest = toolRegistry.generateManifest(selection.detailed());
+        sb.append(manifest).append("\n");
+        if (!selection.otherNames().isEmpty()) {
+            sb.append("Also available: ").append(String.join(", ", selection.otherNames())).append("\n");
+        }
+        if (manifest.isBlank()) {
+            sb.append("No tools yet — use skill_create to build what you need.\n");
+        }
+        sb.append("\n");
+
+        // Compact special actions — parameter names only, one line each
+        sb.append("## Special Actions\n");
+        sb.append("respond(message) — final answer | ask_user(message) — clarifying question\n");
+        sb.append("skill_create(name, description, parameters[JSON], [requirements], [requires_network], [has_side_effects], [timeout], [credentials], [system_packages → container])\n");
+        sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
+        sb.append("credential_manage(action=list|check|store, [key], [value])\n");
+        sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
+        sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
+        sb.append("local_llm(prompt, [context]) — delegate lighter work to local LLM\n\n");
+
+        // Output format (always needed)
+        sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
 
         return sb.toString();
     }
