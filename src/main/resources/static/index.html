@@ -1339,7 +1339,7 @@
     }
 
     function clearMessages() {
-        messagesEl.querySelectorAll('.msg').forEach(function(m) { m.remove(); });
+        messagesEl.querySelectorAll('.msg, .messages-loading').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
     }
 
