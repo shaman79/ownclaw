@@ -5,11 +5,14 @@ import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.LongRunningTaskManager;
+import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskCancellationService;
+import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.observability.EventLogService;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -54,6 +57,9 @@ public class AgentLoop {
     private final ConversationService conversationService;
     private final LongRunningTaskManager longRunningTaskManager;
     private final CapabilityResolver capabilityResolver;
+    private final TokenBudgetTracker budgetTracker;
+    private final EventLogService eventLog;
+    private final ScheduledTaskService scheduledTaskService;
 
     /** Max recent messages to include as conversation context for the LLM. */
     private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
@@ -73,7 +79,10 @@ public class AgentLoop {
             CredentialVault credentialVault,
             ConversationService conversationService,
             LongRunningTaskManager longRunningTaskManager,
-            CapabilityResolver capabilityResolver
+            CapabilityResolver capabilityResolver,
+            TokenBudgetTracker budgetTracker,
+            EventLogService eventLog,
+            ScheduledTaskService scheduledTaskService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -90,6 +99,9 @@ public class AgentLoop {
         this.conversationService = conversationService;
         this.longRunningTaskManager = longRunningTaskManager;
         this.capabilityResolver = capabilityResolver;
+        this.budgetTracker = budgetTracker;
+        this.eventLog = eventLog;
+        this.scheduledTaskService = scheduledTaskService;
     }
 
     /**
@@ -381,6 +393,11 @@ public class AgentLoop {
                 context.addLocalTokens(thinkResult.totalTokens());
             } else {
                 context.addCloudTokens(thinkResult.totalTokens());
+                // Persist cloud usage for budget tracking
+                if (thinkResult.totalTokens() > 0) {
+                    budgetTracker.recordUsage(context.userId(), provider.name(),
+                            thinkResult.totalTokens(), 0.0);
+                }
             }
 
             // Emit debug info when debug mode is active
@@ -538,6 +555,26 @@ public class AgentLoop {
                 if (debug) {
                     emitDebug(context.userId(),
                             "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
+                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
+                                    + truncate(result, 500));
+                }
+                continue;
+            }
+
+            // === SCHEDULE MANAGEMENT (special action) ===
+            if (action.isScheduleManage()) {
+                long startMs = System.currentTimeMillis();
+                String result = executeScheduleManage(action.params(), context.userId());
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                context.markProgress();
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "SCHEDULE_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + truncate(result, 500));
                 }
@@ -824,6 +861,101 @@ public class AgentLoop {
     }
 
     /**
+     * Dispatch a schedule_manage action to the ScheduledTaskService.
+     * Supports: schedule_once, schedule_recurring, list, cancel, pause, resume.
+     */
+    private String executeScheduleManage(Map<String, Object> params, String userId) {
+        String action = params.get("action") != null ? params.get("action").toString() : "";
+        String description = params.get("description") != null ? params.get("description").toString().strip() : null;
+
+        return switch (action) {
+            case "schedule_once" -> {
+                if (description == null || description.isBlank()) {
+                    yield "ERROR: 'description' parameter is required — the task message to execute.";
+                }
+                String timeExpr = params.get("time") != null ? params.get("time").toString().strip() : null;
+                if (timeExpr == null || timeExpr.isBlank()) {
+                    yield "ERROR: 'time' parameter is required (e.g. 'in 30 minutes', 'tomorrow at 9am', 'at 14:30').";
+                }
+                var runAt = scheduledTaskService.parseTimeExpression(timeExpr);
+                if (runAt.isEmpty()) {
+                    yield "ERROR: Could not parse time expression: '" + timeExpr
+                            + "'. Try: 'in N minutes/hours', 'tomorrow at HH:mm', 'at HH:mm'.";
+                }
+                try {
+                    long id = scheduledTaskService.scheduleDeferred(userId, description, runAt.get());
+                    yield "Scheduled one-shot task #" + id + " for " + runAt.get() + ": " + description;
+                } catch (Exception e) {
+                    yield "ERROR: Failed to schedule task: " + e.getMessage();
+                }
+            }
+            case "schedule_recurring" -> {
+                if (description == null || description.isBlank()) {
+                    yield "ERROR: 'description' parameter is required — the task message to execute each time.";
+                }
+                String scheduleExpr = params.get("schedule") != null ? params.get("schedule").toString().strip() : null;
+                if (scheduleExpr == null || scheduleExpr.isBlank()) {
+                    yield "ERROR: 'schedule' parameter is required (e.g. 'every day at 11:00', 'every monday at 9am', 'every 30 minutes').";
+                }
+                var cronExpr = scheduledTaskService.parseScheduleExpression(scheduleExpr);
+                if (cronExpr.isEmpty()) {
+                    yield "ERROR: Could not parse schedule: '" + scheduleExpr
+                            + "'. Try: 'every day at HH:mm', 'every N minutes', 'every <weekday> at HH:mm', or a raw Spring cron expression.";
+                }
+                Integer maxRuns = null;
+                if (params.get("max_runs") != null) {
+                    try {
+                        maxRuns = Integer.parseInt(params.get("max_runs").toString());
+                    } catch (NumberFormatException e) {
+                        yield "ERROR: 'max_runs' must be an integer.";
+                    }
+                }
+                try {
+                    long id = scheduledTaskService.scheduleRecurring(userId, description, cronExpr.get(), maxRuns);
+                    yield "Scheduled recurring task #" + id + " [" + cronExpr.get() + "]: " + description;
+                } catch (Exception e) {
+                    yield "ERROR: Failed to schedule recurring task: " + e.getMessage();
+                }
+            }
+            case "list" -> {
+                yield scheduledTaskService.formatTasksSummary(userId);
+            }
+            case "cancel" -> {
+                long taskId = parseTaskId(params);
+                if (taskId < 0) yield "ERROR: 'task_id' parameter is required (integer).";
+                boolean ok = scheduledTaskService.cancel(userId, taskId);
+                yield ok ? "Task #" + taskId + " cancelled."
+                         : "ERROR: Task #" + taskId + " not found or not cancellable.";
+            }
+            case "pause" -> {
+                long taskId = parseTaskId(params);
+                if (taskId < 0) yield "ERROR: 'task_id' parameter is required (integer).";
+                boolean ok = scheduledTaskService.pause(userId, taskId);
+                yield ok ? "Task #" + taskId + " paused."
+                         : "ERROR: Task #" + taskId + " not found or not pausable.";
+            }
+            case "resume" -> {
+                long taskId = parseTaskId(params);
+                if (taskId < 0) yield "ERROR: 'task_id' parameter is required (integer).";
+                boolean ok = scheduledTaskService.resume(userId, taskId);
+                yield ok ? "Task #" + taskId + " resumed."
+                         : "ERROR: Task #" + taskId + " not found or not resumable.";
+            }
+            default -> "ERROR: Unknown action '" + action + "'. Use: schedule_once, schedule_recurring, list, cancel, pause, resume";
+        };
+    }
+
+    private long parseTaskId(Map<String, Object> params) {
+        Object val = params.get("task_id");
+        if (val == null) return -1;
+        try {
+            return Long.parseLong(val.toString());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /**
      * Inject a reflection observation when the agent is struggling.
      * Triggers on consecutive failures OR consecutive hollow (empty-output) results.
      */
@@ -945,11 +1077,24 @@ public class AgentLoop {
         int cloud = context.cloudTokens();
         if (local > 0 || cloud > 0) {
             StringBuilder sb = new StringBuilder("Tokens: ");
-            if (cloud > 0) sb.append("Mentor ").append(String.format("%,d", cloud));
+            if (cloud > 0) sb.append("Cloud ").append(String.format("%,d", cloud));
             if (cloud > 0 && local > 0) sb.append(" · ");
             if (local > 0) sb.append("Local ").append(String.format("%,d", local));
             sb.append(" · Total ").append(String.format("%,d", local + cloud));
             statusEmitter.emit(userId, StatusMessage.Type.STEP, sb.toString());
+        }
+
+        // Persist token usage to the events table for auditing
+        try {
+            String details = String.format(
+                    "{\"cloudTokens\":%d,\"localTokens\":%d,\"steps\":%d,\"durationMs\":%d,\"reason\":\"%s\"}",
+                    cloud, local, result.totalSteps(), result.totalDurationMs(), result.terminationReason());
+            eventLog.log(userId, context.taskId(), "task_completed",
+                    result.success() ? "info" : "warn",
+                    truncate(context.originalMessage(), 200),
+                    details, cloud + local);
+        } catch (Exception e) {
+            log.warn("Failed to log token usage for task {}: {}", context.taskId(), e.getMessage());
         }
     }
 
@@ -1021,6 +1166,10 @@ public class AgentLoop {
 
             // Track cloud tokens for skill code generation
             context.addCloudTokens(response.totalTokens());
+            if (response.totalTokens() > 0) {
+                budgetTracker.recordUsage(context.userId(), cloud.name(),
+                        response.totalTokens(), 0.0);
+            }
 
             if (cloudCode != null && !cloudCode.isBlank()) {
                 log.info("Cloud LLM generated {} chars of skill code for '{}' ({} tokens)",

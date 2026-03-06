@@ -73,7 +73,13 @@ public class CommandHandler {
             case "/help" -> Optional.of(helpText());
             case "/skills" -> Optional.of(skillsText());
             case "/status" -> Optional.of(statusText());
-            case "/tokens" -> Optional.of(budgetTracker.getUsageSummary(userId));
+            case "/tokens" -> {
+                String budget = budgetTracker.getUsageSummary(userId);
+                Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
+                long cloud = ((Number) detail.get("cloud_tokens")).longValue();
+                long local = ((Number) detail.get("local_tokens")).longValue();
+                yield Optional.of(String.format("%s\nCloud: %,d  |  Local: %,d", budget, cloud, local));
+            }
             case "/history" -> Optional.of(handleHistory(userId));
             default -> {
                 if (command.equals("/new") || command.startsWith("/new ")) {
@@ -234,9 +240,14 @@ public class CommandHandler {
                 yield sb.toString();
             }
             case "tokens" -> {
-                Map<String, Object> usage = eventLog.tokenUsageToday(userId);
-                yield "Token usage today: " + usage.get("total_tokens")
-                        + " tokens across " + usage.get("total_events") + " events";
+                Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
+                String budget = budgetTracker.getUsageSummary(userId);
+                long cloud = ((Number) detail.get("cloud_tokens")).longValue();
+                long local = ((Number) detail.get("local_tokens")).longValue();
+                long total = ((Number) detail.get("total_tokens")).longValue();
+                long tasks = ((Number) detail.get("task_count")).longValue();
+                yield String.format("Token usage today:\n  Cloud: %,d  |  Local: %,d  |  Total: %,d\n  Tasks: %d\n  Budget: %s",
+                        cloud, local, total, tasks, budget);
             }
             default -> {
                 List<Map<String, Object>> events = eventLog.recentEvents(userId, 10);

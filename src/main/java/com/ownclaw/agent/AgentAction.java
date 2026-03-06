@@ -32,6 +32,9 @@ public record AgentAction(
     /** Sentinel tool name indicating the agent wants to manage persistent memory (store/list/delete facts). */
     public static final String MEMORY_MANAGE = "memory_manage";
 
+    /** Sentinel tool name indicating the agent wants to manage scheduled tasks (schedule/list/cancel/pause/resume). */
+    public static final String SCHEDULE_MANAGE = "schedule_manage";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
@@ -56,9 +59,14 @@ public record AgentAction(
         return MEMORY_MANAGE.equals(tool);
     }
 
+    public boolean isScheduleManage() {
+        return SCHEDULE_MANAGE.equals(tool);
+    }
+
     /** Returns true if this action is a built-in special action (not a tool invocation). */
     public boolean isSpecialAction() {
-        return isResponse() || isAskUser() || isSkillCreate() || isSkillManage() || isCredentialManage() || isMemoryManage();
+        return isResponse() || isAskUser() || isSkillCreate() || isSkillManage()
+                || isCredentialManage() || isMemoryManage() || isScheduleManage();
     }
 
     public String responseText() {

@@ -197,6 +197,14 @@ public class ThinkingEngine {
         sb.append("  key (string, required for store/delete): Short identifier (e.g. 'timezone', 'email_style')\n");
         sb.append("  content (string, required for store): Fact or instruction to remember\n\n");
 
+        sb.append("schedule_manage: Schedule tasks to run at specific times or on recurring schedules.\n");
+        sb.append("  action (string, required): 'schedule_once', 'schedule_recurring', 'list', 'cancel', 'pause', or 'resume'\n");
+        sb.append("  description (string, required for schedule_once/schedule_recurring): The task message to execute when the time comes\n");
+        sb.append("  time (string, required for schedule_once): Natural language time (e.g. 'in 30 minutes', 'tomorrow at 9am', 'at 14:30')\n");
+        sb.append("  schedule (string, required for schedule_recurring): Natural language schedule (e.g. 'every day at 11:00', 'every monday at 9am', 'every 30 minutes') or Spring cron expression\n");
+        sb.append("  max_runs (integer, optional for schedule_recurring): Maximum number of executions (null = unlimited)\n");
+        sb.append("  task_id (integer, required for cancel/pause/resume): The scheduled task ID\n\n");
+
         sb.append("## Credential Vault\n");
         sb.append("AES-256-GCM encrypted storage. Check with 'list' before asking user for credentials.\n");
         sb.append("Store with 'store' after user provides them — they only need to provide each once.\n");
