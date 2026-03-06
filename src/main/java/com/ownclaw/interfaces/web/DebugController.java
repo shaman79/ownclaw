@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -49,6 +50,7 @@ public class DebugController {
     private final DebugSessionService debugService;
     private final ChatStatusEmitter statusEmitter;
     private final JdbcTemplate jdbc;
+    private final CredentialVault credentialVault;
 
     /** Stored execution traces, keyed by taskId. */
     private final Map<String, Map<String, Object>> storedTraces = new ConcurrentHashMap<>();
@@ -61,7 +63,8 @@ public class DebugController {
             SkillManager skillManager,
             DebugSessionService debugService,
             ChatStatusEmitter statusEmitter,
-            JdbcTemplate jdbc
+            JdbcTemplate jdbc,
+            CredentialVault credentialVault
     ) {
         this.agentLoop = agentLoop;
         this.toolRegistry = toolRegistry;
@@ -69,6 +72,7 @@ public class DebugController {
         this.debugService = debugService;
         this.statusEmitter = statusEmitter;
         this.jdbc = jdbc;
+        this.credentialVault = credentialVault;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -455,5 +459,27 @@ public class DebugController {
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  GET /api/debug/credentials — TEMPORARY: dump credential vault
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * TEMPORARY DEBUG ENDPOINT — lists all credentials with decrypted plaintext values.
+     * TODO: REMOVE THIS once credential issues are resolved.
+     */
+    @GetMapping("/credentials")
+    public ResponseEntity<?> listCredentials(@RequestAttribute("userId") String userId) {
+        log.warn("DEBUG: Plaintext credential dump requested by user={}", userId);
+        List<String> keys = credentialVault.listCredentialKeys(userId);
+        List<Map<String, String>> result = new ArrayList<>();
+        for (String key : keys) {
+            var entry = new LinkedHashMap<String, String>();
+            entry.put("key", key);
+            entry.put("value", credentialVault.getCredential(userId, key).orElse("<DECRYPT_FAILED>"));
+            result.add(entry);
+        }
+        return ResponseEntity.ok(result);
     }
 }
