@@ -482,4 +482,19 @@ public class DebugController {
         }
         return ResponseEntity.ok(result);
     }
+
+    // ────────────────────────────────────────────────────────────────
+    //  GET /api/debug/skill/{name} — TEMPORARY: read skill YAML + code
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * TEMPORARY DEBUG ENDPOINT — reads SKILL.yaml, skill.py, and requirements.txt for a skill.
+     * TODO: REMOVE THIS once credential issues are resolved.
+     */
+    @GetMapping("/skill/{name}")
+    public ResponseEntity<?> readSkill(@PathVariable String name) {
+        log.info("DEBUG: Reading skill '{}'", name);
+        String result = skillManager.readSkill(name);
+        return ResponseEntity.ok(Map.of("skill", name, "content", result));
+    }
 }

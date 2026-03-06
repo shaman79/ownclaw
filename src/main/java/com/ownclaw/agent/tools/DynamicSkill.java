@@ -236,8 +236,12 @@ public class DynamicSkill implements Tool {
 
             // Inject credentials from the encrypted vault as environment variables
             if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
+                log.info("Skill '{}': requesting credentials {} for user='{}'",
+                        name, requiredCredentials, context.userId());
                 Map<String, String> creds = credentialVault.getCredentials(
                         context.userId(), requiredCredentials);
+                log.info("Skill '{}': vault returned {} credentials, keys={}",
+                        name, creds.size(), creds.keySet());
                 envVars.putAll(creds);
                 if (creds.size() < requiredCredentials.size()) {
                     List<String> missing = requiredCredentials.stream()
@@ -249,7 +253,13 @@ public class DynamicSkill implements Tool {
                             + ". Use credential_manage(action='store') to store them first, "
                             + "or ask the user to provide them with ask_user.");
                 }
-                log.debug("Injected {} credentials for skill '{}'", creds.size(), name);
+                log.info("Skill '{}': all {} credentials injected as env vars", name, creds.size());
+            } else {
+                log.info("Skill '{}': credential injection SKIPPED (requiredCredentials={}, "
+                        + "credentialVault={}, userId={})",
+                        name, requiredCredentials,
+                        credentialVault != null ? "present" : "NULL",
+                        context.userId() != null ? context.userId() : "NULL");
             }
 
             // Run the skill: choose container or direct process execution.
