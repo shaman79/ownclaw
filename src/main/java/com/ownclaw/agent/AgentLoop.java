@@ -582,6 +582,25 @@ public class AgentLoop {
                 continue;
             }
 
+            // === LOCAL LLM DELEGATION (special action) ===
+            if (action.isLocalLlm()) {
+                long startMs = System.currentTimeMillis();
+                String result = executeLocalLlm(action.params(), context);
+                long durationMs = System.currentTimeMillis() - startMs;
+                boolean ok = !result.startsWith("ERROR");
+                AgentObservation obs = ok
+                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
+                        : AgentObservation.failure(action.tool(), result, durationMs);
+                context.trajectory().record(action, obs);
+                context.markProgress();
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "LOCAL_LLM (" + durationMs + "ms)\n"
+                                    + truncate(result, 500));
+                }
+                continue;
+            }
+
             // === CRITIQUE ===
             CriticAgent.Verdict verdict = criticAgent.evaluate(action, context);
             if (!verdict.allowed()) {
@@ -944,6 +963,58 @@ public class AgentLoop {
             }
             default -> "ERROR: Unknown action '" + action + "'. Use: schedule_once, schedule_recurring, list, cancel, pause, resume";
         };
+    }
+
+    /**
+     * Delegate a subtask to the local LLM.
+     * The cloud LLM can invoke this to offload lighter work (summarization, extraction, etc.)
+     * to the local model, saving cloud tokens and enabling LLM cooperation.
+     */
+    private String executeLocalLlm(Map<String, Object> params, AgentContext context) {
+        String prompt = params.get("prompt") != null ? params.get("prompt").toString().strip() : "";
+        String textContext = params.get("context") != null ? params.get("context").toString().strip() : "";
+
+        if (prompt.isBlank()) {
+            return "ERROR: 'prompt' parameter is required — the task or question for the local LLM.";
+        }
+
+        LlmProvider localProvider = llmRouter.local();
+        if (!localProvider.isAvailable()) {
+            return "ERROR: Local LLM (Ollama) is not available. Cannot delegate.";
+        }
+
+        // Build message list for local LLM
+        List<LlmMessage> messages = new ArrayList<>();
+        messages.add(LlmMessage.system(
+                "You are a helpful assistant. Answer concisely and accurately. " +
+                "Focus on the task given. Do not ask follow-up questions."));
+
+        if (!textContext.isBlank()) {
+            messages.add(LlmMessage.user("Context:\n" + textContext + "\n\nTask: " + prompt));
+        } else {
+            messages.add(LlmMessage.user(prompt));
+        }
+
+        try {
+            statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                    "Delegating to local LLM...");
+
+            LlmResponse response = localProvider.chat(messages, LlmRequestConfig.withReadTimeout(120));
+
+            // Track as local tokens
+            context.addLocalTokens(response.totalTokens());
+
+            String content = response.content();
+            if (content == null || content.isBlank()) {
+                return "ERROR: Local LLM returned empty response.";
+            }
+
+            log.info("Local LLM delegation completed: {} tokens", response.totalTokens());
+            return content;
+        } catch (Exception e) {
+            log.error("Local LLM delegation failed", e);
+            return "ERROR: Local LLM call failed: " + e.getMessage();
+        }
     }
 
     private long parseTaskId(Map<String, Object> params) {

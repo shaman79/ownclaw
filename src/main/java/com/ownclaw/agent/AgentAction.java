@@ -35,6 +35,9 @@ public record AgentAction(
     /** Sentinel tool name indicating the agent wants to manage scheduled tasks (schedule/list/cancel/pause/resume). */
     public static final String SCHEDULE_MANAGE = "schedule_manage";
 
+    /** Sentinel tool name indicating the agent wants to delegate a subtask to the local LLM. */
+    public static final String LOCAL_LLM = "local_llm";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
@@ -63,10 +66,15 @@ public record AgentAction(
         return SCHEDULE_MANAGE.equals(tool);
     }
 
+    public boolean isLocalLlm() {
+        return LOCAL_LLM.equals(tool);
+    }
+
     /** Returns true if this action is a built-in special action (not a tool invocation). */
     public boolean isSpecialAction() {
         return isResponse() || isAskUser() || isSkillCreate() || isSkillManage()
-                || isCredentialManage() || isMemoryManage() || isScheduleManage();
+                || isCredentialManage() || isMemoryManage() || isScheduleManage()
+                || isLocalLlm();
     }
 
     public String responseText() {

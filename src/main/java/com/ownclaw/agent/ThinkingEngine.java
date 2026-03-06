@@ -205,6 +205,15 @@ public class ThinkingEngine {
         sb.append("  max_runs (integer, optional for schedule_recurring): Maximum number of executions (null = unlimited)\n");
         sb.append("  task_id (integer, required for cancel/pause/resume): The scheduled task ID\n\n");
 
+        sb.append("local_llm: Delegate a subtask to the local LLM (faster, no cloud cost, good for lighter work).\n");
+        sb.append("  Use this to offload work that does NOT require your full reasoning power.\n");
+        sb.append("  Good for: summarization, text extraction, content analysis, translation, reformatting,\n");
+        sb.append("    data parsing, simple Q&A over provided text, generating descriptions, classification.\n");
+        sb.append("  NOT suitable for: code generation, debugging, multi-step planning, complex reasoning.\n");
+        sb.append("  The local model receives ONLY what you pass — it has no access to conversation history or tools.\n");
+        sb.append("  prompt (string, required): The task or question for the local LLM\n");
+        sb.append("  context (string, optional): Text to process (e.g. document content, data to summarize)\n\n");
+
         sb.append("## Credential Vault\n");
         sb.append("AES-256-GCM encrypted storage. Check with 'list' before asking user for credentials.\n");
         sb.append("Store with 'store' after user provides them — they only need to provide each once.\n");
