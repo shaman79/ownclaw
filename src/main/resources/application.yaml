@@ -34,8 +34,8 @@ ownclaw:
     temperature: 0.4
 
   budgets:
-    daily-cloud-tokens: 500000
-    per-task-cloud-tokens: 10000
+    daily-cloud-tokens: 0
+    per-task-cloud-tokens: 0
     warning-threshold: 0.8
 
   queue:

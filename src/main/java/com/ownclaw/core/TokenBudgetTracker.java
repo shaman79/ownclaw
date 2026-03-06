@@ -78,8 +78,9 @@ public class TokenBudgetTracker {
      * @return true if the user can make the call, false if budget exhausted
      */
     public boolean hasBudget(String userId) {
-        long used = getTodayUsage(userId);
         long limit = config.getBudgets().getDailyCloudTokens();
+        if (limit <= 0) return true; // no limit configured
+        long used = getTodayUsage(userId);
         return used < limit;
     }
 
@@ -90,10 +91,14 @@ public class TokenBudgetTracker {
      * @return true if the call fits within per-task and daily budgets
      */
     public boolean canAfford(String userId, int estimatedTokens) {
-        long dailyUsed = getTodayUsage(userId);
         long dailyLimit = config.getBudgets().getDailyCloudTokens();
         int perTaskLimit = config.getBudgets().getPerTaskCloudTokens();
-        return dailyUsed + estimatedTokens <= dailyLimit && estimatedTokens <= perTaskLimit;
+        if (dailyLimit <= 0 && perTaskLimit <= 0) return true; // no limits configured
+        if (dailyLimit > 0) {
+            long dailyUsed = getTodayUsage(userId);
+            if (dailyUsed + estimatedTokens > dailyLimit) return false;
+        }
+        return perTaskLimit <= 0 || estimatedTokens <= perTaskLimit;
     }
 
     /**
@@ -102,7 +107,10 @@ public class TokenBudgetTracker {
     public String getUsageSummary(String userId) {
         long used = getTodayUsage(userId);
         long limit = config.getBudgets().getDailyCloudTokens();
-        double pct = limit > 0 ? (used * 100.0 / limit) : 0;
+        if (limit <= 0) {
+            return String.format("Today: %,d tokens (no limit)", used);
+        }
+        double pct = (used * 100.0 / limit);
         return String.format("Today: %,d / %,d tokens (%.1f%%)",
                 used, limit, pct);
     }

@@ -194,8 +194,8 @@ public class OwnClawConfig {
     }
 
     public static class Budgets {
-        private long dailyCloudTokens = 500000;
-        private int perTaskCloudTokens = 10000;
+        private long dailyCloudTokens = 0;
+        private int perTaskCloudTokens = 0;
         private double warningThreshold = 0.8;
 
         public long getDailyCloudTokens() { return dailyCloudTokens; }
