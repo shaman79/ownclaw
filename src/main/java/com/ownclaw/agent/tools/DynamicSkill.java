@@ -107,6 +107,7 @@ public class DynamicSkill implements Tool {
     @Override public boolean requiresNetwork() { return requiresNetwork; }
     @Override public boolean hasSideEffects() { return hasSideEffects; }
     @Override public int estimatedMaxDurationSeconds() { return timeoutSec; }
+    @Override public List<String> requiredCredentials() { return requiredCredentials; }
 
     /** The directory containing this skill's files. */
     public Path skillDir() { return skillDir; }

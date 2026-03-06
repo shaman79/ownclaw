@@ -86,18 +86,37 @@ public class ToolRegistry {
      * Generate a manifest for a specific subset of tools.
      */
     public String generateManifest(Collection<Tool> subset) {
+        return generateManifest(subset, List.of());
+    }
+
+    /**
+     * Generate a manifest for a specific subset of tools, annotating credential status.
+     * Tools that require credentials will show which are available (✓) or missing (✗).
+     */
+    public String generateManifest(Collection<Tool> subset, List<String> availableCredentials) {
         return subset.stream()
                 .sorted(Comparator.comparing(Tool::name))
-                .map(this::formatToolEntry)
+                .map(t -> formatToolEntry(t, availableCredentials))
                 .collect(Collectors.joining("\n\n"));
     }
 
-    private String formatToolEntry(Tool tool) {
+    private String formatToolEntry(Tool tool, List<String> availableCredentials) {
         var sb = new StringBuilder();
         sb.append(tool.name()).append(": ").append(tool.description());
 
         if (tool.requiresNetwork()) sb.append(" [network]");
         if (tool.hasSideEffects()) sb.append(" [side-effects]");
+
+        // Annotate credential status for skills that need credentials
+        List<String> creds = tool.requiredCredentials();
+        if (!creds.isEmpty()) {
+            sb.append(" [credentials:");
+            for (String key : creds) {
+                sb.append(" ").append(key);
+                sb.append(availableCredentials.contains(key) ? "\u2713" : "\u2717");
+            }
+            sb.append("]");
+        }
 
         Map<String, ToolParam> schema = tool.inputSchema();
         if (schema != null && !schema.isEmpty()) {

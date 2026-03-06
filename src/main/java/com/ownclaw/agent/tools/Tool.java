@@ -1,5 +1,6 @@
 package com.ownclaw.agent.tools;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -55,4 +56,10 @@ public interface Tool {
      * Estimated maximum duration in seconds. Helps the agent reason about timeouts.
      */
     default int estimatedMaxDurationSeconds() { return 30; }
+
+    /**
+     * Credential keys required by this tool (e.g. IMAP_HOST, IMAP_PASS).
+     * Empty list means no credentials needed.
+     */
+    default List<String> requiredCredentials() { return List.of(); }
 }
