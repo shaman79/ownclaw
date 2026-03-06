@@ -561,6 +561,16 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+
+                // Refresh credential keys after store so subsequent ✓/✗ marks are accurate
+                if (ok && "store".equals(action.params().get("action"))) {
+                    try {
+                        context.setCredentialKeys(credentialVault.listCredentialKeys(context.userId()));
+                    } catch (Exception e) {
+                        log.debug("Failed to refresh credential keys: {}", e.getMessage());
+                    }
+                }
+
                 if (debug) {
                     emitDebug(context.userId(),
                             "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "

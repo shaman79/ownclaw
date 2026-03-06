@@ -185,7 +185,9 @@ public class ThinkingEngine {
         sb.append("  requires_network (boolean, optional): needs internet?\n");
         sb.append("  has_side_effects (boolean, optional): modifies files, sends emails, etc.?\n");
         sb.append("  timeout (integer, optional): max seconds (default 30)\n");
-        sb.append("  credentials (string, optional): comma-separated credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS') — injected as env vars\n");
+        sb.append("  credentials (string, IMPORTANT): comma-separated credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT') — auto-injected as env vars at runtime\n");
+        sb.append("    ALWAYS declare credentials here — NEVER accept credential values as regular tool parameters.\n");
+        sb.append("    Check ✓/✗ marks in Available Tools to see which credentials the user already has stored.\n");
         sb.append("  system_packages (string, optional): space-separated OS packages (apt) needed by the skill (e.g. 'nmap net-tools iputils-ping').\n");
         sb.append("    When specified, the skill runs inside a Docker/Podman container where these packages are auto-installed — no sudo needed.\n");
         sb.append("    Use this for tools like nmap, traceroute, tcpdump, ffmpeg, imagemagick, etc. that are not pip-installable.\n\n");
@@ -222,10 +224,15 @@ public class ThinkingEngine {
         sb.append("  context (string, optional): Text to process (e.g. document content, data to summarize)\n\n");
 
         sb.append("## Credential Vault\n");
-        sb.append("AES-256-GCM encrypted storage. Credentials auto-injected as env vars into skills that declare them.\n");
-        sb.append("When creating skills, declare needed credentials in the 'credentials' parameter.\n");
-        sb.append("Store with 'store' after user provides them — they only need to provide each once.\n");
-        sb.append("Tools above show credential status: ✓ = stored, ✗ = missing. Don't ask the user for credentials marked ✓.\n\n");
+        sb.append("AES-256-GCM encrypted storage. Credential values are AUTO-INJECTED as env vars into skills that declare them.\n");
+        sb.append("CRITICAL credential rules:\n");
+        sb.append("- When creating skills, ALWAYS declare needed credentials in the 'credentials' parameter (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
+        sb.append("  Do NOT add credential values as tool parameters — they are injected automatically from the vault.\n");
+        sb.append("- Tools above show credential status: ✓ = stored, ✗ = missing.\n");
+        sb.append("- If all required credentials are ✓: just run the tool. Values are injected automatically. Do NOT ask the user for them.\n");
+        sb.append("- If a tool with ✓ credentials fails (auth/connection error): the stored VALUE might be wrong.\n");
+        sb.append("  Ask the user ONLY for the specific value that seems wrong, then update with credential_manage(action='store').\n");
+        sb.append("- Only ask the user for credentials showing ✗ (missing).\n\n");
 
         sb.append("## Persistent Memory\n");
         sb.append("Facts survive across conversations and load as 'User Preferences' at task start.\n");
@@ -315,6 +322,10 @@ public class ThinkingEngine {
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
         sb.append("local_llm(prompt, [context]) — delegate lighter work to local LLM\n\n");
+
+        // Credential reminder in compact prompt
+        sb.append("Credentials marked ✓ in tool manifest are auto-injected — NEVER ask the user for them. Only ask for ✗ (missing).\n");
+        sb.append("When creating skills, declare credentials in 'credentials' param — never as tool parameters.\n\n");
 
         // Output format (always needed)
         sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
