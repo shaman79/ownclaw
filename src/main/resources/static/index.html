@@ -984,6 +984,66 @@
             font-size: 13px;
         }
 
+        /*  Loading spinner for session list  */
+        .session-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 32px 16px;
+            color: var(--text-3);
+            font-size: 13px;
+        }
+        .session-loading .mini-spinner {
+            width: 14px; height: 14px;
+            border: 2px solid rgba(255,255,255,.08);
+            border-top-color: var(--accent-hi);
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            flex-shrink: 0;
+        }
+
+        /*  Session item delete animation  */
+        .session-item.deleting {
+            opacity: .4;
+            pointer-events: none;
+            transform: translateX(8px);
+            transition: opacity .25s, transform .25s;
+        }
+        .session-item.fade-out {
+            opacity: 0;
+            max-height: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+            margin-bottom: 0;
+            overflow: hidden;
+            transition: opacity .2s, max-height .3s .05s, padding .3s .05s, margin .3s .05s;
+        }
+
+        /*  Session item renaming state  */
+        .session-item.renaming .session-title {
+            opacity: .5;
+        }
+
+        /*  Messages loading overlay  */
+        .messages-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 48px 16px;
+            color: var(--text-3);
+            font-size: 13px;
+        }
+        .messages-loading .mini-spinner {
+            width: 16px; height: 16px;
+            border: 2px solid rgba(255,255,255,.08);
+            border-top-color: var(--accent-hi);
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            flex-shrink: 0;
+        }
+
         /*  Main chat column  */
         #chat-main {
             flex: 1;
@@ -1253,6 +1313,13 @@
 
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
+        // Show loading spinner in messages area
+        clearMessages();
+        var loader = document.createElement('div');
+        loader.className = 'messages-loading';
+        loader.innerHTML = '<div class="mini-spinner"></div><span>Loading messages...</span>';
+        messagesEl.appendChild(loader);
+
         fetch('/api/chats/' + sessionId + '/messages', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
@@ -1265,7 +1332,10 @@
                 addMsg(type, m.content);
             });
         })
-        .catch(function(e) { console.error('Failed to load messages:', e); });
+        .catch(function(e) {
+            clearMessages();
+            console.error('Failed to load messages:', e);
+        });
     }
 
     function clearMessages() {
@@ -1283,6 +1353,7 @@
         sessions.forEach(function(s) {
             var item = document.createElement('div');
             item.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+            item.setAttribute('data-session-id', s.id);
             var timeStr = formatTime(s.updated_at);
             var msgCount = s.message_count || 0;
             item.innerHTML =
@@ -1329,18 +1400,51 @@
 
     function renameSession(sessionId, newTitle) {
         if (!authToken) return;
+        // Optimistic UI: update title immediately
+        var itemEl = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+        var oldTitle = '';
+        if (itemEl) {
+            var titleEl = itemEl.querySelector('.session-title');
+            if (titleEl) {
+                oldTitle = titleEl.textContent;
+                titleEl.textContent = newTitle;
+            }
+            itemEl.classList.add('renaming');
+        }
         fetch('/api/chats/' + sessionId, {
             method: 'PUT',
             headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
             body: JSON.stringify({ title: newTitle })
         })
-        .then(function() { refreshSessionList(); })
-        .catch(function(e) { console.error('Rename failed:', e); });
+        .then(function() {
+            if (itemEl) itemEl.classList.remove('renaming');
+            refreshSessionList();
+        })
+        .catch(function(e) {
+            console.error('Rename failed:', e);
+            // Revert on failure
+            if (itemEl) {
+                itemEl.classList.remove('renaming');
+                var titleEl = itemEl.querySelector('.session-title');
+                if (titleEl) titleEl.textContent = oldTitle;
+            }
+        });
     }
 
     function deleteSession(sessionId) {
         if (!authToken) return;
         var wasActive = (sessionId === activeSessionId);
+
+        // Optimistic UI: immediately mark the item as deleting, then fade out
+        var itemEl = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+        if (itemEl) {
+            itemEl.classList.add('deleting');
+            setTimeout(function() { itemEl.classList.add('fade-out'); }, 150);
+        }
+        if (wasActive) {
+            clearMessages();
+        }
+
         fetch('/api/chats/' + sessionId, {
             method: 'DELETE',
             headers: { 'Authorization': 'Bearer ' + authToken }
@@ -1352,22 +1456,26 @@
         .then(function(data) {
             // Server returns updated session list + activeSessionId
             renderSessionList(data.sessions || [], data.activeSessionId || '');
-            if (wasActive) {
-                clearMessages();
-                if (data.activeSessionId) {
-                    loadSessionMessages(data.activeSessionId);
-                }
+            if (wasActive && data.activeSessionId) {
+                loadSessionMessages(data.activeSessionId);
             }
         })
         .catch(function(e) {
             console.error('Delete failed:', e);
-            // Refresh sidebar from server to show accurate state
+            // Revert optimistic removal on failure
+            if (itemEl) {
+                itemEl.classList.remove('deleting', 'fade-out');
+            }
             refreshSessionList();
         });
     }
 
     function refreshSessionList() {
         if (!authToken) return Promise.resolve();
+        // Show loading spinner if session list is currently empty (initial load)
+        if (!sessionListEl.querySelector('.session-item')) {
+            sessionListEl.innerHTML = '<div class="session-loading"><div class="mini-spinner"></div><span>Loading chats...</span></div>';
+        }
         return fetch('/api/chats', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
@@ -1375,7 +1483,12 @@
         .then(function(data) {
             renderSessionList(data.sessions || [], data.activeSessionId);
         })
-        .catch(function(e) { console.error('Failed to refresh sessions:', e); });
+        .catch(function(e) {
+            console.error('Failed to refresh sessions:', e);
+            // Clear loading indicator on error
+            var loader = sessionListEl.querySelector('.session-loading');
+            if (loader) loader.remove();
+        });
     }
 
     function formatTime(isoStr) {
