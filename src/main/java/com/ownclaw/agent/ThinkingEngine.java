@@ -222,10 +222,16 @@ public class ThinkingEngine {
         sb.append("  context (string, optional): Text to process (e.g. document content, data to summarize)\n\n");
 
         sb.append("## Credential Vault\n");
-        sb.append("AES-256-GCM encrypted storage. Check with 'list' before asking user for credentials.\n");
+        sb.append("AES-256-GCM encrypted storage. Credentials auto-injected as env vars into skills that declare them.\n");
+        sb.append("When creating skills, declare needed credentials in the 'credentials' parameter.\n");
         sb.append("Store with 'store' after user provides them — they only need to provide each once.\n");
-        sb.append("Credentials auto-injected as env vars into skills that declare them.\n");
-        sb.append("When creating skills, declare needed credentials in the 'credentials' parameter.\n\n");
+        if (!context.credentialKeys().isEmpty()) {
+            sb.append("Stored credentials: ").append(String.join(", ", context.credentialKeys())).append("\n");
+            sb.append("These are ALREADY AVAILABLE — use them directly in skill_create credentials parameter. Do NOT ask the user for them again.\n");
+        } else {
+            sb.append("No credentials stored yet. Ask the user for credentials when needed, then store them.\n");
+        }
+        sb.append("\n");
 
         sb.append("## Persistent Memory\n");
         sb.append("Facts survive across conversations and load as 'User Preferences' at task start.\n");
@@ -305,6 +311,13 @@ public class ThinkingEngine {
             sb.append("No tools yet — use skill_create to build what you need.\n");
         }
         sb.append("\n");
+
+        // Credential vault status (compact — keys only)
+        if (!context.credentialKeys().isEmpty()) {
+            sb.append("## Credentials Available\n");
+            sb.append(String.join(", ", context.credentialKeys())).append("\n");
+            sb.append("Already stored — use directly in skill_create credentials. Do NOT ask user again.\n\n");
+        }
 
         // Compact special actions — parameter names only, one line each
         sb.append("## Special Actions\n");

@@ -159,6 +159,14 @@ public class AgentLoop {
             log.debug("Failed to recall memories for user {}: {}", userId, e.getMessage());
         }
 
+        // Load credential keys so the LLM knows what's in the vault without calling credential_manage list
+        try {
+            List<String> keys = credentialVault.listCredentialKeys(userId);
+            context.setCredentialKeys(keys);
+        } catch (Exception e) {
+            log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
+        }
+
         // Deterministic capability gap detection — if the task requires a known
         // capability (network scanning, media processing, etc.) and no existing
         // skill covers it, inject a specific hint so the LLM doesn't need to

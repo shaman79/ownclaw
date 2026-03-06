@@ -1,6 +1,7 @@
 package com.ownclaw.agent;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -24,6 +25,9 @@ public class AgentContext {
 
     /** Deterministic capability hint from CapabilityResolver (null if no gap detected). */
     private CapabilityResolver.CapabilityHint capabilityHint;
+
+    /** Credential keys available in the vault for this user (loaded once at task start). */
+    private List<String> credentialKeys = List.of();
 
     // Per-task token usage counters
     private int localTokens;
@@ -68,6 +72,11 @@ public class AgentContext {
 
     public CapabilityResolver.CapabilityHint capabilityHint() { return capabilityHint; }
     public void setCapabilityHint(CapabilityResolver.CapabilityHint hint) { this.capabilityHint = hint; }
+
+    // ── Credential keys ──
+
+    public List<String> credentialKeys() { return credentialKeys; }
+    public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }
 
     // ── Token tracking ──
 
