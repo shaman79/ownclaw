@@ -10,13 +10,12 @@ import org.springframework.stereotype.Component;
 /**
  * Routes LLM requests to the appropriate provider based on context.
  *
- * Strategy: cloud-first for user task reasoning.
- * - Use the cloud provider (e.g., OpenAI) by default for reliable
- *   understanding of complex user prompts and multi-step reasoning.
- * - Fall back to the local provider (e.g., Ollama) when:
- *   a) The cloud provider is unavailable
- * - Use local() directly for simple, high-volume operations
- *   (summarization, content analysis, etc.)
+ * Strategy: cloud-first for user intent analysis, local for follow-up steps.
+ * - Step 1 (empty trajectory): Cloud — needs best reasoning for user intent
+ * - Step 2+ (has trajectory): Local — simpler follow-up after tool results
+ *   EXCEPT: if last step failed, escalate back to cloud for recovery reasoning
+ * - Skill code generation always uses cloud (handled separately in AgentLoop)
+ * - local_llm tool provides explicit delegation for subtask offloading
  */
 @Component
 public class LlmRouter {
@@ -39,23 +38,54 @@ public class LlmRouter {
 
     /**
      * Select the best provider for user task reasoning.
-     * Cloud-first: the cloud/mentor LLM understands complex user prompts
-     * far more reliably than the local model.
+     *
+     * <p>Step 1 uses cloud for reliable user intent understanding.
+     * Steps 2+ use local (cheaper, faster) unless the last step failed,
+     * in which case cloud is used for stronger recovery reasoning.
      */
     public LlmProvider selectProvider(AgentContext context) {
-        // Prefer cloud for reliable understanding of user intent
-        if (cloudProvider.isAvailable()) {
-            log.debug("Using cloud provider for task reasoning");
+        boolean hasTrajectory = context.trajectory() != null && !context.trajectory().isEmpty();
+
+        // Step 1: always cloud for intent analysis
+        if (!hasTrajectory) {
+            if (cloudProvider.isAvailable()) {
+                log.debug("Step 1: using cloud provider for user intent analysis");
+                return cloudProvider;
+            }
+            if (localProvider.isAvailable()) {
+                log.warn("Step 1: cloud unavailable, falling back to local");
+                return localProvider;
+            }
+            log.error("No LLM providers available!");
             return cloudProvider;
         }
 
-        // Fall back to local if cloud is unavailable
+        // Step 2+: prefer local, but escalate to cloud on failure recovery
+        var lastTurn = context.trajectory().lastTurn();
+        boolean lastFailed = lastTurn != null && lastTurn.observation() != null
+                && !lastTurn.observation().success();
+
+        if (lastFailed) {
+            if (cloudProvider.isAvailable()) {
+                log.info("Step {}: last step failed — escalating to cloud for recovery",
+                        context.trajectory().size() + 1);
+                return cloudProvider;
+            }
+        }
+
+        // Normal step 2+: use local
         if (localProvider.isAvailable()) {
-            log.warn("Cloud provider unavailable, falling back to local");
+            log.debug("Step {}: using local provider for follow-up reasoning",
+                    context.trajectory().size() + 1);
             return localProvider;
         }
 
-        // Last resort: return cloud and let it fail with a clear error
+        // Local unavailable, fall back to cloud
+        if (cloudProvider.isAvailable()) {
+            log.debug("Step {}: local unavailable, using cloud", context.trajectory().size() + 1);
+            return cloudProvider;
+        }
+
         log.error("No LLM providers available!");
         return cloudProvider;
     }

@@ -48,6 +48,11 @@ public class OllamaProvider implements LlmProvider {
         body.put("model", model);
         body.put("stream", false);
 
+        // JSON mode: force structured JSON output when requested
+        if (reqConfig.jsonMode()) {
+            body.put("format", "json");
+        }
+
         ObjectNode options = body.putObject("options");
         options.put("temperature", temperature);
         if (config.getContextWindow() > 0) {
