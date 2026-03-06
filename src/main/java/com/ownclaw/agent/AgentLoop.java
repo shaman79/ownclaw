@@ -17,6 +17,7 @@ import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import com.ownclaw.llm.*;
@@ -82,7 +83,7 @@ public class AgentLoop {
             CapabilityResolver capabilityResolver,
             TokenBudgetTracker budgetTracker,
             EventLogService eventLog,
-            ScheduledTaskService scheduledTaskService
+            @Lazy ScheduledTaskService scheduledTaskService
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
