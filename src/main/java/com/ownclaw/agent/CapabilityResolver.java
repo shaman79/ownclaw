@@ -239,6 +239,37 @@ public class CapabilityResolver {
                             + "\"timeout\": { \"type\": \"string\", \"description\": \"Timeout in seconds (default: 30)\", \"required\": false } }",
                     60,
                     List.of("shell", "command", "execute", "run", "bash", "terminal")
+            ),
+
+            // ── Email / IMAP ──
+            new CapabilityPattern(
+                    "email_imap",
+                    List.of(
+                            "check.*e?-?mail", "e?-?mail.*check", "read.*e?-?mail", "e?-?mail.*read",
+                            "fetch.*e?-?mail", "e?-?mail.*fetch", "inbox", "\\bimap\\b",
+                            "unread.*mail", "mail.*unread", "new.*mail", "mail.*new",
+                            "e?-?mail.*summ", "summ.*e?-?mail",
+                            "zkontroluj.*mail", "přečti.*mail", "\\bpošt",  // Czech
+                            "nepřečten.*mail", "mail.*nepřečten",
+                            "stáhni.*mail", "mail.*stáhn"
+                    ),
+                    "check_email",
+                    "Connect to an IMAP server and fetch emails. "
+                            + "Uses IMAP4_SSL to connect (host/port/user/pass from env vars IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_PASS). "
+                            + "Searches for emails matching criteria (UNSEEN, FROM, subject, date range). "
+                            + "Returns structured JSON: [{\"uid\": \"...\", \"from\": \"...\", \"to\": \"...\", \"subject\": \"...\", "
+                            + "\"date\": \"...\", \"body_text\": \"...\", \"has_attachments\": true/false}]. "
+                            + "Handles encoding (RFC2047 headers, multipart bodies, charset detection). "
+                            + "Extracts plain text body (prefers text/plain, falls back to text/html with tag stripping). "
+                            + "Limits body to first 2000 chars per email to avoid huge outputs.",
+                    List.of(),
+                    List.of(),
+                    "{ \"mailbox\": { \"type\": \"string\", \"description\": \"IMAP mailbox folder (default: INBOX)\", \"required\": false }, "
+                            + "\"search\": { \"type\": \"string\", \"description\": \"IMAP search criteria (default: UNSEEN). Examples: UNSEEN, ALL, FROM \\\"user@example.com\\\", SUBJECT \\\"keyword\\\"\", \"required\": false }, "
+                            + "\"limit\": { \"type\": \"string\", \"description\": \"Max number of emails to fetch (default: 20)\", \"required\": false } }",
+                    60,
+                    List.of("email", "mail", "imap", "inbox", "unread", "fetch", "check"),
+                    List.of("IMAP_HOST", "IMAP_PORT", "IMAP_USER", "IMAP_PASS")
             )
     );
 
@@ -299,7 +330,8 @@ public class CapabilityResolver {
                     matched.systemPackages,
                     matched.pipPackages,
                     matched.parameters,
-                    matched.timeout
+                    matched.timeout,
+                    matched.credentials
             );
         }
 
@@ -458,8 +490,16 @@ public class CapabilityResolver {
             List<String> systemPackages,
             List<String> pipPackages,
             String parametersJson,
-            int timeout
+            int timeout,
+            List<String> credentials
     ) {
+        /** Convenience constructor without credentials (backward compat). */
+        public CapabilityHint(String category, String suggestedName, String description,
+                              List<String> systemPackages, List<String> pipPackages,
+                              String parametersJson, int timeout) {
+            this(category, suggestedName, description, systemPackages, pipPackages,
+                    parametersJson, timeout, List.of());
+        }
         /**
          * Render this hint as a directive for the LLM system prompt.
          * This is designed to be a clear, unambiguous instruction that even
@@ -482,6 +522,9 @@ public class CapabilityResolver {
             }
             if (!pipPackages.isEmpty()) {
                 sb.append("  requirements: \"").append(String.join("\n", pipPackages)).append("\"\n");
+            }
+            if (!credentials.isEmpty()) {
+                sb.append("  credentials: \"").append(String.join(",", credentials)).append("\"\n");
             }
             sb.append("  timeout: ").append(timeout).append("\n");
             sb.append("```\n\n");
@@ -506,8 +549,16 @@ public class CapabilityResolver {
             List<String> pipPackages,
             String parameters,
             int timeout,
-            List<String> matchKeywords
+            List<String> matchKeywords,
+            List<String> credentials
     ) {
+        /** Convenience constructor without credentials (for existing patterns). */
+        CapabilityPattern(String category, List<String> triggerPatterns, String suggestedName,
+                          String description, List<String> systemPackages, List<String> pipPackages,
+                          String parameters, int timeout, List<String> matchKeywords) {
+            this(category, triggerPatterns, suggestedName, description, systemPackages, pipPackages,
+                    parameters, timeout, matchKeywords, List.of());
+        }
         /** Compiled patterns — lazily cached per instance. */
         boolean matches(String normalizedInput) {
             for (String trigger : triggerPatterns) {

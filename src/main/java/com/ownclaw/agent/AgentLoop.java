@@ -339,6 +339,9 @@ public class AgentLoop {
                 if (!hint.pipPackages().isEmpty()) {
                     skillParams.put("requirements", String.join("\n", hint.pipPackages()));
                 }
+                if (!hint.credentials().isEmpty()) {
+                    skillParams.put("credentials", String.join(",", hint.credentials()));
+                }
 
                 AgentAction action = new AgentAction(
                         AgentAction.SKILL_CREATE, skillParams,

@@ -225,14 +225,24 @@ public class ThinkingEngine {
 
         sb.append("## Credential Vault\n");
         sb.append("AES-256-GCM encrypted storage. Credential values are AUTO-INJECTED as env vars into skills that declare them.\n");
+
+        // Show what's actually in the vault — critical for skill creation decisions
+        List<String> vaultKeys = context.credentialKeys();
+        if (!vaultKeys.isEmpty()) {
+            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n");
+        } else {
+            sb.append("Vault is empty.\n");
+        }
+
         sb.append("CRITICAL credential rules:\n");
-        sb.append("- When creating skills, ALWAYS declare needed credentials in the 'credentials' parameter (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
+        sb.append("- When creating skills, ALWAYS declare needed credentials in the 'credentials' parameter.\n");
+        sb.append("  Match the exact key names from the vault above (e.g. credentials='IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
         sb.append("  Do NOT add credential values as tool parameters — they are injected automatically from the vault.\n");
         sb.append("- Tools above show credential status: ✓ = stored, ✗ = missing.\n");
-        sb.append("- If all required credentials are ✓: just run the tool. Values are injected automatically. Do NOT ask the user for them.\n");
+        sb.append("- If all required credentials are ✓ (or listed in vault above): just CREATE the skill and RUN it. Do NOT ask the user.\n");
         sb.append("- If a tool with ✓ credentials fails (auth/connection error): the stored VALUE might be wrong.\n");
         sb.append("  Ask the user ONLY for the specific value that seems wrong, then update with credential_manage(action='store').\n");
-        sb.append("- Only ask the user for credentials showing ✗ (missing).\n\n");
+        sb.append("- Only ask the user for credentials NOT in the vault above.\n\n");
 
         sb.append("## Persistent Memory\n");
         sb.append("Facts survive across conversations and load as 'User Preferences' at task start.\n");
@@ -324,8 +334,12 @@ public class ThinkingEngine {
         sb.append("local_llm(prompt, [context]) — delegate lighter work to local LLM\n\n");
 
         // Credential reminder in compact prompt
-        sb.append("Credentials marked ✓ in tool manifest are auto-injected — NEVER ask the user for them. Only ask for ✗ (missing).\n");
-        sb.append("When creating skills, declare credentials in 'credentials' param — never as tool parameters.\n\n");
+        List<String> vaultKeys = context.credentialKeys();
+        if (!vaultKeys.isEmpty()) {
+            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n");
+        }
+        sb.append("Credentials marked ✓ (or listed in vault) are auto-injected — NEVER ask the user for them. Only ask for missing ones.\n");
+        sb.append("When creating skills, declare credentials in 'credentials' param (use exact vault key names) — never as tool parameters.\n\n");
 
         // Output format (always needed)
         sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
