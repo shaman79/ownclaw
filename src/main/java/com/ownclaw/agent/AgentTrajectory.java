@@ -89,14 +89,52 @@ public class AgentTrajectory {
 
     /**
      * Build a textual representation of the trajectory for LLM context.
-     * No truncation — local models have no token cost, so the agent sees everything.
+     * <p>
+     * Applies smart compression to reduce token usage on cloud LLM:
+     * <ul>
+     *   <li>Last 2 turns: full output (LLM needs recent context for next decision)</li>
+     *   <li>Older turns: output truncated to {@code maxOlderOutputChars} chars</li>
+     *   <li>Consecutive _thinking failures: collapsed into a single summary line</li>
+     *   <li>Reasoning on older turns: truncated to 200 chars</li>
+     * </ul>
      */
     public String toPromptSummary() {
+        return toPromptSummary(500);
+    }
+
+    /**
+     * Configurable version for testing/tuning the truncation threshold.
+     */
+    public String toPromptSummary(int maxOlderOutputChars) {
         if (turns.isEmpty()) return "";
 
         var sb = new StringBuilder();
+        int fullDetailFrom = Math.max(0, turns.size() - 2); // last 2 turns get full output
+
+        // Collapse consecutive _thinking failures into a count
+        int thinkingFailStreak = 0;
+
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
+            boolean isThinkingFail = !turn.observation().success()
+                    && "_thinking".equals(turn.observation().tool());
+
+            // Collapse _thinking failures
+            if (isThinkingFail && i < fullDetailFrom) {
+                thinkingFailStreak++;
+                continue;
+            }
+
+            // Flush any accumulated _thinking failures before this step
+            if (thinkingFailStreak > 0) {
+                sb.append("[Steps ").append(i - thinkingFailStreak + 1).append("-").append(i)
+                        .append("] ").append(thinkingFailStreak)
+                        .append(" thinking failures (JSON parse errors) — skipped\n\n");
+                thinkingFailStreak = 0;
+            }
+
+            boolean isFull = i >= fullDetailFrom;
+
             sb.append("[Step ").append(i + 1).append("] ");
             sb.append("Tool: ").append(turn.action().tool());
             sb.append(" | Status: ").append(turn.observation().success() ? "OK" : "FAILED");
@@ -104,14 +142,33 @@ public class AgentTrajectory {
 
             String reasoning = turn.action().reasoning();
             if (reasoning != null && !reasoning.isBlank()) {
-                sb.append("\nReasoning: ").append(reasoning);
+                if (isFull || reasoning.length() <= 200) {
+                    sb.append("\nReasoning: ").append(reasoning);
+                } else {
+                    sb.append("\nReasoning: ").append(reasoning, 0, 200).append("...");
+                }
             }
 
             String output = turn.observation().output();
             if (output != null && !output.isBlank()) {
-                sb.append("\nOutput: ").append(output);
+                if (isFull) {
+                    sb.append("\nOutput: ").append(output);
+                } else if (output.length() <= maxOlderOutputChars) {
+                    sb.append("\nOutput: ").append(output);
+                } else {
+                    sb.append("\nOutput (truncated): ").append(output, 0, maxOlderOutputChars)
+                            .append("... [").append(output.length()).append(" chars total]");
+                }
             }
             sb.append("\n\n");
+        }
+
+        // Flush trailing _thinking failures
+        if (thinkingFailStreak > 0) {
+            int from = turns.size() - thinkingFailStreak + 1;
+            sb.append("[Steps ").append(from).append("-").append(turns.size())
+                    .append("] ").append(thinkingFailStreak)
+                    .append(" thinking failures (JSON parse errors)\n\n");
         }
 
         return sb.toString();
