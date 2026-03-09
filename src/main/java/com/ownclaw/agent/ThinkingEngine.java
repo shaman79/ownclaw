@@ -26,10 +26,18 @@ import java.util.*;
 public class ThinkingEngine {
 
     private static final Logger log = LoggerFactory.getLogger(ThinkingEngine.class);
-    // Lenient mapper: allows backslash-escaped single quotes (\') and other non-standard
-    // escape sequences that LLMs sometimes produce when embedding code in JSON strings.
+    // Lenient mapper: tolerates common LLM JSON quirks.
+    // - ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: \' and other non-standard escapes
+    // - ALLOW_UNQUOTED_FIELD_NAMES: {tool: "x"} instead of {"tool": "x"}
+    // - ALLOW_SINGLE_QUOTES: {'tool': 'x'} instead of {"tool": "x"}
+    // - ALLOW_TRAILING_COMMA: {"x": 1,} trailing commas in objects/arrays
+    // These features are CRITICAL for the local LLM (qwen2.5:14b) which frequently
+    // produces non-standard JSON.
     private static final ObjectMapper mapper = JsonMapper.builder()
             .enable(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER)
+            .enable(JsonReadFeature.ALLOW_UNQUOTED_FIELD_NAMES)
+            .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
+            .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
             .build();
 
     private final ToolRegistry toolRegistry;

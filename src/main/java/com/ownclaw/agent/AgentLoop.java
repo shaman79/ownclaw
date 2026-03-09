@@ -400,6 +400,30 @@ public class AgentLoop {
             context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
 
+            // SKILL-CREATE CLOUD GUARD: if a local LLM decided to create a skill,
+            // re-invoke with cloud for reliable structured JSON params.
+            // The local model (qwen2.5:14b) can't reliably produce the complex
+            // nested JSON required for skill_create (parameters, credentials, etc.).
+            if (action.isSkillCreate() && "ollama".equals(provider.name())) {
+                log.info("Task {} step {}: local LLM chose skill_create — re-invoking with cloud",
+                        context.taskId(), step + 1);
+                LlmProvider cloudProvider = llmRouter.cloud();
+                if (cloudProvider.isAvailable()) {
+                    // Track local tokens for the discarded attempt
+                    context.addLocalTokens(thinkResult.totalTokens());
+                    // Re-think with cloud
+                    thinkHeartbeat = startLlmHeartbeat(context.userId(),
+                            "Re-thinking with cloud (step " + (step + 1) + ")");
+                    try {
+                        thinkResult = thinkingEngine.decideNextActionFull(context, cloudProvider);
+                    } finally {
+                        stopHeartbeat(thinkHeartbeat);
+                    }
+                    action = thinkResult.action();
+                    provider = cloudProvider; // update provider for token tracking below
+                }
+            }
+
             // Track token usage per provider
             if ("ollama".equals(provider.name())) {
                 context.addLocalTokens(thinkResult.totalTokens());
@@ -417,7 +441,7 @@ public class AgentLoop {
                 emitDebugPrompt(context.userId(), thinkResult, step + 1);
             }
 
-            log.info("Task {} step {}: tool={} reasoning={}",
+            log.info("Task {} step {}: tool={} reasoning={}", 
                     context.taskId(), step + 1, action.tool(),
                     truncate(action.reasoning(), 100));
 
@@ -467,7 +491,6 @@ public class AgentLoop {
                 // Generate skill code exclusively with cloud LLM — never use local model for code gen
                 Map<String, Object> enhancedParams = generateSkillCodeWithCloud(action.params(), context);
                 if (enhancedParams == null) {
-                    long durationMs = System.currentTimeMillis() - System.currentTimeMillis();
                     String errMsg = "ERROR: Cloud LLM unavailable — cannot generate skill code. " +
                             "Skill creation requires the cloud provider.";
                     context.trajectory().record(action, AgentObservation.failure(action.tool(), errMsg, 0));

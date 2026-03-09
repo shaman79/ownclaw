@@ -1,7 +1,9 @@
 package com.ownclaw.agent;
 
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
@@ -39,7 +41,13 @@ import java.util.stream.Stream;
 public class SkillManager {
 
     private static final Logger log = LoggerFactory.getLogger(SkillManager.class);
-    private static final ObjectMapper jsonMapper = new ObjectMapper();
+    // Lenient mapper for parsing parameters JSON from LLM output.
+    // Tolerates unquoted keys, single quotes, trailing commas — common LLM quirks.
+    private static final ObjectMapper jsonMapper = JsonMapper.builder()
+            .enable(JsonReadFeature.ALLOW_UNQUOTED_FIELD_NAMES)
+            .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
+            .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
+            .build();
     private static final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 
     private final DynamicSkillRegistry dynamicSkillRegistry;
@@ -76,8 +84,6 @@ public class SkillManager {
         String name = str(params, "name");
         String description = str(params, "description");
         String code = str(params, "code");
-        String parametersJson = str(params, "parameters");
-
         // --- Validate ---
 
         if (name == null || !name.matches("[a-z][a-z0-9_]*")) {
@@ -87,11 +93,19 @@ public class SkillManager {
         if (description == null || description.isBlank()) return "ERROR: Description is required.";
         if (code == null || code.isBlank()) return "ERROR: Code is required.";
 
+        // Adaptively normalize parameters: LLMs produce this field as:
+        //   a) JSON string: "{\"url\": {\"type\": \"string\"}}"  (correct)
+        //   b) Map object: {url={type=string}} (common from local LLM)
+        //   c) List/Array: [{name: "url", type: "string"}] (rare but happens)
+        //   d) null/missing (error)
         Map<String, Object> parametersDef;
         try {
-            parametersDef = jsonMapper.readValue(parametersJson, new TypeReference<>() {});
+            parametersDef = normalizeParameters(params.get("parameters"));
         } catch (Exception e) {
             return "ERROR: Invalid parameters JSON: " + e.getMessage();
+        }
+        if (parametersDef == null) {
+            return "ERROR: parameters field is required.";
         }
 
         String syntaxError = checkPythonSyntax(code);
@@ -358,6 +372,58 @@ public class SkillManager {
     private String str(Map<String, Object> m, String key) {
         Object v = m.get(key);
         return v != null ? v.toString() : null;
+    }
+
+    /**
+     * Normalize the parameters field from LLM output into a proper Map.
+     * <p>Handles multiple formats that LLMs produce:
+     * <ul>
+     *   <li>String: parse as JSON (the intended format)</li>
+     *   <li>Map: already deserialized by Jackson (common when local LLM produces nested object)</li>
+     *   <li>List: convert [{name: "x", type: "string"}] → {"x": {type: "string"}}</li>
+     *   <li>null: returns null</li>
+     * </ul>
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> normalizeParameters(Object raw) throws Exception {
+        if (raw == null) return null;
+
+        // Already a Map (Jackson deserialized it from nested JSON object)
+        if (raw instanceof Map) {
+            return (Map<String, Object>) raw;
+        }
+
+        // List/Array format: [{"name": "url", "type": "string", ...}, ...]
+        // Convert to Map format: {"url": {"type": "string", ...}}
+        if (raw instanceof List<?> list) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> entry) {
+                    String paramName = entry.get("name") != null ? entry.get("name").toString() : null;
+                    if (paramName != null) {
+                        Map<String, Object> paramDef = new LinkedHashMap<>((Map<String, Object>) entry);
+                        paramDef.remove("name");
+                        result.put(paramName, paramDef);
+                    }
+                }
+            }
+            return result.isEmpty() ? null : result;
+        }
+
+        // String: parse as JSON with lenient mapper
+        String jsonStr = raw.toString();
+        if (jsonStr.isBlank()) return null;
+
+        // Handle Java Map.toString() format: {type=string, description=...}
+        // This happens when str() calls toString() on a Map object
+        if (jsonStr.contains("=") && !jsonStr.contains(":") && !jsonStr.contains("\"")) {
+            // Convert {key=value, ...} to {"key": "value", ...}
+            jsonStr = jsonStr.replaceAll("(\\w+)=", "\"$1\":");
+            // Wrap unquoted values
+            jsonStr = jsonStr.replaceAll(":\\s*([^,{}\"\\[\\]]+)", ": \"$1\"");
+        }
+
+        return jsonMapper.readValue(jsonStr, new TypeReference<>() {});
     }
 
     private int toInt(Object value, int defaultValue) {
