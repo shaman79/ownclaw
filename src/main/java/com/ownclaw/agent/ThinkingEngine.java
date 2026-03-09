@@ -495,6 +495,30 @@ public class ThinkingEngine {
                 if (message == null || message.isBlank()) message = getStringField(parsed, "response");
                 if (message == null || message.isBlank()) message = getStringField(parsed, "content");
                 if (message == null || message.isBlank()) message = getStringField(parsed, "text");
+
+                // Handle "status report" pattern: {"ok": false, "error": "...", "next_step": "..."}
+                // The LLM is producing diagnostic JSON instead of a tool call — still useful content
+                if (message == null || message.isBlank()) {
+                    String error = getStringField(parsed, "error");
+                    String reason = getStringField(parsed, "reason");
+                    String nextStep = getStringField(parsed, "next_step");
+                    Object errors = parsed.get("errors");
+                    StringBuilder statusReport = new StringBuilder();
+                    if (error != null && !error.isBlank()) statusReport.append(error);
+                    if (reason != null && !reason.isBlank()) statusReport.append(reason);
+                    if (errors instanceof List<?> errList && !errList.isEmpty()) {
+                        statusReport.append(errList.stream()
+                                .map(Object::toString)
+                                .collect(java.util.stream.Collectors.joining("; ")));
+                    }
+                    if (nextStep != null && !nextStep.isBlank()) {
+                        statusReport.append("\n Next step: ").append(nextStep);
+                    }
+                    if (!statusReport.isEmpty()) {
+                        message = statusReport.toString();
+                    }
+                }
+
                 if (message != null && !message.isBlank()) {
                     return new AgentAction(AgentAction.RESPOND, Map.of("message", message),
                             reasoning != null ? reasoning : "Direct response");

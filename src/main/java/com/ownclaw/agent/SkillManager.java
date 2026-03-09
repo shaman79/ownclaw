@@ -338,8 +338,11 @@ public class SkillManager {
         yaml.put("has_side_effects", hasSideEffects);
         yaml.put("timeout", timeout);
         if (credentials != null && !credentials.isBlank()) {
-            List<String> credList = Arrays.stream(credentials.split(","))
+            // Strip brackets (LLM may send list-stringified form like "[IMAP_HOST, IMAP_PORT]")
+            String cleanedCreds = credentials.replaceAll("[\\[\\]]", "");
+            List<String> credList = Arrays.stream(cleanedCreds.split(","))
                     .map(String::trim)
+                    .map(String::toUpperCase)
                     .filter(s -> !s.isBlank())
                     .toList();
             if (!credList.isEmpty()) {

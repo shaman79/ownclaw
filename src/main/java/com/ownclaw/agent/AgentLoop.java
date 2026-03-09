@@ -464,10 +464,10 @@ public class AgentLoop {
                     if (consecutiveFallbacks >= 3) {
                         log.error("Task {} step {}: {} consecutive LLM failures — aborting task",
                                 context.taskId(), step + 1, consecutiveFallbacks);
+                        String progress = summarizeProgress(context);
                         return AgentResult.completed(
-                                "I'm having trouble processing this request — the AI model isn't able to " +
-                                "produce valid tool calls after " + consecutiveFallbacks + " consecutive attempts. " +
-                                "Please try rephrasing or simplifying your request.",
+                                "I had trouble completing this request (" + consecutiveFallbacks +
+                                " consecutive reasoning failures). Here's what happened:\n\n" + progress,
                                 context.trajectory(),
                                 context.elapsedMs()
                         );
@@ -477,10 +477,10 @@ public class AgentLoop {
                     if (totalThinkingFailures >= 5) {
                         log.error("Task {} step {}: {} total thinking failures — aborting task",
                                 context.taskId(), step + 1, totalThinkingFailures);
+                        String progress = summarizeProgress(context);
                         return AgentResult.completed(
                                 "I've had " + totalThinkingFailures + " reasoning failures during this task. " +
-                                "Something about this request is causing persistent issues. " +
-                                "Please try a different approach or break it into smaller requests.",
+                                "Here's what happened:\n\n" + progress,
                                 context.trajectory(),
                                 context.elapsedMs()
                         );

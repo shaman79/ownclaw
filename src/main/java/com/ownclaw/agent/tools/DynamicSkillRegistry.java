@@ -133,14 +133,14 @@ public class DynamicSkillRegistry {
         Object credObj = yaml.get("credentials");
         if (credObj == null) return List.of();
         if (credObj instanceof List<?> list) {
-            return list.stream()
-                    .map(Object::toString)
-                    .map(String::trim)
-                    .map(String::toUpperCase)
-                    .filter(s -> !s.isBlank())
-                    .toList();
+            // Flatten nested lists and strip brackets from stringified list elements
+            List<String> result = new ArrayList<>();
+            flattenCredentialList(list, result);
+            return result;
         }
         if (credObj instanceof String str && !str.isBlank()) {
+            // Strip brackets in case of stringified list format: "[KEY1, KEY2]"
+            str = str.replaceAll("[\\[\\]]", "");
             return Arrays.stream(str.split(","))
                     .map(String::trim)
                     .map(String::toUpperCase)
@@ -148,6 +148,20 @@ public class DynamicSkillRegistry {
                     .toList();
         }
         return List.of();
+    }
+
+    /** Recursively flatten nested lists of credential keys into a flat list of clean strings. */
+    private void flattenCredentialList(List<?> list, List<String> result) {
+        for (Object item : list) {
+            if (item instanceof List<?> nested) {
+                flattenCredentialList(nested, result);
+            } else if (item != null) {
+                String key = item.toString().replaceAll("[\\[\\]]", "").trim().toUpperCase();
+                if (!key.isBlank()) {
+                    result.add(key);
+                }
+            }
+        }
     }
 
     /**
