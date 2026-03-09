@@ -274,6 +274,8 @@ public class AgentLoop {
     private AgentResult runLoop(AgentContext context) {
         int maxSteps = config.getTasks().getMaxPlanSteps();
         long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
+        int consecutiveFallbacks = 0; // Track consecutive LLM failures to cap retries
+        int totalThinkingFailures = 0; // Track total thinking failures across entire task
 
         for (int step = 0; step < maxSteps; step++) {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
@@ -454,18 +456,67 @@ public class AgentLoop {
                         || reasoning.startsWith("Failed to parse structured output")
                         || reasoning.startsWith("LLM call failed");
 
-                if (isFallback && step < maxSteps - 1) {
-                    log.warn("Task {} step {}: LLM produced fallback response ('{}'), retrying...",
-                            context.taskId(), step + 1, truncate(action.responseText(), 80));
-                    // Record this as a failed thinking step so the LLM sees it in trajectory
-                    AgentObservation failedThink = AgentObservation.failure(
-                            "_thinking",
-                            "LLM failed to produce a valid action. The model may be confused by the current context. " +
-                            "Try a different approach or tool.",
-                            0);
-                    context.trajectory().record(action, failedThink);
-                    context.markProgress(); // LLM produced output (even if malformed)
-                    continue;
+                if (isFallback) {
+                    consecutiveFallbacks++;
+                    totalThinkingFailures++;
+
+                    // After 3 consecutive failures, stop burning tokens and give up
+                    if (consecutiveFallbacks >= 3) {
+                        log.error("Task {} step {}: {} consecutive LLM failures — aborting task",
+                                context.taskId(), step + 1, consecutiveFallbacks);
+                        return AgentResult.completed(
+                                "I'm having trouble processing this request — the AI model isn't able to " +
+                                "produce valid tool calls after " + consecutiveFallbacks + " consecutive attempts. " +
+                                "Please try rephrasing or simplifying your request.",
+                                context.trajectory(),
+                                context.elapsedMs()
+                        );
+                    }
+
+                    // After 5 total thinking failures in a task (even non-consecutive), abort
+                    if (totalThinkingFailures >= 5) {
+                        log.error("Task {} step {}: {} total thinking failures — aborting task",
+                                context.taskId(), step + 1, totalThinkingFailures);
+                        return AgentResult.completed(
+                                "I've had " + totalThinkingFailures + " reasoning failures during this task. " +
+                                "Something about this request is causing persistent issues. " +
+                                "Please try a different approach or break it into smaller requests.",
+                                context.trajectory(),
+                                context.elapsedMs()
+                        );
+                    }
+
+                    if (step < maxSteps - 1) {
+                        log.warn("Task {} step {}: LLM produced fallback response ('{}'), retrying... (consec={}/3, total={}/5)",
+                                context.taskId(), step + 1, truncate(action.responseText(), 80),
+                                consecutiveFallbacks, totalThinkingFailures);
+
+                        // Build feedback that shows the LLM WHAT it did wrong
+                        String rawOutput = thinkResult.rawLlmOutput();
+                        StringBuilder feedback = new StringBuilder();
+                        feedback.append("YOUR OUTPUT COULD NOT BE PARSED. Here is what you produced:\n");
+                        feedback.append(truncate(rawOutput, 500));
+                        feedback.append("\n\nThis was NOT valid. You MUST respond with a JSON object containing ");
+                        feedback.append("exactly these fields:\n");
+                        feedback.append("{\n  \"tool\": \"<tool_name>\",\n  \"params\": {<param_key>: <param_value>},");
+                        feedback.append("\n  \"reasoning\": \"<why>\"\n}\n");
+                        feedback.append("Or to respond to the user:\n");
+                        feedback.append("{\n  \"tool\": \"respond\",\n  \"params\": {\"message\": \"<your response>\"},");
+                        feedback.append("\n  \"reasoning\": \"<why>\"\n}");
+
+                        if (consecutiveFallbacks >= 2) {
+                            feedback.append("\n\nWARNING: This is your ").append(consecutiveFallbacks)
+                                    .append("th consecutive failure. ONE more and the task will be aborted.");
+                        }
+
+                        AgentObservation failedThink = AgentObservation.failure(
+                                "_thinking", feedback.toString(), 0);
+                        context.trajectory().record(action, failedThink);
+                        context.markProgress(); // LLM produced output (even if malformed)
+                        continue;
+                    }
+                } else {
+                    consecutiveFallbacks = 0; // Reset on any successful action
                 }
 
                 return AgentResult.completed(

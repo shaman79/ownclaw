@@ -460,22 +460,49 @@ public class ThinkingEngine {
         try {
             Map<String, Object> parsed = mapper.readValue(cleaned, new TypeReference<>() {});
 
+            // Try multiple field names that LLMs commonly use for tool selection
             String tool = getStringField(parsed, "tool");
+            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "action");
+            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "name");
+            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "function");
+            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "command");
+
+            // Try nested structures: {"action": {"tool": "..."}}
+            if ((tool == null || tool.isBlank()) && parsed.get("action") instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> actionMap = (Map<String, Object>) parsed.get("action");
+                tool = getStringField(actionMap, "tool");
+                if (tool == null || tool.isBlank()) tool = getStringField(actionMap, "name");
+            }
+
             String reasoning = getStringField(parsed, "reasoning");
+            if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thought");
+            if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thoughts");
+            if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thinking");
 
             @SuppressWarnings("unchecked")
             Map<String, Object> params = parsed.containsKey("params") && parsed.get("params") instanceof Map
                     ? (Map<String, Object>) parsed.get("params")
-                    : Map.of();
+                    : parsed.containsKey("parameters") && parsed.get("parameters") instanceof Map
+                        ? (Map<String, Object>) parsed.get("parameters")
+                        : parsed.containsKey("arguments") && parsed.get("arguments") instanceof Map
+                            ? (Map<String, Object>) parsed.get("arguments")
+                            : Map.of();
 
             if (tool == null || tool.isBlank()) {
                 // If there's a "message" field at root level, treat as response
                 String message = getStringField(parsed, "message");
+                if (message == null || message.isBlank()) message = getStringField(parsed, "response");
+                if (message == null || message.isBlank()) message = getStringField(parsed, "content");
+                if (message == null || message.isBlank()) message = getStringField(parsed, "text");
                 if (message != null && !message.isBlank()) {
                     return new AgentAction(AgentAction.RESPOND, Map.of("message", message),
                             reasoning != null ? reasoning : "Direct response");
                 }
-                log.warn("ThinkingEngine: no 'tool' field in parsed JSON");
+                log.warn("ThinkingEngine: no 'tool' field in parsed JSON. Keys present: {}",
+                        parsed.keySet());
+                log.warn("ThinkingEngine: raw parsed JSON: {}",
+                        truncate(cleaned, 500));
                 return fallbackResponse("I had trouble deciding what to do. Let me try again.");
             }
 
