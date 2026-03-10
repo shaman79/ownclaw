@@ -1550,6 +1550,179 @@
             background: var(--bg-input);
             color: var(--text-1);
         }
+
+        /*  Settings view  */
+        .settings-view {
+            max-width: 640px;
+            margin: 0 auto;
+            padding: 0 8px;
+        }
+        .settings-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .settings-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0;
+        }
+        .settings-section {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+        .settings-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-2);
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .settings-section-title .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .settings-section-title .status-dot.ok { background: var(--green) }
+        .settings-section-title .status-dot.warn { background: #fbbf24 }
+        .settings-section-title .status-dot.off { background: var(--text-3) }
+        .settings-field {
+            margin-bottom: 14px;
+        }
+        .settings-field:last-child { margin-bottom: 0 }
+        .settings-field label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-2);
+            margin-bottom: 5px;
+        }
+        .settings-field input,
+        .settings-field select {
+            width: 100%;
+            padding: 9px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 13px;
+            font-family: var(--font);
+            outline: none;
+            transition: border-color .15s, box-shadow .15s;
+        }
+        .settings-field select {
+            cursor: pointer;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239ca3af' viewBox='0 0 24 24'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            padding-right: 30px;
+        }
+        .settings-field input:focus,
+        .settings-field select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .settings-field .field-hint {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 4px;
+        }
+        .settings-field .field-status {
+            font-size: 11px;
+            margin-top: 4px;
+        }
+        .settings-field .field-status.ok { color: var(--green) }
+        .settings-field .field-status.warn { color: #fbbf24 }
+        .settings-field .field-status.err { color: var(--red) }
+        .settings-key-input-wrap {
+            position: relative;
+        }
+        .settings-key-input-wrap input {
+            padding-right: 70px;
+        }
+        .settings-key-change-btn {
+            position: absolute;
+            right: 6px;
+            top: 50%;
+            transform: translateY(-50%);
+            padding: 4px 10px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-3);
+            font-size: 11px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: color .15s, border-color .15s;
+        }
+        .settings-key-change-btn:hover {
+            color: var(--text-1);
+            border-color: var(--border-mid);
+        }
+        .settings-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        .settings-save-btn {
+            padding: 9px 24px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 600;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .15s, opacity .15s;
+        }
+        .settings-save-btn:hover { background: var(--accent-hi) }
+        .settings-save-btn:disabled { opacity: .5; cursor: not-allowed }
+        .settings-toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            background: var(--green-dim);
+            color: var(--green);
+            border: 1px solid rgba(52,211,153,.3);
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 500;
+            z-index: 400;
+            animation: fadeIn .15s;
+        }
+        .settings-toast.error {
+            background: var(--red-dim);
+            color: var(--red);
+            border-color: rgba(248,113,113,.3);
+        }
+
+        /*  Pinned settings item  */
+        .session-item.pinned-settings {
+            border: 1px solid rgba(129,140,248,.15) !important;
+            background: rgba(129,140,248,.06);
+            margin-bottom: 4px;
+        }
+        .session-item.pinned-settings:hover { background: rgba(129,140,248,.1) }
+        .session-item.pinned-settings.active {
+            background: rgba(129,140,248,.14);
+            border-color: rgba(129,140,248,.3) !important;
+        }
+        .session-item.pinned-settings .session-title { padding-right: 0 }
     </style>
 </head>
 <body>
@@ -1852,6 +2025,19 @@
         });
         sessionListEl.appendChild(pinned);
 
+        // ── Pinned "Settings" item ──
+        var pinnedSettings = document.createElement('div');
+        pinnedSettings.className = 'session-item pinned-settings' + (currentView === 'settings' ? ' active' : '');
+        pinnedSettings.setAttribute('data-session-id', '__settings__');
+        pinnedSettings.innerHTML =
+            '<div class="session-title"><span class="pinned-icon">\u2699\uFE0F</span>Settings</div>' +
+            '<div class="session-preview">LLM providers, API keys & models</div>';
+        pinnedSettings.addEventListener('click', function() {
+            switchToSettings();
+            sidebar.classList.remove('mobile-open');
+        });
+        sessionListEl.appendChild(pinnedSettings);
+
         if (!sessions || sessions.length === 0) {
             var empty = document.createElement('div');
             empty.className = 'search-empty';
@@ -1909,10 +2095,13 @@
 
     function updateSidebarActive(sessionId) {
         sessionListEl.querySelectorAll('.session-item').forEach(function(el) {
-            if (el.getAttribute('data-session-id') === '__scheduled_tasks__') {
+            var sid = el.getAttribute('data-session-id');
+            if (sid === '__scheduled_tasks__') {
                 el.classList.toggle('active', currentView === 'tasks');
+            } else if (sid === '__settings__') {
+                el.classList.toggle('active', currentView === 'settings');
             } else {
-                el.classList.toggle('active', currentView === 'chat' && el.getAttribute('data-session-id') === sessionId);
+                el.classList.toggle('active', currentView === 'chat' && sid === sessionId);
             }
         });
     }
@@ -2371,6 +2560,261 @@
         var hr = Math.floor(min / 60);
         var m = min % 60;
         return hr + 'h ' + m + 'm';
+    }
+
+    // ────────── Settings View ──────────
+    function switchToSettings() {
+        currentView = 'settings';
+        clearMessages();
+        document.getElementById('input-area').style.display = 'none';
+        document.getElementById('activity-wrap').style.display = 'none';
+        updateSidebarActive(null);
+        loadSettings();
+    }
+
+    function loadSettings() {
+        if (!authToken) return;
+        var loader = document.createElement('div');
+        loader.className = 'task-history-loading';
+        loader.innerHTML = '<div class="mini-spinner"></div><span>Loading settings...</span>';
+        messagesEl.appendChild(loader);
+
+        fetch('/api/settings', {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            clearMessages();
+            renderSettings(data);
+        })
+        .catch(function(e) {
+            clearMessages();
+            console.error('Failed to load settings:', e);
+            addMsg('system', 'Failed to load settings: ' + e.message);
+        });
+    }
+
+    function renderSettings(data) {
+        var view = document.createElement('div');
+        view.className = 'settings-view';
+
+        // Header
+        var header = document.createElement('div');
+        header.className = 'settings-header';
+        header.innerHTML = '<h2>\u2699\uFE0F Settings</h2>';
+        view.appendChild(header);
+
+        // Determine statuses
+        var provider = data.cloud_provider || 'openai';
+        var openaiKeySet = !!(data.openai_api_key && data.openai_api_key !== '(not set)');
+        var anthropicKeySet = !!(data.anthropic_api_key && data.anthropic_api_key !== '(not set)');
+
+        // ── Cloud Provider section ──
+        var cloudSection = document.createElement('div');
+        cloudSection.className = 'settings-section';
+        var cloudDotClass = (provider === 'openai' && openaiKeySet) || (provider === 'anthropic' && anthropicKeySet) ? 'ok' : 'warn';
+        cloudSection.innerHTML =
+            '<div class="settings-section-title">' +
+                '<span class="status-dot ' + cloudDotClass + '"></span>' +
+                'Cloud LLM Provider' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>Active Provider</label>' +
+                '<select id="settings-provider">' +
+                    '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
+                    '<option value="anthropic"' + (provider === 'anthropic' ? ' selected' : '') + '>Anthropic (Claude)</option>' +
+                '</select>' +
+            '</div>';
+        view.appendChild(cloudSection);
+
+        // ── OpenAI section ──
+        var openaiSection = document.createElement('div');
+        openaiSection.className = 'settings-section';
+        var openaiDot = openaiKeySet ? 'ok' : 'off';
+        openaiSection.innerHTML =
+            '<div class="settings-section-title">' +
+                '<span class="status-dot ' + openaiDot + '"></span>' +
+                'OpenAI' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>API Key</label>' +
+                '<div class="settings-key-input-wrap">' +
+                    '<input type="text" id="settings-openai-key" value="' + escapeHtml(data.openai_api_key || '') + '" placeholder="sk-..." readonly>' +
+                    '<button class="settings-key-change-btn" id="settings-openai-key-btn">Change</button>' +
+                '</div>' +
+                (openaiKeySet ? '<div class="field-status ok">\u2713 Key configured</div>' : '<div class="field-status warn">Not set</div>') +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>Model</label>' +
+                '<input type="text" id="settings-openai-model" value="' + escapeHtml(data.openai_model || '') + '" placeholder="gpt-4o">' +
+                '<div class="field-hint">e.g. gpt-4o, gpt-4o-mini, o3-mini</div>' +
+            '</div>';
+        view.appendChild(openaiSection);
+
+        // ── Anthropic section ──
+        var anthropicSection = document.createElement('div');
+        anthropicSection.className = 'settings-section';
+        var anthropicDot = anthropicKeySet ? 'ok' : 'off';
+        anthropicSection.innerHTML =
+            '<div class="settings-section-title">' +
+                '<span class="status-dot ' + anthropicDot + '"></span>' +
+                'Anthropic (Claude)' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>API Key</label>' +
+                '<div class="settings-key-input-wrap">' +
+                    '<input type="text" id="settings-anthropic-key" value="' + escapeHtml(data.anthropic_api_key || '') + '" placeholder="sk-ant-..." readonly>' +
+                    '<button class="settings-key-change-btn" id="settings-anthropic-key-btn">Change</button>' +
+                '</div>' +
+                (anthropicKeySet ? '<div class="field-status ok">\u2713 Key configured</div>' : '<div class="field-status warn">Not set</div>') +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>Model</label>' +
+                '<input type="text" id="settings-anthropic-model" value="' + escapeHtml(data.anthropic_model || '') + '" placeholder="claude-sonnet-4-20250514">' +
+                '<div class="field-hint">e.g. claude-sonnet-4-20250514, claude-opus-4-20250514</div>' +
+            '</div>';
+        view.appendChild(anthropicSection);
+
+        // ── Ollama section ──
+        var ollamaSection = document.createElement('div');
+        ollamaSection.className = 'settings-section';
+        ollamaSection.innerHTML =
+            '<div class="settings-section-title">' +
+                '<span class="status-dot ok"></span>' +
+                'Ollama (Local)' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>URL</label>' +
+                '<input type="text" id="settings-ollama-url" value="' + escapeHtml(data.ollama_url || '') + '" placeholder="http://localhost:11434">' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>Model</label>' +
+                '<input type="text" id="settings-ollama-model" value="' + escapeHtml(data.ollama_model || '') + '" placeholder="qwen2.5:14b">' +
+            '</div>';
+        view.appendChild(ollamaSection);
+
+        // ── Save button ──
+        var actions = document.createElement('div');
+        actions.className = 'settings-actions';
+        actions.innerHTML = '<button class="settings-save-btn" id="settings-save">Save Settings</button>';
+        view.appendChild(actions);
+
+        messagesEl.appendChild(view);
+
+        // ── Wire up events ──
+        // "Change" buttons for API keys — unlock the field for editing
+        document.getElementById('settings-openai-key-btn').addEventListener('click', function() {
+            var inp = document.getElementById('settings-openai-key');
+            if (inp.readOnly) {
+                inp.readOnly = false;
+                inp.value = '';
+                inp.placeholder = 'Enter new OpenAI API key';
+                inp.focus();
+                this.textContent = 'Cancel';
+            } else {
+                inp.readOnly = true;
+                inp.value = data.openai_api_key || '';
+                inp.placeholder = 'sk-...';
+                this.textContent = 'Change';
+            }
+        });
+
+        document.getElementById('settings-anthropic-key-btn').addEventListener('click', function() {
+            var inp = document.getElementById('settings-anthropic-key');
+            if (inp.readOnly) {
+                inp.readOnly = false;
+                inp.value = '';
+                inp.placeholder = 'Enter new Anthropic API key';
+                inp.focus();
+                this.textContent = 'Cancel';
+            } else {
+                inp.readOnly = true;
+                inp.value = data.anthropic_api_key || '';
+                inp.placeholder = 'sk-ant-...';
+                this.textContent = 'Change';
+            }
+        });
+
+        document.getElementById('settings-save').addEventListener('click', function() {
+            saveSettings(data);
+        });
+    }
+
+    function saveSettings(originalData) {
+        var payload = {};
+
+        // Provider
+        var provider = document.getElementById('settings-provider').value;
+        if (provider !== originalData.cloud_provider) payload.cloud_provider = provider;
+
+        // OpenAI key (only if changed — field was unlocked)
+        var openaiKeyInp = document.getElementById('settings-openai-key');
+        if (!openaiKeyInp.readOnly && openaiKeyInp.value.trim()) {
+            payload.openai_api_key = openaiKeyInp.value.trim();
+        }
+
+        // OpenAI model
+        var openaiModel = document.getElementById('settings-openai-model').value.trim();
+        if (openaiModel !== (originalData.openai_model || '')) payload.openai_model = openaiModel;
+
+        // Anthropic key
+        var anthropicKeyInp = document.getElementById('settings-anthropic-key');
+        if (!anthropicKeyInp.readOnly && anthropicKeyInp.value.trim()) {
+            payload.anthropic_api_key = anthropicKeyInp.value.trim();
+        }
+
+        // Anthropic model
+        var anthropicModel = document.getElementById('settings-anthropic-model').value.trim();
+        if (anthropicModel !== (originalData.anthropic_model || '')) payload.anthropic_model = anthropicModel;
+
+        // Ollama
+        var ollamaUrl = document.getElementById('settings-ollama-url').value.trim();
+        if (ollamaUrl !== (originalData.ollama_url || '')) payload.ollama_url = ollamaUrl;
+
+        var ollamaModel = document.getElementById('settings-ollama-model').value.trim();
+        if (ollamaModel !== (originalData.ollama_model || '')) payload.ollama_model = ollamaModel;
+
+        if (Object.keys(payload).length === 0) {
+            showSettingsToast('No changes to save', false);
+            return;
+        }
+
+        var btn = document.getElementById('settings-save');
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+
+        fetch('/api/settings', {
+            method: 'PUT',
+            headers: {
+                'Authorization': 'Bearer ' + authToken,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        })
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Save failed'); });
+            return r.json();
+        })
+        .then(function() {
+            showSettingsToast('Settings saved successfully', false);
+            // Reload to reflect new masked keys and statuses
+            setTimeout(function() { loadSettings(); }, 600);
+        })
+        .catch(function(e) {
+            showSettingsToast(e.message, true);
+            btn.disabled = false;
+            btn.textContent = 'Save Settings';
+        });
+    }
+
+    function showSettingsToast(msg, isError) {
+        var existing = document.querySelector('.settings-toast');
+        if (existing) existing.remove();
+        var toast = document.createElement('div');
+        toast.className = 'settings-toast' + (isError ? ' error' : '');
+        toast.textContent = msg;
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.remove(); }, 3000);
     }
 
     function renameSession(sessionId, newTitle) {
