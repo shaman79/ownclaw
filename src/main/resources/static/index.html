@@ -1964,13 +1964,14 @@
         container.innerHTML = '<div class="task-history-header"><h2>\uD83D\uDCCB Scheduled Tasks</h2></div>';
 
         // ── Stats cards ──
-        var statsHtml = '<div class="task-stats">' +
+        var statsDiv = document.createElement('div');
+        statsDiv.className = 'task-stats';
+        statsDiv.innerHTML =
             '<div class="task-stat"><div class="task-stat-value">' + (stats.activeTasks || 0) + '</div><div class="task-stat-label">Active Tasks</div></div>' +
             '<div class="task-stat"><div class="task-stat-value">' + (stats.totalRuns || 0) + '</div><div class="task-stat-label">Total Runs</div></div>' +
             '<div class="task-stat"><div class="task-stat-value green">' + (stats.completedRuns || 0) + '</div><div class="task-stat-label">Succeeded</div></div>' +
-            '<div class="task-stat"><div class="task-stat-value red">' + (stats.failedRuns || 0) + '</div><div class="task-stat-label">Failed</div></div>' +
-            '</div>';
-        container.innerHTML += statsHtml;
+            '<div class="task-stat"><div class="task-stat-value red">' + (stats.failedRuns || 0) + '</div><div class="task-stat-label">Failed</div></div>';
+        container.appendChild(statsDiv);
 
         // ── All tasks section — grouped by status ──
         var activeTasks = tasks.filter(function(t) { return t.status === 'active' || t.status === 'paused' || t.status === 'running'; });
@@ -1997,12 +1998,13 @@
         }
 
         if (tasks.length === 0) {
-            container.innerHTML +=
-                '<div class="task-empty">' +
-                    '<div class="task-empty-icon">\uD83D\uDCED</div>' +
-                    '<div class="task-empty-text">No scheduled tasks</div>' +
-                    '<div class="task-empty-sub">Ask OwnClaw to schedule or remind you about something</div>' +
-                '</div>';
+            var emptyTasks = document.createElement('div');
+            emptyTasks.className = 'task-empty';
+            emptyTasks.innerHTML =
+                '<div class="task-empty-icon">\uD83D\uDCED</div>' +
+                '<div class="task-empty-text">No scheduled tasks</div>' +
+                '<div class="task-empty-sub">Ask OwnClaw to schedule or remind you about something</div>';
+            container.appendChild(emptyTasks);
         }
 
         // ── Execution history section ──
@@ -2012,12 +2014,13 @@
         container.appendChild(histTitle);
 
         if (!runs || runs.length === 0) {
-            container.innerHTML +=
-                '<div class="task-empty">' +
-                    '<div class="task-empty-icon">\uD83D\uDCED</div>' +
-                    '<div class="task-empty-text">No task executions yet</div>' +
-                    '<div class="task-empty-sub">Scheduled tasks will appear here after they run</div>' +
-                '</div>';
+            var emptyRuns = document.createElement('div');
+            emptyRuns.className = 'task-empty';
+            emptyRuns.innerHTML =
+                '<div class="task-empty-icon">\uD83D\uDCED</div>' +
+                '<div class="task-empty-text">No task executions yet</div>' +
+                '<div class="task-empty-sub">Scheduled tasks will appear here after they run</div>';
+            container.appendChild(emptyRuns);
         } else {
             runs.forEach(function(run) {
                 container.appendChild(buildTaskRunElement(run));
