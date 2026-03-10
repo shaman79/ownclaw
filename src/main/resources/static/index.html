@@ -1284,7 +1284,10 @@
             border-radius: var(--r-md);
             padding: 12px 14px;
             margin-bottom: 6px;
+            transition: border-color .15s;
+            overflow: hidden;
         }
+        .active-task-card:hover { border-color: var(--border-mid) }
         .active-task-card-header {
             display: flex;
             align-items: center;
@@ -1297,6 +1300,7 @@
             letter-spacing: .04em;
             padding: 2px 6px;
             border-radius: 4px;
+            flex-shrink: 0;
         }
         .active-task-type.recurring {
             color: var(--accent-hi);
@@ -1310,6 +1314,9 @@
             font-size: 13px;
             color: var(--text-1);
             flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .active-task-meta {
             font-size: 11px;
@@ -1324,6 +1331,169 @@
             align-items: center;
             gap: 4px;
         }
+
+        /*  Task card actions  */
+        .task-card-actions {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+        .task-action-btn {
+            width: 28px; height: 28px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-3);
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color .12s, border-color .12s, background .12s;
+            padding: 0;
+        }
+        .task-action-btn:hover { color: var(--text-1); border-color: var(--border-mid); background: var(--surface) }
+        .task-action-btn.danger:hover { color: var(--red); border-color: rgba(248,113,113,.3) }
+        .task-action-btn.success:hover { color: var(--green); border-color: rgba(52,211,153,.3) }
+        .task-action-btn:disabled { opacity: .4; cursor: not-allowed }
+
+        /*  Task card status badge  */
+        .task-status-badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            letter-spacing: .03em;
+            flex-shrink: 0;
+        }
+        .task-status-badge.active   { color: var(--green); background: var(--green-dim) }
+        .task-status-badge.paused   { color: #fbbf24; background: rgba(251,191,36,.12) }
+        .task-status-badge.running  { color: var(--accent-hi); background: var(--accent-glow) }
+        .task-status-badge.completed { color: var(--text-3); background: rgba(255,255,255,.05) }
+        .task-status-badge.cancelled { color: var(--text-3); background: rgba(255,255,255,.05) }
+        .task-status-badge.failed   { color: var(--red); background: var(--red-dim) }
+
+        /*  Expandable task detail  */
+        .task-card-detail {
+            display: none;
+            border-top: 1px solid var(--border);
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        .active-task-card.expanded .task-card-detail { display: block }
+        .task-card-toggle {
+            font-size: 10px;
+            color: var(--text-3);
+            transition: transform .2s;
+            cursor: pointer;
+            padding: 4px;
+        }
+        .active-task-card.expanded .task-card-toggle { transform: rotate(180deg) }
+
+        /*  Task edit modal  */
+        .task-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.6);
+            z-index: 300;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn .15s;
+        }
+        @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        .task-modal {
+            width: 460px;
+            max-width: 92vw;
+            max-height: 85vh;
+            overflow-y: auto;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-lg);
+            padding: 28px 24px;
+            box-shadow: var(--shadow-lg);
+        }
+        .task-modal h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0 0 18px;
+            color: var(--text-1);
+        }
+        .task-modal-field {
+            margin-bottom: 14px;
+        }
+        .task-modal-field label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-2);
+            margin-bottom: 5px;
+        }
+        .task-modal-field input,
+        .task-modal-field textarea {
+            width: 100%;
+            padding: 9px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 13px;
+            font-family: var(--font);
+            outline: none;
+            transition: border-color .15s, box-shadow .15s;
+        }
+        .task-modal-field textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .task-modal-field input:focus,
+        .task-modal-field textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .task-modal-field .field-hint {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 4px;
+        }
+        .task-modal-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        .task-modal-btn {
+            padding: 8px 18px;
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 500;
+            font-family: var(--font);
+            cursor: pointer;
+            border: 1px solid var(--border);
+            transition: opacity .15s, background .15s;
+        }
+        .task-modal-btn.primary {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+        .task-modal-btn.primary:hover { background: var(--accent-hi) }
+        .task-modal-btn.secondary {
+            background: var(--surface);
+            color: var(--text-2);
+        }
+        .task-modal-btn.secondary:hover { color: var(--text-1) }
+        .task-modal-error {
+            color: var(--red);
+            font-size: 12px;
+            margin-top: 8px;
+        }
+
+        /*  Completed/inactive task cards  */
+        .active-task-card.inactive {
+            opacity: .6;
+        }
+        .active-task-card.inactive:hover { opacity: .8 }
 
         .task-empty {
             text-align: center;
@@ -1802,34 +1972,44 @@
             '</div>';
         container.innerHTML += statsHtml;
 
-        // ── Active/Paused tasks section ──
+        // ── All tasks section — grouped by status ──
         var activeTasks = tasks.filter(function(t) { return t.status === 'active' || t.status === 'paused' || t.status === 'running'; });
+        var inactiveTasks = tasks.filter(function(t) { return t.status !== 'active' && t.status !== 'paused' && t.status !== 'running'; });
+
         if (activeTasks.length > 0) {
-            container.innerHTML += '<div class="task-section-title">Active Tasks</div>';
+            var titleEl = document.createElement('div');
+            titleEl.className = 'task-section-title';
+            titleEl.textContent = 'Active Tasks';
+            container.appendChild(titleEl);
             activeTasks.forEach(function(t) {
-                var typeClass = t.task_type === 'recurring' ? 'recurring' : 'deferred';
-                var nextRun = t.next_run_at ? formatTime(t.next_run_at) : '\u2014';
-                var statusIcon = t.status === 'running' ? '\u23F3' : (t.status === 'paused' ? '\u23F8\uFE0F' : '\u2705');
-                var cronStr = t.cron_expression ? '<span class="task-tag">\uD83D\uDD04 ' + escapeHtml(t.cron_expression) + '</span>' : '';
-                var runsStr = t.run_count ? '<span class="task-tag">\u25B6 ' + t.run_count + ' runs</span>' : '';
-                var maxStr = t.max_runs ? '<span class="task-tag">\uD83C\uDFAF max ' + t.max_runs + '</span>' : '';
-                container.innerHTML +=
-                    '<div class="active-task-card" data-task-id="' + t.id + '">' +
-                        '<div class="active-task-card-header">' +
-                            '<span class="active-task-type ' + typeClass + '">' + t.task_type + '</span>' +
-                            '<span class="active-task-desc">' + escapeHtml(t.description || 'Untitled task') + '</span>' +
-                        '</div>' +
-                        '<div class="active-task-meta">' +
-                            '<span class="task-tag">' + statusIcon + ' ' + t.status + '</span>' +
-                            '<span class="task-tag">\uD83D\uDD52 Next: ' + nextRun + '</span>' +
-                            cronStr + runsStr + maxStr +
-                        '</div>' +
-                    '</div>';
+                container.appendChild(buildTaskCard(t));
             });
         }
 
+        if (inactiveTasks.length > 0) {
+            var titleEl2 = document.createElement('div');
+            titleEl2.className = 'task-section-title';
+            titleEl2.textContent = 'Past Tasks';
+            container.appendChild(titleEl2);
+            inactiveTasks.forEach(function(t) {
+                container.appendChild(buildTaskCard(t));
+            });
+        }
+
+        if (tasks.length === 0) {
+            container.innerHTML +=
+                '<div class="task-empty">' +
+                    '<div class="task-empty-icon">\uD83D\uDCED</div>' +
+                    '<div class="task-empty-text">No scheduled tasks</div>' +
+                    '<div class="task-empty-sub">Ask OwnClaw to schedule or remind you about something</div>' +
+                '</div>';
+        }
+
         // ── Execution history section ──
-        container.innerHTML += '<div class="task-section-title">Execution History</div>';
+        var histTitle = document.createElement('div');
+        histTitle.className = 'task-section-title';
+        histTitle.textContent = 'Execution History';
+        container.appendChild(histTitle);
 
         if (!runs || runs.length === 0) {
             container.innerHTML +=
@@ -1840,8 +2020,7 @@
                 '</div>';
         } else {
             runs.forEach(function(run) {
-                var runEl = buildTaskRunElement(run);
-                container.appendChild(runEl);
+                container.appendChild(buildTaskRunElement(run));
             });
             if (runs.length >= 50) {
                 var loadMore = document.createElement('button');
@@ -1856,6 +2035,237 @@
 
         messagesEl.insertBefore(container, thinkingEl);
         scrollBottom();
+    }
+
+    function buildTaskCard(t) {
+        var card = document.createElement('div');
+        var isInactive = (t.status !== 'active' && t.status !== 'paused' && t.status !== 'running');
+        card.className = 'active-task-card' + (isInactive ? ' inactive' : '');
+        card.setAttribute('data-task-id', t.id);
+
+        var typeClass = t.task_type === 'recurring' ? 'recurring' : 'deferred';
+
+        // ── Header row with actions ──
+        var header = document.createElement('div');
+        header.className = 'active-task-card-header';
+
+        // Build action buttons based on status
+        var actionsHtml = '<div class="task-card-actions">';
+        if (t.status === 'active') {
+            actionsHtml += '<button class="task-action-btn" data-action="pause" title="Pause">\u23F8</button>';
+            actionsHtml += '<button class="task-action-btn" data-action="edit" title="Edit">\u270F\uFE0F</button>';
+            actionsHtml += '<button class="task-action-btn danger" data-action="cancel" title="Cancel">\u26D4</button>';
+        } else if (t.status === 'paused') {
+            actionsHtml += '<button class="task-action-btn success" data-action="resume" title="Resume">\u25B6\uFE0F</button>';
+            actionsHtml += '<button class="task-action-btn" data-action="edit" title="Edit">\u270F\uFE0F</button>';
+            actionsHtml += '<button class="task-action-btn danger" data-action="cancel" title="Cancel">\u26D4</button>';
+        }
+        if (t.status !== 'running') {
+            actionsHtml += '<button class="task-action-btn danger" data-action="delete" title="Delete permanently">\uD83D\uDDD1\uFE0F</button>';
+        }
+        actionsHtml += '</div>';
+
+        header.innerHTML =
+            '<span class="active-task-type ' + typeClass + '">' + escapeHtml(t.task_type) + '</span>' +
+            '<span class="task-status-badge ' + escapeHtml(t.status) + '">' + escapeHtml(t.status) + '</span>' +
+            '<span class="active-task-desc">' + escapeHtml(t.description || 'Untitled task') + '</span>' +
+            actionsHtml +
+            '<span class="task-card-toggle">\u25BC</span>';
+
+        card.appendChild(header);
+
+        // ── Meta row ──
+        var nextRun = t.next_run_at ? formatTime(t.next_run_at) : '\u2014';
+        var cronStr = t.cron_expression ? '<span class="task-tag">\uD83D\uDD04 ' + escapeHtml(t.cron_expression) + '</span>' : '';
+        var runsStr = t.run_count ? '<span class="task-tag">\u25B6 ' + t.run_count + ' runs</span>' : '';
+        var maxStr = t.max_runs ? '<span class="task-tag">\uD83C\uDFAF max ' + t.max_runs + '</span>' : '';
+        var metaDiv = document.createElement('div');
+        metaDiv.className = 'active-task-meta';
+        metaDiv.innerHTML =
+            '<span class="task-tag">\uD83D\uDD52 Next: ' + nextRun + '</span>' +
+            cronStr + runsStr + maxStr +
+            '<span class="task-tag">Created: ' + formatTime(t.created_at) + '</span>';
+        card.appendChild(metaDiv);
+
+        // ── Expandable detail section ──
+        var detail = document.createElement('div');
+        detail.className = 'task-card-detail';
+        var detailHtml =
+            '<div class="task-detail-row"><span class="task-detail-label">Task ID</span><span class="task-detail-value">#' + t.id + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Description</span><span class="task-detail-value">' + escapeHtml(t.description || '') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + escapeHtml(t.task_type) + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Status</span><span class="task-detail-value">' + escapeHtml(t.status) + '</span></div>';
+        if (t.cron_expression) {
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(t.cron_expression) + '</span></div>';
+        }
+        if (t.next_run_at) {
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Next run</span><span class="task-detail-value">' + new Date(t.next_run_at + 'Z').toLocaleString() + '</span></div>';
+        }
+        if (t.last_run_at) {
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Last run</span><span class="task-detail-value">' + new Date(t.last_run_at + 'Z').toLocaleString() + '</span></div>';
+        }
+        detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Run count</span><span class="task-detail-value">' + (t.run_count || 0) + (t.max_runs ? ' / ' + t.max_runs : '') + '</span></div>';
+        if (t.last_result) {
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Last result</span></div>' +
+                '<div class="task-result-content">' + escapeHtml(t.last_result) + '</div>';
+        }
+        if (t.last_error) {
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Last error</span></div>' +
+                '<div class="task-result-content" style="border-color:var(--red-dim);color:var(--red)">' + escapeHtml(t.last_error) + '</div>';
+        }
+        detail.innerHTML = detailHtml;
+        card.appendChild(detail);
+
+        // ── Event: toggle expand ──
+        header.querySelector('.task-card-toggle').addEventListener('click', function(e) {
+            e.stopPropagation();
+            card.classList.toggle('expanded');
+        });
+
+        // ── Event: action buttons ──
+        header.querySelectorAll('.task-action-btn').forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var action = btn.getAttribute('data-action');
+                if (action === 'edit') {
+                    showEditTaskModal(t);
+                } else if (action === 'delete') {
+                    if (confirm('Permanently delete task #' + t.id + '? This also deletes its run history.')) {
+                        taskAction('DELETE', '/api/scheduled-tasks/' + t.id);
+                    }
+                } else if (action === 'cancel') {
+                    if (confirm('Cancel task #' + t.id + '? History will be preserved.')) {
+                        taskAction('PUT', '/api/scheduled-tasks/' + t.id + '/cancel');
+                    }
+                } else if (action === 'pause') {
+                    taskAction('PUT', '/api/scheduled-tasks/' + t.id + '/pause');
+                } else if (action === 'resume') {
+                    taskAction('PUT', '/api/scheduled-tasks/' + t.id + '/resume');
+                }
+            });
+        });
+
+        return card;
+    }
+
+    function taskAction(method, url, body) {
+        if (!authToken) return;
+        var opts = {
+            method: method,
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        };
+        if (body) {
+            opts.headers['Content-Type'] = 'application/json';
+            opts.body = JSON.stringify(body);
+        }
+        fetch(url, opts)
+        .then(function(r) {
+            if (!r.ok) throw new Error('Request failed: ' + r.status);
+            return r.json();
+        })
+        .then(function() {
+            // Reload the task history view
+            loadTaskHistory();
+        })
+        .catch(function(e) {
+            console.error('Task action failed:', e);
+            alert('Action failed: ' + e.message);
+        });
+    }
+
+    function showEditTaskModal(task) {
+        // Remove any existing modal
+        var existing = document.querySelector('.task-modal-overlay');
+        if (existing) existing.remove();
+
+        var overlay = document.createElement('div');
+        overlay.className = 'task-modal-overlay';
+
+        var isRecurring = task.task_type === 'recurring';
+        var modalHtml =
+            '<div class="task-modal">' +
+                '<h3>\u270F\uFE0F Edit Task #' + task.id + '</h3>' +
+                '<div class="task-modal-field">' +
+                    '<label>Description</label>' +
+                    '<textarea id="edit-task-desc">' + escapeHtml(task.description || '') + '</textarea>' +
+                '</div>';
+        if (isRecurring) {
+            modalHtml +=
+                '<div class="task-modal-field">' +
+                    '<label>Cron Expression</label>' +
+                    '<input type="text" id="edit-task-cron" value="' + escapeHtml(task.cron_expression || '') + '">' +
+                    '<div class="field-hint">Spring cron format: sec min hour day month weekday (e.g. 0 0 9 * * MON-FRI)</div>' +
+                '</div>';
+        }
+        modalHtml +=
+                '<div class="task-modal-error" id="edit-task-error"></div>' +
+                '<div class="task-modal-actions">' +
+                    '<button class="task-modal-btn secondary" id="edit-task-cancel">Cancel</button>' +
+                    '<button class="task-modal-btn primary" id="edit-task-save">Save Changes</button>' +
+                '</div>' +
+            '</div>';
+
+        overlay.innerHTML = modalHtml;
+        document.body.appendChild(overlay);
+
+        // Close on overlay click
+        overlay.addEventListener('click', function(e) {
+            if (e.target === overlay) overlay.remove();
+        });
+
+        // Close on Escape
+        var escHandler = function(e) {
+            if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
+        };
+        document.addEventListener('keydown', escHandler);
+
+        document.getElementById('edit-task-cancel').addEventListener('click', function() {
+            overlay.remove();
+        });
+
+        document.getElementById('edit-task-save').addEventListener('click', function() {
+            var desc = document.getElementById('edit-task-desc').value.trim();
+            var cron = isRecurring ? document.getElementById('edit-task-cron').value.trim() : null;
+            var errorEl = document.getElementById('edit-task-error');
+            errorEl.textContent = '';
+
+            if (!desc) {
+                errorEl.textContent = 'Description is required';
+                return;
+            }
+
+            var body = { description: desc };
+            if (cron !== null) body.cronExpression = cron;
+
+            var saveBtn = document.getElementById('edit-task-save');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+
+            fetch('/api/scheduled-tasks/' + task.id, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': 'Bearer ' + authToken,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
+            })
+            .then(function(r) {
+                if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Update failed'); });
+                return r.json();
+            })
+            .then(function() {
+                overlay.remove();
+                loadTaskHistory();
+            })
+            .catch(function(e) {
+                errorEl.textContent = e.message;
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Changes';
+            });
+        });
+
+        // Focus description
+        document.getElementById('edit-task-desc').focus();
     }
 
     function buildTaskRunElement(run) {

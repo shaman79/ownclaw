@@ -391,6 +391,73 @@ public class ScheduledTaskService {
     // ──────────────────────────────────────────────────────────────────────
 
     /**
+     * Update a scheduled task's description and/or cron expression.
+     */
+    public boolean updateTask(String userId, long taskId, String description,
+                              String cronExpression) {
+        var task = getTask(userId, taskId);
+        if (task.isEmpty()) return false;
+
+        var t = task.get();
+        String status = String.valueOf(t.get("status"));
+        if (!status.equals("active") && !status.equals("paused")) return false;
+
+        String taskType = String.valueOf(t.get("task_type"));
+        var updates = new ArrayList<String>();
+        var params = new ArrayList<Object>();
+
+        if (description != null && !description.isBlank()) {
+            updates.add("description = ?");
+            params.add(description.trim());
+        }
+
+        if (cronExpression != null && taskType.equals("recurring")) {
+            // Validate cron expression
+            try {
+                CronExpression cron = CronExpression.parse(cronExpression.trim());
+                Instant nextRun = calculateNextRun(cronExpression.trim());
+                updates.add("cron_expression = ?");
+                params.add(cronExpression.trim());
+                updates.add("next_run_at = ?");
+                params.add(nextRun.toString());
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Invalid cron expression: " + e.getMessage());
+            }
+        }
+
+        if (updates.isEmpty()) return false;
+
+        updates.add("updated_at = datetime('now')");
+        params.add(taskId);
+        params.add(userId);
+
+        String sql = "UPDATE scheduled_tasks SET " + String.join(", ", updates)
+                + " WHERE id = ? AND user_id = ?";
+        int rows = jdbc.update(sql, params.toArray());
+        if (rows > 0) {
+            eventLog.info(userId, null, "scheduled.updated", "Task #" + taskId + " updated");
+            log.info("Scheduled task #{} updated by user {}", taskId, userId);
+        }
+        return rows > 0;
+    }
+
+    /**
+     * Permanently delete a scheduled task and its run history.
+     */
+    public boolean deleteTask(String userId, long taskId) {
+        // Delete run history first
+        jdbc.update("DELETE FROM scheduled_task_runs WHERE task_id = ? AND user_id = ?",
+                taskId, userId);
+        int rows = jdbc.update("DELETE FROM scheduled_tasks WHERE id = ? AND user_id = ?",
+                taskId, userId);
+        if (rows > 0) {
+            eventLog.info(userId, null, "scheduled.deleted", "Task #" + taskId + " permanently deleted");
+            log.info("Scheduled task #{} deleted by user {}", taskId, userId);
+        }
+        return rows > 0;
+    }
+
+    /**
      * Cancel a scheduled task.
      */
     public boolean cancel(String userId, long taskId) {
