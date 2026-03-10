@@ -27,9 +27,11 @@ ownclaw:
     context-window: 16384
 
   mentor:
-    provider: openai
+    provider: ${OWNCLAW_MENTOR_PROVIDER:openai}
     model: gpt-5.2
     api-key: ${OPENAI_API_KEY:}
+    anthropic-api-key: ${ANTHROPIC_API_KEY:}
+    anthropic-model: ${OWNCLAW_ANTHROPIC_MODEL:claude-sonnet-4-20250514}
     max-tokens-per-task: 10000
     temperature: 0.4
 

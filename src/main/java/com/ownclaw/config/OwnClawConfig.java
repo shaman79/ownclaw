@@ -52,6 +52,8 @@ public class OwnClawConfig {
         private String provider = "openai";
         private String model = "gpt-4o";
         private String apiKey;
+        private String anthropicApiKey;
+        private String anthropicModel = "claude-sonnet-4-20250514";
         private int maxTokensPerTask = 10000;
         private double temperature = 0.4;
 
@@ -61,6 +63,10 @@ public class OwnClawConfig {
         public void setModel(String model) { this.model = model; }
         public String getApiKey() { return apiKey; }
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getAnthropicApiKey() { return anthropicApiKey; }
+        public void setAnthropicApiKey(String anthropicApiKey) { this.anthropicApiKey = anthropicApiKey; }
+        public String getAnthropicModel() { return anthropicModel; }
+        public void setAnthropicModel(String anthropicModel) { this.anthropicModel = anthropicModel; }
         public int getMaxTokensPerTask() { return maxTokensPerTask; }
         public void setMaxTokensPerTask(int maxTokensPerTask) { this.maxTokensPerTask = maxTokensPerTask; }
         public double getTemperature() { return temperature; }

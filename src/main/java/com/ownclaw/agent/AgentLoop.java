@@ -406,7 +406,7 @@ public class AgentLoop {
             // re-invoke with cloud for reliable structured JSON params.
             // The local model (qwen2.5:14b) can't reliably produce the complex
             // nested JSON required for skill_create (parameters, credentials, etc.).
-            if (action.isSkillCreate() && "ollama".equals(provider.name())) {
+            if (action.isSkillCreate() && llmRouter.isLocal(provider)) {
                 log.info("Task {} step {}: local LLM chose skill_create — re-invoking with cloud",
                         context.taskId(), step + 1);
                 LlmProvider cloudProvider = llmRouter.cloud();
@@ -427,7 +427,7 @@ public class AgentLoop {
             }
 
             // Track token usage per provider
-            if ("ollama".equals(provider.name())) {
+            if (llmRouter.isLocal(provider)) {
                 context.addLocalTokens(thinkResult.totalTokens());
             } else {
                 context.addCloudTokens(thinkResult.totalTokens());

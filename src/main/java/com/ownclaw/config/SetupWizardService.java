@@ -2,6 +2,7 @@ package com.ownclaw.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.LlmRouter;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -38,6 +39,7 @@ public class SetupWizardService {
     private final OkHttpClient http;
     private final ObjectMapper mapper;
     private final ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider;
+    private final ObjectProvider<LlmRouter> llmRouterProvider;
 
     /** Cached diagnostic result, refreshed on demand. */
     private volatile DiagnosticResult lastDiagnostic;
@@ -51,11 +53,13 @@ public class SetupWizardService {
     private volatile String lastOllamaPerfModel;
 
     public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
-                              ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider) {
+                              ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider,
+                              ObjectProvider<LlmRouter> llmRouterProvider) {
         this.jdbc = jdbc;
         this.config = config;
         this.mapper = mapper;
         this.telegramBotProvider = telegramBotProvider;
+        this.llmRouterProvider = llmRouterProvider;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
@@ -104,9 +108,12 @@ public class SetupWizardService {
         String pythonVersion = pythonPath != null ? getPythonVersion(pythonPath) : null;
         boolean openAiKeySet = config.getMentor().getApiKey() != null
                 && !config.getMentor().getApiKey().isBlank();
+        boolean anthropicKeySet = config.getMentor().getAnthropicApiKey() != null
+                && !config.getMentor().getAnthropicApiKey().isBlank();
+        String cloudProvider = config.getMentor().getProvider();
 
         var result = new DiagnosticResult(ollamaOk, config.getExecutor().getUrl(),
-                pythonPath, pythonVersion, openAiKeySet);
+                pythonPath, pythonVersion, openAiKeySet, anthropicKeySet, cloudProvider);
         this.lastDiagnostic = result;
         return result;
     }
@@ -309,12 +316,20 @@ public class SetupWizardService {
 
     public void applyOverrides() {
         getSetting("openai_api_key").ifPresent(key -> config.getMentor().setApiKey(key));
+        getSetting("anthropic_api_key").ifPresent(key -> config.getMentor().setAnthropicApiKey(key));
+        getSetting("cloud_provider").ifPresent(p -> config.getMentor().setProvider(p));
+        getSetting("anthropic_model").ifPresent(model -> config.getMentor().setAnthropicModel(model));
         getSetting("ollama_url").ifPresent(url -> config.getExecutor().setUrl(url));
         getSetting("ollama_model").ifPresent(model -> config.getExecutor().setModel(model));
         getSetting("python_path").ifPresent(path -> config.getSandbox().setPythonPath(path));
         getSetting("mentor_model").ifPresent(model -> config.getMentor().setModel(model));
         getSetting("telegram_bot_token").ifPresent(token -> config.getTelegram().setBotToken(token));
         getSetting("telegram_enabled").ifPresent(v -> config.getTelegram().setEnabled(Boolean.parseBoolean(v)));
+        // Re-resolve cloud provider if LlmRouter is available
+        try {
+            var router = llmRouterProvider.getIfAvailable();
+            if (router != null) router.resolveCloudProvider();
+        } catch (Exception ignored) {}
     }
 
     // ── Wizard state machine (used by ChatWebSocketHandler) ─────────────
@@ -326,11 +341,12 @@ public class SetupWizardService {
     public WizardResponse processStep(int step, String userInput) {
         return switch (step) {
             case 0 -> buildWelcome();
-            case 1 -> processOpenAiKey(userInput);
-            case 2 -> processOllamaUrl(userInput);
-            case 3 -> processOllamaModel(userInput);
-            case 4 -> processTelegram(userInput);
-            case 5 -> finalizeSetup();
+            case 1 -> processCloudProvider(userInput);
+            case 2 -> processCloudApiKey(userInput);
+            case 3 -> processOllamaUrl(userInput);
+            case 4 -> processOllamaModel(userInput);
+            case 5 -> processTelegram(userInput);
+            case 6 -> finalizeSetup();
             default -> new WizardResponse(null, true);
         };
     }
@@ -345,8 +361,11 @@ public class SetupWizardService {
         sb.append("### OwnClaw setup\n\n");
         sb.append("Type `-` to skip a step and keep the current value.\n\n");
         sb.append("**Diagnostics**\n");
+        sb.append("- Cloud provider: `").append(d.cloudProvider).append("`\n");
         sb.append("- ").append(d.openAiKeySet ? "✅" : "❌").append(" OpenAI API key: ")
             .append(d.openAiKeySet ? "configured" : "not set").append('\n');
+        sb.append("- ").append(d.anthropicKeySet ? "✅" : "❌").append(" Anthropic API key: ")
+            .append(d.anthropicKeySet ? "configured" : "not set").append('\n');
         sb.append("- ").append(d.ollamaReachable ? "✅" : "❌").append(" Ollama: `")
             .append(d.ollamaUrl).append("` — ")
             .append(d.ollamaReachable ? "reachable" : "not reachable")
@@ -374,25 +393,76 @@ public class SetupWizardService {
             .append(tgEnabled ? "enabled" : "disabled").append('\n');
 
         sb.append("\n---\n\n");
-        sb.append("**Step 1/4 — OpenAI API key**\n");
-        sb.append("Paste your OpenAI API key");
-        if (d.openAiKeySet) {
-            sb.append(" (or `-` to keep current)");
-        }
-        sb.append(":");
+        sb.append("**Step 1/5 — Cloud LLM Provider**\n");
+        sb.append("Which cloud LLM do you want to use?\n");
+        sb.append("1) `openai` — OpenAI (GPT models)\n");
+        sb.append("2) `anthropic` — Anthropic (Claude models)\n\n");
+        sb.append("Current: `").append(config.getMentor().getProvider()).append("`\n");
+        sb.append("Enter `1`, `2`, provider name, or `-` to keep current:");
         return new WizardResponse(sb.toString(), false);
     }
 
-    private WizardResponse processOpenAiKey(String input) {
+    private WizardResponse processCloudProvider(String input) {
         if (!isSkip(input)) {
-            saveSetting("openai_api_key", input.strip());
-            config.getMentor().setApiKey(input.strip());
+            String choice = input.strip().toLowerCase();
+            String provider;
+            if ("1".equals(choice) || "openai".equals(choice)) {
+                provider = "openai";
+            } else if ("2".equals(choice) || "anthropic".equals(choice) || "claude".equals(choice)) {
+                provider = "anthropic";
+            } else {
+                // Unknown — treat as provider name anyway
+                provider = choice;
+            }
+            saveSetting("cloud_provider", provider);
+            config.getMentor().setProvider(provider);
         }
+        String currentProvider = config.getMentor().getProvider();
+        var sb = new StringBuilder();
+        sb.append("☁️ Cloud provider: `").append(currentProvider).append("`\n\n");
+
+        sb.append("**Step 2/5 — Cloud API Key**\n");
+        if ("anthropic".equalsIgnoreCase(currentProvider)) {
+            boolean hasKey = config.getMentor().getAnthropicApiKey() != null
+                    && !config.getMentor().getAnthropicApiKey().isBlank();
+            sb.append("Paste your **Anthropic** API key");
+            if (hasKey) sb.append(" (or `-` to keep current)");
+            sb.append(":\n");
+            sb.append("_(Get one at https://console.anthropic.com/settings/keys)_");
+        } else {
+            boolean hasKey = config.getMentor().getApiKey() != null
+                    && !config.getMentor().getApiKey().isBlank();
+            sb.append("Paste your **OpenAI** API key");
+            if (hasKey) sb.append(" (or `-` to keep current)");
+            sb.append(":\n");
+            sb.append("_(Get one at https://platform.openai.com/api-keys)_");
+        }
+        return new WizardResponse(sb.toString(), false);
+    }
+
+    private WizardResponse processCloudApiKey(String input) {
+        String currentProvider = config.getMentor().getProvider();
+        if (!isSkip(input)) {
+            String key = input.strip();
+            if ("anthropic".equalsIgnoreCase(currentProvider)) {
+                saveSetting("anthropic_api_key", key);
+                config.getMentor().setAnthropicApiKey(key);
+            } else {
+                saveSetting("openai_api_key", key);
+                config.getMentor().setApiKey(key);
+            }
+        }
+        // Re-resolve cloud provider in the router
+        try {
+            var router = llmRouterProvider.getIfAvailable();
+            if (router != null) router.resolveCloudProvider();
+        } catch (Exception ignored) {}
+
         var sb = new StringBuilder();
         if (!isSkip(input)) {
-            sb.append("✅ OpenAI API key saved.\n\n");
+            sb.append("✅ API key saved for `").append(currentProvider).append("`.\n\n");
         }
-        sb.append("**Step 2/4 — Ollama URL**\n");
+        sb.append("**Step 3/5 — Ollama URL**\n");
         sb.append("- Format: `http://host:port` (e.g. `http://localhost:11434`)\n");
         sb.append("- No trailing slash, no `/v1` suffix\n");
         sb.append("- Current: `").append(config.getExecutor().getUrl()).append("`\n\n");
@@ -415,7 +485,7 @@ public class SetupWizardService {
                 .append(reachable ? "reachable" : "not reachable (you can re-run `/setup` later)")
                 .append("\n\n");
 
-        sb.append("**Step 3/4 — Ollama model**\n");
+        sb.append("**Step 4/5 — Ollama model**\n");
         sb.append("- Current: `").append(config.getExecutor().getModel()).append("`\n");
         if (!lastDiscoveredModels.isEmpty()) {
             sb.append("\n**Available models**\n");
@@ -478,7 +548,7 @@ public class SetupWizardService {
             sb.append("⚠️ Python not found on PATH — skills requiring Python may fail. Install Python 3 and re-run `/setup`.\n\n");
         }
 
-        sb.append("**Step 4/4 — Telegram bot (optional)**\n\n");
+        sb.append("**Step 5/5 — Telegram bot (optional)**\n\n");
         sb.append("To connect OwnClaw to Telegram:\n");
         sb.append("1) Open Telegram and search for `@BotFather`\n");
         sb.append("2) Send `/newbot` and follow the prompts\n");
@@ -563,7 +633,14 @@ public class SetupWizardService {
         sb.append(prefix);
         sb.append("### Setup complete ✅\n\n");
         sb.append("**Final configuration**\n");
+        sb.append("- Cloud provider: `").append(d.cloudProvider).append("`\n");
         sb.append("- OpenAI API key: ").append(d.openAiKeySet ? "configured" : "not set").append('\n');
+        sb.append("- Anthropic API key: ").append(d.anthropicKeySet ? "configured" : "not set").append('\n');
+        if ("anthropic".equalsIgnoreCase(d.cloudProvider)) {
+            sb.append("- Claude model: `").append(config.getMentor().getAnthropicModel()).append("`\n");
+        } else {
+            sb.append("- OpenAI model: `").append(config.getMentor().getModel()).append("`\n");
+        }
         sb.append("- Ollama: ").append(d.ollamaReachable ? "reachable" : "not reachable")
                 .append(" (model: `").append(config.getExecutor().getModel()).append("`)");
         if (d.ollamaReachable) {
@@ -596,7 +673,9 @@ public class SetupWizardService {
             String ollamaUrl,
             String pythonPath,
             String pythonVersion,
-            boolean openAiKeySet
+            boolean openAiKeySet,
+            boolean anthropicKeySet,
+            String cloudProvider
     ) {}
 
     public record WizardResponse(String message, boolean complete) {}
