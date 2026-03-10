@@ -1067,6 +1067,319 @@
         }
         #sidebar-toggle svg { width: 16px; height: 16px; fill: currentColor }
         #sidebar-toggle:hover { color: var(--text-1); border-color: var(--border-mid) }
+
+        /*  Pinned scheduled tasks item  */
+        .session-item.pinned {
+            border: 1px solid rgba(52,211,153,.15) !important;
+            background: rgba(52,211,153,.06);
+            margin-bottom: 8px;
+            position: relative;
+        }
+        .session-item.pinned::after {
+            content: '';
+            display: block;
+            position: absolute;
+            bottom: -5px;
+            left: 12px;
+            right: 12px;
+            height: 1px;
+            background: var(--border);
+        }
+        .session-item.pinned:hover { background: rgba(52,211,153,.1) }
+        .session-item.pinned.active {
+            background: rgba(52,211,153,.14);
+            border-color: rgba(52,211,153,.3) !important;
+        }
+        .session-item.pinned .session-title {
+            padding-right: 0;
+        }
+        .pinned-icon {
+            margin-right: 6px;
+            font-size: 14px;
+        }
+        .pinned-badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--green);
+            background: var(--green-dim);
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+            letter-spacing: .03em;
+        }
+
+        /*  Task history view (replaces messages area)  */
+        .task-history {
+            padding: 20px 24px;
+            max-width: 860px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .task-history-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .task-history-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-1);
+            margin: 0;
+        }
+        .task-stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .task-stat {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 12px 16px;
+            min-width: 120px;
+            flex: 1;
+        }
+        .task-stat-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-1);
+            line-height: 1.2;
+        }
+        .task-stat-value.green { color: var(--green) }
+        .task-stat-value.red { color: var(--red) }
+        .task-stat-label {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 2px;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        /*  Active tasks section  */
+        .task-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-2);
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            margin: 24px 0 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .task-section-title::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+
+        /*  Task run timeline entry  */
+        .task-run {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            margin-bottom: 8px;
+            overflow: hidden;
+            transition: border-color .15s;
+        }
+        .task-run:hover { border-color: var(--border-mid) }
+        .task-run-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .task-run-status {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .task-run-status.completed { background: var(--green) }
+        .task-run-status.failed { background: var(--red) }
+        .task-run-desc {
+            flex: 1;
+            font-size: 13px;
+            color: var(--text-1);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .task-run-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11px;
+            color: var(--text-3);
+            flex-shrink: 0;
+        }
+        .task-run-duration {
+            color: var(--text-2);
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
+        .task-run-toggle {
+            font-size: 10px;
+            color: var(--text-3);
+            transition: transform .2s;
+        }
+        .task-run.expanded .task-run-toggle {
+            transform: rotate(180deg);
+        }
+
+        /*  Task run expanded details  */
+        .task-run-details {
+            display: none;
+            border-top: 1px solid var(--border);
+            padding: 14px;
+            background: var(--bg-elevated);
+        }
+        .task-run.expanded .task-run-details { display: block }
+        .task-detail-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+        .task-detail-label {
+            color: var(--text-3);
+            min-width: 80px;
+            flex-shrink: 0;
+            font-weight: 500;
+        }
+        .task-detail-value {
+            color: var(--text-2);
+            word-break: break-word;
+            flex: 1;
+        }
+        .task-detail-value.error { color: var(--red) }
+        .task-detail-value.success { color: var(--green) }
+        .task-result-content {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            padding: 10px 12px;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            color: var(--text-2);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 4px;
+            line-height: 1.5;
+        }
+        .task-result-content::-webkit-scrollbar { width: 4px }
+        .task-result-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 3px }
+
+        /*  Active task card  */
+        .active-task-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 12px 14px;
+            margin-bottom: 6px;
+        }
+        .active-task-card-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .active-task-type {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .active-task-type.recurring {
+            color: var(--accent-hi);
+            background: var(--accent-glow);
+        }
+        .active-task-type.deferred {
+            color: #fbbf24;
+            background: rgba(251,191,36,.12);
+        }
+        .active-task-desc {
+            font-size: 13px;
+            color: var(--text-1);
+            flex: 1;
+        }
+        .active-task-meta {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 6px;
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .task-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .task-empty {
+            text-align: center;
+            padding: 48px 24px;
+            color: var(--text-3);
+        }
+        .task-empty-icon {
+            font-size: 36px;
+            margin-bottom: 12px;
+        }
+        .task-empty-text {
+            font-size: 14px;
+        }
+        .task-empty-sub {
+            font-size: 12px;
+            margin-top: 6px;
+            color: var(--text-3);
+            opacity: .7;
+        }
+
+        .task-history-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 48px 16px;
+            color: var(--text-3);
+            font-size: 13px;
+        }
+        .task-history-loading .mini-spinner {
+            width: 16px; height: 16px;
+            border: 2px solid rgba(255,255,255,.08);
+            border-top-color: var(--green);
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .task-load-more {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-2);
+            font-size: 13px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .15s, color .15s;
+        }
+        .task-load-more:hover {
+            background: var(--bg-input);
+            color: var(--text-1);
+        }
     </style>
 </head>
 <body>
@@ -1228,6 +1541,7 @@
     var heartbeatTimer = null;
     var thinkingSafetyTimer = null;
     var activeSessionId = null;
+    var currentView = 'chat'; // 'chat' or 'tasks'
     var thinkingStartedAt = null;
     var elapsedTimer = null;
     var searchDebounce = null;
@@ -1245,6 +1559,8 @@
 
     newChatBtn.addEventListener('click', function() {
         if (ws && ws.readyState === 1) {
+            currentView = 'chat';
+            document.getElementById('input-area').style.display = '';
             ws.send(JSON.stringify({ type: 'new_session', message: '' }));
             clearMessages();
             sidebar.classList.remove('mobile-open');
@@ -1305,8 +1621,14 @@
     //  Session management
     function switchToSession(sessionId) {
         if (!ws || ws.readyState !== 1) return;
+        currentView = 'chat';
+        // Show chat UI elements, hide task history
+        document.getElementById('input-area').style.display = '';
+        document.getElementById('activity-wrap').style.display = '';
         ws.send(JSON.stringify({ type: 'switch_session', message: sessionId }));
         clearMessages();
+        // Update sidebar active states
+        updateSidebarActive(sessionId);
         // Load session messages via REST
         loadSessionMessages(sessionId);
     }
@@ -1339,20 +1661,38 @@
     }
 
     function clearMessages() {
-        messagesEl.querySelectorAll('.msg, .messages-loading').forEach(function(m) { m.remove(); });
+        messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
     }
 
     function renderSessionList(sessions, currentActiveId) {
         sessionListEl.innerHTML = '';
         activeSessionId = currentActiveId;
+
+        // ── Pinned "Scheduled Tasks" item (always first, non-deletable) ──
+        var pinned = document.createElement('div');
+        pinned.className = 'session-item pinned' + (currentView === 'tasks' ? ' active' : '');
+        pinned.setAttribute('data-session-id', '__scheduled_tasks__');
+        pinned.innerHTML =
+            '<div class="session-title"><span class="pinned-icon">\uD83D\uDCCB</span>Scheduled Tasks</div>' +
+            '<div class="session-preview">Task execution history & status</div>';
+        pinned.addEventListener('click', function() {
+            switchToTaskHistory();
+            sidebar.classList.remove('mobile-open');
+        });
+        sessionListEl.appendChild(pinned);
+
         if (!sessions || sessions.length === 0) {
-            sessionListEl.innerHTML = '<div class="search-empty">No chats yet</div>';
+            var empty = document.createElement('div');
+            empty.className = 'search-empty';
+            empty.textContent = 'No chats yet';
+            sessionListEl.appendChild(empty);
             return;
         }
         sessions.forEach(function(s) {
             var item = document.createElement('div');
-            item.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+            var isActive = (currentView === 'chat' && s.id === activeSessionId);
+            item.className = 'session-item' + (isActive ? ' active' : '');
             item.setAttribute('data-session-id', s.id);
             var timeStr = formatTime(s.updated_at);
             var msgCount = s.message_count || 0;
@@ -1367,13 +1707,12 @@
 
             item.addEventListener('click', function(e) {
                 if (e.target.closest('.session-action-btn')) return;
-                if (s.id === activeSessionId) {
-                    // Already active — just reload messages (in case chat was cleared)
+                if (currentView === 'tasks' || s.id !== activeSessionId) {
+                    switchToSession(s.id);
+                } else {
+                    // Already active chat — just reload messages
                     loadSessionMessages(s.id);
-                    sidebar.classList.remove('mobile-open');
-                    return;
                 }
-                switchToSession(s.id);
                 sidebar.classList.remove('mobile-open');
             });
 
@@ -1396,6 +1735,229 @@
 
             sessionListEl.appendChild(item);
         });
+    }
+
+    function updateSidebarActive(sessionId) {
+        sessionListEl.querySelectorAll('.session-item').forEach(function(el) {
+            if (el.getAttribute('data-session-id') === '__scheduled_tasks__') {
+                el.classList.toggle('active', currentView === 'tasks');
+            } else {
+                el.classList.toggle('active', currentView === 'chat' && el.getAttribute('data-session-id') === sessionId);
+            }
+        });
+    }
+
+    function switchToTaskHistory() {
+        currentView = 'tasks';
+        clearMessages();
+        // Hide chat input and activity bar when viewing tasks
+        document.getElementById('input-area').style.display = 'none';
+        // Update sidebar active states
+        updateSidebarActive(null);
+        loadTaskHistory();
+    }
+
+    function loadTaskHistory() {
+        if (!authToken) return;
+        // Show loading spinner
+        var loader = document.createElement('div');
+        loader.className = 'task-history-loading';
+        loader.innerHTML = '<div class="mini-spinner"></div><span>Loading task history...</span>';
+        messagesEl.appendChild(loader);
+
+        // Fetch both tasks and run history in parallel
+        Promise.all([
+            fetch('/api/scheduled-tasks', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(function(r) { return r.json(); }),
+            fetch('/api/scheduled-tasks/runs?limit=50', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(function(r) { return r.json(); })
+        ])
+        .then(function(results) {
+            clearMessages();
+            var tasksData = results[0];
+            var runsData = results[1];
+            renderTaskHistory(tasksData.tasks || [], runsData.runs || [], runsData.stats || {});
+        })
+        .catch(function(e) {
+            clearMessages();
+            console.error('Failed to load task history:', e);
+            var errDiv = document.createElement('div');
+            errDiv.className = 'task-empty';
+            errDiv.innerHTML = '<div class="task-empty-icon">⚠️</div><div class="task-empty-text">Failed to load task history</div>';
+            messagesEl.insertBefore(errDiv, thinkingEl);
+        });
+    }
+
+    function renderTaskHistory(tasks, runs, stats) {
+        var container = document.createElement('div');
+        container.className = 'task-history';
+
+        // ── Header ──
+        container.innerHTML = '<div class="task-history-header"><h2>\uD83D\uDCCB Scheduled Tasks</h2></div>';
+
+        // ── Stats cards ──
+        var statsHtml = '<div class="task-stats">' +
+            '<div class="task-stat"><div class="task-stat-value">' + (stats.activeTasks || 0) + '</div><div class="task-stat-label">Active Tasks</div></div>' +
+            '<div class="task-stat"><div class="task-stat-value">' + (stats.totalRuns || 0) + '</div><div class="task-stat-label">Total Runs</div></div>' +
+            '<div class="task-stat"><div class="task-stat-value green">' + (stats.completedRuns || 0) + '</div><div class="task-stat-label">Succeeded</div></div>' +
+            '<div class="task-stat"><div class="task-stat-value red">' + (stats.failedRuns || 0) + '</div><div class="task-stat-label">Failed</div></div>' +
+            '</div>';
+        container.innerHTML += statsHtml;
+
+        // ── Active/Paused tasks section ──
+        var activeTasks = tasks.filter(function(t) { return t.status === 'active' || t.status === 'paused' || t.status === 'running'; });
+        if (activeTasks.length > 0) {
+            container.innerHTML += '<div class="task-section-title">Active Tasks</div>';
+            activeTasks.forEach(function(t) {
+                var typeClass = t.task_type === 'recurring' ? 'recurring' : 'deferred';
+                var nextRun = t.next_run_at ? formatTime(t.next_run_at) : '\u2014';
+                var statusIcon = t.status === 'running' ? '\u23F3' : (t.status === 'paused' ? '\u23F8\uFE0F' : '\u2705');
+                var cronStr = t.cron_expression ? '<span class="task-tag">\uD83D\uDD04 ' + escapeHtml(t.cron_expression) + '</span>' : '';
+                var runsStr = t.run_count ? '<span class="task-tag">\u25B6 ' + t.run_count + ' runs</span>' : '';
+                var maxStr = t.max_runs ? '<span class="task-tag">\uD83C\uDFAF max ' + t.max_runs + '</span>' : '';
+                container.innerHTML +=
+                    '<div class="active-task-card" data-task-id="' + t.id + '">' +
+                        '<div class="active-task-card-header">' +
+                            '<span class="active-task-type ' + typeClass + '">' + t.task_type + '</span>' +
+                            '<span class="active-task-desc">' + escapeHtml(t.description || 'Untitled task') + '</span>' +
+                        '</div>' +
+                        '<div class="active-task-meta">' +
+                            '<span class="task-tag">' + statusIcon + ' ' + t.status + '</span>' +
+                            '<span class="task-tag">\uD83D\uDD52 Next: ' + nextRun + '</span>' +
+                            cronStr + runsStr + maxStr +
+                        '</div>' +
+                    '</div>';
+            });
+        }
+
+        // ── Execution history section ──
+        container.innerHTML += '<div class="task-section-title">Execution History</div>';
+
+        if (!runs || runs.length === 0) {
+            container.innerHTML +=
+                '<div class="task-empty">' +
+                    '<div class="task-empty-icon">\uD83D\uDCED</div>' +
+                    '<div class="task-empty-text">No task executions yet</div>' +
+                    '<div class="task-empty-sub">Scheduled tasks will appear here after they run</div>' +
+                '</div>';
+        } else {
+            runs.forEach(function(run) {
+                var runEl = buildTaskRunElement(run);
+                container.appendChild(runEl);
+            });
+            if (runs.length >= 50) {
+                var loadMore = document.createElement('button');
+                loadMore.className = 'task-load-more';
+                loadMore.textContent = 'Load more...';
+                loadMore.addEventListener('click', function() {
+                    loadMoreRuns(runs.length, container, loadMore);
+                });
+                container.appendChild(loadMore);
+            }
+        }
+
+        messagesEl.insertBefore(container, thinkingEl);
+        scrollBottom();
+    }
+
+    function buildTaskRunElement(run) {
+        var runEl = document.createElement('div');
+        runEl.className = 'task-run';
+
+        var durationStr = run.duration_ms != null ? formatDuration(run.duration_ms) : '\u2014';
+        var timeStr = run.executed_at ? formatTime(run.executed_at) : '\u2014';
+        var statusClass = run.status || 'completed';
+        var statusIcon = statusClass === 'completed' ? '\u2705' : '\u274C';
+
+        // Header (clickable)
+        var header = document.createElement('div');
+        header.className = 'task-run-header';
+        header.innerHTML =
+            '<div class="task-run-status ' + statusClass + '"></div>' +
+            '<div class="task-run-desc">' + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
+            '<div class="task-run-meta">' +
+                '<span>' + timeStr + '</span>' +
+                '<span class="task-run-duration">' + durationStr + '</span>' +
+            '</div>' +
+            '<span class="task-run-toggle">\u25BC</span>';
+
+        header.addEventListener('click', function() {
+            runEl.classList.toggle('expanded');
+        });
+        runEl.appendChild(header);
+
+        // Expandable details
+        var details = document.createElement('div');
+        details.className = 'task-run-details';
+
+        var detailsHtml =
+            '<div class="task-detail-row"><span class="task-detail-label">Status</span><span class="task-detail-value ' + (statusClass === 'failed' ? 'error' : 'success') + '">' + statusIcon + ' ' + (run.status || 'unknown') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Task ID</span><span class="task-detail-value">#' + (run.task_id || '\u2014') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + (run.task_type || '\u2014') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Run #</span><span class="task-detail-value">' + (run.run_number || '\u2014') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Duration</span><span class="task-detail-value">' + durationStr + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Executed</span><span class="task-detail-value">' + (run.executed_at ? new Date(run.executed_at + 'Z').toLocaleString() : '\u2014') + '</span></div>';
+
+        if (run.cron_expression) {
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(run.cron_expression) + '</span></div>';
+        }
+
+        if (run.skills_used) {
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Skills</span><span class="task-detail-value">' + escapeHtml(run.skills_used) + '</span></div>';
+        }
+
+        if (run.result) {
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Result</span></div>' +
+                '<div class="task-result-content">' + escapeHtml(run.result) + '</div>';
+        }
+
+        if (run.error) {
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Error</span></div>' +
+                '<div class="task-result-content" style="border-color:var(--red-dim);color:var(--red)">' + escapeHtml(run.error) + '</div>';
+        }
+
+        details.innerHTML = detailsHtml;
+        runEl.appendChild(details);
+
+        return runEl;
+    }
+
+    function loadMoreRuns(offset, container, btn) {
+        if (!authToken) return;
+        btn.textContent = 'Loading...';
+        btn.disabled = true;
+        fetch('/api/scheduled-tasks/runs?limit=50&offset=' + offset, {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var runs = data.runs || [];
+            runs.forEach(function(run) {
+                container.insertBefore(buildTaskRunElement(run), btn);
+            });
+            if (runs.length < 50) {
+                btn.remove();
+            } else {
+                btn.textContent = 'Load more...';
+                btn.disabled = false;
+                btn.onclick = function() { loadMoreRuns(offset + runs.length, container, btn); };
+            }
+        })
+        .catch(function(e) {
+            console.error('Failed to load more runs:', e);
+            btn.textContent = 'Load more...';
+            btn.disabled = false;
+        });
+    }
+
+    function formatDuration(ms) {
+        if (ms < 1000) return ms + 'ms';
+        var sec = Math.floor(ms / 1000);
+        if (sec < 60) return sec + 's';
+        var min = Math.floor(sec / 60);
+        var s = sec % 60;
+        if (min < 60) return min + 'm ' + s + 's';
+        var hr = Math.floor(min / 60);
+        var m = min % 60;
+        return hr + 'h ' + m + 'm';
     }
 
     function renameSession(sessionId, newTitle) {
@@ -1722,7 +2284,8 @@
                     renderSessionList(data.sessions || [], data.activeSessionId || '');
                     // Only load messages on initial connect / reconnect, not on every
                     // switch/new_session (those handle message loading themselves).
-                    if (needsInitialLoad && data.activeSessionId) {
+                    // Skip if user is viewing task history.
+                    if (needsInitialLoad && data.activeSessionId && currentView === 'chat') {
                         loadSessionMessages(data.activeSessionId);
                         needsInitialLoad = false;
                     }

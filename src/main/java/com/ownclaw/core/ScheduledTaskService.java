@@ -54,6 +54,9 @@ public class ScheduledTaskService {
     private final ConversationService conversationService;
     private final OwnClawConfig config;
 
+    // Track task submission timestamps for duration calculation
+    private final Map<Long, Long> taskStartTimes = new java.util.concurrent.ConcurrentHashMap<>();
+
     // ── Natural language time patterns ──
 
     private static final Pattern DURATION_PATTERN = Pattern.compile(
@@ -469,6 +472,9 @@ public class ScheduledTaskService {
             statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
                     "Scheduled task firing: " + truncate(description, 80));
 
+            // Track start time for duration calculation
+            taskStartTimes.put(taskId, System.currentTimeMillis());
+
             // Submit to task queue at P2 (background priority)
             taskQueue.submit(userId, description, 2)
                     .thenAccept(response -> onTaskCompleted(taskId, userId, taskType, description, response))
@@ -485,6 +491,9 @@ public class ScheduledTaskService {
     private void onTaskCompleted(long taskId, String userId, String taskType,
                                  String description, String response) {
         int newRunCount = incrementRunCount(taskId);
+
+        // Record full execution history
+        recordRun(taskId, userId, description, taskType, "completed", response, null, newRunCount);
 
         if (taskType.equals("recurring")) {
             // Check if max runs reached
@@ -548,7 +557,10 @@ public class ScheduledTaskService {
      */
     private void onTaskFailed(long taskId, String userId, String taskType,
                               String description, String error) {
-        incrementRunCount(taskId);
+        int newRunCount = incrementRunCount(taskId);
+
+        // Record full execution history
+        recordRun(taskId, userId, description, taskType, "failed", null, error, newRunCount);
 
         if (taskType.equals("recurring")) {
             // For recurring tasks, try to schedule next run despite the failure
@@ -637,5 +649,77 @@ public class ScheduledTaskService {
     private String truncate(String text, int maxLen) {
         if (text == null) return "";
         return text.length() > maxLen ? text.substring(0, maxLen) + "…" : text;
+    }
+
+    /**
+     * Record a task execution run in the scheduled_task_runs history table.
+     */
+    private void recordRun(long taskId, String userId, String description, String taskType,
+                           String status, String result, String error, int runNumber) {
+        Long startTime = taskStartTimes.remove(taskId);
+        Long durationMs = (startTime != null) ? System.currentTimeMillis() - startTime : null;
+        try {
+            jdbc.update("""
+                INSERT INTO scheduled_task_runs
+                    (task_id, user_id, description, task_type, status, result, error,
+                     duration_ms, run_number, executed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                taskId, userId, description, taskType, status,
+                result, error, durationMs, runNumber);
+        } catch (Exception e) {
+            log.error("Failed to record task run for task #{}: {}", taskId, e.getMessage());
+        }
+    }
+
+    /**
+     * Get paginated execution history for a user's scheduled tasks.
+     */
+    public List<Map<String, Object>> getRunHistory(String userId, int limit, int offset) {
+        return jdbc.queryForList("""
+            SELECT r.*, t.cron_expression, t.next_run_at, t.max_runs,
+                   t.status as task_status
+            FROM scheduled_task_runs r
+            LEFT JOIN scheduled_tasks t ON r.task_id = t.id
+            WHERE r.user_id = ?
+            ORDER BY r.executed_at DESC
+            LIMIT ? OFFSET ?
+            """, userId, limit, offset);
+    }
+
+    /**
+     * Get execution history for a specific task.
+     */
+    public List<Map<String, Object>> getTaskRuns(String userId, long taskId, int limit) {
+        return jdbc.queryForList("""
+            SELECT * FROM scheduled_task_runs
+            WHERE user_id = ? AND task_id = ?
+            ORDER BY executed_at DESC
+            LIMIT ?
+            """, userId, taskId, limit);
+    }
+
+    /**
+     * Get summary stats for a user's scheduled tasks.
+     */
+    public Map<String, Object> getTaskStats(String userId) {
+        int totalRuns = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM scheduled_task_runs WHERE user_id = ?",
+                Integer.class, userId)).orElse(0);
+        int completedRuns = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM scheduled_task_runs WHERE user_id = ? AND status = 'completed'",
+                Integer.class, userId)).orElse(0);
+        int failedRuns = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM scheduled_task_runs WHERE user_id = ? AND status = 'failed'",
+                Integer.class, userId)).orElse(0);
+        int activeTasks = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM scheduled_tasks WHERE user_id = ? AND status IN ('active', 'paused')",
+                Integer.class, userId)).orElse(0);
+        return Map.of(
+                "totalRuns", totalRuns,
+                "completedRuns", completedRuns,
+                "failedRuns", failedRuns,
+                "activeTasks", activeTasks
+        );
     }
 }
