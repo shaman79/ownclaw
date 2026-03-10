@@ -1711,18 +1711,29 @@
             border-color: rgba(248,113,113,.3);
         }
 
-        /*  Pinned settings item  */
-        .session-item.pinned-settings {
-            border: 1px solid rgba(129,140,248,.15) !important;
-            background: rgba(129,140,248,.06);
-            margin-bottom: 4px;
+        /*  Header settings gear  */
+        #settings-btn {
+            display: flex; align-items: center; justify-content: center;
+            width: 34px; height: 34px;
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            background: none;
+            color: var(--text-3);
+            cursor: pointer;
+            transition: all .15s;
+            margin-right: 6px;
         }
-        .session-item.pinned-settings:hover { background: rgba(129,140,248,.1) }
-        .session-item.pinned-settings.active {
-            background: rgba(129,140,248,.14);
-            border-color: rgba(129,140,248,.3) !important;
+        #settings-btn:hover {
+            color: var(--accent-hi);
+            border-color: rgba(129,140,248,.3);
+            background: rgba(129,140,248,.08);
         }
-        .session-item.pinned-settings .session-title { padding-right: 0 }
+        #settings-btn.active {
+            color: var(--accent-hi);
+            border-color: rgba(129,140,248,.4);
+            background: rgba(129,140,248,.12);
+        }
+        #settings-btn svg { width: 16px; height: 16px; fill: currentColor }
     </style>
 </head>
 <body>
@@ -1761,6 +1772,9 @@
         <span id="conn-label">Connecting</span>
     </div>
     <span class="header-spacer"></span>
+    <button id="settings-btn" title="Settings">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
+    </button>
     <button id="logout-btn">
         <svg viewBox="0 0 24 24"><path d="M16 13v-2H7V8l-5 4 5 4v-3zM20 3h-9c-1.1 0-2 .9-2 2v4h2V5h9v14h-9v-4H9v4c0 1.1.9 2 2 2h9c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
         Sign out
@@ -1845,6 +1859,12 @@
     var authError    = document.getElementById('auth-error');
     var authToggle   = document.getElementById('auth-toggle');
     var logoutBtn    = document.getElementById('logout-btn');
+    var settingsBtn  = document.getElementById('settings-btn');
+
+    settingsBtn.addEventListener('click', function() {
+        if (currentView === 'settings') return;
+        switchToSettings();
+    });
 
     var messagesEl      = document.getElementById('messages');
     var thinkingEl      = document.getElementById('thinking');
@@ -1965,9 +1985,10 @@
     function switchToSession(sessionId) {
         if (!ws || ws.readyState !== 1) return;
         currentView = 'chat';
-        // Show chat UI elements, hide task history
+        // Show chat UI elements, hide task history/settings
         document.getElementById('input-area').style.display = '';
         document.getElementById('activity-wrap').style.display = '';
+        settingsBtn.classList.remove('active');
         ws.send(JSON.stringify({ type: 'switch_session', message: sessionId }));
         clearMessages();
         // Update sidebar active states
@@ -2004,7 +2025,7 @@
     }
 
     function clearMessages() {
-        messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading').forEach(function(m) { m.remove(); });
+        messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
     }
 
@@ -2024,19 +2045,6 @@
             sidebar.classList.remove('mobile-open');
         });
         sessionListEl.appendChild(pinned);
-
-        // ── Pinned "Settings" item ──
-        var pinnedSettings = document.createElement('div');
-        pinnedSettings.className = 'session-item pinned-settings' + (currentView === 'settings' ? ' active' : '');
-        pinnedSettings.setAttribute('data-session-id', '__settings__');
-        pinnedSettings.innerHTML =
-            '<div class="session-title"><span class="pinned-icon">\u2699\uFE0F</span>Settings</div>' +
-            '<div class="session-preview">LLM providers, API keys & models</div>';
-        pinnedSettings.addEventListener('click', function() {
-            switchToSettings();
-            sidebar.classList.remove('mobile-open');
-        });
-        sessionListEl.appendChild(pinnedSettings);
 
         if (!sessions || sessions.length === 0) {
             var empty = document.createElement('div');
@@ -2098,8 +2106,6 @@
             var sid = el.getAttribute('data-session-id');
             if (sid === '__scheduled_tasks__') {
                 el.classList.toggle('active', currentView === 'tasks');
-            } else if (sid === '__settings__') {
-                el.classList.toggle('active', currentView === 'settings');
             } else {
                 el.classList.toggle('active', currentView === 'chat' && sid === sessionId);
             }
@@ -2111,6 +2117,7 @@
         clearMessages();
         // Hide chat input and activity bar when viewing tasks
         document.getElementById('input-area').style.display = 'none';
+        settingsBtn.classList.remove('active');
         // Update sidebar active states
         updateSidebarActive(null);
         loadTaskHistory();
@@ -2568,6 +2575,7 @@
         clearMessages();
         document.getElementById('input-area').style.display = 'none';
         document.getElementById('activity-wrap').style.display = 'none';
+        settingsBtn.classList.add('active');
         updateSidebarActive(null);
         loadSettings();
     }
