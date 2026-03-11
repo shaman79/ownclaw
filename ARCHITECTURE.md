@@ -1,8 +1,8 @@
 # OwnClaw — Architecture Design Document
 
-**Version**: 0.2 (Draft)  
-**Date**: 2026-02-22  
-**Status**: Design phase — no code yet
+**Version**: 0.3  
+**Date**: 2025-07-12  
+**Status**: Active development — reactive agent loop implemented
 
 ---
 
@@ -10,13 +10,15 @@
 
 OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LLM architecture**:
 
-- **Mentor** — a large cloud LLM that plans, reviews, and teaches
-- **Executor** — a small local LLM (7-14B via Ollama) that classifies, compresses, reasons, and manages tasks
-- **SkillRunner** — the execution engine that runs skill scripts in sandboxed environments
+- **Cloud LLM (Orchestrator)** — a large cloud LLM (OpenAI or Anthropic, configurable) that **always** drives the main agent loop: reasoning, planning, deciding which tools to call, and evaluating results. The cloud LLM is the "brain" — it sees every message, makes every decision, and owns the Think→Act→Observe loop.
+- **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
+- **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (Podman containers on Linux, ProcessBuilder on Windows).
 
-The core innovation is **token efficiency**: the Mentor never sees raw data, only compressed summaries prepared by the Executor. This makes the system 10-100x cheaper than single-LLM alternatives (e.g., OpenClaw) while maintaining quality through structured feedback loops.
+The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is a fallback — if the cloud is unavailable, the system degrades to local-only mode.
 
 The system supports **multiple users**, each with isolated profiles, credentials, skill libraries, and conversation state.
+
+> **Architecture evolution note**: The original design (v0.1–v0.2) described a "Mentor/Executor" model where the local LLM classified tasks, matched skills, and decided when to escalate to the cloud "Mentor" for planning. This has been replaced by a **reactive agent loop** where the cloud LLM always orchestrates, using a Think→Act→Observe cycle. The `delegate` action replaces the old `local_llm` action, providing structured plan-based delegation instead of free-form local LLM conversations. Some sections of this document still reference the original design terminology.
 
 ### Design Principles
 
@@ -64,12 +66,16 @@ scenario breaks the system's ability to handle all others.
 
 | Component | What it is | What it does | Runs on |
 |-----------|-----------|-------------|---------|
-| **Executor** | Local LLM agent | Classifies tasks, matches skills, compresses context, manages conversation, tracks user preferences | Ollama (shared instance) |
-| **SkillRunner** | Execution engine | Runs Python skill scripts in sandbox, manages I/O, captures results | Java ProcessBuilder / bwrap |
-| **Mentor** | Cloud LLM | Plans multi-step tasks, reviews results, generates new skills, refines prompts | Cloud API (Anthropic, OpenAI, etc.) |
-| **Task Queue** | Priority queue | Serializes Ollama access, manages fairness across users, handles async tasks | In-process (Java) |
+| **AgentLoop** | Main agent loop | Drives the Think→Act→Observe cycle: cloud LLM reasons, picks an action, system executes it, result feeds back | Java (Spring Boot) |
+| **ThinkingEngine** | Prompt builder + LLM caller | Builds system/user prompts, calls the selected LLM provider, parses structured JSON responses | Java |
+| **LlmRouter** | Provider selector | Always selects cloud LLM; falls back to local only if cloud is unavailable | Java |
+| **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
+| **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
+| **SkillRunner** | Skill execution engine | Runs Python skill scripts in sandboxed containers (Podman/ProcessBuilder), manages I/O | Java + Python |
+| **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
+| **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
-**Key constraint**: Executor and SkillRunner share the same Ollama instance. Running two local LLMs is not viable. The Task Queue ensures they don't compete for inference time.
+**Key architectural rule**: The cloud LLM **always** orchestrates the main loop. The local LLM is only used when the cloud issues a `delegate` action with a structured plan, or as a degraded fallback when the cloud is unavailable.
 
 ### 2.2 Architecture Diagram
 
@@ -91,58 +97,56 @@ scenario breaks the system's ability to handle all others.
 │  └──────────────────────┬───────────────────────────┘                  │
 │                         ▼                                              │
 │  ┌──────────────────────────────────────────────────┐                  │
-│  │               Task Queue                          │                  │
-│  │  (priority queue, per-user fairness,              │                  │
-│  │   Ollama serialization, async task support)       │                  │
-│  └──────────────────────┬───────────────────────────┘                  │
-│                         ▼                                              │
-│  ┌──────────────────────────────────────────────────┐                  │
-│  │               Task Orchestrator                   │                  │
+│  │               AgentLoop (Main Agent Loop)         │                  │
 │  │                                                   │                  │
-│  │  1. Executor classifies task + matches skills     │                  │
-│  │  2. Confidence check: low → bypass to Mentor raw  │                  │
-│  │  3. Executor compresses task + context             │                  │
-│  │  4. Mentor receives compact payload, returns plan │                  │
-│  │  5. SkillRunner follows plan in sandbox           │                  │
-│  │  6. Executor compresses results                   │                  │
-│  │  7. Mentor reviews (optional, based on plan)      │                  │
-│  │  8. Feedback loop if needed (max N rounds)        │                  │
-│  │  9. Chat status messages to user throughout       │                  │
+│  │  Reactive Think→Act→Observe cycle:                │                  │
+│  │  1. ThinkingEngine builds prompt + calls Cloud LLM│                  │
+│  │  2. Cloud LLM responds with a JSON action         │                  │
+│  │  3. AgentLoop dispatches action to ToolRegistry   │                  │
+│  │  4. Observation (result) feeds back into next turn│                  │
+│  │  5. Repeat until Cloud LLM emits "answer" action  │                  │
+│  │                                                   │                  │
+│  │  Special actions:                                 │                  │
+│  │  • "delegate" → LocalExecutor (structured plan)   │                  │
+│  │  • "skill_create" → generates new Python skill    │                  │
+│  │  • "answer" → final response to user              │                  │
 │  └────────┬─────────────┬───────────────────────────┘                  │
 │           │             │                                              │
 │   ┌───────▼───────┐  ┌─▼────────────────────────────────────────┐     │
-│   │    Mentor      │  │  Local Agents (shared Ollama instance)    │     │
-│   │  (Cloud LLM)   │  │                                          │     │
-│   │                │  │  ┌─────────────┐  ┌──────────────────┐   │     │
-│   │ Providers:     │  │  │  Executor    │  │  SkillRunner      │   │     │
-│   │ • Anthropic    │  │  │  (LLM tasks) │  │  (script exec)    │   │     │
-│   │ • OpenAI       │  │  │             │  │                    │   │     │
-│   │ • DeepSeek     │  │  │ • Classify  │  │ • Run skill.py    │   │     │
-│   │ • Mistral      │  │  │ • Compress  │  │ • Sandbox I/O     │   │     │
-│   │ • (pluggable)  │  │  │ • Match     │  │ • Credential inj. │   │     │
-│   │                │  │  │ • Summarize │  │ • Timeout + kill   │   │     │
-│   │                │  │  │ • Pref.track│  │ • Progress stream  │   │     │
-│   └───────────────┘  │  └─────────────┘  └──────────────────┘   │     │
-│                       └──────────────────────────────────────────┘     │
+│   │  Cloud LLM     │  │  LocalExecutor (Ollama)                   │     │
+│   │  (Orchestrator) │  │                                          │     │
+│   │                │  │  Receives DelegationPlan from cloud:      │     │
+│   │ Providers:     │  │  • goal: what to accomplish               │     │
+│   │ • OpenAI       │  │  • steps: ordered [{description,          │     │
+│   │ • Anthropic    │  │           tool, params}, ...]             │     │
+│   │                │  │  • checkpoints: verification points       │     │
+│   │ Always drives  │  │  • max_steps: execution limit             │     │
+│   │ main loop.     │  │                                          │     │
+│   │ Decides ALL    │  │  Runs mini Think→Act→Observe loop         │     │
+│   │ actions.       │  │  using local LLM (qwen2.5:14b).          │     │
+│   │                │  │  Returns consolidated results to cloud.   │     │
+│   └───────────────┘  └──────────────────────────────────────────┘     │
 │                                                                        │
 │  ┌──────────────────────────────────────────────────┐                  │
-│  │              Skill Engine                         │                  │
+│  │              ToolRegistry + Skills                │                  │
 │  │                                                   │                  │
 │  │  ┌─────────────┐ ┌────────────┐ ┌─────────────┐  │                  │
-│  │  │  Manifest    │ │  Loader    │ │  Generator  │  │                  │
-│  │  │  (index)     │ │  (resolve) │ │  (Mentor    │  │                  │
-│  │  │              │ │            │ │   creates)  │  │                  │
+│  │  │  Built-in    │ │  Python    │ │  MCP Bridge │  │                  │
+│  │  │  tools       │ │  Skills    │ │  tools      │  │                  │
+│  │  │  (shell,     │ │  (sandbox) │ │             │  │                  │
+│  │  │   file,      │ │            │ │             │  │                  │
+│  │  │   http...)   │ │            │ │             │  │                  │
 │  │  └─────────────┘ └────────────┘ └─────────────┘  │                  │
 │  └──────────────────────┬───────────────────────────┘                  │
 │                         ▼                                              │
 │  ┌──────────────────────────────────────────────────┐                  │
-│  │              Sandbox Manager                      │                  │
+│  │              Container Sandbox (Podman/Process)    │                  │
 │  │                                                   │                  │
-│  │  Linux:   bubblewrap (bwrap) + seccomp            │                  │
-│  │  Windows: ProcessBuilder + restricted user        │                  │
+│  │  Linux:   Podman container with python:3.11-slim  │                  │
+│  │  Windows: ProcessBuilder (dev mode)               │                  │
 │  │                                                   │                  │
 │  │  • Credential injection via env vars              │                  │
-│  │  • Filesystem: read-only base + writable tmpdir   │                  │
+│  │  • Per-skill venv with pip dependencies           │                  │
 │  │  • Network: configurable (allow/deny per skill)   │                  │
 │  │  • Timeout: hard kill after configurable limit    │                  │
 │  │  • I/O: JSON params → stdout result + progress    │                  │
@@ -150,7 +154,7 @@ scenario breaks the system's ability to handle all others.
 │                                                                        │
 │  ┌───────────────┐ ┌────────────────┐ ┌──────────────────────┐        │
 │  │ User Profiles  │ │ Credential     │ │ Conversation Store   │        │
-│  │ (SQLite)       │ │ Vault          │ │ (SQLite, compressed) │        │
+│  │ (H2/SQLite)    │ │ Vault          │ │ (H2, compressed)     │        │
 │  │                │ │ (encrypted)    │ │                      │        │
 │  └───────────────┘ └────────────────┘ └──────────────────────┘        │
 │                                                                        │
@@ -252,386 +256,190 @@ Long-running tasks emit periodic progress messages to the user's chat:
 
 ## 4. Dual-LLM Communication Protocol
 
-### 4.1 Token Budget
+> **Architecture change (v0.3)**: This section has been rewritten to reflect the current **cloud-as-orchestrator** architecture. The original v0.2 design used a confidence-based routing model where the local "Executor" LLM classified tasks and decided when to escalate to the cloud "Mentor." That model has been replaced with a simpler, more reliable design: the cloud LLM **always** drives the main agent loop, and the local LLM only executes structured delegation plans.
 
-The #1 architectural constraint. Target per-task cloud token usage:
-
-| Phase | Input Tokens | Output Tokens | Notes |
-|-------|-------------|---------------|-------|
-| Mentor: Plan | 500-1500 | 200-800 | Compressed task + skill manifest subset |
-| Mentor: Review | 300-800 | 100-400 | Compressed result summary |
-| Mentor: Teach (rare) | 1000-3000 | 2000-5000 | Only when creating new skills |
-| **Total typical task** | **800-2300** | **300-1200** | **~3500 tokens worst case** |
-
-Compare: OpenClaw burns 50K-200K tokens per interaction (full context + tools + history).
-
-### 4.2 Confidence Threshold & Mentor Bypass
-
-The Executor's task classification produces a confidence score. This determines the flow:
+### 4.1 Core Principle: Cloud Orchestrates, Local Executes
 
 ```
                     User message
                          │
                          ▼
               ┌─────────────────────┐
-              │  Executor: classify  │
-              │  + match skills      │
+              │  ThinkingEngine      │
+              │  builds prompt +     │
+              │  calls Cloud LLM    │
               └──────────┬──────────┘
                          │
-              confidence score (0.0-1.0)
+              Cloud LLM responds with
+              a JSON action:
                          │
-            ┌────────────┼────────────┐
-            │            │            │
-       < 0.3        0.3 - 0.7       > 0.7
-     (very low)     (medium)        (high)
-            │            │            │
-            ▼            ▼            ▼
-     Send RAW task   Normal flow:  For KNOWN tasks
-     to Mentor       compressed    (cached plans,
-     (accept higher  payload to    cron repeats):
-     token cost to   Mentor for    Executor reuses
-     avoid bad plan) planning      previous plan,
-                                   skip Mentor
+         ┌───────────────┼───────────────┐
+         │               │               │
+    tool call        delegate         answer
+    (direct)     (to local LLM)    (final response)
+         │               │               │
+         ▼               ▼               ▼
+    ToolRegistry    LocalExecutor    Return to user
+    executes it     runs plan with
+                    local LLM
+         │               │
+         └───────┬───────┘
+                 ▼
+           Observation
+           feeds back
+           into next
+           Think cycle
 ```
 
-- **Below 0.3**: Executor doesn't trust itself. Raw task (more tokens) goes to Mentor with an explicit "I'm unsure" flag. This is the safety valve.
-- **0.3–0.7**: Normal flow. Executor compresses, Mentor plans.
-- **Above 0.7 + cached plan**: For tasks the system has done before (especially crons), Executor reuses the cached plan without calling Mentor at all. Zero cloud tokens.
+**Key rules**:
+- The cloud LLM sees **every** message and makes **every** decision in the main loop
+- The local LLM is **never** called directly in the main loop — only via `delegate`
+- `LlmRouter.selectProvider()` always returns the cloud provider; local is only a fallback if cloud is unavailable
+- All tools except `skill_create` are available to the local LLM during delegation
 
-### 4.3 Task Flow (Happy Path)
+### 4.2 The Agent Loop (Think → Act → Observe)
+
+The main agent loop (`AgentLoop.java`) runs a reactive cycle:
 
 ```
-User: "Send today's meeting notes to john@example.com"
-                    │
-                    ▼
-              [Chat: "🔍 Analyzing task..."]
-                    │
-                    ▼
-┌─────────────────────────────────────────┐
-│ Step 1: EXECUTOR — Classify & Match      │
-│                                          │
-│ Input:  Raw user message + manifest.json │
-│ Action: • LLM-based intent classification│
-│         • LLM-based skill matching       │
-│         • Confidence scoring             │
-│         • Compress user context          │
-│ Output: Compact task payload             │
-│                                          │
-│ {                                        │
-│   "task": "email meeting notes",         │
-│   "skills_matched": [                    │
-│     {"name":"send_email","conf":0.9},    │
-│     {"name":"file_read","conf":0.8},     │
-│     {"name":"text_summarize","conf":0.6} │
-│   ],                                     │
-│   "user_ctx": "email configured, SMTP ok"│
-│   "confidence": 0.85,                   │
-│   "credentials_needed": ["SMTP_*"]       │
-│ }                                        │
-└─────────────────┬───────────────────────┘
-                  ▼
-            [Chat: "📋 Planning with Mentor..."]
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│ Step 2: MENTOR — Plan                    │
-│                                          │
-│ Input:  Compact payload from Step 1      │
-│ Output: Structured execution plan        │
-│                                          │
-│ {                                        │
-│   "steps": [                             │
-│     {"id": 1, "skill": "file_read",     │
-│      "params": {"pattern":"*meeting*"},  │
-│      "on_fail": "report"},               │
-│     {"id": 2, "skill":"text_summarize",  │
-│      "params": {"source":"$1.output",    │
-│                  "style":"bullet"},       │
-│      "depends_on": [1],                  │
-│      "on_fail": "skip"},                 │
-│     {"id": 3, "skill": "send_email",    │
-│      "params": {"to": "john@...",        │
-│                  "body": "$2.output"},    │
-│      "depends_on": [2],                  │
-│      "reversible": false,                │
-│      "on_fail": "report"}                │
-│   ],                                     │
-│   "review_result": true,                 │
-│   "max_retries": 1                       │
-│ }                                        │
-└─────────────────┬───────────────────────┘
-                  ▼
-            [Chat: "⚙️ Running: reading files..."]
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│ Step 3: SKILLRUNNER — Execute            │
-│                                          │
-│ For each step (respecting depends_on):   │
-│   • Check credential approval (see §8.3) │
-│   • Load skill script from library       │
-│   • Inject params + approved credentials │
-│   • Run in sandbox                       │
-│   • Capture output → step result registry│
-│   • Resolve $N.output references         │
-│   • Send progress to user chat           │
-│   • On failure: check on_fail policy     │
-│                                          │
-│ Parallel execution: steps with no mutual │
-│ depends_on can run concurrently.         │
-│                                          │
-│ Reversible flag: warn before executing   │
-│ irreversible steps after a failure.      │
-└─────────────────┬───────────────────────┘
-                  ▼
-            [Chat: "📧 Email sent. Mentor reviewing..."]
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│ Step 4: MENTOR — Review (if requested)   │
-│                                          │
-│ Input:  Compressed result summary        │
-│         "3 files found, summarized to    │
-│          5 bullets, email sent to john@" │
-│ Output: "approved" | "retry with changes"│
-└─────────────────┬───────────────────────┘
-                  ▼
-            [Chat: "✅ Done. Meeting notes emailed to john@example.com"]
+┌──────────────────────────────────────────────────────────┐
+│                    AgentLoop                              │
+│                                                          │
+│  1. Build messages: system prompt + conversation history │
+│     + last observation                                   │
+│  2. Call Cloud LLM via ThinkingEngine                    │
+│  3. Parse JSON response → action + params               │
+│  4. If action == "answer" → return response to user      │
+│  5. If action == "delegate" → LocalExecutor.execute()    │
+│  6. If action == tool call → ToolRegistry.execute()      │
+│  7. Record observation (tool result or delegation result) │
+│  8. Go to step 1                                         │
+│                                                          │
+│  Max iterations: configurable (default 25)               │
+│  Conversation compression after N messages               │
+│  Prompt caching for Anthropic (CACHE_BOUNDARY_MARKER)    │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### 4.4 Plan Format — Advanced Features
+### 4.3 The `delegate` Action
 
-The plan format supports more than linear sequence:
+When the cloud LLM determines that a task involves multiple routine steps that don't require cloud-grade reasoning, it can delegate work to the local LLM via a **structured delegation plan**.
 
+**Action format** (as emitted by cloud LLM):
 ```json
 {
-  "steps": [
-    {
-      "id": 1,
-      "skill": "file_read",
-      "params": {"pattern": "*meeting*"},
-      "depends_on": [],
-      "on_fail": "report",
-      "reversible": true
-    },
-    {
-      "id": 2,
-      "skill": "file_read",
-      "params": {"pattern": "*notes*"},
-      "depends_on": [],
-      "on_fail": "skip",
-      "reversible": true
-    },
-    {
-      "id": 3,
-      "skill": "text_summarize",
-      "params": {"source": "$1.output + $2.output"},
-      "depends_on": [1, 2],
-      "condition": "$1.success || $2.success",
-      "on_fail": "report"
-    },
-    {
-      "id": 4,
-      "skill": "send_email",
-      "params": {"to": "john@example.com", "body": "$3.output"},
-      "depends_on": [3],
-      "reversible": false,
-      "on_fail": "report"
-    }
-  ],
-  "review_result": true,
-  "max_retries": 1
+  "action": "delegate",
+  "params": {
+    "goal": "Find all Python files in the project and count lines of code",
+    "steps": [
+      {
+        "description": "List all .py files recursively",
+        "tool": "shell",
+        "params": {"command": "find . -name '*.py' -type f"}
+      },
+      {
+        "description": "Count lines in each file",
+        "tool": "shell",
+        "params": {"command": "wc -l $(find . -name '*.py' -type f)"}
+      }
+    ],
+    "checkpoints": ["Verify files were found before counting"],
+    "max_steps": 10
+  }
 }
 ```
 
-**Features**:
-- **`depends_on`**: DAG-based dependencies. Steps 1 and 2 can run in parallel. Step 3 waits for both.
-- **`condition`**: Simple expression evaluated against step results. Enables branching.
-- **`on_fail`**: `"report"` (stop + report to Mentor), `"skip"` (continue without this step's output), `"retry"` (retry once).
-- **`reversible`**: Marks whether the action can be undone. If a later step fails, the orchestrator knows which earlier steps are permanent (email sent) vs reversible (temp file created).
-
-#### Condition Grammar (Java-Evaluated)
-
-The `condition` field uses a minimal expression language evaluated **in Java** (never by the LLM). The grammar is deliberately restrictive to prevent Mentor from generating unparseable expressions.
-
-**Supported variables**:
-- `$N.success` — boolean, `true` if step N completed without error
-- `$N.output` — string, the `output` field from step N's result JSON
-- `$N.exit_code` — integer, the process exit code of step N
-
-**Supported operators**:
-- `&&` (AND), `||` (OR), `!` (NOT)
-- `==`, `!=` (equality, works on strings and integers)
-- `.contains("literal")` — string contains check
-- `.isEmpty()` — string empty check
-
-**Valid expressions**:
-- `$1.success`
-- `$1.success && $2.success`
-- `$1.success || $2.success`
-- `!$3.output.isEmpty()`
-- `$1.output.contains("error") == false`
-
-**Evaluation**: `ConditionEvaluator.java` parses and evaluates against a `Map<Integer, StepResult>`. If parsing fails, the condition is treated as `true` (fail-open) and the parse failure is logged as a warning event.
-
-The Mentor's system prompt (§4.8) includes this grammar, ensuring generated plans only use valid expressions.
-
-### 4.5 Escalation Scenarios
-
-| Scenario | What Happens | Cloud Cost |
-|----------|-------------|------------|
-| Known task, cached plan | Executor reuses plan, SkillRunner runs, no Mentor call | **Zero** |
-| Known task, skills available | Executor compresses → Mentor plans → SkillRunner runs | Low (~2K tokens) |
-| Known task, execution fails | Executor compresses error → Mentor replans | Medium (~5K tokens) |
-| Unknown task, no matching skills | Executor flags "no skills" → Mentor creates new skill | High (~8K tokens, one-time) |
-| Low confidence (< 0.3) | Raw task to Mentor (accepts higher token cost for safety) | Medium (~4K tokens) |
-| Ambiguous task | Executor can't classify → asks user for clarification directly | Zero |
-| Conversational (no action) | Executor handles entirely (chat, Q&A) | Zero |
-
-### 4.6 Feedback Loop & Teaching
-
-The feedback loop serves two purposes: (1) fix immediate task failures, (2) improve the system over time.
-
-#### Immediate Feedback (Task Retry)
-
-```
-SkillRunner fails step 3
-        │
-        ▼
-Executor compresses error:
-  "send_email failed: SMTP auth error,
-   credentials appear correct, port 587"
-        │
-        ▼
-Mentor receives compressed error + original plan
-        │
-        ▼
-Mentor returns:
-  { "action": "retry",
-    "changes": {"step":3, "params":{"port":465, "use_ssl":true}},
-    "teaching_note": "SMTP port 587 requires STARTTLS, not direct SSL.
-                      Update send_email skill to auto-detect." }
-        │
-        ▼
-Executor applies changes, SkillRunner retries
-```
-
-#### Teaching (Skill Improvement)
-
-When Mentor returns a `teaching_note`, this triggers the teaching pipeline:
-
-```
-Mentor teaching_note
-        │
-        ▼
-Executor stores note in local teaching log
-        │
-        ▼
-After task completes, Executor evaluates:
-  - Is this a recurring issue? (check teaching log)
-  - Does the skill need modification?
-  - Should a new skill variant be created?
-        │
-        ▼
-If skill update needed:
-  Executor sends targeted request to Mentor:
-    "Update send_email skill to auto-detect
-     SSL vs STARTTLS based on port"
-        │
-        ▼
-Mentor generates updated skill.py + SKILL.yaml
-        │
-        ▼
-Executor tests in sandbox (dry run)
-        │
-        ▼
-On success: skill versioned, manifest updated
-On failure: log issue, keep current version
-```
-
-#### Prompt Refinement (Anti-Bloat Mechanism)
-
-Over time, the Executor's prompt instructions can drift and grow. To prevent this:
-
-1. **Teaching log is append-only but bounded**: max 50 entries per skill, FIFO eviction.
-2. **Periodic distillation**: Every N tasks (configurable), Executor reviews its own teaching log and asks Mentor to produce a **single condensed instruction set** replacing the accumulated notes. This is a one-time cloud call that produces a compact, non-redundant prompt snippet.
-3. **Prompt size monitoring**: Track the total Executor prompt size. Alert if it exceeds a threshold (e.g., 2000 tokens). Trigger distillation automatically.
-4. **Skills absorb knowledge**: Wherever possible, teaching notes become **code changes in skill scripts**, not prompt additions. Code doesn't consume context window.
-
-### 4.7 Feedback Loop Constraints
-
-- **Max rounds per task**: configurable per user, default 3
-- **Progressive compression**: each round, Executor summarizes the full history before sending to Mentor
-- **Hard token budget**: per-task cloud token limit (configurable, default ~10K)
-- **Timeout**: wall-clock limit per task (default 5 minutes)
-- **Teaching is deferred**: skill improvements happen AFTER the task completes, not during
-
-### 4.8 Mentor System Prompt
-
-The Mentor's system prompt must be minimal and formal. It is a fixed template, not user-customizable.
-
-```
-You are a task planning assistant for an autonomous agent system.
-
-ROLE: Analyze tasks, create execution plans using available skills, 
-review execution results, and generate new skills when needed.
-
-CONSTRAINTS:
-- Output ONLY valid JSON matching the requested schema.
-- Plans must use only skills listed in the provided manifest excerpt.
-- If no skills match, respond with {"action": "create_skill", ...}.
-- Flag irreversible actions (email, API calls, file deletion).
-- Prefer existing skills over creating new ones.
-- Keep all text responses under 500 tokens.
-
-PLAN SCHEMA:
-{
-  "steps": [{"id":int, "skill":str, "params":{}, 
-             "depends_on":[int], "condition?":str,
-             "on_fail":"report|skip|retry", "reversible":bool}],
-  "review_result": bool,
-  "max_retries": int
+**DelegationPlan record** (`DelegationPlan.java`):
+```java
+public record DelegationPlan(
+    String goal,
+    List<Step> steps,
+    List<String> checkpoints,
+    int maxSteps
+) {
+    public record Step(
+        String description,
+        String tool,
+        Map<String, Object> params
+    ) {}
 }
-
-CONDITION GRAMMAR (for "condition" field):
-  Variables: $N.success (bool), $N.output (str), $N.exit_code (int)
-  Operators: && || ! == != .contains("x") .isEmpty()
-  Example: "$1.success && !$2.output.isEmpty()"
-
-REVIEW SCHEMA:
-{"status": "approved|retry|failed", "changes?": {}, "teaching_note?": str}
-
-SKILL CREATION SCHEMA:
-{"action":"create_skill", "skill_yaml":str, "skill_py":str, "test_params":{}}
 ```
 
-This prompt is ~200 tokens. It never grows. All context-specific information (task, skills, user context) comes in the user message, not the system prompt.
+### 4.4 LocalExecutor — Mini Agent Loop
 
-### 4.9 Confidence Self-Calibration
+`LocalExecutor.java` receives a `DelegationPlan` and executes it using the local LLM (Ollama qwen2.5:14b) in a self-contained mini agent loop:
 
-The Executor's confidence scores (§4.2) may be poorly calibrated out of the box. A 7-14B model saying "0.85" might be wrong more often than one saying "0.50." The architecture includes a self-calibration mechanism to address this over time.
+```
+┌──────────────────────────────────────────────────────────┐
+│                    LocalExecutor                          │
+│                                                          │
+│  Input:  DelegationPlan + AgentContext                   │
+│                                                          │
+│  1. Build executor system prompt:                        │
+│     - Plan goal + ordered steps                          │
+│     - Available tools (all except skill_create)          │
+│     - Rules: follow the plan, use checkpoints,           │
+│       emit "done" when finished                          │
+│                                                          │
+│  2. Mini Think→Act→Observe loop (local LLM):             │
+│     a. Call local LLM with plan context + history        │
+│     b. Parse response → tool call or "done" signal       │
+│     c. If tool call → executeToolDirect() via ToolRegistry│
+│     d. Record result as observation                      │
+│     e. Repeat until "done" or maxSteps reached           │
+│                                                          │
+│  3. Return consolidated results to AgentLoop             │
+│     (which feeds them back to cloud LLM as observation)  │
+│                                                          │
+│  Constraints:                                            │
+│  • skill_create is BLOCKED (only cloud can create skills)│
+│  • maxSteps hard limit prevents runaway execution        │
+│  • Partial results returned on timeout/error             │
+│  • All tool execution goes through same ToolRegistry     │
+└──────────────────────────────────────────────────────────┘
+```
 
-**Data collection** (from Phase 1):
-- Every task logs: `{confidence_score, was_plan_cached, mentor_called, task_succeeded, user_corrected}`
-- After 100+ tasks, the system has enough data to detect miscalibration
+### 4.5 LLM Provider Routing
 
-**Calibration analysis** (Phase 3+):
-- Plot confidence vs. actual success rate (calibration curve)
-- If the model is overconfident (high scores, frequent failures): lower `cache_skip_threshold`
-- If the model is underconfident (low scores, unnecessary Mentor calls): raise `mentor_threshold`
+`LlmRouter.java` implements a simple routing policy:
 
-**Auto-adjustment** (future):
-- Periodically (weekly), the system reviews its calibration data
-- Adjusts `mentor_threshold` and `cache_skip_threshold` by ±0.05 increments
-- Logs adjustments to event log: `confidence.threshold_adjusted`
-- Hard bounds: `mentor_threshold` ∈ [0.1, 0.5], `cache_skip_threshold` ∈ [0.5, 0.9]
+```
+selectProvider():
+  if cloudProvider is available:
+    return cloudProvider          ← ALWAYS cloud for main loop
+  else:
+    return localProvider          ← degraded mode only
+```
 
-**Fallback heuristic**: If numeric confidence proves fundamentally unreliable with the chosen model, fall back to categorical routing:
-- Cache hit → skip Mentor (zero tokens)
-- Known skills match → normal flow (Mentor plans)
-- No skills match → escalate to Mentor
+The old architecture had complex routing logic (confidence thresholds, circuit breakers, blocked-tool escalation, thinking-failure tracking). All of that has been removed. The cloud LLM is always the orchestrator; if it's unavailable, the system degrades to local-only mode where the local LLM drives the main loop directly (reduced capability but functional).
 
-This removes the numeric threshold entirely in favor of a deterministic decision tree.
+### 4.6 Prompt Caching (Anthropic)
+
+When using Anthropic as the cloud provider, the system supports **prompt caching** to reduce costs:
+
+- The system prompt is split into two parts by a `CACHE_BOUNDARY_MARKER`
+- **Before the marker**: Static content (system identity, tool descriptions, rules) — cached across requests
+- **After the marker**: Dynamic content (teaching log, user preferences, conversation context) — not cached
+- Anthropic's cache breakpoints are set on the static portion, so repeated calls within the cache TTL (~5 minutes) pay reduced input token costs
+
+### 4.7 Graceful Degradation
+
+| Capability | Cloud Available | Cloud Unavailable (Degraded) |
+|-----------|----------------|------------------------------|
+| Main agent loop | Cloud LLM orchestrates | Local LLM orchestrates (reduced quality) |
+| Tool execution | All tools available | All tools available |
+| Delegation | Cloud delegates to local | N/A (local is already the main loop) |
+| Skill creation | Available | Available (local LLM generates, lower quality) |
+| Conversational chat | Cloud quality | Local quality |
+
+### 4.8 Teaching & Skill Improvement
+
+The teaching system remains conceptually similar to v0.2, but is now driven by the cloud LLM's decisions in the main loop rather than a separate Mentor/Executor feedback pipeline:
+
+1. **Teaching log**: Bounded append-only log (max 30 entries), injected into the cloud LLM's system prompt after `CACHE_BOUNDARY_MARKER`
+2. **Skill repair**: When a skill fails, the cloud LLM in the main loop decides whether to retry, repair, or create a new skill — no separate "Mentor review" step
+3. **Distillation**: Periodic compression of teaching log entries to prevent prompt bloat
+4. **Skills absorb knowledge**: Teaching notes are turned into code changes in skill scripts wherever possible, removing them from the prompt
 
 ---
 
@@ -1141,25 +949,24 @@ Executor handles all compression locally (zero cloud cost):
 
 ### 8.1 Sandbox Architecture
 
+> **Note (v0.3)**: Production sandbox now uses **Podman containers** (python:3.11-slim image) instead of bubblewrap. The container-based approach provides better dependency isolation (per-skill venvs built inside containers) and more consistent cross-platform behavior.
+
 ```
 ┌─────────────────────────────────────────────┐
 │              OwnClaw Process (Java)          │
 │                                              │
 │  ┌────────────────────────────────────────┐  │
-│  │          Sandbox Manager                │  │
+│  │          ContainerSandbox               │  │
 │  │                                         │  │
-│  │  Linux: bubblewrap (bwrap)              │  │
-│  │  • Mount: /usr, /lib (read-only)        │  │
-│  │  • Mount: /tmp/ownclaw-{exec-id} (rw)   │  │
-│  │  • Mount: skill dir (read-only)         │  │
-│  │  • Network: configurable per skill      │  │
-│  │  • PID namespace: isolated              │  │
-│  │  • User namespace: unprivileged         │  │
-│  │  • Seccomp: restricted syscalls         │  │
-│  │  • Timeout: hard kill                   │  │
+│  │  Linux: Podman (rootless containers)    │  │
+│  │  • Image: python:3.11-slim             │  │
+│  │  • Mount: skill dir (read-only)        │  │
+│  │  • Mount: venv dir (per-skill)         │  │
+│  │  • Network: configurable per skill     │  │
+│  │  • Timeout: hard kill                  │  │
+│  │  • Pip install on first run            │  │
 │  │                                         │  │
 │  │  Windows (dev): ProcessBuilder           │  │
-│  │  • Restricted user account              │  │
 │  │  • Working dir isolation                │  │
 │  │  • Timeout via Future.get()             │  │
 │  └────────────────────────────────────────┘  │
@@ -1300,6 +1107,8 @@ All system-level failures (as opposed to skill/task-level failures) are handled 
 
 ### 9.2 Circuit Breaker
 
+> **Note (v0.3)**: The old per-LLM circuit breaker in LlmRouter has been removed. The cloud LLM always orchestrates; if it's unavailable, the system degrades to local-only mode. Circuit breaker logic may still be useful at the HTTP client level for retries.
+
 For Ollama and cloud LLM connections:
 
 ```
@@ -1392,9 +1201,11 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
-| Local LLM (Executor + SkillRunner) | Ollama | Easy model management, REST API |
-| Cloud LLM (Mentor) | Direct API calls (Anthropic, OpenAI, DeepSeek, Mistral) | No unnecessary abstraction layer |
-| Unified interface | Internal adapter pattern | Java interfaces per provider |
+| Cloud LLM (Orchestrator) | Direct API calls (OpenAI, Anthropic) | Cloud always drives main agent loop; provider configurable via settings |
+| Local LLM (Executor) | Ollama (qwen2.5:14b) | Executes delegated plans via LocalExecutor mini-loop |
+| Unified interface | Internal adapter pattern (`LlmProvider`) | Java interfaces per provider (OpenAI, Anthropic, Ollama) |
+| Provider routing | `LlmRouter` — always cloud, local fallback | Simplified from old confidence-based routing |
+| Prompt caching | Anthropic `CACHE_BOUNDARY_MARKER` | Static prompt content cached to reduce costs |
 | Ollama serialization | Semaphore (single concurrent request) | 7-14B models need exclusive GPU |
 
 ### 10.4 Frontend (WebUI)
@@ -1567,7 +1378,7 @@ ownclaw:
     port: 8080
     host: 0.0.0.0
 
-  # Local LLM (Executor + SkillRunner share Ollama)
+  # Local LLM (Executor — runs delegated plans via LocalExecutor)
   executor:
     provider: ollama
     url: http://localhost:11434
@@ -1575,9 +1386,9 @@ ownclaw:
     temperature: 0.3
     context_window: 16384       # tokens
 
-  # Cloud LLM (Mentor) — default, users can override
+  # Cloud LLM (Orchestrator — always drives main agent loop)
   mentor:
-    provider: openai              # openai | anthropic | deepseek | mistral
+    provider: openai              # openai | anthropic
     model: gpt-4.1
     api_key: ${OPENAI_API_KEY}
     max_tokens_per_task: 10000
@@ -1659,10 +1470,11 @@ ownclaw:
     status_verbosity: concise        # concise | verbose
     log_level: INFO                  # DEBUG | INFO | WARN | ERROR
 
-  # Confidence threshold (Executor bypass)
-  confidence:
-    mentor_threshold: 0.3            # Below this → always go to Mentor
-    cache_skip_threshold: 0.7        # Above this + cache hit → skip Mentor entirely
+  # Confidence threshold (no longer used — cloud always orchestrates)
+  # Retained for reference; was used in v0.2 Executor-routes-to-Mentor model
+  # confidence:
+  #   mentor_threshold: 0.3
+  #   cache_skip_threshold: 0.7
 ```
 
 ---
