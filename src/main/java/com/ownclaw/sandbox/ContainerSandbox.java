@@ -247,6 +247,10 @@ public class ContainerSandbox {
             dockerfile.append("ENV DEBIAN_FRONTEND=noninteractive\n");
             dockerfile.append("ENV PYTHONIOENCODING=utf-8\n");
             dockerfile.append("ENV PYTHONUTF8=1\n");
+            // Ensure the Python shared library (libpython3.xx.so) is always findable.
+            // Some system packages trigger ldconfig which can drop /usr/local/lib from cache.
+            dockerfile.append("ENV LD_LIBRARY_PATH=/usr/local/lib\n");
+            dockerfile.append("ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin\n");
 
             // Install system packages
             if (systemPackages != null && !systemPackages.isEmpty()) {
@@ -257,7 +261,9 @@ public class ContainerSandbox {
                 if (!sanitized.isEmpty()) {
                     dockerfile.append("RUN apt-get update && apt-get install -y --no-install-recommends ");
                     dockerfile.append(String.join(" ", sanitized));
-                    dockerfile.append(" && rm -rf /var/lib/apt/lists/*\n");
+                    // ldconfig rebuilds the shared library cache — ensures /usr/local/lib
+                    // (where libpython3.xx.so lives) stays indexed after new packages are added
+                    dockerfile.append(" && ldconfig && rm -rf /var/lib/apt/lists/*\n");
                 }
             }
 
@@ -540,6 +546,10 @@ public class ContainerSandbox {
         // Bind-mount the skill directory at /skill (read-write for temp files)
         cmd.add("-v");
         cmd.add(skillDir.toAbsolutePath() + ":/skill");
+
+        // Ensure Python shared library is always findable at runtime
+        cmd.add("-e");
+        cmd.add("LD_LIBRARY_PATH=/usr/local/lib");
 
         // Inject environment variables
         if (envVars != null) {

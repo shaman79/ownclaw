@@ -267,12 +267,15 @@ public class DynamicSkill implements Tool {
             // can be installed without sudo. Falls back to direct execution if no
             // container runtime is available.
             SandboxResult result;
+            boolean usedContainer = false;
+            String containerImageTag = null;
             if (!systemPackages.isEmpty() && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
-                String imageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                usedContainer = true;
                 result = containerSandbox.execute(
-                        imageTag, "python3", runnerScript, skillDir,
+                        containerImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
                         context.progressCallback());
             } else {
@@ -305,19 +308,9 @@ public class DynamicSkill implements Tool {
 
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
                         if (installed) {
-                            // Re-resolve and retry — re-inject credentials + encoding env vars
-                            var healedResolution = pythonEnv.resolveExecution(skillDir, name);
-                            Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
-                            healedEnv.put("PYTHONIOENCODING", "utf-8");
-                            healedEnv.put("PYTHONUTF8", "1");
-                            healedEnv.putAll(envVars.entrySet().stream()
-                                    .filter(e -> !healedEnv.containsKey(e.getKey()))
-                                    .collect(java.util.stream.Collectors.toMap(
-                                            Map.Entry::getKey, Map.Entry::getValue)));
-                            SandboxResult retry = sandbox.execute(
-                                    healedResolution.python(), runnerScript, skillDir,
-                                    inputJson, healedEnv, timeoutSec);
-                            if (!retry.timedOut() && retry.isSuccess()) {
+                            SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
+                                    runnerScript, skillDir, inputJson, envVars, timeoutSec);
+                            if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                                 log.info("Self-heal succeeded for skill '{}'", name);
                                 return parseOutput(retry.stdout(), retry.stderr());
                             }
@@ -338,18 +331,9 @@ public class DynamicSkill implements Tool {
                     log.info("Self-healing skill '{}' (stderr): installing '{}' for module '{}'",
                             name, pkg, missingModule);
                     if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
-                        var healedResolution = pythonEnv.resolveExecution(skillDir, name);
-                        Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
-                        healedEnv.put("PYTHONIOENCODING", "utf-8");
-                        healedEnv.put("PYTHONUTF8", "1");
-                        healedEnv.putAll(envVars.entrySet().stream()
-                                .filter(e -> !healedEnv.containsKey(e.getKey()))
-                                .collect(java.util.stream.Collectors.toMap(
-                                        Map.Entry::getKey, Map.Entry::getValue)));
-                        SandboxResult retry = sandbox.execute(
-                                healedResolution.python(), runnerScript, skillDir,
-                                inputJson, healedEnv, timeoutSec);
-                        if (!retry.timedOut() && retry.isSuccess()) {
+                        SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
+                                runnerScript, skillDir, inputJson, envVars, timeoutSec);
+                        if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                             log.info("Self-heal (stderr) succeeded for skill '{}'", name);
                             return parseOutput(retry.stdout(), retry.stderr());
                         }
@@ -366,6 +350,41 @@ public class DynamicSkill implements Tool {
             if (runnerScript != null) {
                 try { Files.deleteIfExists(runnerScript); } catch (IOException ignored) {}
             }
+        }
+    }
+
+    /**
+     * Retry a self-healed skill execution using the same execution path as the original run.
+     * Container-based skills retry inside the container; direct skills retry via the process sandbox.
+     */
+    private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
+                                         Path runnerScript, Path skillDir, String inputJson,
+                                         Map<String, String> envVars, int timeoutSec) {
+        try {
+            if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
+                // Rebuild image to pick up newly installed pip packages
+                String pipReqs = readRequirements();
+                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                return containerSandbox.execute(
+                        healedImageTag, "python3", runnerScript, skillDir,
+                        inputJson, envVars, timeoutSec);
+            } else {
+                // Direct process execution
+                var healedResolution = pythonEnv.resolveExecution(skillDir, name);
+                Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                healedEnv.put("PYTHONIOENCODING", "utf-8");
+                healedEnv.put("PYTHONUTF8", "1");
+                healedEnv.putAll(envVars.entrySet().stream()
+                        .filter(e -> !healedEnv.containsKey(e.getKey()))
+                        .collect(java.util.stream.Collectors.toMap(
+                                Map.Entry::getKey, Map.Entry::getValue)));
+                return sandbox.execute(
+                        healedResolution.python(), runnerScript, skillDir,
+                        inputJson, healedEnv, timeoutSec);
+            }
+        } catch (Exception e) {
+            log.error("Self-heal retry failed for skill '{}': {}", name, e.getMessage());
+            return null;
         }
     }
 
