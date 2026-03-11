@@ -779,7 +779,7 @@ public class AgentLoop {
             String available = String.join(", ", toolRegistry.names());
             String hint = available.isEmpty()
                     ? "No tools are currently registered. Use skill_create to build the tool you need."
-                    : "Available tools: " + available + ". Use skill_create to build a new tool if none of these fit.";
+                    : "Available tools: " + available + ". Use skill_create if none of these fit (to fix an existing skill, reuse its name).";
             return AgentObservation.failure(action.tool(),
                     "Tool '" + action.tool() + "' not found. " + hint, 0);
         }
@@ -1137,7 +1137,7 @@ public class AgentLoop {
             reflectionHint = "REFLECTION: The last " + trouble + " tool calls " +
                     (failures >= 2 ? "failed" : "returned empty/useless output") + ". " +
                     "Reconsider your approach. Inspect the tool's code with skill_manage(action='read') " +
-                    "to find the bug, then fix it with skill_create. Or try a fundamentally different strategy.";
+                    "to find the bug, then fix it with skill_create using the SAME name (overwrites in-place). Or try a fundamentally different strategy.";
         } else {
             reflectionHint = "REFLECTION: " + trouble + " consecutive " +
                     (failures >= trouble ? "failures" : "empty results") + ". " +

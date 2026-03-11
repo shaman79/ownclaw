@@ -186,6 +186,8 @@ public class ThinkingEngine {
         sb.append("skill_create: Create/update a Python skill (code is AUTO-GENERATED — specify WHAT, not HOW).\n");
         sb.append("  Skills are Python scripts running LOCALLY on the user's machine with FULL system access.\n");
         sb.append("  They can run shell commands (subprocess), ANYTHING Python can do.\n");
+        sb.append("  IMPORTANT: To fix a broken skill, call skill_create with THE SAME NAME — it overwrites in-place.\n");
+        sb.append("  NEVER append _v2, _fixed, _new, _updated or any suffix. One skill = one name, always.\n");
         sb.append("  name (string, required): Lowercase identifier (e.g. 'web_fetch', 'network_scanner', 'shell_exec')\n");
         sb.append("  description (string, required): Detailed behavior spec including edge cases and output format\n");
         sb.append("  parameters (string, required): JSON — each key maps to {\"type\":\"string\",\"description\":\"...\",\"required\":true/false}\n");
@@ -265,7 +267,7 @@ public class ThinkingEngine {
         sb.append("## Guidelines\n");
         sb.append("- Answer directly with 'respond' if no tools needed.\n");
         sb.append("- On failure, analyze the error and try a different approach. NEVER give up after one failure — try 2-3 alternatives.\n");
-        sb.append("- On skill errors: inspect with skill_manage(action='read'), fix with skill_create, or build a different skill.\n");
+        sb.append("- On skill errors: inspect with skill_manage(action='read'), then fix with skill_create using the SAME name (overwrites in-place). NEVER create _v2/_fixed variants.\n");
         sb.append("- Minimize tool calls. Never fabricate outputs or assume success without observing results.\n");
         sb.append("- Explore thoroughly: follow links, check sub-pages, look for embedded resources before saying 'not found'.\n");
         sb.append("- Verify results make sense. If output is garbled/empty/short, fix the tool — don't present broken data.\n");
@@ -281,7 +283,8 @@ public class ThinkingEngine {
         sb.append("\n## Self-Improvement\n");
         sb.append("All tools in 'Available Tools' are editable Python skills you built.\n");
         sb.append("- No suitable tool? Create one with skill_create. Prefer reusable, general-purpose tools.\n");
-        sb.append("- Poor results? Read the code (skill_manage action='read'), then overwrite with skill_create.\n");
+        sb.append("- Poor results? Read the code (skill_manage action='read'), then overwrite with skill_create using the SAME name.\n");
+        sb.append("- NEVER create variant names like skill_v2, skill_fixed, skill_new — always reuse the original name.\n");
         sb.append("- After multiple failures, reconsider: is the approach fundamentally wrong?\n");
         sb.append("- Remote content skills must handle: encoding, content types, large content, errors.\n");
         sb.append("- Structured content skills: extract readable text, strip markup/boilerplate, preserve structure.\n");
@@ -335,6 +338,7 @@ public class ThinkingEngine {
         sb.append("## Special Actions\n");
         sb.append("respond(message) — final answer | ask_user(message) — clarifying question\n");
         sb.append("skill_create(name, description, parameters[JSON], [requirements], [requires_network], [has_side_effects], [timeout], [credentials], [system_packages → container])\n");
+        sb.append("  To fix a skill, reuse the SAME name — NEVER add _v2/_fixed/_new suffixes.\n");
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
