@@ -83,9 +83,9 @@ public class AnthropicProvider implements LlmProvider {
             }
         }
         if (systemPrompt != null) {
-            // Split system prompt at the cache boundary marker.
-            // Everything BEFORE the marker is static (rules, guidelines) and cacheable.
-            // Everything AFTER is dynamic (datetime, tools, user prefs) and changes per request.
+            // System prompt caching. With multi-turn mode, the system prompt is
+            // fully static (no dynamic content) — the no-marker path caches it as
+            // one block. The marker path is kept for backward compatibility.
             ArrayNode systemArray = body.putArray("system");
             String marker = "\n<!-- CACHE_BOUNDARY -->\n";
             int markerIdx = systemPrompt.indexOf(marker);
@@ -100,7 +100,7 @@ public class AnthropicProvider implements LlmProvider {
                 dynamicBlock.put("type", "text");
                 dynamicBlock.put("text", systemPrompt.substring(markerIdx + marker.length()));
             } else {
-                // No marker found — cache the whole thing (fallback)
+                // No marker — cache the entire prompt (multi-turn static prompt path)
                 ObjectNode sysBlock = systemArray.addObject();
                 sysBlock.put("type", "text");
                 sysBlock.put("text", systemPrompt);
@@ -108,18 +108,18 @@ public class AnthropicProvider implements LlmProvider {
             }
         }
 
-        // Cache conversation history: mark the second-to-last message so the
-        // prefix (everything before the latest turn) is cached between steps.
+        // Sliding-window conversation cache breakpoints.
+        // Two breakpoints create a sliding window for multi-turn prefix caching:
+        //   msgs[size-4]: hits the cache created in the PREVIOUS step
+        //   msgs[size-2]: creates a cache for the NEXT step to hit
+        // Together with the system breakpoint, this uses 3 of 4 allowed breakpoints.
+        // Each step pays full price only for the latest turn + dynamic context;
+        // all older turns are served from cache at 10% cost.
+        if (msgs.size() >= 6) {
+            setMessageCacheBreakpoint(msgs, msgs.size() - 4);
+        }
         if (msgs.size() >= 2) {
-            ObjectNode prefixMsg = (ObjectNode) msgs.get(msgs.size() - 2);
-            String rawContent = prefixMsg.path("content").asText("");
-            // Convert plain string content to content-block array with cache_control
-            prefixMsg.remove("content");
-            ArrayNode contentArray = prefixMsg.putArray("content");
-            ObjectNode block = contentArray.addObject();
-            block.put("type", "text");
-            block.put("text", rawContent);
-            block.putObject("cache_control").put("type", "ephemeral");
+            setMessageCacheBreakpoint(msgs, msgs.size() - 2);
         }
 
         // Claude doesn't have a response_format: json_object option.
@@ -176,6 +176,21 @@ public class AnthropicProvider implements LlmProvider {
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
         }
+    }
+
+    /**
+     * Set a cache breakpoint on a message by converting its plain-text content
+     * to a content-block array with cache_control.
+     */
+    private void setMessageCacheBreakpoint(ArrayNode msgs, int index) {
+        ObjectNode msg = (ObjectNode) msgs.get(index);
+        String rawContent = msg.path("content").asText("");
+        msg.remove("content");
+        ArrayNode contentArray = msg.putArray("content");
+        ObjectNode block = contentArray.addObject();
+        block.put("type", "text");
+        block.put("text", rawContent);
+        block.putObject("cache_control").put("type", "ephemeral");
     }
 
     @Override

@@ -105,21 +105,167 @@ public class ThinkingEngine {
      */
     private List<LlmMessage> buildMessages(AgentContext context, String providerName) {
         List<LlmMessage> messages = new ArrayList<>();
-
-        // System prompt
         messages.add(LlmMessage.system(buildSystemPrompt(context, providerName)));
 
-        // User message with context
-        messages.add(LlmMessage.user(buildUserMessage(context)));
-
-        // If there's a trajectory, include it as assistant+user turns for natural conversation flow
-        AgentTrajectory trajectory = context.trajectory();
-        if (!trajectory.isEmpty()) {
-            // Add trajectory as a single user message summarizing past actions
-            messages.add(LlmMessage.user(buildTrajectoryMessage(trajectory)));
+        if ("anthropic".equals(providerName)) {
+            // Anthropic: multi-turn trajectory for prefix caching.
+            // System prompt is static-only; dynamic context (datetime, tools) goes
+            // in conversation messages so the system prompt never changes.
+            buildAnthropicMessages(messages, context);
+        } else {
+            // OpenAI / other: single trajectory message, dynamic content in system prompt
+            messages.add(LlmMessage.user(buildUserMessage(context)));
+            AgentTrajectory trajectory = context.trajectory();
+            if (!trajectory.isEmpty()) {
+                messages.add(LlmMessage.user(buildTrajectoryMessage(trajectory)));
+            }
         }
 
         return messages;
+    }
+
+    /**
+     * Build Anthropic-optimized message list with multi-turn trajectory.
+     * <p>
+     * Instead of a single trajectory summary message, each action/observation pair
+     * becomes an alternating assistant/user turn. This enables Anthropic's prefix
+     * caching: the stable conversation prefix (older turns) is cached at 10% cost,
+     * and only the latest turn + dynamic context pay full price.
+     * <p>
+     * Dynamic content (datetime, tools, user prefs) is appended to the last user
+     * message, keeping the system prompt 100% static for reliable caching.
+     */
+    private void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context) {
+        messages.add(LlmMessage.user(buildUserMessage(context)));
+
+        AgentTrajectory trajectory = context.trajectory();
+
+        // Filter out _thinking parse failures — they add noise without useful info
+        List<AgentTrajectory.Turn> effectiveTurns = new ArrayList<>();
+        for (var turn : trajectory.turns()) {
+            if (!turn.observation().success() && "_thinking".equals(turn.observation().tool())) {
+                continue;
+            }
+            effectiveTurns.add(turn);
+        }
+
+        if (effectiveTurns.isEmpty()) {
+            // Step 0 or all-failures: append dynamic context to the user message
+            LlmMessage lastMsg = messages.get(messages.size() - 1);
+            messages.set(messages.size() - 1, LlmMessage.user(
+                    lastMsg.content() + "\n\n---\n" + buildDynamicContext(context)));
+            return;
+        }
+
+        // Multi-turn: each action/observation becomes assistant/user message pair.
+        // Last 2 turns get full output detail; older turns are compressed.
+        int fullDetailFrom = Math.max(0, effectiveTurns.size() - 2);
+        for (int i = 0; i < effectiveTurns.size(); i++) {
+            var turn = effectiveTurns.get(i);
+            boolean isFull = i >= fullDetailFrom;
+            boolean isLast = i == effectiveTurns.size() - 1;
+
+            // Assistant turn: reconstructed action JSON (what the LLM "said")
+            messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action(), isFull)));
+
+            // User turn: observation result
+            String obsText = formatObservationForMultiTurn(turn, isFull);
+
+            // Append dynamic context to the LAST observation only —
+            // this keeps it out of the cached prefix while providing current info.
+            if (isLast) {
+                obsText += "\n\n---\n" + buildDynamicContext(context);
+            }
+            messages.add(LlmMessage.user(obsText));
+        }
+    }
+
+    /**
+     * Build dynamic context string (datetime, tools, user preferences, vault).
+     * For Anthropic, this goes in conversation messages instead of the system prompt
+     * to keep the system prompt 100% static for caching.
+     */
+    private String buildDynamicContext(AgentContext context) {
+        var sb = new StringBuilder();
+
+        sb.append("## Environment\n");
+        sb.append("- Platform: ").append(detectPlatform()).append("\n");
+        sb.append("- DateTime: ").append(LocalDateTime.now()
+                .truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
+                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+
+        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
+            sb.append("## User Preferences\n");
+            sb.append(context.userPreferences()).append("\n\n");
+        }
+
+        ToolSelector.Selection selection = toolSelector.select(
+                context.originalMessage(), context.trajectory());
+        sb.append("## Available Tools\n");
+        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+        sb.append(manifest).append("\n");
+        if (!selection.otherNames().isEmpty()) {
+            sb.append("\nAlso available: ").append(String.join(", ", selection.otherNames())).append("\n");
+        }
+        if (manifest.isBlank()) {
+            sb.append("No tools yet — use skill_create to build what you need.\n");
+        }
+
+        List<String> vaultKeys = context.credentialKeys();
+        if (!vaultKeys.isEmpty()) {
+            sb.append("\nVault: ").append(String.join(", ", vaultKeys)).append("\n");
+        }
+
+        if (!context.trajectory().isEmpty()) {
+            sb.append("\nDecide what to do next. If done, use 'respond'.");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Format an agent action as a JSON string for multi-turn conversation.
+     * Reconstructs what the LLM would have generated as its response.
+     */
+    private String formatActionForMultiTurn(AgentAction action, boolean fullDetail) {
+        try {
+            Map<String, Object> map = new LinkedHashMap<>();
+            String reasoning = action.reasoning();
+            if (reasoning != null && !reasoning.isBlank()) {
+                if (!fullDetail && reasoning.length() > 200) {
+                    reasoning = reasoning.substring(0, 200) + "...";
+                }
+                map.put("reasoning", reasoning);
+            }
+            map.put("tool", action.tool());
+            if (action.params() != null && !action.params().isEmpty()) {
+                map.put("params", action.params());
+            }
+            return mapper.writeValueAsString(map);
+        } catch (Exception e) {
+            return "{\"tool\": \"" + action.tool() + "\"}";
+        }
+    }
+
+    /**
+     * Format a trajectory turn's observation for multi-turn conversation.
+     */
+    private String formatObservationForMultiTurn(AgentTrajectory.Turn turn, boolean fullDetail) {
+        var sb = new StringBuilder();
+        sb.append("[").append(turn.action().tool()).append("] ");
+        sb.append(turn.observation().success() ? "OK" : "FAILED");
+        sb.append(" (").append(turn.observation().durationMs()).append("ms)\n");
+
+        String output = turn.observation().output();
+        if (output != null && !output.isBlank()) {
+            if (fullDetail || output.length() <= 500) {
+                sb.append(output);
+            } else {
+                sb.append(output, 0, 500)
+                        .append("... [").append(output.length()).append(" chars total]");
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -284,6 +430,14 @@ public class ThinkingEngine {
         sb.append("- Extract text, never return raw HTML/XML/binary. Strip boilerplate.\n");
         sb.append("- Garbled text = wrong encoding — fix the tool.\n");
         sb.append("- Content behind links or in files (PDF, DOCX, CSV): fetch and extract, don't just report the link.\n");
+
+        // Anthropic: return static-only system prompt. Dynamic content (datetime,
+        // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
+        // to keep the system prompt identical across all steps — enabling both
+        // system-level AND conversation-prefix caching.
+        if ("anthropic".equals(providerName)) {
+            return sb.toString();
+        }
 
         // ═══════════════════════════════════════════════════════════════════
         // DYNAMIC SECTION — changes per request/task/step.
