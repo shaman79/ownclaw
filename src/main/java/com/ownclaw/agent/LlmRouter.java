@@ -12,14 +12,12 @@ import jakarta.annotation.PostConstruct;
 /**
  * Routes LLM requests to the appropriate provider based on context.
  *
- * Strategy — smart task routing with circuit breaker:
+ * <p>Architecture: Cloud-as-orchestrator, local-as-executor.
  * <ul>
- *   <li>Step 1 (empty trajectory): Cloud — full user intent analysis</li>
- *   <li>Step 2+ (has trajectory): Local — cheaper follow-up reasoning</li>
- *   <li>Circuit breaker: 2+ consecutive failures → cloud for rest of task</li>
- *   <li>Thinking failures: 2+ JSON parse failures → cloud permanently (local can't cope)</li>
- *   <li>BLOCKED tool: tool doesn't exist → cloud (will need skill_create)</li>
- *   <li>Last step failed: cloud for recovery reasoning</li>
+ *   <li>The main agent loop ALWAYS uses the cloud provider for reasoning/planning</li>
+ *   <li>The local provider is used exclusively by {@link LocalExecutor} for
+ *       delegated tool execution</li>
+ *   <li>If cloud is unavailable, falls back to local in degraded mode</li>
  * </ul>
  * Skill code generation always uses cloud (handled separately in AgentLoop).
  *
@@ -75,88 +73,23 @@ public class LlmRouter {
     /**
      * Select the best provider for the current reasoning step.
      *
-     * <p>Implements a smart routing strategy with circuit breaker to prevent
-     * cascading failures when the local model struggles with complex JSON output.
+     * <p>Cloud-as-orchestrator: the main agent loop always uses cloud for reasoning.
+     * Local is only used by {@link LocalExecutor} for delegated tool execution.
+     * Falls back to local only when cloud is completely unavailable (degraded mode).
      */
     public LlmProvider selectProvider(AgentContext context) {
-        var trajectory = context.trajectory();
-        boolean hasTrajectory = trajectory != null && !trajectory.isEmpty();
-
-        // Step 1: always cloud for intent analysis
-        if (!hasTrajectory) {
-            if (cloudProvider.isAvailable()) {
-                log.debug("Step 1: using cloud provider for user intent analysis");
-                return cloudProvider;
-            }
-            if (localProvider.isAvailable()) {
-                log.warn("Step 1: cloud unavailable, falling back to local");
-                return localProvider;
-            }
-            log.error("No LLM providers available!");
-            return cloudProvider;
-        }
-
-        int step = trajectory.size() + 1;
-
-        // --- CIRCUIT BREAKER: consecutive failures ---
-        // If 2+ consecutive failures, the local model is clearly struggling.
-        // Switch to cloud permanently for this task.
-        if (trajectory.consecutiveFailures() >= 2) {
-            if (cloudProvider.isAvailable()) {
-                log.info("Step {}: CIRCUIT BREAKER — {} consecutive failures, switching to cloud",
-                        step, trajectory.consecutiveFailures());
-                return cloudProvider;
-            }
-        }
-
-        // --- THINKING FAILURES: local model can't produce valid JSON ---
-        // Count _thinking failures (JSON parse errors from any LLM, but almost always local).
-        // If 2+ have occurred in this task, the local model has proven it can't handle
-        // this task's complexity. Stay on cloud.
-        long thinkingFailures = trajectory.turns().stream()
-                .filter(t -> !t.observation().success()
-                        && "_thinking".equals(t.observation().tool()))
-                .count();
-        if (thinkingFailures >= 2) {
-            if (cloudProvider.isAvailable()) {
-                log.info("Step {}: {} thinking (JSON) failures in task, staying on cloud",
-                        step, thinkingFailures);
-                return cloudProvider;
-            }
-        }
-
-        // --- BLOCKED TOOL: tool doesn't exist → next step will need skill_create ---
-        var lastTurn = trajectory.lastTurn();
-        if (lastTurn != null && lastTurn.observation() != null
-                && !lastTurn.observation().success()
-                && lastTurn.observation().output() != null
-                && lastTurn.observation().output().contains("does not exist")) {
-            if (cloudProvider.isAvailable()) {
-                log.info("Step {}: blocked tool (doesn't exist) — using cloud for skill creation",
-                        step);
-                return cloudProvider;
-            }
-        }
-
-        // --- LAST STEP FAILED: cloud for recovery ---
-        if (lastTurn != null && lastTurn.observation() != null
-                && !lastTurn.observation().success()) {
-            if (cloudProvider.isAvailable()) {
-                log.info("Step {}: last step failed — escalating to cloud for recovery", step);
-                return cloudProvider;
-            }
-        }
-
-        // Normal step 2+: use local
-        if (localProvider.isAvailable()) {
-            log.debug("Step {}: using local provider for follow-up reasoning", step);
-            return localProvider;
-        }
-
-        // Local unavailable, fall back to cloud
+        // Cloud always orchestrates the main agent loop
         if (cloudProvider.isAvailable()) {
-            log.debug("Step {}: local unavailable, using cloud", step);
+            int step = (context.trajectory() != null && !context.trajectory().isEmpty())
+                    ? context.trajectory().size() + 1 : 1;
+            log.debug("Step {}: using cloud provider (orchestrator)", step);
             return cloudProvider;
+        }
+
+        // Fallback: cloud unavailable — degraded mode with local
+        if (localProvider.isAvailable()) {
+            log.warn("Cloud unavailable — falling back to local provider (degraded mode)");
+            return localProvider;
         }
 
         log.error("No LLM providers available!");

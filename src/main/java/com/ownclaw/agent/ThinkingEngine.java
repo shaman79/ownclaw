@@ -205,14 +205,28 @@ public class ThinkingEngine {
         sb.append("  max_runs (integer, optional for schedule_recurring): Maximum number of executions (null = unlimited)\n");
         sb.append("  task_id (integer, required for cancel/pause/resume): The scheduled task ID\n\n");
 
-        sb.append("local_llm: Delegate a subtask to the local LLM (faster, no cloud cost, good for lighter work).\n");
-        sb.append("  Use this to offload work that does NOT require your full reasoning power.\n");
-        sb.append("  Good for: summarization, text extraction, content analysis, translation, reformatting,\n");
-        sb.append("    data parsing, simple Q&A over provided text, generating descriptions, classification.\n");
-        sb.append("  NOT suitable for: code generation, debugging, multi-step planning, complex reasoning.\n");
-        sb.append("  The local model receives ONLY what you pass — it has no access to conversation history or tools.\n");
-        sb.append("  prompt (string, required): The task or question for the local LLM\n");
-        sb.append("  context (string, optional): Text to process (e.g. document content, data to summarize)\n\n");
+        sb.append("delegate: Delegate a multi-tool task to the local LLM executor.\n");
+        sb.append("  Use this to offload work that involves EXECUTING EXISTING TOOLS — the local LLM follows your plan.\n");
+        sb.append("  The local executor can call any available tool except skill_create, chain results between steps,\n");
+        sb.append("  and return a consolidated summary.\n");
+        sb.append("  IDEAL for: running multiple tools in sequence (e.g. fetch 3 URLs), data collection across sources,\n");
+        sb.append("    routine multi-step execution, parallel-like batch processing.\n");
+        sb.append("  NOT suitable for: skill creation (always use skill_create yourself), complex reasoning,\n");
+        sb.append("    tasks requiring your judgment to decide next steps based on intermediate results.\n");
+        sb.append("  goal (string, required): What the delegation should achieve\n");
+        sb.append("  steps (array, required): Ordered list of tool calls. Each step: {\"description\": \"...\", \"tool\": \"tool_name\", \"params\": {...}}\n");
+        sb.append("  checkpoints (array, optional): Quality criteria, e.g. [\"All data fetched\", \"Text is readable\"]\n");
+        sb.append("  max_steps (integer, optional): Max executor steps including retries (default: 10)\n");
+        sb.append("  Example:\n");
+        sb.append("  {\"tool\": \"delegate\", \"params\": {\n");
+        sb.append("    \"goal\": \"Fetch lunch menus from 3 restaurants\",\n");
+        sb.append("    \"steps\": [\n");
+        sb.append("      {\"description\": \"Fetch menu from Restaurant A\", \"tool\": \"web_fetch\", \"params\": {\"url\": \"...\"}},\n");
+        sb.append("      {\"description\": \"Fetch menu from Restaurant B\", \"tool\": \"web_fetch\", \"params\": {\"url\": \"...\"}}\n");
+        sb.append("    ],\n");
+        sb.append("    \"checkpoints\": [\"All menus fetched successfully\"],\n");
+        sb.append("    \"max_steps\": 8\n");
+        sb.append("  }}\n\n");
 
         // Credential rules (static — the actual vault contents are dynamic, added after boundary)
         sb.append("## Credential Vault\n");
@@ -364,7 +378,7 @@ public class ThinkingEngine {
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-        sb.append("local_llm(prompt, [context]) — delegate lighter work to local LLM\n\n");
+        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — delegate multi-tool execution to local LLM\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
