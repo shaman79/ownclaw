@@ -127,12 +127,12 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content.
      */
     private String buildSystemPrompt(AgentContext context) {
-        // On subsequent steps, use a condensed prompt to save cloud tokens.
-        // The full prompt (with detailed tool descriptions, guidelines, etc.) is only
-        // sent on the first reasoning step; the LLM already has the trajectory as context.
-        if (!context.trajectory().isEmpty()) {
-            return buildCompactSystemPrompt(context);
-        }
+        // Always use the full prompt — the static section is cached by Anthropic's
+        // prompt caching (see AnthropicProvider). The compact prompt was saving ~700
+        // tokens/step but broke caching entirely: its static prefix (~25 tokens) is
+        // below Anthropic's 1024-token caching minimum, and the different prefix
+        // prevented step 2+ from reading the 9200-token cache created on step 1.
+        // Full prompt + cache reads (10% cost) is far cheaper than compact + cache misses.
 
         var sb = new StringBuilder();
 
@@ -291,7 +291,11 @@ public class ThinkingEngine {
         // Environment context (dynamic — changes every request)
         sb.append("## Environment\n");
         sb.append("- Platform: ").append(detectPlatform()).append("\n");
-        sb.append("- DateTime: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+        // Truncate to minute precision — seconds change between agent steps (which
+        // happen seconds apart) and would invalidate the Anthropic conversation history
+        // cache. Minute precision is stable enough for the LLM while maximizing cache hits.
+        sb.append("- DateTime: ").append(LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
+                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
 
         // User preferences (if any)
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
@@ -347,7 +351,8 @@ public class ThinkingEngine {
         // Environment (always — dynamic datetime)
         sb.append("## Environment\n");
         sb.append("- Platform: ").append(detectPlatform()).append("\n");
-        sb.append("- DateTime: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+        sb.append("- DateTime: ").append(LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
+                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
 
         // User preferences (always — dynamic per user)
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
