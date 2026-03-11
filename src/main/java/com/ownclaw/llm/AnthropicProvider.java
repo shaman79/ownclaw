@@ -63,12 +63,12 @@ public class AnthropicProvider implements LlmProvider {
         body.put("temperature", temperature);
         body.put("max_tokens", maxTokens);
 
-        // Claude: system prompt is a top-level field, not in messages
+        // Claude: system prompt is a top-level field, not in messages.
+        // We use structured content blocks with cache_control to enable prompt caching.
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
         for (LlmMessage msg : messages) {
             if (msg.role() == LlmMessage.Role.SYSTEM) {
-                // Accumulate system messages (there should be only one, but handle multiples)
                 systemPrompt = (systemPrompt == null)
                         ? msg.content()
                         : systemPrompt + "\n\n" + msg.content();
@@ -79,7 +79,27 @@ public class AnthropicProvider implements LlmProvider {
             }
         }
         if (systemPrompt != null) {
-            body.put("system", systemPrompt);
+            // System prompt as content block array with cache_control.
+            // This caches the (large, static) system prompt across requests.
+            ArrayNode systemArray = body.putArray("system");
+            ObjectNode sysBlock = systemArray.addObject();
+            sysBlock.put("type", "text");
+            sysBlock.put("text", systemPrompt);
+            sysBlock.putObject("cache_control").put("type", "ephemeral");
+        }
+
+        // Cache conversation history: mark the second-to-last message so the
+        // prefix (everything before the latest turn) is cached between steps.
+        if (msgs.size() >= 2) {
+            ObjectNode prefixMsg = (ObjectNode) msgs.get(msgs.size() - 2);
+            String rawContent = prefixMsg.path("content").asText("");
+            // Convert plain string content to content-block array with cache_control
+            prefixMsg.remove("content");
+            ArrayNode contentArray = prefixMsg.putArray("content");
+            ObjectNode block = contentArray.addObject();
+            block.put("type", "text");
+            block.put("text", rawContent);
+            block.putObject("cache_control").put("type", "ephemeral");
         }
 
         // Claude doesn't have a response_format: json_object option.
@@ -122,8 +142,15 @@ public class AnthropicProvider implements LlmProvider {
 
             int promptTokens = json.path("usage").path("input_tokens").asInt(0);
             int completionTokens = json.path("usage").path("output_tokens").asInt(0);
+            int cacheCreation = json.path("usage").path("cache_creation_input_tokens").asInt(0);
+            int cacheRead = json.path("usage").path("cache_read_input_tokens").asInt(0);
 
-            log.debug("Anthropic [{}]: {} input + {} output tokens", model, promptTokens, completionTokens);
+            if (cacheRead > 0 || cacheCreation > 0) {
+                log.info("Anthropic [{}]: {} input + {} output tokens (cache: {} created, {} read)",
+                        model, promptTokens, completionTokens, cacheCreation, cacheRead);
+            } else {
+                log.debug("Anthropic [{}]: {} input + {} output tokens", model, promptTokens, completionTokens);
+            }
             return new LlmResponse(content, promptTokens, completionTokens);
 
         } catch (IOException e) {
