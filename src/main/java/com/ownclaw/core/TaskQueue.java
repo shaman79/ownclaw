@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -30,6 +31,7 @@ public class TaskQueue {
 
     private final PriorityBlockingQueue<QueuedTask> queue = new PriorityBlockingQueue<>();
     private final AtomicInteger queueSize = new AtomicInteger(0);
+    private final AtomicBoolean processing = new AtomicBoolean(false);
     private ExecutorService workerPool;
 
     public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
@@ -96,11 +98,20 @@ public class TaskQueue {
         return submit(userId, message, 1);
     }
 
+    /**
+     * Returns true if a task is currently being processed or waiting in the queue.
+     * Used by the deploy script to avoid restarting during active work.
+     */
+    public boolean isBusy() {
+        return processing.get() || queueSize.get() > 0;
+    }
+
     private void processLoop() {
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 QueuedTask task = queue.take();
                 queueSize.decrementAndGet();
+                processing.set(true);
 
                 try {
                     String response = agentLoop.execute(task.userId(), task.message());
@@ -108,6 +119,8 @@ public class TaskQueue {
                 } catch (Exception e) {
                     log.error("Task processing failed for user {}: {}", task.userId(), e.getMessage(), e);
                     task.future().complete("Internal error: " + e.getMessage());
+                } finally {
+                    processing.set(false);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

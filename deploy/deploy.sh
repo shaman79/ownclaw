@@ -31,6 +31,12 @@ set -euo pipefail
 DEPLOY_DIR="/opt/ownclaw"
 REPO_DIR="${DEPLOY_DIR}/repo"
 
+# === PATH setup for cron ===
+# Cron runs with a minimal PATH (/usr/bin:/bin). We need git, curl, java, etc.
+# Prepend standard locations so the script works identically from cron and interactive shells.
+export PATH="${DEPLOY_DIR}/jdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export JAVA_HOME="${DEPLOY_DIR}/jdk"
+
 # Load .env if present (picks up GITHUB_TOKEN and other vars)
 if [ -f "$DEPLOY_DIR/.env" ]; then
     set -a
@@ -54,7 +60,9 @@ LOG_DIR="${DEPLOY_DIR}/logs"
 BACKUP_DIR="${DEPLOY_DIR}/backups"
 MAX_BACKUPS=5
 HEALTH_URL="http://localhost:8080/api/health"
+BUSY_URL="http://localhost:8080/api/health/busy"
 HEALTH_TIMEOUT=60
+BUSY_WAIT_TIMEOUT=300  # max 5 minutes to wait for task to finish
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -149,6 +157,45 @@ sync_service_file() {
 
     log "WARN: Service file changed but cannot update /etc/systemd/system/ (need sudo). "
     log "       Run: sudo cp $src $dst && sudo systemctl daemon-reload"
+    return 1
+}
+
+# === Check if agent is busy (processing a task) ===
+# Returns 0 if idle (safe to restart), 1 if busy (skip restart).
+wait_for_idle() {
+    # If the service isn't running, it's not busy
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        return 0
+    fi
+
+    local status
+    status=$(curl -sf "$BUSY_URL" 2>/dev/null || echo "unknown")
+
+    if [ "$status" = "idle" ]; then
+        return 0
+    fi
+
+    if [ "$status" != "busy" ]; then
+        # Service might be starting up or /api/health/busy not available yet
+        log "Could not determine busy status (got: $status) — proceeding with deploy"
+        return 0
+    fi
+
+    # Agent is busy — wait for it to finish (up to BUSY_WAIT_TIMEOUT)
+    log "Agent is busy — waiting for task to finish before deploying..."
+    local elapsed=0
+    while [ "$elapsed" -lt "$BUSY_WAIT_TIMEOUT" ]; do
+        sleep 10
+        elapsed=$((elapsed + 10))
+        status=$(curl -sf "$BUSY_URL" 2>/dev/null || echo "unknown")
+        if [ "$status" = "idle" ]; then
+            log "Agent is now idle after ${elapsed}s — proceeding with deploy"
+            return 0
+        fi
+        log "Still busy... (${elapsed}s / ${BUSY_WAIT_TIMEOUT}s)"
+    done
+
+    log "Agent still busy after ${BUSY_WAIT_TIMEOUT}s — skipping deploy to avoid interrupting task"
     return 1
 }
 
@@ -818,6 +865,12 @@ deploy_jar() {
 
     # Restart service (only if systemd is running — skip in setup phase)
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        # Wait for any running task to finish before restarting
+        if ! wait_for_idle; then
+            log "Skipping restart — agent is busy. New JAR is staged and will be picked up on next deploy."
+            return 0
+        fi
+
         log "Restarting $SERVICE_NAME..."
         if ! restart_service; then
             restart_instructions
