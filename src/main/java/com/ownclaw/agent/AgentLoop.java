@@ -753,11 +753,14 @@ public class AgentLoop {
             injectReflection(context, action);
         }
 
-        // Exhausted max steps
+        // Exhausted max steps — ask user if they want to continue instead of hard-failing
         log.warn("Task {} hit max steps ({})", context.taskId(), maxSteps);
-        return AgentResult.maxSteps(
-                "I've reached the maximum number of steps for this task. Here's what I found:\n" +
-                        summarizeProgress(context),
+        String progress = summarizeProgress(context);
+        return AgentResult.completed(
+                "I've used all " + maxSteps + " steps allocated for this task. " +
+                        "Here's what I've done so far:\n" + progress + "\n\n" +
+                        "Would you like me to continue working on this? " +
+                        "Just say **continue** and I'll pick up where I left off.",
                 context.trajectory(),
                 context.elapsedMs()
         );

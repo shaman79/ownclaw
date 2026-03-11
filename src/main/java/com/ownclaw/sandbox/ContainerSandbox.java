@@ -352,13 +352,18 @@ public class ContainerSandbox {
                     () -> drainStreamWithActivity(p.getInputStream(), lastBuildActivity));
 
             boolean finished = waitForWithStallDetection(p, 300, lastBuildActivity);
-            String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
-                p.destroyForcibly();
+                // Capture stall duration BEFORE killing — drainStreamWithActivity updates
+                // lastBuildActivity on each chunk, so joining after kill gives "0s".
                 long stallSec = (System.currentTimeMillis() - lastBuildActivity.get()) / 1000;
+                p.destroyForcibly();
+                try { p.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                outputFuture.cancel(true);
                 return "Build stalled (no output for " + stallSec + "s)";
             }
+
+            String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
 
             if (p.exitValue() != 0) {
                 return "exit " + p.exitValue() + ": " + output;
@@ -420,16 +425,20 @@ public class ContainerSandbox {
 
             boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
-                process.destroyForcibly();
                 long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                process.destroyForcibly();
+                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
                 log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
                         stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
+
+            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             int exitCode = process.exitValue();
             log.debug("Container execution completed [exit={}] {} in {}ms",
@@ -512,16 +521,20 @@ public class ContainerSandbox {
 
             boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             if (!finished) {
-                process.destroyForcibly();
                 long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                process.destroyForcibly();
+                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
                 log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
                         stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
+
+            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             return new SandboxResult(process.exitValue(), stdout, stderr, durationMs, false);
 

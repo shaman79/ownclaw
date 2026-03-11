@@ -108,6 +108,18 @@ public class ProcessSandbox implements SandboxManager {
             // produces output. Killed only if no stdout/stderr for timeoutSec seconds.
             boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
+
+            if (!finished) {
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                process.destroyForcibly();
+                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            }
+
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
@@ -115,14 +127,6 @@ public class ProcessSandbox implements SandboxManager {
             if (needInputDetected.get()) {
                 log.warn("Sandbox aborted — skill emitted need_input in non-interactive execution: {}",
                         scriptPath.getFileName());
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            if (!finished) {
-                process.destroyForcibly();
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
@@ -250,20 +254,24 @@ public class ProcessSandbox implements SandboxManager {
             // Stall detection: no wall-clock timeout.
             boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
             long durationMs = System.currentTimeMillis() - startTime;
+
+            if (!finished) {
+                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+                process.destroyForcibly();
+                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
+                        stallSec, scriptPath.getFileName(), durationMs);
+                return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            }
+
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
 
             if (needInputDetected.get()) {
                 log.warn("Sandbox aborted — need_input in non-interactive execution: {}",
                         scriptPath.getFileName());
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            if (!finished) {
-                process.destroyForcibly();
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
 
