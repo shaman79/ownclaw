@@ -79,13 +79,29 @@ public class AnthropicProvider implements LlmProvider {
             }
         }
         if (systemPrompt != null) {
-            // System prompt as content block array with cache_control.
-            // This caches the (large, static) system prompt across requests.
+            // Split system prompt at the cache boundary marker.
+            // Everything BEFORE the marker is static (rules, guidelines) and cacheable.
+            // Everything AFTER is dynamic (datetime, tools, user prefs) and changes per request.
             ArrayNode systemArray = body.putArray("system");
-            ObjectNode sysBlock = systemArray.addObject();
-            sysBlock.put("type", "text");
-            sysBlock.put("text", systemPrompt);
-            sysBlock.putObject("cache_control").put("type", "ephemeral");
+            String marker = "\n<!-- CACHE_BOUNDARY -->\n";
+            int markerIdx = systemPrompt.indexOf(marker);
+            if (markerIdx > 0) {
+                // Static part — cached across requests
+                ObjectNode staticBlock = systemArray.addObject();
+                staticBlock.put("type", "text");
+                staticBlock.put("text", systemPrompt.substring(0, markerIdx));
+                staticBlock.putObject("cache_control").put("type", "ephemeral");
+                // Dynamic part — changes every request, not cached
+                ObjectNode dynamicBlock = systemArray.addObject();
+                dynamicBlock.put("type", "text");
+                dynamicBlock.put("text", systemPrompt.substring(markerIdx + marker.length()));
+            } else {
+                // No marker found — cache the whole thing (fallback)
+                ObjectNode sysBlock = systemArray.addObject();
+                sysBlock.put("type", "text");
+                sysBlock.put("text", systemPrompt);
+                sysBlock.putObject("cache_control").put("type", "ephemeral");
+            }
         }
 
         // Cache conversation history: mark the second-to-last message so the

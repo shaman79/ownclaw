@@ -26,6 +26,15 @@ import java.util.*;
 public class ThinkingEngine {
 
     private static final Logger log = LoggerFactory.getLogger(ThinkingEngine.class);
+
+    /**
+     * Marker inserted into system prompts to separate the static (cacheable) prefix
+     * from the dynamic suffix (datetime, tools, user prefs). AnthropicProvider splits
+     * on this marker to create two system content blocks — only the static prefix gets
+     * cache_control, so the Anthropic prompt cache actually hits across requests.
+     */
+    static final String CACHE_BOUNDARY_MARKER = "\n<!-- CACHE_BOUNDARY -->\n";
+
     // Lenient mapper: tolerates common LLM JSON quirks.
     // - ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: \' and other non-standard escapes
     // - ALLOW_UNQUOTED_FIELD_NAMES: {tool: "x"} instead of {"tool": "x"}
@@ -129,6 +138,11 @@ public class ThinkingEngine {
 
         sb.append("You are an autonomous agent. You reason, pick a tool, observe the result, repeat until done.\n\n");
 
+        // ═══════════════════════════════════════════════════════════════════
+        // STATIC SECTION — identical across all requests/tasks/steps.
+        // AnthropicProvider caches everything up to CACHE_BOUNDARY_MARKER.
+        // ═══════════════════════════════════════════════════════════════════
+
         // Identity
         sb.append("## Identity & Authority\n");
         sb.append("You are a PERSONAL agent running LOCALLY on the user's machine.\n");
@@ -141,40 +155,7 @@ public class ThinkingEngine {
         // skill_create action without any LLM call. By the time the ThinkingEngine runs
         // (step 1+), the skill is already created and visible in the trajectory.
 
-        // Environment context
-        sb.append("## Environment\n");
-        sb.append("- Platform: ").append(detectPlatform()).append("\n");
-        sb.append("- DateTime: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
-
-        // User preferences (if any)
-        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
-            sb.append("## User Preferences\n");
-            sb.append(context.userPreferences()).append("\n\n");
-        }
-
-        // Smart tool selection — include only relevant tools in detail
-        ToolSelector.Selection selection = toolSelector.select(
-                context.originalMessage(), context.trajectory());
-
-        sb.append("## Available Tools\n");
-        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-        sb.append(manifest).append("\n");
-
-        // If some tools were omitted, list them by name so the LLM knows they exist
-        if (!selection.otherNames().isEmpty()) {
-            sb.append("\n## Other Available Tools (use by name if needed)\n");
-            sb.append(String.join(", ", selection.otherNames())).append("\n");
-        }
-
-        // Bootstrapping: when no tools exist, direct the LLM to create them
-        if (manifest.isBlank()) {
-            sb.append("\n## No Tools Available\n");
-            sb.append("Use 'skill_create' as your FIRST action to build the capability you need.\n");
-            sb.append("Do NOT call skill_manage (inventory is empty). Do NOT ask the user for permission.\n");
-        }
-        sb.append("\n");
-
-        // Special actions
+        // Special actions (static — tool descriptions never change)
         sb.append("## Special Actions\n");
         sb.append("Always available:\n\n");
         sb.append("respond: Deliver final answer. Use when task is complete or answerable directly.\n");
@@ -233,26 +214,18 @@ public class ThinkingEngine {
         sb.append("  prompt (string, required): The task or question for the local LLM\n");
         sb.append("  context (string, optional): Text to process (e.g. document content, data to summarize)\n\n");
 
+        // Credential rules (static — the actual vault contents are dynamic, added after boundary)
         sb.append("## Credential Vault\n");
         sb.append("AES-256-GCM encrypted storage. Credential values are AUTO-INJECTED as env vars into skills that declare them.\n");
-
-        // Show what's actually in the vault — critical for skill creation decisions
-        List<String> vaultKeys = context.credentialKeys();
-        if (!vaultKeys.isEmpty()) {
-            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n");
-        } else {
-            sb.append("Vault is empty.\n");
-        }
-
         sb.append("CRITICAL credential rules:\n");
         sb.append("- When creating skills, ALWAYS declare needed credentials in the 'credentials' parameter.\n");
-        sb.append("  Match the exact key names from the vault above (e.g. credentials='IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
+        sb.append("  Match the exact key names from the vault (e.g. credentials='IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
         sb.append("  Do NOT add credential values as tool parameters — they are injected automatically from the vault.\n");
         sb.append("- Tools above show credential status: ✓ = stored, ✗ = missing.\n");
-        sb.append("- If all required credentials are ✓ (or listed in vault above): just CREATE the skill and RUN it. Do NOT ask the user.\n");
+        sb.append("- If all required credentials are ✓ (or listed in vault): just CREATE the skill and RUN it. Do NOT ask the user.\n");
         sb.append("- If a tool with ✓ credentials fails (auth/connection error): the stored VALUE might be wrong.\n");
         sb.append("  Ask the user ONLY for the specific value that seems wrong, then update with credential_manage(action='store').\n");
-        sb.append("- Only ask the user for credentials NOT in the vault above.\n\n");
+        sb.append("- Only ask the user for credentials NOT in the vault.\n\n");
 
         sb.append("## Persistent Memory\n");
         sb.append("Facts survive across conversations and load as 'User Preferences' at task start.\n");
@@ -295,6 +268,51 @@ public class ThinkingEngine {
         sb.append("- Garbled text = wrong encoding — fix the tool.\n");
         sb.append("- Content behind links or in files (PDF, DOCX, CSV): fetch and extract, don't just report the link.\n");
 
+        // ═══════════════════════════════════════════════════════════════════
+        // DYNAMIC SECTION — changes per request/task/step.
+        // Everything below this marker is NOT cached by Anthropic.
+        // ═══════════════════════════════════════════════════════════════════
+        sb.append(CACHE_BOUNDARY_MARKER);
+
+        // Environment context (dynamic — changes every request)
+        sb.append("## Environment\n");
+        sb.append("- Platform: ").append(detectPlatform()).append("\n");
+        sb.append("- DateTime: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+
+        // User preferences (if any)
+        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
+            sb.append("## User Preferences\n");
+            sb.append(context.userPreferences()).append("\n\n");
+        }
+
+        // Smart tool selection — include only relevant tools in detail
+        ToolSelector.Selection selection = toolSelector.select(
+                context.originalMessage(), context.trajectory());
+
+        sb.append("## Available Tools\n");
+        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+        sb.append(manifest).append("\n");
+
+        // If some tools were omitted, list them by name so the LLM knows they exist
+        if (!selection.otherNames().isEmpty()) {
+            sb.append("\n## Other Available Tools (use by name if needed)\n");
+            sb.append(String.join(", ", selection.otherNames())).append("\n");
+        }
+
+        // Bootstrapping: when no tools exist, direct the LLM to create them
+        if (manifest.isBlank()) {
+            sb.append("\n## No Tools Available\n");
+            sb.append("Use 'skill_create' as your FIRST action to build the capability you need.\n");
+            sb.append("Do NOT call skill_manage (inventory is empty). Do NOT ask the user for permission.\n");
+        }
+        sb.append("\n");
+
+        // Dynamic vault contents
+        List<String> vaultKeys = context.credentialKeys();
+        if (!vaultKeys.isEmpty()) {
+            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n\n");
+        }
+
         return sb.toString();
     }
 
@@ -308,6 +326,9 @@ public class ThinkingEngine {
         var sb = new StringBuilder(2048);
 
         sb.append("You are an autonomous agent. Reason, pick tools, observe, repeat. Never refuse tasks. Use skill_create for new capabilities.\n\n");
+
+        // ── CACHE BOUNDARY ── static preamble above is cacheable
+        sb.append(CACHE_BOUNDARY_MARKER);
 
         // Environment (always — dynamic datetime)
         sb.append("## Environment\n");

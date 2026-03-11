@@ -91,6 +91,16 @@ public class SkillManager {
                     "contain only lowercase letters, digits, and underscores.";
         }
 
+        // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
+        // The LLM should overwrite the original skill with the SAME name instead.
+        String baseName = detectBaseSkillName(name);
+        if (baseName != null && toolRegistry.find(baseName).isPresent()) {
+            return "ERROR: Skill '" + baseName + "' already exists. " +
+                    "Do NOT create '" + name + "'. " +
+                    "To fix or update a skill, use skill_create with the SAME name '" + baseName + "' — " +
+                    "it will overwrite the existing skill in-place.";
+        }
+
         if (description == null || description.isBlank()) return "ERROR: Description is required.";
         if (code == null || code.isBlank()) return "ERROR: Code is required.";
 
@@ -428,6 +438,18 @@ public class SkillManager {
         }
 
         return jsonMapper.readValue(jsonStr, new TypeReference<>() {});
+    }
+
+    /**
+     * Detect if a skill name is a variant of an existing skill.
+     * Returns the base name if a variant suffix is found (e.g. "web_fetch_v2" → "web_fetch"),
+     * or null if the name looks original.
+     */
+    private String detectBaseSkillName(String name) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^(.+?)_(v\\d+|fixed|new|updated|alt|retry|patched|mod|revised|rewrite|reworked)$")
+                .matcher(name);
+        return m.matches() ? m.group(1) : null;
     }
 
     private int toInt(Object value, int defaultValue) {

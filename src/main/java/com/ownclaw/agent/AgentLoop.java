@@ -1331,6 +1331,12 @@ public class AgentLoop {
             }
             String cloudCode = extractPythonCode(response.content());
 
+            if (cloudCode == null || cloudCode.isBlank()) {
+                log.warn("extractPythonCode returned null. Raw response (first 500 chars): {}",
+                        response.content() == null ? "(null)"
+                                : response.content().substring(0, Math.min(500, response.content().length())));
+            }
+
             // Track cloud tokens for skill code generation
             context.addCloudTokens(response.totalTokens());
             if (response.totalTokens() > 0) {
@@ -1452,30 +1458,51 @@ public class AgentLoop {
     private String extractPythonCode(String response) {
         if (response == null || response.isBlank()) return null;
 
-        // Try to find ```python ... ``` fence
-        int start = response.indexOf("```python");
-        if (start >= 0) {
-            start = response.indexOf('\n', start) + 1;
-            int end = response.indexOf("```", start);
-            if (end > start) {
-                return response.substring(start, end).strip();
+        // Try to find ```python ... ``` fence (case-insensitive, handles ```Python too)
+        java.util.regex.Matcher pyFence = java.util.regex.Pattern
+                .compile("```[Pp]ython\\s*\n(.*?)```", java.util.regex.Pattern.DOTALL)
+                .matcher(response);
+        if (pyFence.find()) {
+            String code = pyFence.group(1).strip();
+            if (!code.isBlank()) return code;
+        }
+
+        // Try plain ``` fence (first one)
+        java.util.regex.Matcher plainFence = java.util.regex.Pattern
+                .compile("```\\s*\n(.*?)```", java.util.regex.Pattern.DOTALL)
+                .matcher(response);
+        if (plainFence.find()) {
+            String code = plainFence.group(1).strip();
+            if (!code.isBlank() && (code.contains("def run") || code.startsWith("import ") || code.startsWith("from "))) {
+                return code;
             }
         }
 
-        // Try plain ``` fence
-        start = response.indexOf("```");
-        if (start >= 0) {
-            start = response.indexOf('\n', start) + 1;
-            int end = response.indexOf("```", start);
-            if (end > start) {
-                return response.substring(start, end).strip();
-            }
-        }
-
-        // If the response looks like raw Python code (starts with import or def), use it directly
+        // If the response looks like raw Python code (starts with import, from, def, or #), use it directly
         String trimmed = response.strip();
-        if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("def ")) {
+        if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("def ") || trimmed.startsWith("#!/")) {
             return trimmed;
+        }
+
+        // Last resort: look for def run( anywhere in the response
+        int defRunIdx = response.indexOf("def run(");
+        if (defRunIdx >= 0) {
+            // Walk backwards to find the first import/from line or start of code block
+            String beforeDef = response.substring(0, defRunIdx);
+            int codeStart = Math.max(beforeDef.lastIndexOf("import "), beforeDef.lastIndexOf("from "));
+            if (codeStart >= 0) {
+                // Go to the start of that line
+                codeStart = beforeDef.lastIndexOf('\n', codeStart) + 1;
+            } else {
+                codeStart = defRunIdx;
+            }
+            String candidate = response.substring(codeStart).strip();
+            // Remove any trailing explanation after the code
+            int trailingFence = candidate.indexOf("```");
+            if (trailingFence > 0) {
+                candidate = candidate.substring(0, trailingFence).strip();
+            }
+            if (!candidate.isBlank()) return candidate;
         }
 
         return null;

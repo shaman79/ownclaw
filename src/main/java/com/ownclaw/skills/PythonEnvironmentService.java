@@ -348,7 +348,7 @@ public class PythonEnvironmentService {
             args.add("-q");
             args.addAll(packages);
 
-            ProcessResult install = run(300, new ProcessBuilder(args));
+            ProcessResult install = run(600, new ProcessBuilder(args));
             if (install.exitCode != 0) {
                 throw new IOException("pip install failed: " + install.output);
             }
@@ -403,7 +403,7 @@ public class PythonEnvironmentService {
         ensurePipForPython(systemPython, /*isVenv=*/false, skillName);
 
         Path reqFile = skillDir.resolve("requirements.txt");
-        ProcessResult install = run(600, new ProcessBuilder(
+        ProcessResult install = run(900, new ProcessBuilder(
                 systemPython, "-m", "pip", "install",
                 "--disable-pip-version-check",
                 "-q", "-r", reqFile.toAbsolutePath().toString(),
