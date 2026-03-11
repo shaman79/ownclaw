@@ -42,6 +42,10 @@ public class OpenAiProvider implements LlmProvider {
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
+        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "openai");
+    }
+
+    private LlmResponse chatInternal(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
         String apiKey = config.getApiKey();
         if (apiKey == null || apiKey.isBlank()) {
             throw new LlmException("openai", "API key not configured");

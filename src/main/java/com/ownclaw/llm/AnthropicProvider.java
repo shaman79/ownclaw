@@ -49,6 +49,10 @@ public class AnthropicProvider implements LlmProvider {
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
+        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "anthropic");
+    }
+
+    private LlmResponse chatInternal(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
         String apiKey = config.getAnthropicApiKey();
         if (apiKey == null || apiKey.isBlank()) {
             throw new LlmException("anthropic", "API key not configured");
