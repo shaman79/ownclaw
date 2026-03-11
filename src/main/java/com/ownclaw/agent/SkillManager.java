@@ -91,16 +91,6 @@ public class SkillManager {
                     "contain only lowercase letters, digits, and underscores.";
         }
 
-        // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
-        // The LLM should overwrite the original skill with the SAME name instead.
-        String baseName = detectBaseSkillName(name);
-        if (baseName != null && toolRegistry.find(baseName).isPresent()) {
-            return "ERROR: Skill '" + baseName + "' already exists. " +
-                    "Do NOT create '" + name + "'. " +
-                    "To fix or update a skill, use skill_create with the SAME name '" + baseName + "' — " +
-                    "it will overwrite the existing skill in-place.";
-        }
-
         if (description == null || description.isBlank()) return "ERROR: Description is required.";
         if (code == null || code.isBlank()) return "ERROR: Code is required.";
 
