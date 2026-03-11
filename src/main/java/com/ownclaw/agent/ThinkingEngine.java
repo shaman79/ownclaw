@@ -338,7 +338,7 @@ public class ThinkingEngine {
         sb.append("## Special Actions\n");
         sb.append("respond(message) — final answer | ask_user(message) — clarifying question\n");
         sb.append("skill_create(name, description, parameters[JSON], [requirements], [requires_network], [has_side_effects], [timeout], [credentials], [system_packages → container])\n");
-        sb.append("  To fix a skill, reuse the SAME name — NEVER add _v2/_fixed/_new suffixes.\n");
+        sb.append("To fix a skill, reuse the SAME name — NEVER add _v2/_fixed/_new suffixes.\n");
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");

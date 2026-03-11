@@ -84,13 +84,8 @@ public class AnthropicProvider implements LlmProvider {
 
         // Claude doesn't have a response_format: json_object option.
         // JSON mode is enforced via prompt engineering (ThinkingEngine already says
-        // "respond with valid JSON"). We can add a prefill to help:
-        if (reqConfig.jsonMode()) {
-            // Add assistant prefill to steer toward JSON output
-            ObjectNode prefill = msgs.addObject();
-            prefill.put("role", "assistant");
-            prefill.put("content", "{");
-        }
+        // "respond with valid JSON"). Assistant prefill is NOT used because some
+        // Claude models reject it with HTTP 400.
 
         Request request = new Request.Builder()
                 .url(BASE_URL + "/messages")
@@ -124,11 +119,6 @@ public class AnthropicProvider implements LlmProvider {
                 }
             }
             String content = contentBuilder.toString();
-
-            // If we used JSON prefill, prepend the "{" back
-            if (reqConfig.jsonMode()) {
-                content = "{" + content;
-            }
 
             int promptTokens = json.path("usage").path("input_tokens").asInt(0);
             int completionTokens = json.path("usage").path("output_tokens").asInt(0);
