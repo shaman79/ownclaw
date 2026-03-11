@@ -1734,6 +1734,362 @@
             background: rgba(129,140,248,.12);
         }
         #settings-btn svg { width: 16px; height: 16px; fill: currentColor }
+
+        /*  Header skills button  */
+        #skills-btn {
+            display: flex; align-items: center; justify-content: center;
+            width: 34px; height: 34px;
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            background: none;
+            color: var(--text-3);
+            cursor: pointer;
+            transition: all .15s;
+            margin-right: 6px;
+        }
+        #skills-btn:hover {
+            color: var(--accent-hi);
+            border-color: rgba(129,140,248,.3);
+            background: rgba(129,140,248,.08);
+        }
+        #skills-btn.active {
+            color: var(--accent-hi);
+            border-color: rgba(129,140,248,.4);
+            background: rgba(129,140,248,.12);
+        }
+        #skills-btn svg { width: 16px; height: 16px; fill: currentColor }
+
+        /*  Skills view  */
+        .skills-view {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 8px;
+        }
+        .skills-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .skills-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0;
+            flex: 1;
+        }
+        .skills-header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .skills-reload-btn {
+            padding: 7px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-2);
+            font-size: 12px;
+            font-weight: 500;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: color .15s, border-color .15s, background .15s;
+        }
+        .skills-reload-btn:hover { color: var(--text-1); border-color: var(--border-mid); background: var(--bg-input) }
+        .skills-reload-btn:disabled { opacity: .5; cursor: not-allowed }
+
+        .skills-stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        /*  Skill card grid  */
+        .skills-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .skill-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 16px;
+            transition: border-color .15s, box-shadow .15s;
+            cursor: pointer;
+            position: relative;
+        }
+        .skill-card:hover {
+            border-color: var(--border-mid);
+            box-shadow: 0 2px 8px rgba(0,0,0,.15);
+        }
+        .skill-card-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-1);
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .skill-card-name .skill-icon { font-size: 15px; }
+        .skill-card-desc {
+            font-size: 12px;
+            color: var(--text-2);
+            line-height: 1.5;
+            margin-bottom: 10px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .skill-card-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-bottom: 10px;
+        }
+        .skill-tag {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            letter-spacing: .03em;
+        }
+        .skill-tag.network { color: #60a5fa; background: rgba(96,165,250,.12) }
+        .skill-tag.side-effect { color: #fbbf24; background: rgba(251,191,36,.12) }
+        .skill-tag.credentials { color: #f472b6; background: rgba(244,114,182,.12) }
+        .skill-card-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: var(--text-3);
+        }
+        .skill-card-stat { display: flex; align-items: center; gap: 3px }
+        .skill-card-actions {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            display: none;
+            gap: 4px;
+        }
+        .skill-card:hover .skill-card-actions { display: flex }
+
+        /*  Skill detail view  */
+        .skill-detail {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+        .skill-detail-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .skill-detail-header h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0;
+            flex: 1;
+        }
+        .skill-back-btn {
+            padding: 6px 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-2);
+            font-size: 12px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: color .15s, border-color .15s;
+        }
+        .skill-back-btn:hover { color: var(--text-1); border-color: var(--border-mid) }
+        .skill-detail-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        /*  Skill code editor  */
+        .skill-code-section {
+            margin-bottom: 16px;
+        }
+        .skill-code-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-2);
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            margin-bottom: 8px;
+        }
+        .skill-code-editor {
+            width: 100%;
+            min-height: 300px;
+            padding: 14px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 13px;
+            font-family: var(--font-mono);
+            line-height: 1.6;
+            resize: vertical;
+            outline: none;
+            tab-size: 4;
+            transition: border-color .15s, box-shadow .15s;
+        }
+        .skill-code-editor:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .skill-field {
+            margin-bottom: 14px;
+        }
+        .skill-field label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-2);
+            margin-bottom: 5px;
+        }
+        .skill-field input,
+        .skill-field textarea {
+            width: 100%;
+            padding: 9px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 13px;
+            font-family: var(--font);
+            outline: none;
+            transition: border-color .15s, box-shadow .15s;
+        }
+        .skill-field input:focus,
+        .skill-field textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .skill-field .field-hint {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 4px;
+        }
+        .skill-checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .skill-checkbox-row input[type="checkbox"] {
+            width: 16px; height: 16px;
+            accent-color: var(--accent);
+        }
+        .skill-checkbox-row label {
+            font-size: 13px;
+            color: var(--text-2);
+            cursor: pointer;
+        }
+        .skill-detail-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        .skill-save-btn {
+            padding: 9px 24px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 600;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .15s, opacity .15s;
+        }
+        .skill-save-btn:hover { background: var(--accent-hi) }
+        .skill-save-btn:disabled { opacity: .5; cursor: not-allowed }
+        .skill-delete-btn {
+            padding: 9px 18px;
+            background: var(--red-dim);
+            color: var(--red);
+            border: 1px solid rgba(248,113,113,.2);
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 500;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .15s, border-color .15s;
+        }
+        .skill-delete-btn:hover { background: rgba(248,113,113,.15); border-color: rgba(248,113,113,.4) }
+
+        /*  Skill run modal  */
+        .skill-run-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.6);
+            z-index: 300;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn .15s;
+        }
+        .skill-run-modal {
+            width: 520px;
+            max-width: 92vw;
+            max-height: 85vh;
+            overflow-y: auto;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-lg);
+            padding: 28px 24px;
+            box-shadow: var(--shadow-lg);
+        }
+        .skill-run-modal h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0 0 18px;
+            color: var(--text-1);
+        }
+        .skill-run-output {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            padding: 12px 14px;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            color: var(--text-2);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 14px;
+            line-height: 1.5;
+        }
+        .skill-run-output::-webkit-scrollbar { width: 4px }
+        .skill-run-output::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 3px }
+        .skill-run-output.success { border-color: rgba(52,211,153,.3) }
+        .skill-run-output.error { border-color: rgba(248,113,113,.3); color: var(--red) }
+        .skill-run-duration {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 6px;
+        }
+
+        /*  Skills empty state  */
+        .skills-empty {
+            text-align: center;
+            padding: 48px 24px;
+            color: var(--text-3);
+        }
+        .skills-empty-icon { font-size: 36px; margin-bottom: 12px }
+        .skills-empty-text { font-size: 14px }
+        .skills-empty-sub { font-size: 12px; margin-top: 6px; opacity: .7 }
     </style>
 </head>
 <body>
@@ -1772,6 +2128,9 @@
         <span id="conn-label">Connecting</span>
     </div>
     <span class="header-spacer"></span>
+    <button id="skills-btn" title="Skills">
+        <svg viewBox="0 0 24 24"><path d="M14.17 5L19 9.83V19H5V5h9.17M14.17 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V9.83c0-.53-.21-1.04-.59-1.41l-4.83-4.83c-.37-.38-.88-.59-1.41-.59zM7 15h10v2H7v-2zm0-4h10v2H7v-2zm0-4h7v2H7V7z"/></svg>
+    </button>
     <button id="settings-btn" title="Settings">
         <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
     </button>
@@ -1860,10 +2219,16 @@
     var authToggle   = document.getElementById('auth-toggle');
     var logoutBtn    = document.getElementById('logout-btn');
     var settingsBtn  = document.getElementById('settings-btn');
+    var skillsBtn    = document.getElementById('skills-btn');
 
     settingsBtn.addEventListener('click', function() {
         if (currentView === 'settings') return;
         switchToSettings();
+    });
+
+    skillsBtn.addEventListener('click', function() {
+        if (currentView === 'skills') return;
+        switchToSkills();
     });
 
     var messagesEl      = document.getElementById('messages');
@@ -1985,10 +2350,11 @@
     function switchToSession(sessionId) {
         if (!ws || ws.readyState !== 1) return;
         currentView = 'chat';
-        // Show chat UI elements, hide task history/settings
+        // Show chat UI elements, hide task history/settings/skills
         document.getElementById('input-area').style.display = '';
         document.getElementById('activity-wrap').style.display = '';
         settingsBtn.classList.remove('active');
+        skillsBtn.classList.remove('active');
         ws.send(JSON.stringify({ type: 'switch_session', message: sessionId }));
         clearMessages();
         // Update sidebar active states
@@ -2025,7 +2391,7 @@
     }
 
     function clearMessages() {
-        messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view').forEach(function(m) { m.remove(); });
+        messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view, .skills-view').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
     }
 
@@ -2118,6 +2484,7 @@
         // Hide chat input and activity bar when viewing tasks
         document.getElementById('input-area').style.display = 'none';
         settingsBtn.classList.remove('active');
+        skillsBtn.classList.remove('active');
         // Update sidebar active states
         updateSidebarActive(null);
         loadTaskHistory();
@@ -2576,6 +2943,7 @@
         document.getElementById('input-area').style.display = 'none';
         document.getElementById('activity-wrap').style.display = 'none';
         settingsBtn.classList.add('active');
+        skillsBtn.classList.remove('active');
         updateSidebarActive(null);
         loadSettings();
     }
@@ -2824,6 +3192,567 @@
         document.body.appendChild(toast);
         setTimeout(function() { toast.remove(); }, 3000);
     }
+
+    // ────────── Skills View ──────────
+    function switchToSkills() {
+        currentView = 'skills';
+        clearMessages();
+        document.getElementById('input-area').style.display = 'none';
+        document.getElementById('activity-wrap').style.display = 'none';
+        skillsBtn.classList.add('active');
+        settingsBtn.classList.remove('active');
+        updateSidebarActive(null);
+        loadSkills();
+    }
+
+    function loadSkills() {
+        if (!authToken) return;
+        var loader = document.createElement('div');
+        loader.className = 'task-history-loading';
+        loader.innerHTML = '<div class="mini-spinner"></div><span>Loading skills...</span>';
+        messagesEl.appendChild(loader);
+
+        fetch('/api/skills', {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            clearMessages();
+            renderSkillsList(data.skills || []);
+        })
+        .catch(function(e) {
+            clearMessages();
+            console.error('Failed to load skills:', e);
+            showSettingsToast('Failed to load skills: ' + e.message, true);
+        });
+    }
+
+    function renderSkillsList(skills) {
+        var view = document.createElement('div');
+        view.className = 'skills-view';
+
+        // ── Header ──
+        var header = document.createElement('div');
+        header.className = 'skills-header';
+        header.innerHTML =
+            '<h2>\uD83E\uDDE9 Skills (' + skills.length + ')</h2>' +
+            '<div class="skills-header-actions">' +
+                '<button class="skills-reload-btn" id="skills-reload-btn">\u21BB Reload All</button>' +
+            '</div>';
+        view.appendChild(header);
+
+        // ── Stats summary ──
+        if (skills.length > 0) {
+            var totalInvocations = 0;
+            var totalSuccesses = 0;
+            var withNetwork = 0;
+            var withCredentials = 0;
+            skills.forEach(function(s) {
+                totalInvocations += (s.totalInvocations || 0);
+                totalSuccesses += (s.successes || 0);
+                if (s.requiresNetwork) withNetwork++;
+                if (s.requiredCredentials && s.requiredCredentials.length > 0) withCredentials++;
+            });
+            var statsDiv = document.createElement('div');
+            statsDiv.className = 'skills-stats';
+            statsDiv.innerHTML =
+                '<div class="task-stat"><div class="task-stat-value">' + skills.length + '</div><div class="task-stat-label">Total Skills</div></div>' +
+                '<div class="task-stat"><div class="task-stat-value">' + totalInvocations + '</div><div class="task-stat-label">Total Runs</div></div>' +
+                '<div class="task-stat"><div class="task-stat-value green">' + (totalInvocations > 0 ? Math.round(totalSuccesses / totalInvocations * 100) : 0) + '%</div><div class="task-stat-label">Success Rate</div></div>' +
+                '<div class="task-stat"><div class="task-stat-value">' + withNetwork + '</div><div class="task-stat-label">Network Skills</div></div>';
+            view.appendChild(statsDiv);
+        }
+
+        // ── Skill cards grid ──
+        if (skills.length === 0) {
+            var empty = document.createElement('div');
+            empty.className = 'skills-empty';
+            empty.innerHTML =
+                '<div class="skills-empty-icon">\uD83E\uDDE9</div>' +
+                '<div class="skills-empty-text">No skills yet</div>' +
+                '<div class="skills-empty-sub">Ask OwnClaw to create a skill in the chat</div>';
+            view.appendChild(empty);
+        } else {
+            var grid = document.createElement('div');
+            grid.className = 'skills-grid';
+
+            skills.forEach(function(skill) {
+                var card = document.createElement('div');
+                card.className = 'skill-card';
+                card.setAttribute('data-skill-name', skill.name);
+
+                // Tags
+                var tagsHtml = '';
+                if (skill.requiresNetwork) tagsHtml += '<span class="skill-tag network">\uD83C\uDF10 Network</span>';
+                if (skill.hasSideEffects) tagsHtml += '<span class="skill-tag side-effect">\u26A1 Side Effects</span>';
+                if (skill.requiredCredentials && skill.requiredCredentials.length > 0) {
+                    tagsHtml += '<span class="skill-tag credentials">\uD83D\uDD11 Credentials</span>';
+                }
+
+                // Stats
+                var statsHtml = '';
+                if (skill.totalInvocations > 0) {
+                    statsHtml += '<span class="skill-card-stat">\u25B6 ' + skill.totalInvocations + ' runs</span>';
+                    statsHtml += '<span class="skill-card-stat">\u2705 ' + skill.successRate + '%</span>';
+                    if (skill.avgDurationMs) statsHtml += '<span class="skill-card-stat">\u23F1 ' + formatDuration(skill.avgDurationMs) + '</span>';
+                } else {
+                    statsHtml = '<span class="skill-card-stat">Never invoked</span>';
+                }
+
+                // Actions
+                var actionsHtml =
+                    '<div class="skill-card-actions">' +
+                        '<button class="task-action-btn" data-action="run" title="Test Run">\u25B6\uFE0F</button>' +
+                        '<button class="task-action-btn danger" data-action="delete" title="Delete">\uD83D\uDDD1\uFE0F</button>' +
+                    '</div>';
+
+                // Param count
+                var paramCount = skill.parameters ? skill.parameters.length : 0;
+                var paramStr = paramCount > 0 ? paramCount + ' param' + (paramCount > 1 ? 's' : '') : 'no params';
+
+                card.innerHTML =
+                    actionsHtml +
+                    '<div class="skill-card-name"><span class="skill-icon">\uD83D\uDC0D</span>' + escapeHtml(skill.name) + '</div>' +
+                    '<div class="skill-card-desc">' + escapeHtml(skill.description || '') + '</div>' +
+                    '<div class="skill-card-tags">' + tagsHtml + '</div>' +
+                    '<div class="skill-card-stats">' +
+                        '<span class="skill-card-stat">\uD83D\uDCE6 ' + paramStr + '</span>' +
+                        statsHtml +
+                    '</div>';
+
+                // Click card to view detail
+                card.addEventListener('click', function(e) {
+                    if (e.target.closest('.task-action-btn')) return;
+                    loadSkillDetail(skill.name);
+                });
+
+                // Action buttons
+                card.querySelectorAll('.task-action-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        var action = btn.getAttribute('data-action');
+                        if (action === 'run') {
+                            showSkillRunModal(skill.name);
+                        } else if (action === 'delete') {
+                            if (confirm('Permanently delete skill "' + skill.name + '"? This cannot be undone.')) {
+                                deleteSkill(skill.name);
+                            }
+                        }
+                    });
+                });
+
+                grid.appendChild(card);
+            });
+
+            view.appendChild(grid);
+        }
+
+        messagesEl.insertBefore(view, thinkingEl);
+        scrollBottom();
+
+        // Wire reload button
+        document.getElementById('skills-reload-btn').addEventListener('click', function() {
+            var btn = this;
+            btn.disabled = true;
+            btn.textContent = 'Reloading...';
+            fetch('/api/skills/reload', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + authToken }
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                showSettingsToast(data.message || 'Skills reloaded', false);
+                loadSkills();
+            })
+            .catch(function(e) {
+                showSettingsToast('Reload failed: ' + e.message, true);
+                btn.disabled = false;
+                btn.textContent = '\u21BB Reload All';
+            });
+        });
+    }
+
+    function loadSkillDetail(name) {
+        if (!authToken) return;
+        clearMessages();
+        var loader = document.createElement('div');
+        loader.className = 'task-history-loading';
+        loader.innerHTML = '<div class="mini-spinner"></div><span>Loading skill...</span>';
+        messagesEl.appendChild(loader);
+
+        fetch('/api/skills/' + encodeURIComponent(name), {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) {
+            if (!r.ok) throw new Error('Skill not found');
+            return r.json();
+        })
+        .then(function(data) {
+            clearMessages();
+            renderSkillDetail(data);
+        })
+        .catch(function(e) {
+            clearMessages();
+            showSettingsToast('Failed to load skill: ' + e.message, true);
+            loadSkills();
+        });
+    }
+
+    function renderSkillDetail(skill) {
+        var view = document.createElement('div');
+        view.className = 'skills-view';
+
+        // ── Detail card ──
+        var detail = document.createElement('div');
+        detail.className = 'skill-detail';
+
+        // Header with back + actions
+        var headerHtml =
+            '<div class="skill-detail-header">' +
+                '<button class="skill-back-btn" id="skill-back-btn">\u2190 Back to Skills</button>' +
+                '<h3>\uD83D\uDC0D ' + escapeHtml(skill.name) + '</h3>' +
+                '<button class="task-action-btn" id="skill-run-btn" title="Test Run">\u25B6\uFE0F</button>' +
+            '</div>';
+        detail.innerHTML = headerHtml;
+
+        // Meta tags
+        var metaDiv = document.createElement('div');
+        metaDiv.className = 'skill-detail-meta';
+        var metaHtml = '';
+        if (skill.requiresNetwork) metaHtml += '<span class="skill-tag network">\uD83C\uDF10 Network</span>';
+        if (skill.hasSideEffects) metaHtml += '<span class="skill-tag side-effect">\u26A1 Side Effects</span>';
+        if (skill.requiredCredentials && skill.requiredCredentials.length > 0) {
+            metaHtml += '<span class="skill-tag credentials">\uD83D\uDD11 ' + escapeHtml(skill.requiredCredentials.join(', ')) + '</span>';
+        }
+        if (skill.systemPackages && skill.systemPackages.length > 0) {
+            metaHtml += '<span class="skill-tag network">\uD83D\uDCE6 ' + escapeHtml(skill.systemPackages.join(', ')) + '</span>';
+        }
+        if (skill.totalInvocations) {
+            metaHtml += '<span class="skill-tag" style="color:var(--text-2);background:rgba(255,255,255,.05)">\u25B6 ' + skill.totalInvocations + ' runs</span>';
+        }
+        if (skill.avgDurationMs) {
+            metaHtml += '<span class="skill-tag" style="color:var(--text-2);background:rgba(255,255,255,.05)">\u23F1 avg ' + formatDuration(skill.avgDurationMs) + '</span>';
+        }
+        metaDiv.innerHTML = metaHtml;
+        detail.appendChild(metaDiv);
+
+        // Description field
+        detail.innerHTML +=
+            '<div class="skill-field">' +
+                '<label>Description</label>' +
+                '<input type="text" id="skill-edit-desc" value="' + escapeHtml(skill.description || '') + '">' +
+            '</div>';
+
+        // Timeout field
+        detail.innerHTML +=
+            '<div class="skill-field">' +
+                '<label>Timeout (seconds)</label>' +
+                '<input type="number" id="skill-edit-timeout" value="' + (skill.timeout || 30) + '" min="5" max="600">' +
+            '</div>';
+
+        // Checkboxes
+        detail.innerHTML +=
+            '<div class="skill-checkbox-row">' +
+                '<input type="checkbox" id="skill-edit-network"' + (skill.requiresNetwork ? ' checked' : '') + '>' +
+                '<label for="skill-edit-network">Requires network access</label>' +
+            '</div>' +
+            '<div class="skill-checkbox-row">' +
+                '<input type="checkbox" id="skill-edit-sideeffects"' + (skill.hasSideEffects ? ' checked' : '') + '>' +
+                '<label for="skill-edit-sideeffects">Has side effects</label>' +
+            '</div>';
+
+        // Credentials
+        var credsStr = (skill.requiredCredentials || []).join(', ');
+        detail.innerHTML +=
+            '<div class="skill-field">' +
+                '<label>Required Credentials</label>' +
+                '<input type="text" id="skill-edit-creds" value="' + escapeHtml(credsStr) + '" placeholder="e.g. API_KEY, SECRET">' +
+                '<div class="field-hint">Comma-separated credential keys</div>' +
+            '</div>';
+
+        // System packages
+        var pkgsStr = (skill.systemPackages || []).join(', ');
+        detail.innerHTML +=
+            '<div class="skill-field">' +
+                '<label>System Packages</label>' +
+                '<input type="text" id="skill-edit-pkgs" value="' + escapeHtml(pkgsStr) + '" placeholder="e.g. poppler-utils, tesseract-ocr">' +
+                '<div class="field-hint">Comma-separated system packages for container sandbox</div>' +
+            '</div>';
+
+        // Requirements
+        detail.innerHTML +=
+            '<div class="skill-field">' +
+                '<label>Requirements (pip)</label>' +
+                '<textarea id="skill-edit-reqs" rows="3" style="font-family:var(--font-mono);font-size:12px;resize:vertical">' + escapeHtml(skill.requirements || '') + '</textarea>' +
+                '<div class="field-hint">One package per line, e.g. requests==2.31.0</div>' +
+            '</div>';
+
+        view.appendChild(detail);
+
+        // ── Code editor ──
+        var codeSection = document.createElement('div');
+        codeSection.className = 'skill-detail';
+        codeSection.innerHTML =
+            '<div class="skill-code-section">' +
+                '<div class="skill-code-label">\uD83D\uDC0D skill.py</div>' +
+                '<textarea class="skill-code-editor" id="skill-edit-code" spellcheck="false">' + escapeHtml(skill.code || '') + '</textarea>' +
+            '</div>';
+        view.appendChild(codeSection);
+
+        // ── YAML preview (read-only) ──
+        if (skill.yaml) {
+            var yamlSection = document.createElement('div');
+            yamlSection.className = 'skill-detail';
+            yamlSection.innerHTML =
+                '<div class="skill-code-section">' +
+                    '<div class="skill-code-label">\uD83D\uDCC4 SKILL.yaml (read-only)</div>' +
+                    '<textarea class="skill-code-editor" readonly style="min-height:150px;opacity:.7">' + escapeHtml(skill.yaml) + '</textarea>' +
+                '</div>';
+            view.appendChild(yamlSection);
+        }
+
+        // ── Parameters preview (read-only JSON) ──
+        if (skill.parameters && Object.keys(skill.parameters).length > 0) {
+            var paramsSection = document.createElement('div');
+            paramsSection.className = 'skill-detail';
+            paramsSection.innerHTML =
+                '<div class="skill-code-section">' +
+                    '<div class="skill-code-label">\uD83D\uDCCB Parameters (from SKILL.yaml)</div>' +
+                    '<textarea class="skill-code-editor" readonly style="min-height:100px;opacity:.7">' + escapeHtml(JSON.stringify(skill.parameters, null, 2)) + '</textarea>' +
+                '</div>';
+            view.appendChild(paramsSection);
+        }
+
+        // ── Action buttons ──
+        var actions = document.createElement('div');
+        actions.className = 'skill-detail-actions';
+        actions.innerHTML =
+            '<button class="skill-delete-btn" id="skill-detail-delete">\uD83D\uDDD1\uFE0F Delete Skill</button>' +
+            '<button class="skill-save-btn" id="skill-detail-save">Save Changes</button>';
+        view.appendChild(actions);
+
+        messagesEl.insertBefore(view, thinkingEl);
+        scrollBottom();
+
+        // ── Wire events ──
+        document.getElementById('skill-back-btn').addEventListener('click', function() {
+            loadSkills();
+        });
+
+        document.getElementById('skill-run-btn').addEventListener('click', function() {
+            showSkillRunModal(skill.name);
+        });
+
+        document.getElementById('skill-detail-delete').addEventListener('click', function() {
+            if (confirm('Permanently delete skill "' + skill.name + '"? This cannot be undone.')) {
+                deleteSkill(skill.name);
+            }
+        });
+
+        document.getElementById('skill-detail-save').addEventListener('click', function() {
+            saveSkill(skill);
+        });
+
+        // Tab key support in code editor
+        document.getElementById('skill-edit-code').addEventListener('keydown', function(e) {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                var start = this.selectionStart;
+                var end = this.selectionEnd;
+                this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
+                this.selectionStart = this.selectionEnd = start + 4;
+            }
+        });
+    }
+
+    function saveSkill(originalSkill) {
+        var code = document.getElementById('skill-edit-code').value;
+        var desc = document.getElementById('skill-edit-desc').value.trim();
+        var timeout = parseInt(document.getElementById('skill-edit-timeout').value) || 30;
+        var requiresNetwork = document.getElementById('skill-edit-network').checked;
+        var hasSideEffects = document.getElementById('skill-edit-sideeffects').checked;
+        var credentials = document.getElementById('skill-edit-creds').value.trim();
+        var systemPackages = document.getElementById('skill-edit-pkgs').value.trim();
+        var requirements = document.getElementById('skill-edit-reqs').value.trim();
+
+        if (!desc) {
+            showSettingsToast('Description is required', true);
+            return;
+        }
+        if (!code.trim()) {
+            showSettingsToast('Code is required', true);
+            return;
+        }
+
+        var btn = document.getElementById('skill-detail-save');
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+
+        // Build parameters from original (can't edit params through this UI, keep original)
+        var params = originalSkill.parameters || {};
+
+        fetch('/api/skills/' + encodeURIComponent(originalSkill.name), {
+            method: 'PUT',
+            headers: {
+                'Authorization': 'Bearer ' + authToken,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                description: desc,
+                code: code,
+                parameters: params,
+                timeout: timeout,
+                requiresNetwork: requiresNetwork,
+                hasSideEffects: hasSideEffects,
+                credentials: credentials,
+                systemPackages: systemPackages,
+                requirements: requirements
+            })
+        })
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Save failed'); });
+            return r.json();
+        })
+        .then(function(data) {
+            showSettingsToast(data.message || 'Skill saved', false);
+            // Reload detail to reflect changes
+            setTimeout(function() { loadSkillDetail(originalSkill.name); }, 600);
+        })
+        .catch(function(e) {
+            showSettingsToast(e.message, true);
+            btn.disabled = false;
+            btn.textContent = 'Save Changes';
+        });
+    }
+
+    function deleteSkill(name) {
+        if (!authToken) return;
+        fetch('/api/skills/' + encodeURIComponent(name), {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Delete failed'); });
+            return r.json();
+        })
+        .then(function(data) {
+            showSettingsToast(data.message || 'Skill deleted', false);
+            loadSkills();
+        })
+        .catch(function(e) {
+            showSettingsToast(e.message, true);
+        });
+    }
+
+    function showSkillRunModal(name) {
+        if (!authToken) return;
+
+        // First fetch skill detail to get parameters
+        fetch('/api/skills/' + encodeURIComponent(name), {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(skill) {
+            // Build modal
+            var existing = document.querySelector('.skill-run-overlay');
+            if (existing) existing.remove();
+
+            var overlay = document.createElement('div');
+            overlay.className = 'skill-run-overlay';
+
+            var params = skill.parameters || {};
+            var paramKeys = Object.keys(params);
+
+            var fieldsHtml = '';
+            paramKeys.forEach(function(key) {
+                var p = params[key] || {};
+                var pType = p.type || 'string';
+                var pDesc = p.description || '';
+                var required = p.required ? ' *' : '';
+                fieldsHtml +=
+                    '<div class="task-modal-field">' +
+                        '<label>' + escapeHtml(key) + required + ' <span style="color:var(--text-3);font-weight:400">(' + pType + ')</span></label>' +
+                        '<input type="text" class="skill-run-param" data-param="' + escapeHtml(key) + '" placeholder="' + escapeHtml(pDesc) + '">' +
+                    '</div>';
+            });
+
+            if (paramKeys.length === 0) {
+                fieldsHtml = '<div style="color:var(--text-3);font-size:13px;margin-bottom:14px">This skill takes no parameters</div>';
+            }
+
+            overlay.innerHTML =
+                '<div class="skill-run-modal">' +
+                    '<h3>\u25B6\uFE0F Test Run: ' + escapeHtml(name) + '</h3>' +
+                    '<div style="color:var(--text-2);font-size:12px;margin-bottom:16px">' + escapeHtml(skill.description || '') + '</div>' +
+                    fieldsHtml +
+                    '<div class="task-modal-actions">' +
+                        '<button class="task-modal-btn secondary" id="skill-run-cancel">Cancel</button>' +
+                        '<button class="task-modal-btn primary" id="skill-run-execute">\u25B6 Run</button>' +
+                    '</div>' +
+                    '<div id="skill-run-result" style="display:none"></div>' +
+                '</div>';
+
+            document.body.appendChild(overlay);
+
+            // Close handlers
+            overlay.addEventListener('click', function(e) {
+                if (e.target === overlay) overlay.remove();
+            });
+            var escHandler = function(e) {
+                if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
+            };
+            document.addEventListener('keydown', escHandler);
+
+            document.getElementById('skill-run-cancel').addEventListener('click', function() {
+                overlay.remove();
+            });
+
+            document.getElementById('skill-run-execute').addEventListener('click', function() {
+                var runBtn = this;
+                runBtn.disabled = true;
+                runBtn.textContent = 'Running...';
+
+                // Collect params
+                var runParams = {};
+                overlay.querySelectorAll('.skill-run-param').forEach(function(inp) {
+                    var val = inp.value.trim();
+                    if (val) runParams[inp.getAttribute('data-param')] = val;
+                });
+
+                var resultDiv = document.getElementById('skill-run-result');
+                resultDiv.style.display = 'block';
+                resultDiv.innerHTML = '<div class="task-history-loading" style="padding:16px"><div class="mini-spinner"></div><span>Executing...</span></div>';
+
+                fetch('/api/skills/' + encodeURIComponent(name) + '/run', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + authToken,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ params: runParams })
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var statusClass = data.success ? 'success' : 'error';
+                    resultDiv.innerHTML =
+                        '<div class="skill-run-output ' + statusClass + '">' + escapeHtml(data.output || '(no output)') + '</div>' +
+                        '<div class="skill-run-duration">' + (data.success ? '\u2705' : '\u274C') + ' ' + formatDuration(data.durationMs || 0) + '</div>';
+                    runBtn.disabled = false;
+                    runBtn.textContent = '\u25B6 Run Again';
+                })
+                .catch(function(e) {
+                    resultDiv.innerHTML =
+                        '<div class="skill-run-output error">Error: ' + escapeHtml(e.message) + '</div>';
+                    runBtn.disabled = false;
+                    runBtn.textContent = '\u25B6 Run';
+                });
+            });
+        })
+        .catch(function(e) {
+            showSettingsToast('Failed to load skill: ' + e.message, true);
+        });
+    }
+
 
     function renameSession(sessionId, newTitle) {
         if (!authToken) return;
