@@ -75,7 +75,7 @@ public class ThinkingEngine {
      * for debug/observability use.
      */
     public ThinkResult decideNextActionFull(AgentContext context, LlmProvider provider) {
-        List<LlmMessage> messages = buildMessages(context);
+        List<LlmMessage> messages = buildMessages(context, provider.name());
 
         LlmRequestConfig requestConfig = new LlmRequestConfig(
                 null,   // use provider default model
@@ -103,11 +103,11 @@ public class ThinkingEngine {
     /**
      * Build the full message list for the LLM.
      */
-    private List<LlmMessage> buildMessages(AgentContext context) {
+    private List<LlmMessage> buildMessages(AgentContext context, String providerName) {
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt
-        messages.add(LlmMessage.system(buildSystemPrompt(context)));
+        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName)));
 
         // User message with context
         messages.add(LlmMessage.user(buildUserMessage(context)));
@@ -126,13 +126,16 @@ public class ThinkingEngine {
      * Build the system prompt. This defines the agent's behavior, available tools,
      * and output format. Completely generic — no domain-specific content.
      */
-    private String buildSystemPrompt(AgentContext context) {
-        // Always use the full prompt — the static section is cached by Anthropic's
-        // prompt caching (see AnthropicProvider). The compact prompt was saving ~700
-        // tokens/step but broke caching entirely: its static prefix (~25 tokens) is
-        // below Anthropic's 1024-token caching minimum, and the different prefix
-        // prevented step 2+ from reading the 9200-token cache created on step 1.
-        // Full prompt + cache reads (10% cost) is far cheaper than compact + cache misses.
+    private String buildSystemPrompt(AgentContext context, String providerName) {
+        // Anthropic: always use the full prompt — the static section is cached by
+        // Anthropic's prompt caching (9200 tokens cached, read at 10% cost = ~920
+        // effective tokens). The compact prompt broke caching: different prefix meant
+        // step 2+ never read the cache created on step 1.
+        // OpenAI: has no prompt caching, so the compact prompt on steps 2+ saves ~700
+        // real tokens per step.
+        if (!context.trajectory().isEmpty() && !"anthropic".equals(providerName)) {
+            return buildCompactSystemPrompt(context);
+        }
 
         var sb = new StringBuilder();
 
