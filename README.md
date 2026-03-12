@@ -34,6 +34,14 @@ The system runs two LLMs with distinct roles:
 
 The cloud model can also fall back to local-only mode when the cloud API is unavailable.
 
+### Why this saves money
+
+Cloud LLM APIs charge per token. A typical agent task might take 10-30 tool calls — and every call means a full round-trip through the cloud model with the entire conversation context. That context grows with each step, so later calls are disproportionately expensive.
+
+OwnClaw's delegation system short-circuits this: when the cloud model recognizes a sequence of routine steps ("run these 5 shell commands and collect the output"), it emits a single delegation plan instead of 5 separate tool calls. The local LLM executes the plan autonomously, and only the final result goes back to the cloud model. This can cut cloud token usage by 50-80% on tasks with many routine steps, since the local model runs on your own hardware at zero marginal cost.
+
+By contrast, OpenClaw sends every single action through its cloud LLM — there is no delegation path. Every shell command, every API call, every file read costs cloud tokens. For a 20-step task, that means 20 cloud round-trips with ever-growing context windows.
+
 ### Skill system
 
 Skills are Python scripts with a standard contract (`def run(params) → {output, success}`). The agent creates new skills on demand — the cloud LLM generates the code, the system installs pip dependencies into an isolated venv, and the skill becomes available immediately for current and future tasks.
@@ -63,7 +71,7 @@ OwnClaw started as a fork of the [OpenClaw](https://github.com/BionicClick/OpenC
 | **Multi-user** | Single-user | Multi-user with isolated profiles, credentials, and skill libraries |
 | **Credential handling** | Config files or hardcoded | Encrypted vault with per-user isolation, injected as env vars at runtime |
 | **Sandbox** | Basic process execution | Podman containers with network policies, stall detection, per-skill venvs |
-| **Cost control** | None | Token budgets, delegation nudges, prompt caching, rate-limit back-off |
+| **Cost control** | None — every action hits the cloud API | Token budgets, local delegation (50-80% cloud savings on routine work), prompt caching, rate-limit back-off |
 | **UI** | CLI / basic web | Chat UI with real-time status, token counters, debug mode, settings panel |
 
 The fundamental architectural difference: OpenClaw's plan-first model cannot handle tasks that require observing intermediate results before deciding what to do next (which is most real-world tasks). OwnClaw's reactive loop solves this — the agent sees every tool result and adapts its strategy accordingly.
