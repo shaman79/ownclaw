@@ -11,6 +11,7 @@
 #   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
+#   ./deploy.sh --test-cron  # Diagnose cron environment (check PATH, git, token, perms)
 #
 # Authentication:
 #   During --setup, you will be prompted for your GitHub token interactively.
@@ -31,11 +32,13 @@ set -euo pipefail
 DEPLOY_DIR="/opt/ownclaw"
 REPO_DIR="${DEPLOY_DIR}/repo"
 
-# === PATH setup for cron ===
+# === PATH + HOME setup for cron ===
 # Cron runs with a minimal PATH (/usr/bin:/bin). We need git, curl, java, etc.
 # Prepend standard locations so the script works identically from cron and interactive shells.
 export PATH="${DEPLOY_DIR}/jdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 export JAVA_HOME="${DEPLOY_DIR}/jdk"
+# Some cron implementations don't set HOME; git and gradle may need it.
+export HOME="${HOME:-${DEPLOY_DIR}}"
 
 # Load .env if present (picks up GITHUB_TOKEN and other vars)
 if [ -f "$DEPLOY_DIR/.env" ]; then
@@ -749,13 +752,29 @@ pull_latest() {
     # Ensure the remote URL uses current credentials
     git remote set-url origin "$REPO_URL" 2>/dev/null || true
 
-    # Fetch and check for changes
+    # Read current HEAD
     local before
-    before=$(git rev-parse HEAD)
+    before=$(git rev-parse HEAD 2>/dev/null) || {
+        log "ERROR: Cannot read current HEAD — repo may be corrupt"
+        return 2
+    }
 
-    git fetch origin "$BRANCH" --depth 1 --quiet
+    # Fetch latest from remote — explicitly check for failure.
+    # NOTE: this function is called from 'if pull_latest;' which disables set -e,
+    # so a failed git fetch would silently continue and the before/after comparison
+    # would always show "no changes". We must check the exit code explicitly.
+    local fetch_output
+    if ! fetch_output=$(git fetch origin "$BRANCH" --depth 1 2>&1); then
+        log "ERROR: git fetch failed — check network connectivity and GITHUB_TOKEN"
+        [ -n "$fetch_output" ] && log "  git output: $fetch_output"
+        return 2
+    fi
+
     local after
-    after=$(git rev-parse "origin/$BRANCH")
+    after=$(git rev-parse "origin/$BRANCH" 2>/dev/null) || {
+        log "ERROR: Cannot read origin/$BRANCH after fetch"
+        return 2
+    }
 
     if [ "$before" = "$after" ]; then
         return 1  # No changes
@@ -944,15 +963,75 @@ main() {
             exit 0
             ;;
         --update)
-            log "--- Auto-update check ---"
-            if pull_latest; then
+            log "--- Auto-update check (user=$(whoami), home=$HOME) ---"
+            local pull_rc=0
+            pull_latest || pull_rc=$?
+            if [ "$pull_rc" -eq 0 ]; then
                 local jar
                 jar=$(build_jar)
                 deploy_jar "$jar" || { log "Deploy failed, attempting rollback"; rollback; }
                 log "--- Update complete ---"
-            else
+            elif [ "$pull_rc" -eq 1 ]; then
                 log "Already up to date"
+            else
+                log "--- Update check failed (rc=$pull_rc) — will retry next cycle ---"
             fi
+            ;;
+        --test-cron)
+            # Diagnostic mode: verifies the cron environment can run deployments
+            log "=== Cron Environment Diagnostic ==="
+            log "User: $(whoami) | UID: $(id -u) | HOME: $HOME"
+            log "PATH: $PATH"
+            log "JAVA_HOME: $JAVA_HOME"
+            log "DEPLOY_DIR: $DEPLOY_DIR"
+            log "REPO_DIR: $REPO_DIR"
+            log "GITHUB_TOKEN: ${GITHUB_TOKEN:+set (${#GITHUB_TOKEN} chars)}${GITHUB_TOKEN:-NOT SET}"
+
+            log ""
+            log "--- Binary checks ---"
+            for cmd in git java curl sudo; do
+                if command -v "$cmd" &>/dev/null; then
+                    log "  $cmd: $(command -v "$cmd")"
+                else
+                    log "  $cmd: NOT FOUND"
+                fi
+            done
+
+            log ""
+            log "--- Repository ---"
+            if [ -d "$REPO_DIR/.git" ]; then
+                cd "$REPO_DIR"
+                log "  HEAD: $(git rev-parse HEAD 2>/dev/null || echo 'FAILED')"
+                log "  Branch: $(git branch --show-current 2>/dev/null || echo 'UNKNOWN')"
+                log "  Remote URL: $(git remote get-url origin 2>/dev/null | sed 's/x-access-token:[^@]*/x-access-token:***/' || echo 'FAILED')"
+                log "  Fetch test:"
+                local fetch_out
+                if fetch_out=$(git fetch origin "$BRANCH" --depth 1 2>&1); then
+                    log "    OK"
+                else
+                    log "    FAILED: $fetch_out"
+                fi
+            else
+                log "  Repo not found at $REPO_DIR"
+            fi
+
+            log ""
+            log "--- Service ---"
+            log "  Active: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'unknown')"
+            if sudo -n true 2>/dev/null; then
+                log "  Passwordless sudo: YES"
+            else
+                log "  Passwordless sudo: NO (service restart from cron may fail)"
+            fi
+
+            log ""
+            log "--- File permissions ---"
+            log "  deploy.sh: $(ls -la "$REPO_DIR/deploy/deploy.sh" 2>/dev/null | awk '{print $1, $3, $4}')"
+            log "  gradlew: $(ls -la "$REPO_DIR/gradlew" 2>/dev/null | awk '{print $1, $3, $4}')"
+            log "  .env: $(ls -la "$DEPLOY_DIR/.env" 2>/dev/null | awk '{print $1, $3, $4}')"
+            log "  ownclaw.jar: $(ls -la "$DEPLOY_DIR/ownclaw.jar" 2>/dev/null | awk '{print $1, $3, $4}')"
+            log ""
+            log "=== Diagnostic Complete ==="
             ;;
         --rollback)
             rollback
