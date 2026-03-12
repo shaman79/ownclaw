@@ -47,6 +47,7 @@ public class ThinkingEngine {
             .enable(JsonReadFeature.ALLOW_UNQUOTED_FIELD_NAMES)
             .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
             .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
+            .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
             .build();
 
     private final ToolRegistry toolRegistry;

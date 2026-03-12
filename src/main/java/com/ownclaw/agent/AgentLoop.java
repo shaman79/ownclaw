@@ -188,8 +188,6 @@ public class AgentLoop {
         // Clear any stale cancel flag from a previous task
         cancellationService.clear(userId);
 
-        statusEmitter.emit(userId, StatusMessage.Type.STARTED, "Processing your request...");
-
         AgentResult result = runLoop(context);
         emitResult(context, result);
 
@@ -391,11 +389,14 @@ public class AgentLoop {
 
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
+            boolean local = llmRouter.isLocal(provider);
+            String providerLabel = local ? "local" : provider.name();
             statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
-                    "Thinking... (step " + (step + 1) + ")");
+                    "Step " + (step + 1) + " · " + providerLabel,
+                    tokenData(context));
 
             ScheduledFuture<?> thinkHeartbeat = startLlmHeartbeat(context.userId(),
-                    "Thinking (step " + (step + 1) + ")");
+                    "Step " + (step + 1) + " · " + providerLabel);
             ThinkResult thinkResult;
             try {
                 thinkResult = thinkingEngine.decideNextActionFull(context, provider);
@@ -406,7 +407,7 @@ public class AgentLoop {
             AgentAction action = thinkResult.action();
 
             // Track token usage per provider
-            if (llmRouter.isLocal(provider)) {
+            if (local) {
                 context.addLocalTokens(thinkResult.totalTokens());
             } else {
                 context.addCloudTokens(thinkResult.totalTokens());
@@ -416,6 +417,11 @@ public class AgentLoop {
                             thinkResult.totalTokens(), 0.0);
                 }
             }
+
+            // Emit running token totals so the frontend can update the live counter
+            statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
+                    action.tool() + " (" + String.format("%,d", thinkResult.totalTokens()) + " tok)",
+                    tokenData(context));
 
             // Emit debug info when debug mode is active
             if (debug) {
@@ -515,6 +521,42 @@ public class AgentLoop {
 
             // === SKILL MANAGEMENT (special actions — always available) ===
             if (action.isSkillCreate()) {
+                String skillName = str(action.params(), "name");
+
+                // --- Skill-create retry guard ---
+                // Count how many times we've already tried to create this skill (or any skill)
+                // in this task. After 2 failed attempts for the same name, force the LLM
+                // to abandon this approach instead of burning cloud tokens.
+                int sameNameFails = 0;
+                int totalSkillFails = 0;
+                for (var turn : context.trajectory().turns()) {
+                    if (AgentAction.SKILL_CREATE.equals(turn.action().tool()) && !turn.observation().success()) {
+                        totalSkillFails++;
+                        String prevName = str(turn.action().params(), "name");
+                        if (skillName != null && skillName.equals(prevName)) sameNameFails++;
+                    }
+                }
+                if (sameNameFails >= 2) {
+                    String msg = "ERROR: Skill '" + skillName + "' has failed " + sameNameFails
+                            + " times with syntax errors. Do NOT try creating it again. "
+                            + "Use a different approach: break the problem into smaller skills, "
+                            + "use shell_exec directly, or simplify your requirements.";
+                    context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
+                    context.markProgress();
+                    log.warn("Task {} step {}: blocked repeated skill_create for '{}' ({} fails)",
+                            context.taskId(), step + 1, skillName, sameNameFails);
+                    continue;
+                }
+                if (totalSkillFails >= 3) {
+                    String msg = "ERROR: " + totalSkillFails + " skill creation attempts have failed. "
+                            + "Stop creating skills. Use shell_exec or simpler existing tools instead.";
+                    context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
+                    context.markProgress();
+                    log.warn("Task {} step {}: blocked skill_create after {} total failures",
+                            context.taskId(), step + 1, totalSkillFails);
+                    continue;
+                }
+
                 statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
 
@@ -743,10 +785,11 @@ public class AgentLoop {
 
             if (observation.success()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
-                        action.tool() + " completed (" + observation.durationMs() + "ms)");
+                        action.tool() + " ✓ " + formatDurationMs(observation.durationMs()),
+                        tokenData(context));
             } else {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.WARNING,
-                        action.tool() + " failed: " + truncate(observation.output(), 100));
+                        action.tool() + " ✗ " + truncate(observation.output(), 100));
             }
 
             // === DELEGATION NUDGE ===
@@ -1245,26 +1288,27 @@ public class AgentLoop {
 
     private void emitResult(AgentContext context, AgentResult result) {
         String userId = context.userId();
-        if (result.success()) {
-            statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
-                    "Task completed in " + result.totalSteps() + " steps (" +
-                            result.totalDurationMs() + "ms)");
-        } else {
-            statusEmitter.emit(userId, StatusMessage.Type.FAILED,
-                    "Task ended: " + result.terminationReason());
-        }
-
-        // Emit token usage summary as a status message
         int local = context.localTokens();
         int cloud = context.cloudTokens();
-        if (local > 0 || cloud > 0) {
-            StringBuilder sb = new StringBuilder("Tokens: ");
-            if (cloud > 0) sb.append("Cloud ").append(String.format("%,d", cloud));
-            if (cloud > 0 && local > 0) sb.append(" · ");
-            if (local > 0) sb.append("Local ").append(String.format("%,d", local));
-            sb.append(" · Total ").append(String.format("%,d", local + cloud));
-            statusEmitter.emit(userId, StatusMessage.Type.STEP, sb.toString());
+
+        // Build compact summary line with tokens included
+        StringBuilder summary = new StringBuilder();
+        if (result.success()) {
+            summary.append(result.totalSteps()).append(" steps · ")
+                    .append(formatDurationMs(result.totalDurationMs()));
+        } else {
+            summary.append(result.terminationReason());
         }
+        if (cloud > 0 || local > 0) {
+            summary.append(" · ");
+            if (cloud > 0) summary.append(String.format("%,d", cloud)).append(" cloud");
+            if (cloud > 0 && local > 0) summary.append(" + ");
+            if (local > 0) summary.append(String.format("%,d", local)).append(" local");
+            summary.append(" tokens");
+        }
+
+        StatusMessage.Type type = result.success() ? StatusMessage.Type.COMPLETED : StatusMessage.Type.FAILED;
+        statusEmitter.emit(userId, type, summary.toString(), tokenData(context));
 
         // Persist token usage to the events table for auditing
         try {
@@ -1296,6 +1340,23 @@ public class AgentLoop {
         }
     }
 
+    /** Format milliseconds as compact duration, e.g. "5.4s" or "2m 12s". */
+    private static String formatDurationMs(long ms) {
+        if (ms < 1000) return ms + "ms";
+        double sec = ms / 1000.0;
+        if (sec < 60) return String.format("%.1fs", sec);
+        long totalSec = ms / 1000;
+        return (totalSec / 60) + "m " + (totalSec % 60) + "s";
+    }
+
+    /** Build structured token data for status messages. */
+    private Map<String, Object> tokenData(AgentContext context) {
+        return Map.of(
+                "cloudTokens", context.cloudTokens(),
+                "localTokens", context.localTokens()
+        );
+    }
+
     // ── Cloud skill code generation ──
 
     /**
@@ -1322,8 +1383,7 @@ public class AgentLoop {
         String requirements = str(originalParams, "requirements");
 
         statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
-                "Generating skill code with cloud LLM...");
-
+                    "Generating skill code · cloud", tokenData(context));
         try {
             List<LlmMessage> messages = buildSkillCodePrompt(
                     name, description, parameters, requirements, originalParams, context);
@@ -1435,7 +1495,13 @@ public class AgentLoop {
         sys.append("## Output Format\n");
         sys.append("Return ONLY Python code in a ```python fence, followed by a ```requirements fence ");
         sys.append("listing ALL third-party pip packages (one per line). Use correct pip names ");
-        sys.append("(beautifulsoup4 not bs4, Pillow not PIL, PyMuPDF not fitz). Empty fence if no deps.\n");
+        sys.append("(beautifulsoup4 not bs4, Pillow not PIL, PyMuPDF not fitz). Empty fence if no deps.\n\n");
+
+        sys.append("## Size Constraint (CRITICAL)\n");
+        sys.append("- Maximum 300 lines of code. If the task is complex, split into smaller logical functions.\n");
+        sys.append("- Prefer existing libraries over reimplementing (e.g. python-nmap, not raw subprocess parsing).\n");
+        sys.append("- Do NOT generate overly defensive code with hundreds of edge cases — keep it focused and practical.\n");
+        sys.append("- If the skill would naturally exceed 300 lines, simplify the approach significantly.\n");
 
         messages.add(LlmMessage.system(sys.toString()));
 
@@ -1602,9 +1668,11 @@ public class AgentLoop {
             } else {
                 time = (elapsed / 60) + "m " + (elapsed % 60) + "s";
             }
+            // Emit as PROGRESS so the frontend updates the last step label
+            // rather than adding a new step entry.
             statusEmitter.emit(userId, StatusMessage.Type.PROGRESS,
-                    description + " (" + time + " elapsed, please wait...)");
-        }, 10, 15, TimeUnit.SECONDS);
+                    description + " (" + time + ")");
+        }, 30, 20, TimeUnit.SECONDS);    // first tick at 30s, then every 20s
     }
 
     private void stopHeartbeat(ScheduledFuture<?> heartbeat) {

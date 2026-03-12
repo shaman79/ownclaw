@@ -503,6 +503,13 @@
             color: var(--text-2);
             font-weight: 500;
         }
+        #activity-tokens {
+            font-size: 11px;
+            color: var(--text-3);
+            font-variant-numeric: tabular-nums;
+            letter-spacing: .02em;
+            white-space: nowrap;
+        }
         #activity-elapsed {
             font-size: 11px;
             color: var(--text-3);
@@ -2208,6 +2215,7 @@
         <div id="activity-header">
             <div class="activity-spinner" id="activity-spinner"></div>
             <span id="activity-label">Working...</span>
+            <span id="activity-tokens"></span>
             <span id="activity-elapsed"></span>
             <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
         </div>
@@ -2277,6 +2285,7 @@
     var activityWrap    = document.getElementById('activity-wrap');
     var activitySpinner = document.getElementById('activity-spinner');
     var activityLabel   = document.getElementById('activity-label');
+    var activityTokens  = document.getElementById('activity-tokens');
     var activityElapsed = document.getElementById('activity-elapsed');
     var activityStepsEl = document.getElementById('activity-steps');
     var activityToggle  = document.getElementById('activity-toggle');
@@ -3903,6 +3912,29 @@
         scrollBottom();
     }
 
+    /** PROGRESS updates: overwrite the last step's text + label instead of adding a new step. */
+    function updateActivity(text) {
+        activityLabel.textContent = text;
+        if (activityStepList.length > 0) {
+            var last = activityStepList[activityStepList.length - 1];
+            var span = last.querySelector('span:last-child');
+            if (span) span.textContent = text;
+        }
+    }
+
+    /** Update the live token counter in the activity header. */
+    function updateTokens(data) {
+        if (!data) return;
+        var cloud = data.cloudTokens || 0;
+        var local = data.localTokens || 0;
+        var total = cloud + local;
+        if (total === 0) { activityTokens.textContent = ''; return; }
+        var parts = [];
+        if (cloud > 0) parts.push(cloud.toLocaleString() + ' cloud');
+        if (local > 0) parts.push(local.toLocaleString() + ' local');
+        activityTokens.textContent = parts.join(' + ') + ' tok';
+    }
+
     function doneActivity() {
         activitySpinner.classList.add('done');
         activityStepList.forEach(function(s) { s.classList.remove('latest'); });
@@ -3911,8 +3943,9 @@
                 activityWrap.style.display = 'none';
                 activityStepsEl.innerHTML = '';
                 activityStepList = [];
+                activityTokens.textContent = '';
             }
-        }, 5000);
+        }, 8000);
     }
 
     function resetActivity() {
@@ -3922,6 +3955,7 @@
         activityOpen = false;
         activityToggle.classList.remove('open');
         activityStepsEl.classList.remove('visible');
+        activityTokens.textContent = '';
     }
 
     //  Auth flow 
@@ -4109,10 +4143,17 @@
                     refreshSessionList();
                 } else if (type === 'status') {
                     var sub = data.status || '';
+                    // Update token counter whenever data.data has token info
+                    if (data.data) updateTokens(data.data);
                     if (sub === 'completed' || sub === 'failed' || sub === 'rollback') {
                         showActivity(content);
                         setThinking(false);
                         doneActivity();
+                    } else if (sub === 'progress') {
+                        // PROGRESS updates the last step in-place (no new entry)
+                        setThinking(true);
+                        resetThinkingSafetyTimer();
+                        updateActivity(content);
                     } else {
                         setThinking(true);
                         resetThinkingSafetyTimer();

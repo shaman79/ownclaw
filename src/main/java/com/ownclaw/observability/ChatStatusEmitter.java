@@ -38,15 +38,29 @@ public class ChatStatusEmitter {
         }
     }
 
-    /** Convenience overload. */
+    /** Convenience overload — text only (no structured data). */
     public void emit(String userId, StatusMessage.Type type, String text) {
-        emit(userId, new StatusMessage(type, text));
+        emit(userId, new StatusMessage(type, text, null));
+    }
+
+    /** Convenience overload — text + structured data (e.g. token counts). */
+    public void emit(String userId, StatusMessage.Type type, String text, Map<String, Object> data) {
+        emit(userId, new StatusMessage(type, text, data));
     }
 
     /**
      * A structured status message sent to the user's chat.
+     *
+     * @param type message category
+     * @param text human-readable text
+     * @param data optional structured data (token counts, provider info, etc.)
      */
-    public record StatusMessage(Type type, String text) {
+    public record StatusMessage(Type type, String text, Map<String, Object> data) {
+
+        /** Construct without data. */
+        public StatusMessage(Type type, String text) {
+            this(type, text, null);
+        }
 
         public enum Type {
             QUEUED, STARTED, STEP, PROGRESS, NEED_INPUT, CREDENTIAL,

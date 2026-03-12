@@ -23,6 +23,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -364,11 +365,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
         try {
-            String json = mapper.writeValueAsString(Map.of(
-                    "type", "status",
-                    "content", msg.formatted(),
-                    "status", msg.type().name().toLowerCase()
-            ));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("type", "status");
+            payload.put("content", msg.formatted());
+            payload.put("status", msg.type().name().toLowerCase());
+            if (msg.data() != null && !msg.data().isEmpty()) {
+                payload.put("data", msg.data());
+            }
+            String json = mapper.writeValueAsString(payload);
             session.sendMessage(new TextMessage(json));
         } catch (Exception e) {
             log.warn("Failed to send status to WebSocket: {}", e.getMessage());
