@@ -223,7 +223,7 @@ public class ThinkingEngine {
         // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
         Object nudge = context.metadata().get("delegationNudge");
         if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
-            sb.append("\n\n⚠ COST WARNING: ").append(nudgeMsg);
+            sb.append("\n\nCOST WARNING: ").append(nudgeMsg);
         }
 
         return sb.toString();
@@ -311,94 +311,67 @@ public class ThinkingEngine {
         // (step 1+), the skill is already created and visible in the trajectory.
 
         // Special actions (static — tool descriptions never change)
-        sb.append("## Special Actions\n");
-        sb.append("Always available:\n\n");
-        sb.append("respond: Deliver final answer. Use when task is complete or answerable directly.\n");
+        sb.append("## Special Actions\n\n");
+        sb.append("respond: Deliver final answer when task is complete or answerable directly.\n");
         sb.append("  message (string, required): Response text\n\n");
-        sb.append("ask_user: Ask a clarifying question when you LACK INFORMATION (e.g. missing parameters, ambiguous scope).\n");
-        sb.append("  message (string, required): The question\n");
-        sb.append("  NEVER use ask_user to request permission or confirm before acting. Just act.\n\n");
+        sb.append("ask_user: Ask a clarifying question when you LACK INFORMATION. NEVER ask for permission — just act.\n");
+        sb.append("  message (string, required): The question\n\n");
 
         sb.append("skill_create: Create/update a Python skill (code is AUTO-GENERATED — specify WHAT, not HOW).\n");
-        sb.append("  Skills are Python scripts running LOCALLY on the user's machine with FULL system access.\n");
-        sb.append("  They can run shell commands (subprocess), ANYTHING Python can do.\n");
-        sb.append("  IMPORTANT: To fix a broken skill, call skill_create with THE SAME NAME — it overwrites in-place.\n");
-        sb.append("  NEVER append _v2, _fixed, _new, _updated or any suffix. One skill = one name, always.\n");
-        sb.append("  name (string, required): Lowercase identifier (e.g. 'web_fetch', 'network_scanner', 'shell_exec')\n");
+        sb.append("  Skills run LOCALLY with FULL system access (subprocess, networking, filesystem).\n");
+        sb.append("  To fix a skill, reuse THE SAME NAME — it overwrites in-place. NEVER append _v2/_fixed/_new.\n");
+        sb.append("  name (string, required): Lowercase identifier\n");
         sb.append("  description (string, required): Detailed behavior spec including edge cases and output format\n");
         sb.append("  parameters (string, required): JSON — each key maps to {\"type\":\"string\",\"description\":\"...\",\"required\":true/false}\n");
         sb.append("  requirements (string, optional): pip packages, one per line\n");
-        sb.append("  requires_network (boolean, optional): needs internet?\n");
-        sb.append("  has_side_effects (boolean, optional): modifies files, sends emails, etc.?\n");
+        sb.append("  requires_network (boolean, optional)\n");
+        sb.append("  has_side_effects (boolean, optional)\n");
         sb.append("  timeout (integer, optional): max seconds (default 30)\n");
-        sb.append("  credentials (string, IMPORTANT): comma-separated credential keys (e.g. 'IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT') — auto-injected as env vars at runtime\n");
-        sb.append("    ALWAYS declare credentials here — NEVER accept credential values as regular tool parameters.\n");
-        sb.append("    Check ✓/✗ marks in Available Tools to see which credentials the user already has stored.\n");
-        sb.append("  system_packages (string, optional): space-separated OS packages (apt) needed by the skill (e.g. 'nmap net-tools iputils-ping').\n");
-        sb.append("    When specified, the skill runs inside a Docker/Podman container where these packages are auto-installed — no sudo needed.\n");
-        sb.append("    Use this for tools like nmap, traceroute, tcpdump, ffmpeg, imagemagick, etc. that are not pip-installable.\n\n");
+        sb.append("  credentials (string, IMPORTANT): comma-separated vault keys — auto-injected as env vars. NEVER pass credential values as parameters.\n");
+        sb.append("  system_packages (string, optional): space-separated apt packages. Triggers container execution with auto-install.\n\n");
 
         sb.append("skill_manage: Read, delete, list, or analyze existing skills.\n");
-        sb.append("  action (string, required): 'read', 'delete', 'list', or 'analyze'\n");
-        sb.append("  name (string, required for read/delete): Skill name\n\n");
+        sb.append("  action (string, required): read | delete | list | analyze\n");
+        sb.append("  name (string, required for read/delete)\n\n");
 
-        sb.append("credential_manage: Manage encrypted credential vault (passwords, API keys, tokens).\n");
-        sb.append("  action (string, required): 'list', 'check', or 'store'\n");
-        sb.append("  key (string, required for check/store): Credential key (UPPER_CASE, e.g. IMAP_PASS)\n");
-        sb.append("  value (string, required for store): Value to encrypt and store\n\n");
+        sb.append("credential_manage: Manage encrypted credential vault.\n");
+        sb.append("  action (string, required): list | check | store\n");
+        sb.append("  key (string, required for check/store): UPPER_CASE key\n");
+        sb.append("  value (string, required for store)\n\n");
 
         sb.append("memory_manage: Persistent memory across conversations.\n");
-        sb.append("  action (string, required): 'store', 'list', or 'delete'\n");
-        sb.append("  key (string, required for store/delete): Short identifier (e.g. 'timezone', 'email_style')\n");
-        sb.append("  content (string, required for store): Fact or instruction to remember\n\n");
+        sb.append("  action (string, required): store | list | delete\n");
+        sb.append("  key (string, required for store/delete)\n");
+        sb.append("  content (string, required for store)\n\n");
 
-        sb.append("schedule_manage: Schedule tasks to run at specific times or on recurring schedules.\n");
-        sb.append("  action (string, required): 'schedule_once', 'schedule_recurring', 'list', 'cancel', 'pause', or 'resume'\n");
-        sb.append("  description (string, required for schedule_once/schedule_recurring): The task message to execute when the time comes\n");
-        sb.append("  time (string, required for schedule_once): Natural language time (e.g. 'in 30 minutes', 'tomorrow at 9am', 'at 14:30')\n");
-        sb.append("  schedule (string, required for schedule_recurring): Natural language schedule (e.g. 'every day at 11:00', 'every monday at 9am', 'every 30 minutes') or Spring cron expression\n");
-        sb.append("  max_runs (integer, optional for schedule_recurring): Maximum number of executions (null = unlimited)\n");
-        sb.append("  task_id (integer, required for cancel/pause/resume): The scheduled task ID\n\n");
+        sb.append("schedule_manage: Schedule tasks for specific times or recurring schedules.\n");
+        sb.append("  action (string, required): schedule_once | schedule_recurring | list | cancel | pause | resume\n");
+        sb.append("  description (string, required for scheduling): Task message to execute\n");
+        sb.append("  time (string, required for schedule_once): Natural language time\n");
+        sb.append("  schedule (string, required for schedule_recurring): Natural language schedule or Spring cron\n");
+        sb.append("  max_runs (integer, optional): Max executions (null = unlimited)\n");
+        sb.append("  task_id (integer, required for cancel/pause/resume)\n\n");
 
-        sb.append("delegate: Delegate a multi-tool task to the FREE local LLM executor. SAVES CLOUD TOKENS.\n");
-        sb.append("  Use this to offload work that involves EXECUTING EXISTING TOOLS — the local LLM follows your plan.\n");
-        sb.append("  The local executor can call any available tool except skill_create, chain results between steps,\n");
-        sb.append("  and return a consolidated summary. Costs ZERO cloud tokens.\n");
-        sb.append("  MUST USE when: running 2+ existing tools in sequence, fetching from multiple URLs, batch data collection,\n");
-        sb.append("    routine repetitive execution — ANY series of tool calls that doesn't need YOUR judgment between steps.\n");
-        sb.append("  NOT suitable for: skill creation (always use skill_create yourself), complex reasoning,\n");
-        sb.append("    tasks requiring your judgment to decide next steps based on intermediate results.\n");
+        sb.append("delegate: Delegate multi-tool execution to the FREE local LLM. Costs ZERO cloud tokens.\n");
+        sb.append("  Can call any tool except skill_create, chains results, returns consolidated summary.\n");
+        sb.append("  MUST USE for 2+ sequential tool calls that don't need your judgment between steps.\n");
+        sb.append("  NOT for: skill creation, complex reasoning, judgment-dependent next steps.\n");
         sb.append("  goal (string, required): What the delegation should achieve\n");
-        sb.append("  steps (array, required): Ordered list of tool calls. Each step: {\"description\": \"...\", \"tool\": \"tool_name\", \"params\": {...}}\n");
-        sb.append("  checkpoints (array, optional): Quality criteria, e.g. [\"All data fetched\", \"Text is readable\"]\n");
-        sb.append("  max_steps (integer, optional): Max executor steps including retries (default: 10)\n");
-        sb.append("  Example:\n");
-        sb.append("  {\"tool\": \"delegate\", \"params\": {\n");
-        sb.append("    \"goal\": \"Fetch lunch menus from 3 restaurants\",\n");
-        sb.append("    \"steps\": [\n");
-        sb.append("      {\"description\": \"Fetch menu from Restaurant A\", \"tool\": \"web_fetch\", \"params\": {\"url\": \"...\"}},\n");
-        sb.append("      {\"description\": \"Fetch menu from Restaurant B\", \"tool\": \"web_fetch\", \"params\": {\"url\": \"...\"}}\n");
-        sb.append("    ],\n");
-        sb.append("    \"checkpoints\": [\"All menus fetched successfully\"],\n");
-        sb.append("    \"max_steps\": 8\n");
-        sb.append("  }}\n\n");
+        sb.append("  steps (array, required): [{\"description\": \"...\", \"tool\": \"name\", \"params\": {...}}]\n");
+        sb.append("  checkpoints (array, optional): Quality criteria\n");
+        sb.append("  max_steps (integer, optional, default: 10)\n\n");
 
-        // Credential rules (static — the actual vault contents are dynamic, added after boundary)
-        sb.append("## Credential Vault\n");
-        sb.append("AES-256-GCM encrypted storage. Credential values are AUTO-INJECTED as env vars into skills that declare them.\n");
-        sb.append("CRITICAL credential rules:\n");
-        sb.append("- When creating skills, ALWAYS declare needed credentials in the 'credentials' parameter.\n");
-        sb.append("  Match the exact key names from the vault (e.g. credentials='IMAP_HOST,IMAP_USER,IMAP_PASS,IMAP_PORT').\n");
-        sb.append("  Do NOT add credential values as tool parameters — they are injected automatically from the vault.\n");
-        sb.append("- Tools above show credential status: ✓ = stored, ✗ = missing.\n");
-        sb.append("- If all required credentials are ✓ (or listed in vault): just CREATE the skill and RUN it. Do NOT ask the user.\n");
-        sb.append("- If a tool with ✓ credentials fails (auth/connection error): the stored VALUE might be wrong.\n");
-        sb.append("  Ask the user ONLY for the specific value that seems wrong, then update with credential_manage(action='store').\n");
-        sb.append("- Only ask the user for credentials NOT in the vault.\n\n");
+        // Credential rules
+        sb.append("## Credentials\n");
+        sb.append("Vault values are AUTO-INJECTED as env vars into skills that declare them.\n");
+        sb.append("- In skill_create, declare needed credentials in 'credentials' param (exact vault key names). Never pass values as parameters.\n");
+        sb.append("- Credential status shown per tool: present or missing.\n");
+        sb.append("- All present: just create and run. Do NOT ask the user.\n");
+        sb.append("- Auth failure with present credentials: ask user for the specific wrong value, then update via credential_manage.\n");
+        sb.append("- Only ask for credentials NOT in the vault.\n\n");
 
-        sb.append("## Persistent Memory\n");
-        sb.append("Facts survive across conversations and load as 'User Preferences' at task start.\n");
-        sb.append("When user says 'remember this' or gives standing instructions, ALWAYS store — don't just acknowledge.\n\n");
+        sb.append("## Memory\n");
+        sb.append("Facts persist across conversations as 'User Preferences'. When user says 'remember this', store immediately.\n\n");
 
         // Output format
         sb.append("## Output Format\n");
@@ -408,43 +381,27 @@ public class ThinkingEngine {
         // Behavioral guidelines
         sb.append("## Guidelines\n");
         sb.append("- Answer directly with 'respond' if no tools needed.\n");
-        sb.append("- On failure, analyze the error and try a different approach. NEVER give up after one failure — try 2-3 alternatives.\n");
-        sb.append("- On skill errors: inspect with skill_manage(action='read'), then fix with skill_create using the SAME name (overwrites in-place). NEVER create _v2/_fixed variants.\n");
-        sb.append("- Minimize tool calls. Never fabricate outputs or assume success without observing results.\n");
-        sb.append("- Explore thoroughly: follow links, check sub-pages, look for embedded resources before saying 'not found'.\n");
-        sb.append("- Verify results make sense. If output is garbled/empty/short, fix the tool — don't present broken data.\n");
-        sb.append("- Partial data (wrong day/section)? Inspect and fix the skill — pages often have hidden/tabbed content.\n");
+        sb.append("- On failure, try 2-3 alternative approaches before giving up.\n");
+        sb.append("- On skill errors: read with skill_manage, then fix with skill_create (SAME name). Never create _v2/_fixed variants.\n");
+        sb.append("- Minimize tool calls. Never fabricate outputs or assume success.\n");
+        sb.append("- Explore thoroughly before saying 'not found'. Verify results are correct and complete.\n");
+        sb.append("- Detect and respond in the user's language. Use target content's language for search/selectors.\n");
 
         // Cost-efficiency delegation rules
-        sb.append("\n## Cost Efficiency — Delegation\n");
-        sb.append("Every step YOU take costs expensive cloud LLM tokens. The 'delegate' tool runs on a FREE local LLM.\n");
-        sb.append("RULES:\n");
-        sb.append("- When you need to run 2+ existing tools in sequence and the results don't require your reasoning to decide next steps → ALWAYS use delegate.\n");
-        sb.append("- Batch similar operations: fetching multiple URLs, parsing multiple pages, running multiple commands → delegate ALL of them in one call.\n");
-        sb.append("- After creating/fixing a skill, if you need to run it on multiple inputs → delegate the batch execution.\n");
-        sb.append("- Only execute tools YOURSELF when intermediate results determine what to do next (requires your judgment).\n");
+        sb.append("\n## Cost Efficiency\n");
+        sb.append("Every step YOU take costs cloud tokens. 'delegate' uses a FREE local LLM.\n");
+        sb.append("- 2+ sequential tool calls without judgment needed between them: ALWAYS delegate.\n");
+        sb.append("- After creating/fixing a skill, delegate batch execution of remaining inputs.\n");
+        sb.append("- Only run tools yourself when intermediate results determine next steps.\n");
 
-        // Language awareness
-        sb.append("\n## Language & Locale\n");
-        sb.append("- Detect and respond in the user's language.\n");
-        sb.append("- Use search terms and selectors in the TARGET content's language, not English.\n");
-        sb.append("- Never assume content is English — check first.\n");
-
-        // Self-improvement guidelines
-        sb.append("\n## Self-Improvement\n");
-        sb.append("All tools in 'Available Tools' are editable Python skills you built.\n");
-        sb.append("- No suitable tool? Create one with skill_create. Prefer reusable, general-purpose tools.\n");
-        sb.append("- Poor results? Read the code (skill_manage action='read'), then overwrite with skill_create using the SAME name.\n");
-        sb.append("- NEVER create variant names like skill_v2, skill_fixed, skill_new — always reuse the original name.\n");
-        sb.append("- After multiple failures, reconsider: is the approach fundamentally wrong?\n");
-        sb.append("- Remote content skills must handle: encoding, content types, large content, errors.\n");
-        sb.append("- Structured content skills: extract readable text, strip markup/boilerplate, preserve structure.\n");
-
-        sb.append("\n## Data Quality\n");
-        sb.append("Tool outputs enter your context — they must be clean.\n");
-        sb.append("- Extract text, never return raw HTML/XML/binary. Strip boilerplate.\n");
+        // Self-improvement and data quality
+        sb.append("\n## Self-Improvement & Data Quality\n");
+        sb.append("- No suitable tool? Create one. Prefer reusable, general-purpose tools.\n");
+        sb.append("- Poor results? Read skill code, then overwrite with skill_create (same name).\n");
+        sb.append("- After multiple failures, reconsider the approach.\n");
+        sb.append("- Tool outputs must be clean text. Never return raw HTML/XML. Strip boilerplate.\n");
         sb.append("- Garbled text = wrong encoding — fix the tool.\n");
-        sb.append("- Content behind links or in files (PDF, DOCX, CSV): fetch and extract, don't just report the link.\n");
+        sb.append("- Content in files (PDF, DOCX, CSV): fetch and extract, don't report the link.\n");
 
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
@@ -489,11 +446,8 @@ public class ThinkingEngine {
             sb.append(String.join(", ", selection.otherNames())).append("\n");
         }
 
-        // Bootstrapping: when no tools exist, direct the LLM to create them
         if (manifest.isBlank()) {
-            sb.append("\n## No Tools Available\n");
-            sb.append("Use 'skill_create' as your FIRST action to build the capability you need.\n");
-            sb.append("Do NOT call skill_manage (inventory is empty). Do NOT ask the user for permission.\n");
+            sb.append("\nNo tools yet. Use skill_create as first action.\n");
         }
         sb.append("\n");
 
@@ -506,7 +460,7 @@ public class ThinkingEngine {
         // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
         Object nudge = context.metadata().get("delegationNudge");
         if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
-            sb.append("⚠ COST WARNING: ").append(nudgeMsg).append("\n\n");
+            sb.append("COST WARNING: ").append(nudgeMsg).append("\n\n");
         }
 
         return sb.toString();
@@ -566,10 +520,9 @@ public class ThinkingEngine {
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
         if (!vaultKeys.isEmpty()) {
-            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n");
+            sb.append("Vault: ").append(String.join(", ", vaultKeys)).append("\n");
         }
-        sb.append("Credentials marked ✓ (or listed in vault) are auto-injected — NEVER ask the user for them. Only ask for missing ones.\n");
-        sb.append("When creating skills, declare credentials in 'credentials' param (use exact vault key names) — never as tool parameters.\n\n");
+        sb.append("Present credentials are auto-injected. Only ask user for missing ones. Declare in 'credentials' param, never as tool parameters.\n\n");
 
         // Output format (always needed)
         sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
@@ -577,7 +530,7 @@ public class ThinkingEngine {
         // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
         Object nudge = context.metadata().get("delegationNudge");
         if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
-            sb.append("\n⚠ COST WARNING: ").append(nudgeMsg).append("\n");
+            sb.append("\nCOST WARNING: ").append(nudgeMsg).append("\n");
         }
 
         return sb.toString();
