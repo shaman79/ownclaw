@@ -1497,11 +1497,12 @@ public class AgentLoop {
         sys.append("listing ALL third-party pip packages (one per line). Use correct pip names ");
         sys.append("(beautifulsoup4 not bs4, Pillow not PIL, PyMuPDF not fitz). Empty fence if no deps.\n\n");
 
-        sys.append("## Size Constraint (CRITICAL)\n");
-        sys.append("- Maximum 300 lines of code. If the task is complex, split into smaller logical functions.\n");
+        sys.append("## Code Quality Guidelines\n");
+        sys.append("- Write clean, well-structured code. Decompose complex logic into small, focused helper functions.\n");
         sys.append("- Prefer existing libraries over reimplementing (e.g. python-nmap, not raw subprocess parsing).\n");
-        sys.append("- Do NOT generate overly defensive code with hundreds of edge cases — keep it focused and practical.\n");
-        sys.append("- If the skill would naturally exceed 300 lines, simplify the approach significantly.\n");
+        sys.append("- Avoid overly defensive code with redundant edge-case handling — keep it focused and practical.\n");
+        sys.append("- Use efficient algorithms and data structures. Avoid unnecessary loops or repeated operations.\n");
+        sys.append("- Group related logic together. Each function should do one thing well.\n");
 
         messages.add(LlmMessage.system(sys.toString()));
 
