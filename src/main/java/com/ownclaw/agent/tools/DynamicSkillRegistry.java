@@ -85,6 +85,16 @@ public class DynamicSkillRegistry {
             }
         } catch (Exception e) {
             log.warn("Failed to load dynamic skill from {}: {}", skillDir, e.getMessage());
+            // Auto-remove broken skill directory so it doesn't block startup repeatedly
+            try {
+                try (Stream<Path> files = Files.walk(skillDir)) {
+                    files.sorted(java.util.Comparator.reverseOrder())
+                         .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
+                }
+                log.warn("Removed broken skill directory: {}", skillDir.getFileName());
+            } catch (Exception deleteEx) {
+                log.error("Could not remove broken skill directory {}: {}", skillDir, deleteEx.getMessage());
+            }
         }
     }
 
