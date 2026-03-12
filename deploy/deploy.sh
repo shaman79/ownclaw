@@ -9,6 +9,7 @@
 #                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, Docker/Podman, git,
 #                            #   systemd service, sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
 #   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
+#   ./deploy.sh --install-ollama   # Install Ollama and pull the default model (qwen2.5:14b)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
 #   ./deploy.sh --test-cron  # Diagnose cron environment (check PATH, git, token, perms)
@@ -458,6 +459,17 @@ do_setup() {
     chmod +x "$REPO_DIR/deploy/deploy.sh"
     chmod +x "$REPO_DIR/gradlew"
 
+    # Install Ollama + default model (optional — user can skip)
+    echo ""
+    read -r -p "  Install Ollama and pull the default model (qwen2.5:14b)? [Y/n]: " _install_ollama
+    if [ -z "$_install_ollama" ] || [[ "$_install_ollama" =~ ^[Yy] ]]; then
+        install_ollama
+    else
+        log "Skipping Ollama install. Install manually later:"
+        log "  curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:14b"
+        log "  Or run: $REPO_DIR/deploy/deploy.sh --install-ollama"
+    fi
+
     # Pre-provision MCP server npm packages
     provision_mcp_servers
 
@@ -683,6 +695,61 @@ provision_mcp_servers() {
 
     log "MCP server provisioning: $((${#pkgs[@]} - failed)) installed, $failed failed"
     return 0
+}
+
+# === Install Ollama + default model ===
+install_ollama() {
+    local model="${OWNCLAW_EXECUTOR_MODEL:-qwen2.5:14b}"
+
+    # Install Ollama if not present
+    if command -v ollama &>/dev/null; then
+        log "Ollama already installed: $(ollama --version 2>&1 | head -1)"
+    else
+        log "Installing Ollama..."
+        curl -fsSL https://ollama.com/install.sh | sh || die "Failed to install Ollama"
+        log "Ollama installed: $(ollama --version 2>&1 | head -1)"
+    fi
+
+    # Ensure the Ollama systemd service is enabled and running
+    if systemctl list-unit-files ollama.service &>/dev/null 2>&1; then
+        if ! systemctl is-active --quiet ollama 2>/dev/null; then
+            log "Starting Ollama service..."
+            systemctl enable ollama 2>/dev/null || true
+            systemctl start ollama
+            # Give it a moment to bind the API port
+            sleep 3
+        fi
+    fi
+
+    # Verify the API is responsive
+    local ollama_url="${OWNCLAW_EXECUTOR_URL:-http://localhost:11434}"
+    local retries=0
+    while [ "$retries" -lt 10 ]; do
+        if curl -sf "${ollama_url}/api/tags" -o /dev/null 2>/dev/null; then
+            break
+        fi
+        retries=$((retries + 1))
+        sleep 2
+    done
+    if [ "$retries" -ge 10 ]; then
+        log "WARN: Ollama API not responding at $ollama_url — model pull may fail"
+    fi
+
+    # Pull the default model if not already present
+    if ollama list 2>/dev/null | grep -q "^${model}"; then
+        log "Model '$model' already available"
+    else
+        log "Pulling model '$model' (this may take a while)..."
+        if ollama pull "$model"; then
+            log "Model '$model' pulled successfully"
+        else
+            log "ERROR: Failed to pull model '$model'"
+            log "  You can retry manually: ollama pull $model"
+            return 1
+        fi
+    fi
+
+    log "Ollama ready with model '$model'"
 }
 
 # === Install JDK 21 (Adoptium Temurin) ===
@@ -1032,6 +1099,10 @@ main() {
             log "  ownclaw.jar: $(ls -la "$DEPLOY_DIR/ownclaw.jar" 2>/dev/null | awk '{print $1, $3, $4}')"
             log ""
             log "=== Diagnostic Complete ==="
+            ;;
+        --install-ollama)
+            install_ollama
+            exit 0
             ;;
         --rollback)
             rollback

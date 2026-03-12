@@ -45,6 +45,7 @@ This will:
 - Install JDK 21 (Adoptium Temurin)
 - Install git, python3, python3-venv, python3-pip if missing
 - Install Docker or Podman (for sandboxed skill execution with system packages)
+- Optionally install Ollama and pull the default model (qwen2.5:14b)
 - Clone the repository
 - Build the JAR
 - Install the systemd service (`ownclaw.service`)
@@ -69,11 +70,11 @@ sudo nano /opt/ownclaw/.env
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 | `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
 
-**Important:** Ollama must be installed separately on the production server:
+**Ollama** is offered during `--setup`. If you skipped it or need to install later:
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:14b
+sudo /opt/ownclaw/repo/deploy/deploy.sh --install-ollama
 ```
+This installs Ollama, starts the service, and pulls the configured model.
 
 ### 3. Start the service
 

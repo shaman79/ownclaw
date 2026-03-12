@@ -121,7 +121,7 @@ chmod +x deploy.sh
 sudo ./deploy.sh --setup
 ```
 
-The setup wizard prompts for your GitHub token and API keys, then installs all dependencies, builds the JAR, and starts the service. See [deploy/README.md](deploy/README.md) for full details, rollback, and cron configuration.
+The setup wizard prompts for your GitHub token and API keys, then installs all dependencies, builds the JAR, and starts the service. It also offers to install Ollama and pull the default model. See [deploy/README.md](deploy/README.md) for full details, rollback, and cron configuration.
 
 ### Local development
 
