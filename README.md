@@ -56,7 +56,7 @@ OwnClaw started as a fork of the [OpenClaw](https://github.com/BionicClick/OpenC
 | | OpenClaw | OwnClaw |
 |---|---|---|
 | **Execution model** | Plan-first: generates a complete DAG upfront, then executes it blind | Reactive loop: one action at a time, observe result, reason about next step |
-| **LLM routing** | Local LLM classifies and routes; cloud only for "hard" tasks | Cloud always orchestrates; local only executes delegated plans |
+| **LLM routing** | Cloud-only, single LLM | Dual-LLM: cloud orchestrates, local executes delegated plans |
 | **Skill creation** | Manual or pre-built skill library | On-the-fly: cloud LLM generates Python code, auto-installs dependencies |
 | **Error recovery** | Skill repair loop (diagnose → patch code → retry) | Trajectory-aware: critic agent, reflection injection, retry guards |
 | **Memory** | Plan cache (exact-match only) | Episodic memory, agent facts, conversation history with compression |
