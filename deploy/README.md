@@ -44,12 +44,22 @@ This will:
 - Create `ownclaw` system user
 - Install JDK 21 (Adoptium Temurin)
 - Install git, python3, python3-venv, python3-pip if missing
-- Install Docker or Podman (for sandboxed skill execution with system packages)
-- Optionally install Ollama and pull the default model (qwen2.5:14b)
 - Clone the repository
 - Build the JAR
 - Install the systemd service (`ownclaw.service`)
 - Create an `.env` template
+
+Then an **optional features wizard** lets you choose:
+
+| Feature | Default | Description |
+|---|---|---|
+| Ollama + default model | **Yes** | Installs Ollama, pulls `qwen2.5:14b` |
+| Container runtime | **Yes** | Installs Podman (or Docker fallback) for sandboxed skill execution |
+| Sudoers rule | **Yes** | Allows the `ownclaw` user to restart the service without a password (needed for cron updates) |
+| Cron job | **Yes** | Auto-update every 15 minutes via `deploy.sh --update` |
+| MCP server packages | **Yes** | Pre-installs npm packages for MCP servers + Chromium for Puppeteer |
+
+All defaults are **Yes** — press Enter through everything for a fully automated setup.
 
 ### 2. Configure secrets
 
@@ -84,6 +94,9 @@ sudo systemctl status ownclaw
 ```
 
 ### 4. Enable auto-updates
+
+If you chose "Yes" for the cron job during setup, auto-updates are already active.
+Otherwise, add it manually:
 
 ```bash
 sudo crontab -u ownclaw -e

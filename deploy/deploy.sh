@@ -369,39 +369,6 @@ do_setup() {
         log "Node.js already installed: $(node --version)"
     fi
 
-    # Install Docker or Podman (needed for skills that require system packages like nmap, ffmpeg, etc.)
-    # Skills declaring system_packages run inside a container where those packages are auto-installed.
-    # Prefer Podman (rootless, daemonless) but fall back to Docker.
-    if ! command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
-        log "Installing container runtime (for sandboxed skill execution)..."
-        # Try Podman first (rootless, no daemon, better for single-user servers)
-        if apt-cache show podman &>/dev/null 2>&1; then
-            log "  Installing Podman..."
-            apt-get update -qq && apt-get install -y -qq podman
-            # Rootless Podman requires subuid/subgid entries for user namespace mapping.
-            # Without these, 'podman build' fails with lchown errors.
-            setup_podman_rootless
-        else
-            # Fall back to Docker
-            log "  Podman not available in repos, installing Docker..."
-            if ! command -v docker &>/dev/null; then
-                curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
-                # Allow the ownclaw user to run docker without sudo
-                usermod -aG docker ownclaw 2>/dev/null || true
-            fi
-        fi
-    else
-        if command -v podman &>/dev/null; then
-            log "Container runtime already installed: podman $(podman --version 2>/dev/null | head -1)"
-            # Ensure rootless setup is correct even if podman was pre-installed
-            setup_podman_rootless
-        else
-            log "Container runtime already installed: $(docker --version 2>/dev/null | head -1)"
-            # Ensure ownclaw user is in docker group
-            usermod -aG docker ownclaw 2>/dev/null || true
-        fi
-    fi
-
     # Clone or update repo
     git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
     if [ ! -d "$REPO_DIR/.git" ]; then
@@ -445,37 +412,111 @@ do_setup() {
         log "Secrets saved to $DEPLOY_DIR/.env"
     fi
 
-    # Install systemd service
+    # ── Optional features wizard ───────────────────────────────────────────
+    # Collect all choices upfront, then execute. Defaults are [Y] for the
+    # recommended options so the user can press Enter through everything.
+    echo ""
+    echo "  ┌─────────────────────────────────────────┐"
+    echo "  │        Optional Features                │"
+    echo "  └─────────────────────────────────────────┘"
+    echo ""
+
+    local _opt_ollama="Y" _opt_container="Y" _opt_sudoers="Y" _opt_cron="Y" _opt_mcp="Y"
+
+    read -r -p "  Install Ollama + pull default model (qwen2.5:14b)?     [Y/n]: " _ans
+    [[ "$_ans" =~ ^[Nn] ]] && _opt_ollama="N"
+
+    read -r -p "  Install container runtime (Podman/Docker) for sandbox? [Y/n]: " _ans
+    [[ "$_ans" =~ ^[Nn] ]] && _opt_container="N"
+
+    read -r -p "  Install sudoers rule (passwordless service restart)?   [Y/n]: " _ans
+    [[ "$_ans" =~ ^[Nn] ]] && _opt_sudoers="N"
+
+    read -r -p "  Install cron job (auto-update every 15 min)?           [Y/n]: " _ans
+    [[ "$_ans" =~ ^[Nn] ]] && _opt_cron="N"
+
+    read -r -p "  Pre-install MCP server packages + Chromium?            [Y/n]: " _ans
+    [[ "$_ans" =~ ^[Nn] ]] && _opt_mcp="N"
+
+    echo ""
+    log "Selected: ollama=$_opt_ollama container=$_opt_container sudoers=$_opt_sudoers cron=$_opt_cron mcp=$_opt_mcp"
+
+    # ── Install systemd service (always — required for the service to run) ──
     log "Installing systemd service..."
     cp "$REPO_DIR/deploy/ownclaw.service" /etc/systemd/system/ownclaw.service
     systemctl daemon-reload
     systemctl enable ownclaw
 
-    # Allow cron-based updates (running as ownclaw) to restart the service without password prompts.
-    ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
+    # ── Sudoers rule ────────────────────────────────────────────────────────
+    if [ "$_opt_sudoers" = "Y" ]; then
+        ensure_sudoers_restart_rule || log "WARN: Failed to install sudoers rule — cron updates may require manual restart"
+    else
+        log "Skipping sudoers rule. Install later: sudo $REPO_DIR/deploy/deploy.sh --install-sudoers"
+    fi
 
     # Fix ownership and permissions
     chown -R ownclaw:ownclaw "$DEPLOY_DIR"
     chmod +x "$REPO_DIR/deploy/deploy.sh"
     chmod +x "$REPO_DIR/gradlew"
 
-    # Install Ollama + default model (optional — user can skip)
-    echo ""
-    read -r -p "  Install Ollama and pull the default model (qwen2.5:14b)? [Y/n]: " _install_ollama
-    if [ -z "$_install_ollama" ] || [[ "$_install_ollama" =~ ^[Yy] ]]; then
-        install_ollama
+    # ── Container runtime ──────────────────────────────────────────────────
+    if [ "$_opt_container" = "Y" ]; then
+        if ! command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
+            log "Installing container runtime (for sandboxed skill execution)..."
+            if apt-cache show podman &>/dev/null 2>&1; then
+                log "  Installing Podman..."
+                apt-get update -qq && apt-get install -y -qq podman
+                setup_podman_rootless
+            else
+                log "  Podman not available in repos, installing Docker..."
+                curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+                usermod -aG docker ownclaw 2>/dev/null || true
+            fi
+        else
+            if command -v podman &>/dev/null; then
+                log "Container runtime already installed: podman $(podman --version 2>/dev/null | head -1)"
+                setup_podman_rootless
+            else
+                log "Container runtime already installed: $(docker --version 2>/dev/null | head -1)"
+                usermod -aG docker ownclaw 2>/dev/null || true
+            fi
+        fi
     else
-        log "Skipping Ollama install. Install manually later:"
-        log "  curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:14b"
-        log "  Or run: $REPO_DIR/deploy/deploy.sh --install-ollama"
+        log "Skipping container runtime. Skills will run as local processes (no sandbox)."
     fi
 
-    # Pre-provision MCP server npm packages
-    provision_mcp_servers
+    # ── Ollama ─────────────────────────────────────────────────────────────
+    if [ "$_opt_ollama" = "Y" ]; then
+        install_ollama
+    else
+        log "Skipping Ollama. Install later: $REPO_DIR/deploy/deploy.sh --install-ollama"
+    fi
 
-    # Initial build and deploy
+    # ── MCP servers ────────────────────────────────────────────────────────
+    if [ "$_opt_mcp" = "Y" ]; then
+        provision_mcp_servers
+    else
+        log "Skipping MCP server pre-installation. Packages will be auto-downloaded by npx on first use."
+    fi
+
+    # ── Initial build and deploy ───────────────────────────────────────────
     log "Running initial build..."
     su -s /bin/bash ownclaw -c "$REPO_DIR/deploy/deploy.sh"
+
+    # ── Cron job ───────────────────────────────────────────────────────────
+    if [ "$_opt_cron" = "Y" ]; then
+        local cron_line="*/15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+        # Install only if not already present
+        if crontab -u ownclaw -l 2>/dev/null | grep -Fq "deploy.sh --update"; then
+            log "Cron job already installed for ownclaw"
+        else
+            ( crontab -u ownclaw -l 2>/dev/null || true; echo "$cron_line" ) | crontab -u ownclaw -
+            log "Cron job installed: auto-update every 15 minutes"
+        fi
+    else
+        log "Skipping cron job. Install later: sudo crontab -u ownclaw -e"
+        log "  Add: */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+    fi
 
     log ""
     log "=== Setup Complete ==="
@@ -483,9 +524,11 @@ do_setup() {
     log "2. Start service:   sudo systemctl start ownclaw"
     log "3. Check status:    sudo systemctl status ownclaw"
     log "4. View logs:       sudo journalctl -u ownclaw -f"
-    log ""
-    log "For auto-updates, add to crontab (sudo crontab -u ownclaw -e):"
-    log "  */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+    if [ "$_opt_cron" != "Y" ]; then
+        log ""
+        log "For auto-updates, add to crontab (sudo crontab -u ownclaw -e):"
+        log "  */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+    fi
 }
 
 # === Reset workspace to a clean default state ===
