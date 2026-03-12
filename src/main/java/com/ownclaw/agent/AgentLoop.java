@@ -1464,7 +1464,7 @@ public class AgentLoop {
         sys.append("## Environment\n");
         sys.append("Skills run locally with full system access. Credentials are injected as env vars. ");
         sys.append("If `system_packages` are specified, those tools are available on PATH. ");
-        sys.append("For HTTP responses, fix encoding before reading text. Truncate large output.\n\n");
+        sys.append("For HTTP responses, fix encoding before reading text. \n\n");
 
         sys.append("## Output\n");
         sys.append("Return the code in a ```python fence, followed by a ```requirements fence ");
