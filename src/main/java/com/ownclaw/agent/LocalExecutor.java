@@ -92,7 +92,7 @@ public class LocalExecutor {
             LlmResponse response;
             try {
                 response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, 2048, true, 120));
+                        new LlmRequestConfig(null, null, 2048, true, null));
             } catch (Exception e) {
                 log.error("Local LLM call failed during delegation step {}", step + 1, e);
                 return buildPartialResult("Local LLM call failed: " + e.getMessage(), stepResults);
