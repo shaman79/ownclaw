@@ -103,27 +103,38 @@ The fundamental architectural difference: OpenClaw's plan-first model cannot han
 
 ## Running
 
-### Prerequisites
+### Production deploy (Linux)
+
+A single script handles everything — JDK, Python, Podman, systemd service, and cron-based auto-updates:
+
+```bash
+# Upload deploy.sh to the server, then:
+chmod +x deploy.sh
+sudo ./deploy.sh --setup
+```
+
+The setup wizard prompts for your GitHub token and API keys, then installs all dependencies, builds the JAR, and starts the service. See [deploy/README.md](deploy/README.md) for full details, rollback, and cron configuration.
+
+### Local development
+
+```bash
+# Linux / macOS
+export ANTHROPIC_API_KEY=sk-ant-...
+./run.sh
+
+# Windows
+set ANTHROPIC_API_KEY=sk-ant-...
+run.bat
+```
+
+The run script builds automatically if the JAR doesn't exist yet. Open `http://localhost:8080` in your browser.
+
+### Prerequisites (dev mode)
 
 - Java 21+
 - Ollama with a model loaded (e.g. `ollama pull qwen2.5:14b`)
 - An Anthropic or OpenAI API key
-- Podman (Linux, for sandboxed skill execution) or Python 3.11+ (Windows dev mode)
-
-### Quick start
-
-```bash
-# Set your API key
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# Build
-./gradlew build
-
-# Run
-java -jar build/libs/ownclaw-0.1.0.jar
-```
-
-Open `http://localhost:8080` in your browser.
+- Python 3.11+ (skills run as local processes on Windows; on Linux production they run in Podman containers)
 
 ### Configuration
 
@@ -137,10 +148,6 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 | `OWNCLAW_EXECUTOR_MODEL` | `qwen2.5:14b` | Local LLM model name |
 | `OWNCLAW_MENTOR_PROVIDER` | `openai` | Cloud provider: `openai` or `anthropic` |
 | `OWNCLAW_SERVER_PORT` | `8080` | HTTP server port |
-
-### Deployment
-
-See [deploy/README.md](deploy/README.md) for systemd service setup and auto-deploy via cron.
 
 ## Tech stack
 
