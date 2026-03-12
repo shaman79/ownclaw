@@ -1560,6 +1560,25 @@ public class AgentLoop {
             }
         }
 
+        // Handle TRUNCATED responses: opening ```python fence but no closing ``` fence
+        // (happens when the LLM hits max_tokens and output is cut off mid-code)
+        java.util.regex.Matcher truncatedPy = java.util.regex.Pattern
+                .compile("```[Pp]ython\\s*\n(.*)", java.util.regex.Pattern.DOTALL)
+                .matcher(response);
+        if (truncatedPy.find()) {
+            String code = truncatedPy.group(1).strip();
+            // Remove any trailing ``` fences from other blocks (e.g. ```requirements)
+            int nextFence = code.indexOf("```");
+            if (nextFence > 0) {
+                code = code.substring(0, nextFence).strip();
+            }
+            if (!code.isBlank() && code.contains("def run")) {
+                log.warn("Extracted Python code from TRUNCATED response (no closing fence). "
+                        + "Code may be incomplete — {} chars extracted.", code.length());
+                return code;
+            }
+        }
+
         // If the response looks like raw Python code (starts with import, from, def, or #), use it directly
         String trimmed = response.strip();
         if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("def ") || trimmed.startsWith("#!/")) {
