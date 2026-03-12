@@ -423,7 +423,6 @@ public class ThinkingEngine {
         sb.append("- Batch similar operations: fetching multiple URLs, parsing multiple pages, running multiple commands → delegate ALL of them in one call.\n");
         sb.append("- After creating/fixing a skill, if you need to run it on multiple inputs → delegate the batch execution.\n");
         sb.append("- Only execute tools YOURSELF when intermediate results determine what to do next (requires your judgment).\n");
-        sb.append("- Example: need to fetch menus from 4 restaurants? Create the fetch skill yourself, test it on ONE, then delegate the remaining 3.\n");
 
         // Language awareness
         sb.append("\n## Language & Locale\n");
