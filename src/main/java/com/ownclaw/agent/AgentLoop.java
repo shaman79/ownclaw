@@ -1458,37 +1458,20 @@ public class AgentLoop {
         sys.append("You are an expert Python developer generating production-quality skill code.\n\n");
 
         sys.append("## Contract\n");
-        sys.append("- Define `def run(params):` as entry point. `params` is a dict.\n");
-        sys.append("- Return dict with 'output' (result string) and 'success' (True/False). Never raise unhandled exceptions.\n");
-        sys.append("- On failure: `{'success': False, 'output': 'ERROR: <description>'}`\n\n");
+        sys.append("Entry point: `def run(params)` where params is a dict. ");
+        sys.append("Return `{'output': str, 'success': bool}`. Never raise unhandled exceptions.\n\n");
 
-        sys.append("## Web and data handling\n");
-        sys.append("When using `requests`, always set `response.encoding = response.apparent_encoding` ");
-        sys.append("before reading `response.text`. For HTML, use BeautifulSoup to extract clean body text ");
-        sys.append("and collect all links with resolved URLs. Truncate output over 10KB. ");
-        sys.append("Use reasonable timeouts, a proper User-Agent, and handle errors gracefully.\n\n");
+        sys.append("## Environment\n");
+        sys.append("Skills run locally with full system access. Credentials are injected as env vars. ");
+        sys.append("If `system_packages` are specified, those tools are available on PATH. ");
+        sys.append("For HTTP responses, fix encoding before reading text. Truncate large output.\n\n");
 
-        sys.append("## Execution environment\n");
-        sys.append("Skills run locally with full system access. For shell commands use ");
-        sys.append("`subprocess.run(capture_output=True, text=True)` and check `sys.platform` for portability. ");
-        sys.append("If the skill specifies `system_packages`, those tools are pre-installed on PATH. ");
-        sys.append("Never expose credentials in command arguments.\n\n");
+        sys.append("## Output\n");
+        sys.append("Return the code in a ```python fence, followed by a ```requirements fence ");
+        sys.append("listing pip dependencies (use correct pip package names). Empty fence if no deps.\n\n");
 
-        sys.append("## Credentials\n");
-        sys.append("Read from env vars: `os.environ.get('KEY')`. Never hardcode secrets.\n");
-        sys.append("Missing credential → return clear error telling user to store it.\n\n");
-
-        sys.append("## Output Format\n");
-        sys.append("Return ONLY Python code in a ```python fence, followed by a ```requirements fence ");
-        sys.append("listing ALL third-party pip packages (one per line). Use correct pip names ");
-        sys.append("(beautifulsoup4 not bs4, Pillow not PIL, PyMuPDF not fitz). Empty fence if no deps.\n\n");
-
-        sys.append("## Code Quality Guidelines\n");
-        sys.append("- Write clean, well-structured code. Decompose complex logic into small, focused helper functions.\n");
-        sys.append("- Prefer existing libraries over reimplementing (e.g. python-nmap, not raw subprocess parsing).\n");
-        sys.append("- Avoid overly defensive code with redundant edge-case handling — keep it focused and practical.\n");
-        sys.append("- Use efficient algorithms and data structures. Avoid unnecessary loops or repeated operations.\n");
-        sys.append("- Group related logic together. Each function should do one thing well.\n");
+        sys.append("Write clean, well-structured, efficient code. Prefer established libraries. ");
+        sys.append("Keep it practical — no unnecessary boilerplate.\n");
 
         messages.add(LlmMessage.system(sys.toString()));
 
