@@ -402,7 +402,7 @@ public class DynamicSkill implements Tool {
                     ? "stderr: " + stderr.strip()
                     : "The skill's run() function may not be returning/printing output.";
             return ToolResult.failure("Tool produced no output. " + detail
-                    + " Use skill_manage(action='read') to inspect the code, then skill_create with the SAME name '" + name + "' to fix it.");
+                    + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
         try {
@@ -424,7 +424,7 @@ public class DynamicSkill implements Tool {
                 return ToolResult.failure(
                         "Tool returned success but with empty output — this usually means the skill " +
                         "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
-                        + " Use skill_manage(action='read') to inspect, then skill_create with the SAME name '" + name + "' to fix it.");
+                        + " Use skill_create with the SAME name '" + name + "' to fix it.");
             }
 
             @SuppressWarnings("unchecked")
@@ -457,7 +457,7 @@ public class DynamicSkill implements Tool {
             return ToolResult.failure(
                     "Tool produced non-JSON output (possible runner error): "
                     + truncateStr(stdout.strip(), 500) + detail
-                    + " Use skill_manage(action='read') to inspect, then skill_create with the SAME name '" + name + "' to fix.");
+                    + " Use skill_create with the SAME name '" + name + "' to fix.");
         }
     }
 

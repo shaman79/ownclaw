@@ -166,6 +166,24 @@ public class SkillManager {
     // ────────────────────── Read ──────────────────────
 
     /**
+     * Read just the Python source code of an existing skill.
+     * Returns {@code null} if the skill does not exist or has no code file.
+     * This is cheaper than {@link #readSkill} — no formatting, no YAML, no requirements.
+     */
+    public String readSkillCode(String name) {
+        if (name == null || name.isBlank()) return null;
+        var skillOpt = dynamicSkillRegistry.getDynamic(name);
+        if (skillOpt.isEmpty()) return null;
+        try {
+            Path codeFile = skillOpt.get().skillDir().resolve("skill.py");
+            return Files.exists(codeFile) ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
+        } catch (IOException e) {
+            log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Read a skill's source code and metadata.
      */
     public String readSkill(String name) {

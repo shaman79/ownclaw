@@ -383,7 +383,7 @@ public class ThinkingEngine {
         sb.append("## Guidelines\n");
         sb.append("- Answer directly with 'respond' if no tools needed.\n");
         sb.append("- On failure, try 2-3 alternative approaches before giving up.\n");
-        sb.append("- On skill errors: read with skill_manage, then fix with skill_create (SAME name). Never create _v2/_fixed variants.\n");
+        sb.append("- On skill errors: fix with skill_create (SAME name). Never create _v2/_fixed variants.\n");
         sb.append("- Minimize tool calls. Never fabricate outputs or assume success.\n");
         sb.append("- Explore thoroughly before saying 'not found'. Verify results are correct and complete.\n");
         sb.append("- Detect and respond in the user's language. Use target content's language for search/selectors.\n");

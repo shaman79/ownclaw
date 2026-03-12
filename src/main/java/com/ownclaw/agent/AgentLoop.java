@@ -1382,11 +1382,30 @@ public class AgentLoop {
         String parameters = str(originalParams, "parameters");
         String requirements = str(originalParams, "requirements");
 
+        // For existing skills: read old code and find last execution error for targeted fix
+        String oldCode = skillManager.readSkillCode(name);
+        String lastError = null;
+        if (oldCode != null) {
+            // Walk trajectory backwards to find the most recent failed execution of this skill
+            var turns = context.trajectory().turns();
+            for (int i = turns.size() - 1; i >= 0; i--) {
+                var turn = turns.get(i);
+                if (turn.action().tool().equals(name) && !turn.observation().success()) {
+                    lastError = turn.observation().output();
+                    break;
+                }
+            }
+            log.info("Skill '{}' exists — will attempt targeted fix{}",
+                    name, lastError != null ? " (error found)" : " (no error in trajectory)");
+        }
+
         statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
-                    "Generating skill code · cloud", tokenData(context));
+                    oldCode != null ? "Fixing skill code · cloud" : "Generating skill code · cloud",
+                    tokenData(context));
         try {
             List<LlmMessage> messages = buildSkillCodePrompt(
-                    name, description, parameters, requirements, originalParams, context);
+                    name, description, parameters, requirements, originalParams, context,
+                    oldCode, lastError);
 
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
@@ -1446,10 +1465,18 @@ public class AgentLoop {
 
     /**
      * Build a specialized prompt for the cloud LLM to generate high-quality skill code.
+     *
+     * <p>When {@code oldCode} is non-null, the prompt switches to "fix" mode:
+     * the cloud LLM sees the existing code and the error, and is instructed to
+     * make a targeted fix rather than regenerating from scratch.
+     *
+     * @param oldCode   the current Python code of the skill (null for new skills)
+     * @param lastError the most recent execution error (null if unknown)
      */
     private List<LlmMessage> buildSkillCodePrompt(
             String name, String description, String parameters,
-            String requirements, Map<String, Object> originalParams, AgentContext context) {
+            String requirements, Map<String, Object> originalParams, AgentContext context,
+            String oldCode, String lastError) {
 
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -1470,14 +1497,23 @@ public class AgentLoop {
         sys.append("Return the code in a ```python fence, followed by a ```requirements fence ");
         sys.append("listing pip dependencies (use correct pip package names). Empty fence if no deps.\n\n");
 
-        sys.append("Write clean, well-structured, efficient code. Prefer established libraries. ");
-        sys.append("Keep it practical — no unnecessary boilerplate.\n");
+        if (oldCode != null) {
+            sys.append("You are FIXING an existing skill. Make a minimal, targeted fix. ");
+            sys.append("Preserve the working parts — only change what is necessary to resolve the error.\n");
+        } else {
+            sys.append("Write clean, well-structured, efficient code. Prefer established libraries. ");
+            sys.append("Keep it practical — no unnecessary boilerplate.\n");
+        }
 
         messages.add(LlmMessage.system(sys.toString()));
 
-        // User prompt: the skill specification
+        // User prompt: the skill specification (or fix request)
         var user = new StringBuilder();
-        user.append("Generate the Python code for this skill:\n\n");
+        if (oldCode != null) {
+            user.append("Fix this existing Python skill:\n\n");
+        } else {
+            user.append("Generate the Python code for this skill:\n\n");
+        }
         user.append("**Name**: ").append(name).append("\n");
         user.append("**Description**: ").append(description).append("\n");
         user.append("**Parameters**: ").append(parameters).append("\n");
@@ -1490,6 +1526,20 @@ public class AgentLoop {
         if (credentials != null && !credentials.isBlank()) {
             user.append("**Credentials (auto-injected as env vars)**: ").append(credentials).append("\n");
             user.append("Read these with `os.environ['KEY']` — they are guaranteed to be present at runtime.\n");
+        }
+
+        // For fixes: include old code and the error
+        if (oldCode != null) {
+            user.append("\n**Current code (broken):**\n```python\n");
+            user.append(oldCode);
+            user.append("\n```\n");
+            if (lastError != null && !lastError.isBlank()) {
+                user.append("\n**Error when executed:**\n");
+                user.append(truncate(lastError, 1000));
+                user.append("\n");
+            }
+            user.append("\nAnalyze the error and make a targeted fix. ");
+            user.append("Return the complete fixed code (not a diff).\n");
         }
 
         // Include the task context so the cloud knows what the skill needs to accomplish
