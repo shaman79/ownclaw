@@ -749,6 +749,12 @@ public class AgentLoop {
                         action.tool() + " failed: " + truncate(observation.output(), 100));
             }
 
+            // === DELEGATION NUDGE ===
+            // Detect when the cloud LLM is doing repetitive tool calls that should
+            // be delegated to the local LLM. After 2+ consecutive calls to the same
+            // registered skill, inject a cost warning into the prompt context.
+            injectDelegationNudge(context);
+
             // Inject reflection after consecutive failures OR consecutive hollow results
             injectReflection(context, action);
         }
@@ -1064,6 +1070,71 @@ public class AgentLoop {
         } catch (NumberFormatException e) {
             return -1;
         }
+    }
+
+    /**
+     * Detect repetitive tool calls and inject a delegation nudge into context metadata.
+     *
+     * When the cloud LLM has made 2+ consecutive calls to the same registered skill
+     * (non-special tool), this strongly suggests routine execution that should be
+     * delegated to the local LLM to save cloud tokens.
+     *
+     * The nudge is picked up by ThinkingEngine's buildDynamicContext() and rendered
+     * as a cost warning in the prompt.
+     */
+    private void injectDelegationNudge(AgentContext context) {
+        // Only nudge if local LLM is available (otherwise delegation would fail)
+        if (!llmRouter.local().isAvailable()) {
+            context.metadata().remove("delegationNudge");
+            return;
+        }
+
+        List<AgentTrajectory.Turn> turns = context.trajectory().turns();
+        if (turns.size() < 2) {
+            context.metadata().remove("delegationNudge");
+            return;
+        }
+
+        // Count consecutive calls to registered skills (non-special actions) from the end
+        int consecutive = 0;
+        String repeatedTool = null;
+        Set<String> recentSkills = new LinkedHashSet<>();
+        for (int i = turns.size() - 1; i >= 0; i--) {
+            AgentAction act = turns.get(i).action();
+            if (act == null || act.isSpecialAction()) break; // stop at special actions
+            String toolName = act.tool();
+            // Only count registered tools (skills), not special actions
+            if (toolRegistry.find(toolName).isEmpty()) break;
+            recentSkills.add(toolName);
+            consecutive++;
+            if (consecutive == 1) repeatedTool = toolName;
+        }
+
+        if (consecutive < 2) {
+            context.metadata().remove("delegationNudge");
+            return;
+        }
+
+        // Build the nudge message
+        String toolNames = String.join(", ", recentSkills);
+        String nudge;
+        if (recentSkills.size() == 1) {
+            nudge = String.format(
+                "You've called '%s' %d times in a row. This is EXACTLY what 'delegate' is for! "
+                + "Bundle remaining calls into a single delegate action to save cloud tokens. "
+                + "Each step you take costs expensive cloud LLM tokens — delegate costs ZERO.",
+                repeatedTool, consecutive);
+        } else {
+            nudge = String.format(
+                "You've made %d consecutive skill calls (%s) without needing reasoning between them. "
+                + "Use 'delegate' to batch remaining tool calls to the FREE local LLM. "
+                + "Each step you take costs expensive cloud tokens — delegate costs ZERO.",
+                consecutive, toolNames);
+        }
+
+        context.metadata().put("delegationNudge", nudge);
+        log.info("Task {} delegation nudge: {} consecutive skill calls ({})",
+                context.taskId(), consecutive, toolNames);
     }
 
     /**

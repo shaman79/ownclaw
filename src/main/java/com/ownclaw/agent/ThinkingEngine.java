@@ -220,6 +220,12 @@ public class ThinkingEngine {
             sb.append("\nDecide what to do next. If done, use 'respond'.");
         }
 
+        // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
+        Object nudge = context.metadata().get("delegationNudge");
+        if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
+            sb.append("\n\n⚠ COST WARNING: ").append(nudgeMsg);
+        }
+
         return sb.toString();
     }
 
@@ -354,12 +360,12 @@ public class ThinkingEngine {
         sb.append("  max_runs (integer, optional for schedule_recurring): Maximum number of executions (null = unlimited)\n");
         sb.append("  task_id (integer, required for cancel/pause/resume): The scheduled task ID\n\n");
 
-        sb.append("delegate: Delegate a multi-tool task to the local LLM executor.\n");
+        sb.append("delegate: Delegate a multi-tool task to the FREE local LLM executor. SAVES CLOUD TOKENS.\n");
         sb.append("  Use this to offload work that involves EXECUTING EXISTING TOOLS — the local LLM follows your plan.\n");
         sb.append("  The local executor can call any available tool except skill_create, chain results between steps,\n");
-        sb.append("  and return a consolidated summary.\n");
-        sb.append("  IDEAL for: running multiple tools in sequence (e.g. fetch 3 URLs), data collection across sources,\n");
-        sb.append("    routine multi-step execution, parallel-like batch processing.\n");
+        sb.append("  and return a consolidated summary. Costs ZERO cloud tokens.\n");
+        sb.append("  MUST USE when: running 2+ existing tools in sequence, fetching from multiple URLs, batch data collection,\n");
+        sb.append("    routine repetitive execution — ANY series of tool calls that doesn't need YOUR judgment between steps.\n");
         sb.append("  NOT suitable for: skill creation (always use skill_create yourself), complex reasoning,\n");
         sb.append("    tasks requiring your judgment to decide next steps based on intermediate results.\n");
         sb.append("  goal (string, required): What the delegation should achieve\n");
@@ -408,6 +414,16 @@ public class ThinkingEngine {
         sb.append("- Explore thoroughly: follow links, check sub-pages, look for embedded resources before saying 'not found'.\n");
         sb.append("- Verify results make sense. If output is garbled/empty/short, fix the tool — don't present broken data.\n");
         sb.append("- Partial data (wrong day/section)? Inspect and fix the skill — pages often have hidden/tabbed content.\n");
+
+        // Cost-efficiency delegation rules
+        sb.append("\n## Cost Efficiency — Delegation\n");
+        sb.append("Every step YOU take costs expensive cloud LLM tokens. The 'delegate' tool runs on a FREE local LLM.\n");
+        sb.append("RULES:\n");
+        sb.append("- When you need to run 2+ existing tools in sequence and the results don't require your reasoning to decide next steps → ALWAYS use delegate.\n");
+        sb.append("- Batch similar operations: fetching multiple URLs, parsing multiple pages, running multiple commands → delegate ALL of them in one call.\n");
+        sb.append("- After creating/fixing a skill, if you need to run it on multiple inputs → delegate the batch execution.\n");
+        sb.append("- Only execute tools YOURSELF when intermediate results determine what to do next (requires your judgment).\n");
+        sb.append("- Example: need to fetch menus from 4 restaurants? Create the fetch skill yourself, test it on ONE, then delegate the remaining 3.\n");
 
         // Language awareness
         sb.append("\n## Language & Locale\n");
@@ -488,6 +504,12 @@ public class ThinkingEngine {
             sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n\n");
         }
 
+        // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
+        Object nudge = context.metadata().get("delegationNudge");
+        if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
+            sb.append("⚠ COST WARNING: ").append(nudgeMsg).append("\n\n");
+        }
+
         return sb.toString();
     }
 
@@ -540,7 +562,7 @@ public class ThinkingEngine {
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — delegate multi-tool execution to local LLM\n\n");
+        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — delegate multi-tool execution to FREE local LLM. MUST USE for 2+ sequential tool calls that don't need your judgment.\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
@@ -552,6 +574,12 @@ public class ThinkingEngine {
 
         // Output format (always needed)
         sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+
+        // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
+        Object nudge = context.metadata().get("delegationNudge");
+        if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
+            sb.append("\n⚠ COST WARNING: ").append(nudgeMsg).append("\n");
+        }
 
         return sb.toString();
     }
