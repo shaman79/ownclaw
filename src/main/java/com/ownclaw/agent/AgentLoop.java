@@ -1391,7 +1391,7 @@ public class AgentLoop {
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
                     0.2,    // low temperature for precise code generation
-                    8192,   // generous token budget for complete code
+                    null,   // no token limit — let the model finish naturally
                     false,  // no JSON mode — we want raw Python code
                     null    // use provider default read timeout
             );
@@ -1462,31 +1462,17 @@ public class AgentLoop {
         sys.append("- Return dict with 'output' (result string) and 'success' (True/False). Never raise unhandled exceptions.\n");
         sys.append("- On failure: `{'success': False, 'output': 'ERROR: <description>'}`\n\n");
 
-        sys.append("## Quality Standards\n");
-        sys.append("- **Encoding (MANDATORY)**: Always set `response.encoding = response.apparent_encoding` ");
-        sys.append("before using `response.text`. Without this, requests defaults to ISO-8859-1 causing mojibake. NON-NEGOTIABLE.\n");
-        sys.append("- **Content types**: Detect via Content-Type headers/extensions. Handle HTML, PDF, JSON, XML, plain text.\n");
-        sys.append("- **HTML**: Use BeautifulSoup. Extract clean text with `soup.get_text()` on the ENTIRE body — ");
-        sys.append("do NOT select individual sections. Strip scripts/styles/nav. Preserve headings, lists, tables.\n");
-        sys.append("- **Links (CRITICAL)**: For HTML, extract ALL hrefs under a '## Links' section as `[text](url)`. ");
-        sys.append("Resolve relative URLs with `urllib.parse.urljoin`.\n");
-        sys.append("- **Errors**: Catch all exceptions. Report HTTP status codes, connection errors, timeouts clearly.\n");
-        sys.append("- **Large content**: Truncate >10KB intelligently with truncation note.\n");
-        sys.append("- **Network**: Timeouts 10-30s. Proper User-Agent. Follow redirects.\n");
-        sys.append("- **Robustness**: Handle empty responses, invalid URLs, missing data, unexpected formats.\n\n");
+        sys.append("## Web and data handling\n");
+        sys.append("When using `requests`, always set `response.encoding = response.apparent_encoding` ");
+        sys.append("before reading `response.text`. For HTML, use BeautifulSoup to extract clean body text ");
+        sys.append("and collect all links with resolved URLs. Truncate output over 10KB. ");
+        sys.append("Use reasonable timeouts, a proper User-Agent, and handle errors gracefully.\n\n");
 
-        sys.append("## Local Command Execution\n");
-        sys.append("Skills run LOCALLY on the user's machine with FULL system access.\n");
-        sys.append("- **Shell commands**: Use `subprocess.run()` with `capture_output=True, text=True`. ");
-        sys.append("Return stdout as output. Check returncode for errors.\n");
-        sys.append("- **Platform awareness**: Check `sys.platform` ('win32', 'linux', 'darwin') and use appropriate commands.\n");
-        sys.append("- **Common tools**: nmap, ping, arp, ip/ifconfig, netstat, curl, dig, traceroute, systemctl, etc.\n");
-        sys.append("- **Filesystem**: Use `os`, `pathlib`, `shutil` for file/directory operations.\n");
-        sys.append("- **Permissions**: Skills run as the OwnClaw service user. Use sudo only when needed and available.\n");
-        sys.append("- **Security**: Never expose credentials in command args — use env vars or temp files with 0600 permissions.\n");
-        sys.append("- **System packages**: If the skill description mentions system_packages (e.g. nmap, ffmpeg), ");
-        sys.append("the skill will run inside a container where those packages are pre-installed. ");
-        sys.append("Write the code as if the tools are available on PATH — they will be.\n\n");
+        sys.append("## Execution environment\n");
+        sys.append("Skills run locally with full system access. For shell commands use ");
+        sys.append("`subprocess.run(capture_output=True, text=True)` and check `sys.platform` for portability. ");
+        sys.append("If the skill specifies `system_packages`, those tools are pre-installed on PATH. ");
+        sys.append("Never expose credentials in command arguments.\n\n");
 
         sys.append("## Credentials\n");
         sys.append("Read from env vars: `os.environ.get('KEY')`. Never hardcode secrets.\n");
