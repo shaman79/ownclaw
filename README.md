@@ -167,4 +167,4 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 
 ## License
 
-Private project. Not open source.
+MIT License
