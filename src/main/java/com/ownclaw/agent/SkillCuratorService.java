@@ -211,22 +211,10 @@ public class SkillCuratorService {
         }
 
         sb.append("\n## Instructions\n");
-        sb.append("Provide recommendations as JSON:\n");
-        sb.append("{\n");
-        sb.append("  \"summary\": \"brief overall assessment of library health\",\n");
-        sb.append("  \"redundant\": [{\"name\": \"...\", \"overlaps_with\": \"...\", ");
-        sb.append("\"recommendation\": \"delete or merge\"}],\n");
-        sb.append("  \"unused\": [{\"name\": \"...\", \"recommendation\": \"delete or keep\", ");
-        sb.append("\"reason\": \"...\"}],\n");
-        sb.append("  \"low_quality\": [{\"name\": \"...\", \"issues\": \"...\", ");
-        sb.append("\"suggestion\": \"...\"}],\n");
-        sb.append("  \"merge_candidates\": [{\"skills\": [\"a\", \"b\"], ");
-        sb.append("\"into\": \"proposed_name\", \"reason\": \"...\"}],\n");
-        sb.append("  \"capability_gaps\": [{\"description\": \"...\", ");
-        sb.append("\"suggested_name\": \"...\"}]\n");
-        sb.append("}\n");
-        sb.append("Only include non-empty arrays. Be concise and actionable.\n");
-        sb.append("Only recommend modifications/deletions for [modifiable] tools.\n");
+        sb.append("Respond with JSON: {summary, redundant[{name,overlaps_with,recommendation}], ");
+        sb.append("unused[{name,recommendation,reason}], low_quality[{name,issues,suggestion}], ");
+        sb.append("merge_candidates[{skills[],into,reason}], capability_gaps[{description,suggested_name}]}\n");
+        sb.append("Only non-empty arrays. Concise. Only modify/delete [modifiable] tools.\n");
 
         // Use cloud provider for best analytical reasoning
         try {

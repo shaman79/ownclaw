@@ -217,17 +217,11 @@ public class LocalExecutor {
     private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context) {
         var sb = new StringBuilder(4096);
 
-        sb.append("You are a TASK EXECUTOR. You follow a plan created by the orchestrator.\n");
-        sb.append("Execute each step by calling the specified tools. Chain results between steps.\n");
-        sb.append("You have NO planning authority — just execute the plan faithfully.\n\n");
-
-        // Output format
-        sb.append("## Output Format\n");
-        sb.append("To call a tool:\n");
-        sb.append("{\"tool\": \"tool_name\", \"params\": {\"param1\": \"value1\"}}\n\n");
-        sb.append("When ALL steps are complete, consolidate results and output:\n");
-        sb.append("{\"done\": true, \"summary\": \"Complete consolidated results here\"}\n\n");
-        sb.append("ALWAYS output exactly ONE JSON object. No extra text before or after.\n\n");
+        sb.append("TASK EXECUTOR. Follow the plan exactly. Chain results between steps. No planning authority.\n\n");
+        sb.append("## Output\n");
+        sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
+        sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
+        sb.append("ONE JSON object only. No extra text.\n\n");
 
         // The plan
         sb.append("## Plan\n");
@@ -269,15 +263,11 @@ public class LocalExecutor {
             sb.append("No tools available.\n");
         }
 
-        // Guidelines
         sb.append("\n## Rules\n");
-        sb.append("- Execute steps in the order given by the plan.\n");
-        sb.append("- If a step fails, note the error and try the next step. Do NOT give up.\n");
-        sb.append("- Use results from previous steps as input for subsequent steps when needed.\n");
-        sb.append("- After executing all steps, consolidate ALL results into a comprehensive summary.\n");
-        sb.append("- The summary in your final {\"done\": true, \"summary\": \"...\"} must contain ALL useful data collected.\n");
-        sb.append("- NEVER create new skills (skill_create is not available).\n");
-        sb.append("- NEVER ask questions — just execute.\n");
+        sb.append("- Execute steps in order. On failure, note error and continue.\n");
+        sb.append("- Chain previous results into subsequent steps.\n");
+        sb.append("- Final summary must contain ALL collected data.\n");
+        sb.append("- No skill_create. No questions. Just execute.\n");
 
         return sb.toString();
     }

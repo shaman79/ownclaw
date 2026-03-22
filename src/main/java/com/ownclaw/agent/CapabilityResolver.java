@@ -507,32 +507,28 @@ public class CapabilityResolver {
          */
         public String toPromptDirective() {
             var sb = new StringBuilder();
-            sb.append("## ACTION REQUIRED — Create Skill\n");
-            sb.append("Your task requires ").append(category.replace('_', ' '));
-            sb.append(" capability, but NO existing tool provides this.\n");
-            sb.append("You MUST use skill_create as your FIRST action with these parameters:\n\n");
-            sb.append("```\n");
-            sb.append("tool: skill_create\n");
-            sb.append("params:\n");
-            sb.append("  name: \"").append(suggestedName).append("\"\n");
-            sb.append("  description: \"").append(description).append("\"\n");
-            sb.append("  parameters: '").append(parametersJson).append("'\n");
+            sb.append("## ACTION REQUIRED\n");
+            sb.append("Missing ").append(category.replace('_', ' ')).append(" capability. Use skill_create FIRST:\n\n");
+            sb.append("{tool: skill_create, params: {");
+            sb.append("name: \"").append(suggestedName).append("\", ");
+            sb.append("description: \"").append(description).append("\", ");
+            sb.append("parameters: '").append(parametersJson).append("'");
             if (!systemPackages.isEmpty()) {
-                sb.append("  system_packages: \"").append(String.join(" ", systemPackages)).append("\"\n");
+                sb.append(", system_packages: \"").append(String.join(" ", systemPackages)).append("\"");
             }
             if (!pipPackages.isEmpty()) {
-                sb.append("  requirements: \"").append(String.join("\n", pipPackages)).append("\"\n");
+                sb.append(", requirements: \"").append(String.join("\n", pipPackages)).append("\"");
             }
             if (!credentials.isEmpty()) {
-                sb.append("  credentials: \"").append(String.join(",", credentials)).append("\"\n");
+                sb.append(", credentials: \"").append(String.join(",", credentials)).append("\"");
             }
-            sb.append("  timeout: ").append(timeout).append("\n");
-            sb.append("```\n\n");
-            sb.append("DO NOT refuse. DO NOT say tools are missing. ");
+            sb.append(", timeout: ").append(timeout);
+            sb.append("}}\n\n");
+            sb.append("Do NOT refuse. ");
             if (!systemPackages.isEmpty()) {
-                sb.append("The system_packages are auto-installed inside a Docker container. ");
+                sb.append("system_packages auto-installed in Docker. ");
             }
-            sb.append("Just execute skill_create with the parameters above.\n");
+            sb.append("Execute now.\n");
             return sb.toString();
         }
     }

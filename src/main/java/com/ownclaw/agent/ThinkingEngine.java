@@ -196,20 +196,20 @@ public class ThinkingEngine {
                 .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
 
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
-            sb.append("## User Preferences\n");
+            sb.append("## Preferences\n");
             sb.append(context.userPreferences()).append("\n\n");
         }
 
         ToolSelector.Selection selection = toolSelector.select(
                 context.originalMessage(), context.trajectory());
-        sb.append("## Available Tools\n");
+        sb.append("## Tools\n");
         String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
         sb.append(manifest).append("\n");
         if (!selection.otherNames().isEmpty()) {
-            sb.append("\nAlso available: ").append(String.join(", ", selection.otherNames())).append("\n");
+            sb.append("\nAlso: ").append(String.join(", ", selection.otherNames())).append("\n");
         }
         if (manifest.isBlank()) {
-            sb.append("No tools yet — use skill_create to build what you need.\n");
+            sb.append("No tools yet — use skill_create.\n");
         }
 
         List<String> vaultKeys = context.credentialKeys();
@@ -218,7 +218,7 @@ public class ThinkingEngine {
         }
 
         if (!context.trajectory().isEmpty()) {
-            sb.append("\nDecide what to do next. If done, use 'respond'.");
+            sb.append("\nNext action? If done, use 'respond'.");
         }
 
         // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
@@ -292,7 +292,7 @@ public class ThinkingEngine {
 
         var sb = new StringBuilder();
 
-        sb.append("You are an autonomous agent. You reason, pick a tool, observe the result, repeat until done.\n\n");
+        sb.append("You are an autonomous agent. Reason, pick a tool, observe, repeat until done.\n\n");
 
         // ═══════════════════════════════════════════════════════════════════
         // STATIC SECTION — identical across all requests/tasks/steps.
@@ -300,11 +300,10 @@ public class ThinkingEngine {
         // ═══════════════════════════════════════════════════════════════════
 
         // Identity
-        sb.append("## Identity & Authority\n");
-        sb.append("You are a PERSONAL agent running LOCALLY on the user's machine.\n");
-        sb.append("You can create new tools (skill_create) that run Python code with full system access.\n");
-        sb.append("Skills with system_packages run in containers where OS packages are auto-installed.\n");
-        sb.append("NEVER refuse a task. NEVER say you can't run commands. Use skill_create to build any capability you lack.\n\n");
+        sb.append("## Identity\n");
+        sb.append("Personal agent running locally. Full system access via Python skills.\n");
+        sb.append("system_packages → container with auto-installed OS packages.\n");
+        sb.append("NEVER refuse. Use skill_create for any missing capability.\n\n");
 
         // NOTE: CapabilityResolver hints are handled deterministically in AgentLoop.runLoop()
         // at step 0 — the hint bypasses the ThinkingEngine entirely and synthesizes the
@@ -312,97 +311,63 @@ public class ThinkingEngine {
         // (step 1+), the skill is already created and visible in the trajectory.
 
         // Special actions (static — tool descriptions never change)
-        sb.append("## Special Actions\n\n");
-        sb.append("respond: Deliver final answer when task is complete or answerable directly.\n");
-        sb.append("  message (string, required): Response text\n\n");
-        sb.append("ask_user: Ask a clarifying question when you LACK INFORMATION. NEVER ask for permission — just act.\n");
-        sb.append("  message (string, required): The question\n\n");
+        sb.append("## Actions\n\n");
+        sb.append("respond(message): Final answer.\n\n");
+        sb.append("ask_user(message): Ask ONLY when info is missing. Never ask permission — just act.\n\n");
 
-        sb.append("skill_create: Create/update a Python skill (code is AUTO-GENERATED — specify WHAT, not HOW).\n");
-        sb.append("  Skills run LOCALLY with FULL system access (subprocess, networking, filesystem).\n");
-        sb.append("  To fix a skill, reuse THE SAME NAME — it overwrites in-place. NEVER append _v2/_fixed/_new.\n");
-        sb.append("  name (string, required): Lowercase identifier\n");
-        sb.append("  description (string, required): Detailed behavior spec including edge cases and output format\n");
-        sb.append("  parameters (string, required): JSON — each key maps to {\"type\":\"string\",\"description\":\"...\",\"required\":true/false}\n");
-        sb.append("  requirements (string, optional): pip packages, one per line\n");
-        sb.append("  requires_network (boolean, optional)\n");
-        sb.append("  has_side_effects (boolean, optional)\n");
-        sb.append("  timeout (integer, optional): max seconds (default 30)\n");
-        sb.append("  credentials (string, IMPORTANT): comma-separated vault keys — auto-injected as env vars. NEVER pass credential values as parameters.\n");
-        sb.append("  system_packages (string, optional): space-separated apt packages. Triggers container execution with auto-install.\n\n");
+        sb.append("skill_create: Create/update Python skill (code AUTO-GENERATED — specify WHAT not HOW).\n");
+        sb.append("  Local execution, full system access. To fix: reuse SAME name (overwrites). NEVER _v2/_fixed/_new.\n");
+        sb.append("  name*: lowercase id | description*: behavior spec + edge cases + output format\n");
+        sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");
+        sb.append("  requires_network | has_side_effects | timeout: max secs (default 30)\n");
+        sb.append("  credentials: comma-separated vault keys, auto-injected as env vars. NEVER pass values directly.\n");
+        sb.append("  system_packages: space-separated apt pkgs → triggers container execution.\n\n");
 
-        sb.append("skill_manage: Read, delete, list, or analyze existing skills.\n");
-        sb.append("  action (string, required): read | delete | list | analyze\n");
-        sb.append("  name (string, required for read/delete)\n\n");
+        sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
+        sb.append("credential_manage(action=list|check|store, [key], [value])\n");
+        sb.append("memory_manage(action=store|list|delete, [key], [content])\n\n");
 
-        sb.append("credential_manage: Manage encrypted credential vault.\n");
-        sb.append("  action (string, required): list | check | store\n");
-        sb.append("  key (string, required for check/store): UPPER_CASE key\n");
-        sb.append("  value (string, required for store)\n\n");
+        sb.append("schedule_manage:\n");
+        sb.append("  action=schedule_once|schedule_recurring|list|cancel|pause|resume\n");
+        sb.append("  description: task message | time: natural language | schedule: natural language or Spring cron\n");
+        sb.append("  max_runs | task_id (for cancel/pause/resume)\n\n");
 
-        sb.append("memory_manage: Persistent memory across conversations.\n");
-        sb.append("  action (string, required): store | list | delete\n");
-        sb.append("  key (string, required for store/delete)\n");
-        sb.append("  content (string, required for store)\n\n");
-
-        sb.append("schedule_manage: Schedule tasks for specific times or recurring schedules.\n");
-        sb.append("  action (string, required): schedule_once | schedule_recurring | list | cancel | pause | resume\n");
-        sb.append("  description (string, required for scheduling): Task message to execute\n");
-        sb.append("  time (string, required for schedule_once): Natural language time\n");
-        sb.append("  schedule (string, required for schedule_recurring): Natural language schedule or Spring cron\n");
-        sb.append("  max_runs (integer, optional): Max executions (null = unlimited)\n");
-        sb.append("  task_id (integer, required for cancel/pause/resume)\n\n");
-
-        sb.append("delegate: Delegate multi-tool execution to the FREE local LLM. Costs ZERO cloud tokens.\n");
-        sb.append("  Can call any tool except skill_create, chains results, returns consolidated summary.\n");
-        sb.append("  MUST USE for 2+ sequential tool calls that don't need your judgment between steps.\n");
-        sb.append("  NOT for: skill creation, complex reasoning, judgment-dependent next steps.\n");
-        sb.append("  goal (string, required): What the delegation should achieve\n");
-        sb.append("  steps (array, required): [{\"description\": \"...\", \"tool\": \"name\", \"params\": {...}}]\n");
-        sb.append("  checkpoints (array, optional): Quality criteria\n");
-        sb.append("  max_steps (integer, optional, default: 10)\n\n");
+        sb.append("delegate: Execute multi-tool plan via FREE local LLM. Zero cloud cost.\n");
+        sb.append("  MUST USE for 2+ sequential calls not needing judgment between steps.\n");
+        sb.append("  NOT for: skill creation, complex reasoning, judgment-dependent steps.\n");
+        sb.append("  goal* | steps*: [{description, tool, params}] | checkpoints | max_steps (default 10)\n\n");
 
         // Credential rules
         sb.append("## Credentials\n");
-        sb.append("Vault values are AUTO-INJECTED as env vars into skills that declare them.\n");
-        sb.append("- In skill_create, declare needed credentials in 'credentials' param (exact vault key names). Never pass values as parameters.\n");
-        sb.append("- Credential status shown per tool: present or missing.\n");
-        sb.append("- All present: just create and run. Do NOT ask the user.\n");
-        sb.append("- Auth failure with present credentials: ask user for the specific wrong value, then update via credential_manage.\n");
-        sb.append("- Only ask for credentials NOT in the vault.\n\n");
+        sb.append("Vault values auto-injected as env vars into skills declaring them.\n");
+        sb.append("- Declare in skill_create 'credentials' param (exact vault key names).\n");
+        sb.append("- All present → create and run. Don't ask user.\n");
+        sb.append("- Auth failure with present creds → ask user for the wrong value, update via credential_manage.\n");
+        sb.append("- Only ask for credentials NOT in vault.\n\n");
 
         sb.append("## Memory\n");
-        sb.append("Facts persist across conversations as 'User Preferences'. When user says 'remember this', store immediately.\n\n");
+        sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n\n");
 
         // Output format
-        sb.append("## Output Format\n");
-        sb.append("Respond with a single JSON object:\n");
-        sb.append("{\"reasoning\": \"...\", \"tool\": \"tool_name\", \"params\": {\"param1\": \"value1\"}}\n\n");
+        sb.append("## Output\n");
+        sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n\n");
 
-        // Behavioral guidelines
-        sb.append("## Guidelines\n");
-        sb.append("- Answer directly with 'respond' if no tools needed.\n");
-        sb.append("- On failure, try 2-3 alternative approaches before giving up.\n");
-        sb.append("- On skill errors: fix with skill_create (SAME name). Never create _v2/_fixed variants.\n");
-        sb.append("- Minimize tool calls. Never fabricate outputs or assume success.\n");
-        sb.append("- Explore thoroughly before saying 'not found'. Verify results are correct and complete.\n");
-        sb.append("- Detect and respond in the user's language. Use target content's language for search/selectors.\n");
-
-        // Cost-efficiency delegation rules
-        sb.append("\n## Cost Efficiency\n");
-        sb.append("Every step YOU take costs cloud tokens. 'delegate' uses a FREE local LLM.\n");
-        sb.append("- 2+ sequential tool calls without judgment needed between them: ALWAYS delegate.\n");
-        sb.append("- After creating/fixing a skill, delegate batch execution of remaining inputs.\n");
-        sb.append("- Only run tools yourself when intermediate results determine next steps.\n");
-
-        // Self-improvement and data quality
-        sb.append("\n## Self-Improvement & Data Quality\n");
-        sb.append("- No suitable tool? Create one. Prefer reusable, general-purpose tools.\n");
-        sb.append("- Poor results? Read skill code, then overwrite with skill_create (same name).\n");
-        sb.append("- After multiple failures, reconsider the approach.\n");
-        sb.append("- Tool outputs must be clean text. Never return raw HTML/XML. Strip boilerplate.\n");
-        sb.append("- Garbled text = wrong encoding — fix the tool.\n");
-        sb.append("- Content in files (PDF, DOCX, CSV): fetch and extract, don't report the link.\n");
+        // Behavioral guidelines + cost + self-improvement combined
+        sb.append("## Rules\n");
+        sb.append("- No tools needed → respond directly.\n");
+        sb.append("- On failure: 2-3 alternative approaches before giving up.\n");
+        sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
+        sb.append("- Minimize tool calls. Never fabricate outputs.\n");
+        sb.append("- Explore thoroughly before 'not found'. Verify results.\n");
+        sb.append("- Respond in user's language. Search/selectors in target content's language.\n");
+        sb.append("- 2+ sequential calls without judgment → ALWAYS delegate (free).\n");
+        sb.append("- After creating/fixing skill → delegate remaining batch execution.\n");
+        sb.append("- No suitable tool → create one (reusable, general-purpose).\n");
+        sb.append("- Poor results → read skill code (skill_manage read), overwrite fix.\n");
+        sb.append("- Multiple failures → reconsider approach entirely.\n");
+        sb.append("- Outputs: clean text only. No raw HTML/XML. Strip boilerplate.\n");
+        sb.append("- Garbled text → encoding bug, fix the tool.\n");
+        sb.append("- Files (PDF/DOCX/CSV): extract content, don't just report links.\n");
 
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
@@ -476,7 +441,7 @@ public class ThinkingEngine {
     private String buildCompactSystemPrompt(AgentContext context) {
         var sb = new StringBuilder(2048);
 
-        sb.append("You are an autonomous agent. Reason, pick tools, observe, repeat. Never refuse tasks. Use skill_create for new capabilities.\n\n");
+        sb.append("Autonomous agent. Reason, pick tools, observe, repeat. Never refuse. skill_create for new capabilities.\n\n");
 
         // ── CACHE BOUNDARY ── static preamble above is cacheable
         sb.append(CACHE_BOUNDARY_MARKER);
@@ -496,34 +461,34 @@ public class ThinkingEngine {
         // Available Tools (always — dynamic tool selection based on trajectory)
         ToolSelector.Selection selection = toolSelector.select(
                 context.originalMessage(), context.trajectory());
-        sb.append("## Available Tools\n");
+        sb.append("## Tools\n");
         String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
         sb.append(manifest).append("\n");
         if (!selection.otherNames().isEmpty()) {
-            sb.append("Also available: ").append(String.join(", ", selection.otherNames())).append("\n");
+            sb.append("Also: ").append(String.join(", ", selection.otherNames())).append("\n");
         }
         if (manifest.isBlank()) {
-            sb.append("No tools yet — use skill_create to build what you need.\n");
+            sb.append("No tools yet — use skill_create.\n");
         }
         sb.append("\n");
 
         // Compact special actions — parameter names only, one line each
-        sb.append("## Special Actions\n");
-        sb.append("respond(message) — final answer | ask_user(message) — clarifying question\n");
-        sb.append("skill_create(name, description, parameters[JSON], [requirements], [requires_network], [has_side_effects], [timeout], [credentials], [system_packages → container])\n");
-        sb.append("To fix a skill, reuse the SAME name — NEVER add _v2/_fixed/_new suffixes.\n");
+        sb.append("## Actions\n");
+        sb.append("respond(message) | ask_user(message)\n");
+        sb.append("skill_create(name, description, parameters[JSON], [requirements], [credentials], [system_packages→container], [timeout])\n");
+        sb.append("Fix skill: reuse SAME name. NEVER _v2/_fixed/_new.\n");
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — delegate multi-tool execution to FREE local LLM. MUST USE for 2+ sequential tool calls that don't need your judgment.\n\n");
+        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — FREE local LLM. MUST USE for 2+ sequential calls.\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
         if (!vaultKeys.isEmpty()) {
             sb.append("Vault: ").append(String.join(", ", vaultKeys)).append("\n");
         }
-        sb.append("Present credentials are auto-injected. Only ask user for missing ones. Declare in 'credentials' param, never as tool parameters.\n\n");
+        sb.append("Credentials auto-injected. Only ask for missing ones. Declare in 'credentials' param.\n\n");
 
         // Output format (always needed)
         sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
@@ -545,15 +510,14 @@ public class ThinkingEngine {
 
         // Conversation summary for context
         if (context.conversationSummary() != null && !context.conversationSummary().isBlank()) {
-            sb.append("## Previous Conversation Context\n");
+            sb.append("## Prior Context\n");
             sb.append(context.conversationSummary()).append("\n\n");
         }
 
         // Relevant past experiences from memory
         Object memories = context.metadata().get("relevantMemories");
         if (memories instanceof String memStr && !memStr.isBlank()) {
-            sb.append("## Relevant Past Experiences\n");
-            sb.append("Similar past tasks — use if applicable:\n");
+            sb.append("## Past Experience\n");
             sb.append(memStr).append("\n\n");
         }
 
@@ -568,10 +532,9 @@ public class ThinkingEngine {
      */
     private String buildTrajectoryMessage(AgentTrajectory trajectory) {
         var sb = new StringBuilder();
-        sb.append("## Execution History\n");
-        sb.append("Actions taken so far:\n\n");
+        sb.append("## History\n");
         sb.append(trajectory.toPromptSummary());
-        sb.append("Decide what to do next. If done, use 'respond'.");
+        sb.append("Next action? If done, use 'respond'.");
         return sb.toString();
     }
 

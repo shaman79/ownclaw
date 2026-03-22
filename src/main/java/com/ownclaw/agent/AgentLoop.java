@@ -479,15 +479,10 @@ public class AgentLoop {
                         // Build feedback that shows the LLM WHAT it did wrong
                         String rawOutput = thinkResult.rawLlmOutput();
                         StringBuilder feedback = new StringBuilder();
-                        feedback.append("YOUR OUTPUT COULD NOT BE PARSED. Here is what you produced:\n");
+                        feedback.append("PARSE ERROR. Your output:\n");
                         feedback.append(truncate(rawOutput, 500));
-                        feedback.append("\n\nThis was NOT valid. You MUST respond with a JSON object containing ");
-                        feedback.append("exactly these fields:\n");
-                        feedback.append("{\n  \"tool\": \"<tool_name>\",\n  \"params\": {<param_key>: <param_value>},");
-                        feedback.append("\n  \"reasoning\": \"<why>\"\n}\n");
-                        feedback.append("Or to respond to the user:\n");
-                        feedback.append("{\n  \"tool\": \"respond\",\n  \"params\": {\"message\": \"<your response>\"},");
-                        feedback.append("\n  \"reasoning\": \"<why>\"\n}");
+                        feedback.append("\n\nRequired format: {\"tool\": \"name\", \"params\": {...}, \"reasoning\": \"...\"}\n");
+                        feedback.append("To respond: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}, \"reasoning\": \"...\"}");
 
                         if (consecutiveFallbacks >= 2) {
                             feedback.append("\n\nWARNING: This is your ").append(consecutiveFallbacks)
@@ -580,6 +575,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
                             "SKILL_CREATE [" + enhancedParams.getOrDefault("name", "?") + "] "
@@ -619,6 +615,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
                             "SKILL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -639,6 +636,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
                             "MEMORY_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -659,6 +657,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
 
                 // Refresh credential keys after store so subsequent ✓/✗ marks are accurate
                 if (ok && "store".equals(action.params().get("action"))) {
@@ -689,6 +688,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
                             "SCHEDULE_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
@@ -722,6 +722,7 @@ public class AgentLoop {
                         : AgentObservation.failure(action.tool(), result, durationMs);
                 context.trajectory().record(action, obs);
                 context.markProgress();
+                consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
                             "DELEGATE (" + durationMs + "ms, goal: "
@@ -770,6 +771,7 @@ public class AgentLoop {
             // === OBSERVE ===
             context.trajectory().record(action, observation);
             context.markProgress(); // tool completed — task is alive
+            consecutiveFallbacks = 0; // Reset on successful tool execution
 
             if (debug) {
                 emitDebug(context.userId(),
@@ -1192,15 +1194,13 @@ public class AgentLoop {
 
         String reflectionHint;
         if (trouble == 2) {
-            reflectionHint = "REFLECTION: The last " + trouble + " tool calls " +
-                    (failures >= 2 ? "failed" : "returned empty/useless output") + ". " +
-                    "Reconsider your approach. Inspect the tool's code with skill_manage(action='read') " +
-                    "to find the bug, then fix it with skill_create using the SAME name (overwrites in-place). Or try a fundamentally different strategy.";
+            reflectionHint = "REFLECT: " + trouble + "x " +
+                    (failures >= 2 ? "failed" : "empty output") + ". " +
+                    "Read skill code (skill_manage read), fix with skill_create (same name), or try different approach.";
         } else {
-            reflectionHint = "REFLECTION: " + trouble + " consecutive " +
+            reflectionHint = "REFLECT: " + trouble + "x consecutive " +
                     (failures >= trouble ? "failures" : "empty results") + ". " +
-                    "STOP repeating the same approach. Read the skill code, fix it, or try " +
-                    "a completely different technique. If nothing works, respond with what you know.";
+                    "STOP repeating. Fix the skill or try completely different technique. If stuck, respond with what you know.";
         }
 
         // Record reflection as a synthetic observation so the ThinkingEngine sees it
@@ -1482,70 +1482,42 @@ public class AgentLoop {
 
         // System prompt: expert Python code generator
         var sys = new StringBuilder();
-        sys.append("You are an expert Python developer generating production-quality skill code.\n\n");
-
-        sys.append("## Contract\n");
-        sys.append("Entry point: `def run(params)` where params is a dict. ");
-        sys.append("Return `{'output': str, 'success': bool}`. Never raise unhandled exceptions.\n\n");
-
-        sys.append("## Environment\n");
-        sys.append("Skills run locally with full system access. Credentials are injected as env vars. ");
-        sys.append("If `system_packages` are specified, those tools are available on PATH. ");
-        sys.append("For HTTP responses, fix encoding before reading text. \n\n");
-
-        sys.append("## Output\n");
-        sys.append("Return the code in a ```python fence, followed by a ```requirements fence ");
-        sys.append("listing pip dependencies (use correct pip package names). Empty fence if no deps.\n\n");
+        sys.append("Expert Python developer. Generate production-quality skill code.\n\n");
+        sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
+        sys.append("Environment: local, full system access. Credentials as env vars. system_packages on PATH. Fix HTTP encoding.\n");
+        sys.append("Output: ```python fence + ```requirements fence (correct pip names, empty if none).\n\n");
 
         if (oldCode != null) {
-            sys.append("You are FIXING an existing skill. Make a minimal, targeted fix. ");
-            sys.append("Preserve the working parts — only change what is necessary to resolve the error.\n");
+            sys.append("FIXING existing skill. Minimal targeted fix — preserve working parts.\n");
         } else {
-            sys.append("Write clean, well-structured, efficient code. Prefer established libraries. ");
-            sys.append("Keep it practical — no unnecessary boilerplate.\n");
+            sys.append("Clean, efficient code. Established libraries. No unnecessary boilerplate.\n");
         }
 
         messages.add(LlmMessage.system(sys.toString()));
 
         // User prompt: the skill specification (or fix request)
         var user = new StringBuilder();
-        if (oldCode != null) {
-            user.append("Fix this existing Python skill:\n\n");
-        } else {
-            user.append("Generate the Python code for this skill:\n\n");
-        }
-        user.append("**Name**: ").append(name).append("\n");
-        user.append("**Description**: ").append(description).append("\n");
-        user.append("**Parameters**: ").append(parameters).append("\n");
+        user.append(oldCode != null ? "Fix this skill:\n\n" : "Generate skill code:\n\n");
+        user.append("Name: ").append(name).append(" | Params: ").append(parameters).append("\n");
+        user.append("Description: ").append(description).append("\n");
         if (requirements != null && !requirements.isBlank()) {
-            user.append("**Available pip packages**: ").append(requirements).append("\n");
+            user.append("Pip: ").append(requirements).append("\n");
         }
 
-        // Tell the code generator which env var names to use for credentials
         String credentials = str(originalParams, "credentials");
         if (credentials != null && !credentials.isBlank()) {
-            user.append("**Credentials (auto-injected as env vars)**: ").append(credentials).append("\n");
-            user.append("Read these with `os.environ['KEY']` — they are guaranteed to be present at runtime.\n");
+            user.append("Env vars (guaranteed present): ").append(credentials).append("\n");
         }
 
-        // For fixes: include old code and the error
         if (oldCode != null) {
-            user.append("\n**Current code (broken):**\n```python\n");
-            user.append(oldCode);
-            user.append("\n```\n");
+            user.append("\nBroken code:\n```python\n").append(oldCode).append("\n```\n");
             if (lastError != null && !lastError.isBlank()) {
-                user.append("\n**Error when executed:**\n");
-                user.append(truncate(lastError, 1000));
-                user.append("\n");
+                user.append("Error: ").append(truncate(lastError, 1000)).append("\n");
             }
-            user.append("\nAnalyze the error and make a targeted fix. ");
-            user.append("Return the complete fixed code (not a diff).\n");
+            user.append("Return complete fixed code.\n");
         }
 
-        // Include the task context so the cloud knows what the skill needs to accomplish
-        user.append("\n**Context**: The agent is working on this task: \"");
-        user.append(truncate(context.originalMessage(), 500));
-        user.append("\"\n");
+        user.append("\nTask context: \"").append(truncate(context.originalMessage(), 500)).append("\"\n");
 
         messages.add(LlmMessage.user(user.toString()));
 
