@@ -2697,10 +2697,12 @@
             detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(t.cron_expression) + '</span></div>';
         }
         if (t.next_run_at) {
-            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Next run</span><span class="task-detail-value">' + new Date(t.next_run_at + 'Z').toLocaleString() + '</span></div>';
+            var nextDate = new Date(t.next_run_at.endsWith('Z') ? t.next_run_at : t.next_run_at + 'Z');
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Next run</span><span class="task-detail-value">' + nextDate.toLocaleString() + '</span></div>';
         }
         if (t.last_run_at) {
-            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Last run</span><span class="task-detail-value">' + new Date(t.last_run_at + 'Z').toLocaleString() + '</span></div>';
+            var lastDate = new Date(t.last_run_at.endsWith('Z') ? t.last_run_at : t.last_run_at + 'Z');
+            detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Last run</span><span class="task-detail-value">' + lastDate.toLocaleString() + '</span></div>';
         }
         detailHtml += '<div class="task-detail-row"><span class="task-detail-label">Run count</span><span class="task-detail-value">' + (t.run_count || 0) + (t.max_runs ? ' / ' + t.max_runs : '') + '</span></div>';
         if (t.last_result) {
@@ -2896,13 +2898,14 @@
         var details = document.createElement('div');
         details.className = 'task-run-details';
 
+        var execDate = run.executed_at ? new Date(run.executed_at.endsWith('Z') ? run.executed_at : run.executed_at + 'Z') : null;
         var detailsHtml =
             '<div class="task-detail-row"><span class="task-detail-label">Status</span><span class="task-detail-value ' + (statusClass === 'failed' ? 'error' : 'success') + '">' + statusIcon + ' ' + (run.status || 'unknown') + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Task ID</span><span class="task-detail-value">#' + (run.task_id || '\u2014') + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + (run.task_type || '\u2014') + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Run #</span><span class="task-detail-value">' + (run.run_number || '\u2014') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Task ID</span><span class="task-detail-value">#' + (run.task_id || '—') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + (run.task_type || '—') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Run #</span><span class="task-detail-value">' + (run.run_number || '—') + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Duration</span><span class="task-detail-value">' + durationStr + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Executed</span><span class="task-detail-value">' + (run.executed_at ? new Date(run.executed_at + 'Z').toLocaleString() : '\u2014') + '</span></div>';
+            '<div class="task-detail-row"><span class="task-detail-label">Executed</span><span class="task-detail-value">' + (execDate ? execDate.toLocaleString() : '—') + '</span></div>';
 
         if (run.cron_expression) {
             detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(run.cron_expression) + '</span></div>';
@@ -3884,9 +3887,21 @@
     function formatTime(isoStr) {
         if (!isoStr) return '';
         try {
-            var d = new Date(isoStr + 'Z');
+            // Handle both "2026-03-23T10:30:00Z" and "2026-03-23T10:30:00" formats
+            var d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+            if (isNaN(d.getTime())) return isoStr; // fallback if still invalid
             var now = new Date();
             var diff = now - d;
+            // Future dates (scheduled tasks)
+            if (diff < 0) {
+                var absDiff = -diff;
+                if (absDiff < 60000) return 'in <1m';
+                if (absDiff < 3600000) return 'in ' + Math.floor(absDiff / 60000) + 'm';
+                if (absDiff < 86400000) return 'in ' + Math.floor(absDiff / 3600000) + 'h';
+                if (absDiff < 604800000) return 'in ' + Math.floor(absDiff / 86400000) + 'd';
+                return d.toLocaleDateString();
+            }
+            // Past dates
             if (diff < 60000) return 'just now';
             if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
             if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
