@@ -67,6 +67,7 @@ HEALTH_URL="http://localhost:8080/api/health"
 BUSY_URL="http://localhost:8080/api/health/busy"
 HEALTH_TIMEOUT=60
 BUSY_WAIT_TIMEOUT=300  # max 5 minutes to wait for task to finish
+RESTART_PENDING_MARKER="${DEPLOY_DIR}/.restart-pending"
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -996,7 +997,8 @@ deploy_jar() {
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         # Wait for any running task to finish before restarting
         if ! wait_for_idle; then
-            log "Skipping restart — agent is busy. New JAR is staged and will be picked up on next deploy."
+            log "Skipping restart — agent is busy. New JAR is staged; will retry on next cron cycle."
+            touch "$RESTART_PENDING_MARKER"
             return 0
         fi
 
@@ -1005,6 +1007,7 @@ deploy_jar() {
             restart_instructions
             die "Service restart failed (insufficient permissions)."
         fi
+        rm -f "$RESTART_PENDING_MARKER"
         wait_for_health
     elif systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
         log "Service installed but not running — skipping restart."
@@ -1074,6 +1077,25 @@ main() {
             ;;
         --update)
             log "--- Auto-update check (user=$(whoami), home=$HOME) ---"
+
+            # If a previous deploy staged a new JAR but couldn't restart (agent was busy),
+            # retry the restart now before checking for new code.
+            if [ -f "$RESTART_PENDING_MARKER" ]; then
+                log "Pending restart detected — retrying service restart..."
+                if wait_for_idle; then
+                    sync_service_file || true
+                    if restart_service; then
+                        rm -f "$RESTART_PENDING_MARKER"
+                        wait_for_health
+                        log "Pending restart completed successfully"
+                    else
+                        log "Pending restart failed (permissions?) — will retry next cycle"
+                    fi
+                else
+                    log "Agent still busy — will retry restart on next cycle"
+                fi
+            fi
+
             local pull_rc=0
             pull_latest || pull_rc=$?
             if [ "$pull_rc" -eq 0 ]; then
@@ -1128,6 +1150,11 @@ main() {
             log ""
             log "--- Service ---"
             log "  Active: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo 'unknown')"
+            if [ -f "$RESTART_PENDING_MARKER" ]; then
+                log "  Pending restart: YES (new JAR staged but service not yet restarted)"
+            else
+                log "  Pending restart: no"
+            fi
             if sudo -n true 2>/dev/null; then
                 log "  Passwordless sudo: YES"
             else
