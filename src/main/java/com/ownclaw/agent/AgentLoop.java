@@ -519,12 +519,26 @@ public class AgentLoop {
                 String skillName = str(action.params(), "name");
 
                 // --- Skill-create retry guard ---
-                // Count how many times we've already tried to create this skill (or any skill)
-                // in this task. After 2 failed attempts for the same name, force the LLM
-                // to abandon this approach instead of burning cloud tokens.
+                // Count failures only AFTER the most recent successful deletion of this
+                // skill (or any skill). A delete+recreate cycle is a legitimate retry
+                // strategy and should not be blocked by stale failure history.
                 int sameNameFails = 0;
                 int totalSkillFails = 0;
-                for (var turn : context.trajectory().turns()) {
+                int lastDeleteIndex = -1;
+                var allTurns = context.trajectory().turns();
+                for (int i = allTurns.size() - 1; i >= 0; i--) {
+                    var turn = allTurns.get(i);
+                    // Find the most recent successful skill deletion (any name or this name)
+                    if (AgentAction.SKILL_MANAGE.equals(turn.action().tool())
+                            && turn.observation().success()
+                            && "delete".equals(str(turn.action().params(), "action"))) {
+                        lastDeleteIndex = i;
+                        break;
+                    }
+                }
+                // Only count failures that occurred AFTER the last deletion reset point
+                for (int i = lastDeleteIndex + 1; i < allTurns.size(); i++) {
+                    var turn = allTurns.get(i);
                     if (AgentAction.SKILL_CREATE.equals(turn.action().tool()) && !turn.observation().success()) {
                         totalSkillFails++;
                         String prevName = str(turn.action().params(), "name");
@@ -766,6 +780,15 @@ public class AgentLoop {
                 observation = executeTool(action, context);
             } finally {
                 stopHeartbeat(toolHeartbeat);
+            }
+
+            // Append critic warnings to the observation so the LLM sees them
+            if (verdict.hasWarnings()) {
+                String warningBlock = "\n\n⚠️ SYSTEM: " + String.join(" | ", verdict.warnings());
+                observation = new AgentObservation(
+                        observation.tool(), observation.success(),
+                        observation.output() + warningBlock,
+                        observation.structured(), observation.durationMs());
             }
 
             // === OBSERVE ===
@@ -1190,17 +1213,37 @@ public class AgentLoop {
         int failures = context.trajectory().consecutiveFailures();
         int hollow = context.trajectory().consecutiveHollowResults();
         int trouble = Math.max(failures, hollow);
-        if (trouble < 2) return;
+
+        // Also check overall failure ratio — catches non-consecutive waste patterns
+        // (e.g., fail, succeed trivially, fail, succeed trivially, fail...)
+        int totalSteps = context.trajectory().size();
+        int totalFailed = 0;
+        for (var turn : context.trajectory().turns()) {
+            if (!turn.observation().success()) totalFailed++;
+        }
+        boolean highWasteRatio = totalSteps >= 6 && totalFailed * 2 > totalSteps;
+
+        if (trouble < 2 && !highWasteRatio) return;
 
         String reflectionHint;
-        if (trouble == 2) {
+        if (highWasteRatio && trouble < 3) {
+            // Many failures overall but not strictly consecutive — strategic pivot needed
+            reflectionHint = "REFLECT: " + totalFailed + "/" + totalSteps
+                    + " steps have failed. Your overall approach is ineffective. "
+                    + "PIVOT STRATEGY: (1) Search the internet for how others solve this, "
+                    + "(2) Try a completely different library/method/data source, "
+                    + "(3) Simplify — deliver a partial result rather than failing completely. "
+                    + "Do NOT retry what already failed.";
+        } else if (trouble == 2) {
             reflectionHint = "REFLECT: " + trouble + "x " +
                     (failures >= 2 ? "failed" : "empty output") + ". " +
                     "Read skill code (skill_manage read), fix with skill_create (same name), or try different approach.";
         } else {
             reflectionHint = "REFLECT: " + trouble + "x consecutive " +
                     (failures >= trouble ? "failures" : "empty results") + ". " +
-                    "STOP repeating. Fix the skill or try completely different technique. If stuck, respond with what you know.";
+                    "STOP repeating. Try a fundamentally different approach: "
+                    + "search the internet for solutions, use a different library, "
+                    + "or simplify the task. If truly stuck, respond with what you have.";
         }
 
         // Record reflection as a synthetic observation so the ThinkingEngine sees it

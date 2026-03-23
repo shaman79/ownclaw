@@ -132,6 +132,28 @@ public class CriticAgent {
             warnings.add("Task has taken " + trajectory.size() + " steps. Consider wrapping up.");
         }
 
+        // 9. Wasted-effort detection — tiered response.
+        //    Moderate waste: warn + redirect to different strategy (agent can still act).
+        //    Extreme waste: hard block — force wrap-up.
+        int blockedOrFailed = 0;
+        for (var turn : trajectory.turns()) {
+            if (!turn.observation().success()) blockedOrFailed++;
+        }
+        int totalSteps = trajectory.size();
+        if (totalSteps >= 12 && blockedOrFailed * 4 > totalSteps * 3) {
+            // 75%+ failures at 12+ steps — nothing is working, force wrap-up
+            return Verdict.block(blockedOrFailed + " of " + totalSteps
+                    + " steps have failed. Respond now with what you've accomplished "
+                    + "and what went wrong.");
+        }
+        if (totalSteps >= 8 && blockedOrFailed * 2 > totalSteps) {
+            // 50%+ failures at 8+ steps — strong redirect, not a block
+            warnings.add("STRATEGY WARNING: " + blockedOrFailed + " of " + totalSteps
+                    + " steps have failed. Your current approach is not working. "
+                    + "CHANGE STRATEGY: search the internet for solutions, try a completely "
+                    + "different technique, or simplify the approach. Do NOT repeat what already failed.");
+        }
+
         return Verdict.allow(warnings);
     }
 

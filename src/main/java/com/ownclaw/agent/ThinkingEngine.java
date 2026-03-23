@@ -370,6 +370,15 @@ public class ThinkingEngine {
         sb.append("- Garbled text → encoding bug, fix the tool.\n");
         sb.append("- Files (PDF/DOCX/CSV): extract content, don't just report links.\n");
 
+        sb.append("\n## Problem Solving\n");
+        sb.append("- THINK DEEPLY before each step. Understand WHY something failed before retrying.\n");
+        sb.append("- Stuck? Search the internet.\n");
+        sb.append("- Try fundamentally different approaches, not variations of the same idea.\n");
+        sb.append("- Blocked on one path? Pivot: different library, different API, different data source, manual parsing.\n");
+        sb.append("- Invest in diagnosis: read error messages carefully, check logs, test assumptions.\n");
+        sb.append("- A partial but USEFUL result beats an empty failure. Deliver what you can.\n");
+        sb.append("- Never waste steps repeating failed actions. Each step must make new progress.\n");
+
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
         // to keep the system prompt identical across all steps — enabling both
@@ -483,6 +492,9 @@ public class ThinkingEngine {
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
         sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — FREE local LLM. MUST USE for 2+ sequential calls.\n\n");
+
+        // Problem-solving nudge (compact version of the full prompt's ## Problem Solving)
+        sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
