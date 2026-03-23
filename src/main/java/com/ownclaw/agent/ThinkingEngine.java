@@ -587,24 +587,19 @@ public class ThinkingEngine {
 
         String cleaned = LlmOutputUtils.stripCodeFences(raw.strip());
 
-        // Try to extract JSON object if there's surrounding text
-        int jsonStart = cleaned.indexOf('{');
-        int jsonEnd = cleaned.lastIndexOf('}');
-        if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            cleaned = cleaned.substring(jsonStart, jsonEnd + 1);
-        } else {
-            // No JSON found — treat the entire response as a direct answer
-            log.warn("ThinkingEngine: no JSON found in LLM response, treating as direct response");
+        // Try to parse as JSON. Use Jackson's streaming parser to find the first
+        // valid JSON object — handles nested braces, escaped chars, etc. correctly.
+        // If no valid JSON object can be parsed, the LLM produced natural language
+        // which is a direct response, not a parse failure.
+        Map<String, Object> parsed = tryParseJsonObject(cleaned);
+        if (parsed == null) {
+            log.warn("ThinkingEngine: no valid JSON object in LLM response, treating as direct response");
             return new AgentAction(AgentAction.RESPOND,
                     Map.of("message", raw.strip()),
                     "LLM did not produce structured output; delivering raw response");
         }
 
-        // Strip JS-style comments that LLMs sometimes inject into JSON
-        cleaned = stripJsonComments(cleaned);
-
         try {
-            Map<String, Object> parsed = mapper.readValue(cleaned, new TypeReference<>() {});
 
             // Try multiple field names that LLMs commonly use for tool selection
             String tool = getStringField(parsed, "tool");
@@ -701,6 +696,51 @@ public class ThinkingEngine {
         if (os.contains("mac")) return "macOS";
         if (os.contains("linux")) return "Linux";
         return os;
+    }
+
+    /**
+     * Try to parse the first valid JSON object from a string that may contain
+     * surrounding natural language text. Uses Jackson's streaming parser to
+     * correctly handle nested braces, escaped characters, and strings containing
+     * braces — avoiding false matches on things like {CURRENT_YEAR}.
+     *
+     * Strategy:
+     *   1. Try parsing the whole string as JSON (common case — LLM followed instructions).
+     *   2. Try each '{' position as a potential JSON start; use Jackson's streaming
+     *      parser which reads exactly one value and stops (tolerates trailing text).
+     *   3. If nothing parses, return null (not a failure — LLM wrote prose).
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> tryParseJsonObject(String text) {
+        if (text == null || text.isBlank()) return null;
+
+        // Strip JS-style comments before any parsing attempt
+        String stripped = stripJsonComments(text);
+
+        // Fast path: entire string is valid JSON
+        try {
+            Object result = mapper.readValue(stripped, Object.class);
+            if (result instanceof Map) return (Map<String, Object>) result;
+        } catch (Exception ignored) {}
+
+        // Scan for '{' and try parsing from each candidate position.
+        // Jackson's streaming parser reads exactly one JSON value and stops,
+        // so trailing text (natural language after the JSON) is not a problem.
+        var factory = mapper.getFactory();
+        int searchFrom = 0;
+        while (searchFrom < stripped.length()) {
+            int bracePos = stripped.indexOf('{', searchFrom);
+            if (bracePos < 0) break;
+
+            try (var parser = factory.createParser(stripped.substring(bracePos))) {
+                Object result = mapper.readValue(parser, Object.class);
+                if (result instanceof Map) return (Map<String, Object>) result;
+            } catch (Exception ignored) {}
+
+            searchFrom = bracePos + 1;
+        }
+
+        return null;
     }
 
     private String truncate(String s, int maxLen) {

@@ -2,6 +2,10 @@ package com.ownclaw.core;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.llm.LlmRequestConfig;
+import com.ownclaw.llm.OllamaProvider;
+import com.ownclaw.llm.OllamaSemaphore;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
@@ -53,6 +57,8 @@ public class ScheduledTaskService {
     private final EventLogService eventLog;
     private final ConversationService conversationService;
     private final OwnClawConfig config;
+    private final OllamaProvider ollama;
+    private final OllamaSemaphore ollamaSemaphore;
 
     // Track task submission timestamps for duration calculation
     private final Map<Long, Long> taskStartTimes = new java.util.concurrent.ConcurrentHashMap<>();
@@ -73,13 +79,16 @@ public class ScheduledTaskService {
 
     public ScheduledTaskService(JdbcTemplate jdbc, TaskQueue taskQueue,
                                 ChatStatusEmitter statusEmitter, EventLogService eventLog,
-                                ConversationService conversationService, OwnClawConfig config) {
+                                ConversationService conversationService, OwnClawConfig config,
+                                OllamaProvider ollama, OllamaSemaphore ollamaSemaphore) {
         this.jdbc = jdbc;
         this.taskQueue = taskQueue;
         this.statusEmitter = statusEmitter;
         this.eventLog = eventLog;
         this.conversationService = conversationService;
         this.config = config;
+        this.ollama = ollama;
+        this.ollamaSemaphore = ollamaSemaphore;
     }
 
     @PostConstruct
@@ -578,7 +587,7 @@ public class ScheduledTaskService {
                                last_run_at = datetime('now'), last_result = ?,
                                updated_at = datetime('now')
                         WHERE id = ?
-                        """, truncate(response, 500), taskId);
+                        """, summarizeIfNeeded(response, 4000), taskId);
                     statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
                             "Recurring task #" + taskId + " completed (max runs reached): "
                                     + truncate(description, 60));
@@ -590,7 +599,7 @@ public class ScheduledTaskService {
                                next_run_at = ?, last_run_at = datetime('now'),
                                last_result = ?, updated_at = datetime('now')
                         WHERE id = ?
-                        """, nextRun.toString(), truncate(response, 500), taskId);
+                        """, nextRun.toString(), summarizeIfNeeded(response, 4000), taskId);
                     statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
                             "Recurring task #" + taskId + " completed. Next run: "
                                     + formatTime(nextRun));
@@ -603,7 +612,7 @@ public class ScheduledTaskService {
                        last_run_at = datetime('now'), last_result = ?,
                        updated_at = datetime('now')
                 WHERE id = ?
-                """, truncate(response, 500), taskId);
+                """, summarizeIfNeeded(response, 4000), taskId);
             statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
                     "Deferred task #" + taskId + " completed: " + truncate(description, 80));
         }
@@ -616,7 +625,7 @@ public class ScheduledTaskService {
         conversationService.saveMessage(userId, sessionId, "system",
                 "📋 **Scheduled task completed** (#" + taskId + ")\n"
                         + "**Task:** " + description + "\n"
-                        + "**Result:** " + truncate(response, 300));
+                        + "**Result:** " + summarizeIfNeeded(response, 2000));
     }
 
     /**
@@ -641,7 +650,7 @@ public class ScheduledTaskService {
                            next_run_at = ?, last_run_at = datetime('now'),
                            last_error = ?, updated_at = datetime('now')
                     WHERE id = ?
-                    """, nextRun.toString(), truncate(error, 500), taskId);
+                    """, nextRun.toString(), summarizeIfNeeded(error, 500), taskId);
                 statusEmitter.emit(userId, StatusMessage.Type.WARNING,
                         "Recurring task #" + taskId + " failed but will retry at "
                                 + formatTime(nextRun) + ": " + truncate(error, 80));
@@ -653,7 +662,7 @@ public class ScheduledTaskService {
                        last_run_at = datetime('now'), last_error = ?,
                        updated_at = datetime('now')
                 WHERE id = ?
-                """, truncate(error, 500), taskId);
+                """, summarizeIfNeeded(error, 500), taskId);
             statusEmitter.emit(userId, StatusMessage.Type.FAILED,
                     "Deferred task #" + taskId + " failed: " + truncate(error, 80));
         }
@@ -666,7 +675,7 @@ public class ScheduledTaskService {
         conversationService.saveMessage(userId, sessionId, "system",
                 "❌ **Scheduled task failed** (#" + taskId + ")\n"
                         + "**Task:** " + description + "\n"
-                        + "**Error:** " + truncate(error, 300));
+                        + "**Error:** " + summarizeIfNeeded(error, 300));
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -711,6 +720,42 @@ public class ScheduledTaskService {
         return DateTimeFormatter.ofPattern("MMM d, HH:mm")
                 .withZone(ZoneId.systemDefault())
                 .format(instant);
+    }
+
+    private String summarizeIfNeeded(String text, int maxLen) {
+        if (text == null) return "";
+        if (text.length() <= maxLen) return text;
+
+        try {
+            int wordBudget = maxLen / 5; // rough estimate: ~5 chars per word
+            String systemPrompt = "Summarize the following into " + wordBudget
+                    + " words or fewer. Preserve ALL key facts, numbers, names, URLs, "
+                    + "decisions, and outcomes. Omit filler and repetition. Output ONLY the summary.";
+
+            List<LlmMessage> messages = List.of(
+                    LlmMessage.system(systemPrompt),
+                    LlmMessage.user(text.length() > 8000
+                            ? text.substring(0, 8000) + "\n... [input truncated for summarization]"
+                            : text)
+            );
+
+            ollamaSemaphore.acquire();
+            try {
+                var response = ollama.chat(messages, LlmRequestConfig.withMaxTokens(maxLen / 3));
+                String summary = response.content();
+                if (summary != null && !summary.isBlank()) {
+                    log.debug("Summarized {} chars -> {} chars", text.length(), summary.length());
+                    return summary;
+                }
+            } finally {
+                ollamaSemaphore.release();
+            }
+        } catch (Exception e) {
+            log.warn("LLM summarization failed, falling back to truncation: {}", e.getMessage());
+        }
+
+        // Fallback: hard truncate if LLM unavailable
+        return text.substring(0, maxLen) + "…";
     }
 
     private String truncate(String text, int maxLen) {
