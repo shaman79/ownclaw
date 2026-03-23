@@ -337,7 +337,10 @@ public class ContainerSandbox {
                 cmd.add("docker");
             }
 
-            cmd.add("--quiet");
+            // Don't use --quiet: stall detection relies on build output (layer
+            // downloads, RUN steps) to know the build is still making progress.
+            // With --quiet, a legitimately slow build produces zero output and
+            // gets killed by the stall detector.
             cmd.add(buildCtx.toAbsolutePath().toString());
 
             Process p = new ProcessBuilder(cmd)
@@ -351,7 +354,8 @@ public class ContainerSandbox {
             CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
                     () -> drainStreamWithActivity(p.getInputStream(), lastBuildActivity));
 
-            boolean finished = waitForWithStallDetection(p, 300, lastBuildActivity);
+            int buildStallTimeout = config.getTasks().getStallTimeout();
+            boolean finished = waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
 
             if (!finished) {
                 // Capture stall duration BEFORE killing — drainStreamWithActivity updates

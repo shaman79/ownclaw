@@ -97,7 +97,7 @@ public class OwnClawConfig {
         private int stepTimeout = 60;
         private int maxPlanSteps = 20;
         private int longRunningThreshold = 120;
-        private int stallTimeout = 300;
+        private int stallTimeout = 1200;
         private int heartbeatInterval = 30;
         private int schedulerPollInterval = 30;
         private int maxScheduledTasksPerUser = 50;
