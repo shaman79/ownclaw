@@ -316,6 +316,7 @@ public class ThinkingEngine {
         sb.append("ask_user(message): Ask ONLY when info is missing. Never ask permission — just act.\n\n");
 
         sb.append("skill_create: Create/update Python skill (code AUTO-GENERATED — specify WHAT not HOW).\n");
+        sb.append("  THINK FIRST: anticipate edge cases, required imports, error handling. Rework burns tokens.\n");
         sb.append("  Local execution, full system access. To fix: reuse SAME name (overwrites). NEVER _v2/_fixed/_new.\n");
         sb.append("  name*: lowercase id | description*: behavior spec + edge cases + output format\n");
         sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");

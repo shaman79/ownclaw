@@ -1483,6 +1483,7 @@ public class AgentLoop {
         // System prompt: expert Python code generator
         var sys = new StringBuilder();
         sys.append("Expert Python developer. Generate production-quality skill code.\n\n");
+        sys.append("CRITICAL: Mentally trace your code before outputting. Verify imports exist, types match, edge cases handled. Rework burns tokens — get it right first try.\n\n");
         sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
         sys.append("Environment: local, full system access. Credentials as env vars. system_packages on PATH. Fix HTTP encoding.\n");
         sys.append("Output: ```python fence + ```requirements fence (correct pip names, empty if none).\n\n");
