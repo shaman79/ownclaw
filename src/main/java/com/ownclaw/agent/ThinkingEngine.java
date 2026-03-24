@@ -81,7 +81,7 @@ public class ThinkingEngine {
         LlmRequestConfig requestConfig = new LlmRequestConfig(
                 null,   // use provider default model
                 null,   // use provider default temperature
-                4096,   // enough for a structured action response
+                8192,   // enough for structured action with long response messages
                 true,   // JSON mode for structured output
                 null    // use provider default read timeout
         );
@@ -351,7 +351,9 @@ public class ThinkingEngine {
 
         // Output format
         sb.append("## Output\n");
-        sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n\n");
+        sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+        sb.append("CRITICAL: Keep 'reasoning' to 1-2 sentences. Long reasoning wastes tokens and risks truncation.\n");
+        sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
 
         // Behavioral guidelines + cost + self-improvement combined
         sb.append("## Rules\n");
@@ -378,6 +380,7 @@ public class ThinkingEngine {
         sb.append("- Invest in diagnosis: read error messages carefully, check logs, test assumptions.\n");
         sb.append("- A partial but USEFUL result beats an empty failure. Deliver what you can.\n");
         sb.append("- Never waste steps repeating failed actions. Each step must make new progress.\n");
+        sb.append("- NEVER write multi-line Python/code via shell_exec heredocs or python3 -c. Escaping WILL break. Use skill_create instead.\n");
 
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
