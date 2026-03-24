@@ -1373,6 +1373,17 @@ public class AgentLoop {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
+    /** Add line numbers to code for precise error location in repair prompts. */
+    private String numberCodeLines(String code) {
+        if (code == null) return "";
+        String[] lines = code.split("\n", -1);
+        var sb = new StringBuilder(code.length() + lines.length * 5);
+        for (int i = 0; i < lines.length; i++) {
+            sb.append(String.format("%3d| %s\n", i + 1, lines[i]));
+        }
+        return sb.toString();
+    }
+
     /** Format seconds as human-readable duration, e.g. "5m 23s" or "45s". */
     private static String formatDuration(long totalSec) {
         if (totalSec >= 3600) {
@@ -1503,19 +1514,28 @@ public class AgentLoop {
                         response.totalTokens(), 0.0);
             }
 
+            // --- Structural pre-check: reject obviously broken code early ---
+            if (cloudCode != null && !cloudCode.isBlank() && !cloudCode.contains("def run(")) {
+                log.warn("Skill '{}': generated code missing 'def run(params)' — treating as extraction failure", name);
+                cloudCode = null;
+            }
+
             // --- Inner syntax-repair loop: fix syntax errors without burning outer agent steps ---
             if (cloudCode != null && !cloudCode.isBlank()) {
                 String syntaxError = skillManager.checkPythonSyntax(cloudCode);
-                for (int repair = 0; repair < 2 && syntaxError != null; repair++) {
-                    log.warn("Skill '{}' syntax error (repair attempt {}/2): {}", name, repair + 1, syntaxError);
+                for (int repair = 0; repair < 3 && syntaxError != null; repair++) {
+                    log.warn("Skill '{}' syntax error (repair attempt {}/3): {}", name, repair + 1, syntaxError);
                     statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
-                            "Repairing syntax error · " + providerLabel + " (attempt " + (repair + 1) + "/2)",
+                            "Repairing syntax error · " + providerLabel + " (attempt " + (repair + 1) + "/3)",
                             tokenData(context));
 
+                    // Build a focused repair prompt with the error and numbered code context
+                    String numberedCode = numberCodeLines(cloudCode);
                     messages.add(LlmMessage.assistant(response.content()));
                     messages.add(LlmMessage.user(
-                            "Syntax error in generated code:\n" + syntaxError
-                            + "\n\nFix the error and return the complete corrected code in a ```python fence."));
+                            "Syntax error:\n" + syntaxError
+                            + "\n\nNumbered code:\n" + numberedCode
+                            + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
 
                     ScheduledFuture<?> repairHeartbeat = startLlmHeartbeat(context.userId(),
                             "Repairing code for '" + name + "'");
@@ -1540,12 +1560,12 @@ public class AgentLoop {
                         response = repairResponse;
                         syntaxError = skillManager.checkPythonSyntax(cloudCode);
                     } else {
-                        log.warn("Repair attempt {}/2 returned no extractable code", repair + 1);
+                        log.warn("Repair attempt {}/3 returned no extractable code", repair + 1);
                         break;
                     }
                 }
                 if (syntaxError != null) {
-                    log.error("Skill '{}' still has syntax errors after repair attempts: {}", name, syntaxError);
+                    log.error("Skill '{}' still has syntax errors after {} repair attempts: {}", name, 3, syntaxError);
                     // Still return the code — let SkillManager.createSkill() report the error
                     // so the outer agent loop can track the failure properly
                 }
@@ -1596,13 +1616,18 @@ public class AgentLoop {
 
         // System prompt: expert Python code generator
         var sys = new StringBuilder();
-        sys.append("Expert Python developer. Generate production-quality skill code.\n\n");
-        sys.append("CRITICAL: Mentally trace your code before outputting. Verify imports exist, types match, edge cases handled. Rework burns tokens — get it right first try.\n\n");
+        sys.append("Expert Python developer. Production-quality, first try.\n\n");
         sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
-        sys.append("IMPORTANT: ALWAYS use `def run(params):` signature — never individual keyword args like `def run(url=None)`. Access parameters via `params.get('key')`.\n");
-        sys.append("Example:\n```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text[:2000]}\n```\n");
-        sys.append("Environment: local, full system access. Credentials as env vars. system_packages on PATH. Fix HTTP encoding.\n");
-        sys.append("Output: ```python fence + ```requirements fence (correct pip names, empty if none).\n\n");
+        sys.append("Always `def run(params):` — never keyword args. Use `params.get('key')`.\n");
+        sys.append("```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text}\n```\n");
+        sys.append("Local env, full access. Credentials as env vars. system_packages on PATH.\n");
+        sys.append("Output: ```python fence + ```requirements fence.\n\n");
+        sys.append("SELF-CHECK before outputting:\n");
+        sys.append("1. All strings/f-strings properly closed (watch triple-quotes and nested quotes)\n");
+        sys.append("2. All brackets/parens matched\n");
+        sys.append("3. Consistent indentation (4 spaces, no tabs)\n");
+        sys.append("4. `def run(params):` exists at module level\n");
+        sys.append("5. Every code path returns {'output': str, 'success': bool}\n\n");
 
         if (oldCode != null) {
             sys.append("FIXING existing skill. Minimal targeted fix — preserve working parts.\n");

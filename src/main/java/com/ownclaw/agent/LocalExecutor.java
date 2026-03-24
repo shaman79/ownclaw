@@ -398,6 +398,36 @@ public class LocalExecutor {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
+    /**
+     * Summarize text using the local LLM if it exceeds maxLen, otherwise return as-is.
+     * Falls back to smart truncation (head + tail) if the LLM is unavailable.
+     */
+    private String summarizeIfLong(String text, int maxLen) {
+        if (text == null) return "";
+        if (text.length() <= maxLen) return text;
+
+        try {
+            LlmProvider local = llmRouter.local();
+            if (local.isAvailable()) {
+                List<LlmMessage> msgs = List.of(
+                        LlmMessage.system("Summarize preserving ALL key facts, data, numbers, URLs. Output ONLY the summary."),
+                        LlmMessage.user(text.length() > 12000 ? text.substring(0, 12000) : text)
+                );
+                var response = local.chat(msgs, LlmRequestConfig.withMaxTokens(maxLen / 3));
+                if (response.content() != null && !response.content().isBlank()) {
+                    return "[summarized] " + response.content();
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Summarization failed, using smart truncation: {}", e.getMessage());
+        }
+
+        // Fallback: keep head + tail for context
+        int half = maxLen / 2;
+        return text.substring(0, half) + "\n...[" + text.length() + " chars, middle omitted]...\n"
+                + text.substring(text.length() - half);
+    }
+
     // ── Inner types ──
 
     /** Parsed action from the local executor LLM. */

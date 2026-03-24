@@ -138,9 +138,11 @@ public class ConversationCompressor {
     private String compressWithLlm(String conversationText) {
         String systemPrompt = "Compress to third-person summary (max 200 words, 1 paragraph). Preserve ALL facts, decisions, names, numbers, URLs. Merge with previous summary if present. Remove filler.";
 
-        // Truncate input to avoid overwhelming the local LLM
-        String truncated = conversationText.length() > 4000
-                ? conversationText.substring(0, 4000) + "\n... [truncated]"
+        // Input limit matched to local LLM context window (16K tokens ≈ ~10K chars of mixed content)
+        String truncated = conversationText.length() > 10000
+                ? conversationText.substring(0, 5000)
+                    + "\n...[middle omitted]...\n"
+                    + conversationText.substring(conversationText.length() - 5000)
                 : conversationText;
 
         List<LlmMessage> messages = List.of(

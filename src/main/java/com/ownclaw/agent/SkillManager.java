@@ -334,11 +334,17 @@ public class SkillManager {
             Path checkScript = tempDir.resolve("_check.py");
             String targetPath = targetFile.toAbsolutePath().toString().replace("\\", "/");
             Files.writeString(checkScript,
-                    "import py_compile, sys\n" +
+                    "import py_compile, sys, ast\n" +
                     "try:\n" +
                     "    py_compile.compile('" + targetPath + "', doraise=True)\n" +
                     "except py_compile.PyCompileError as e:\n" +
                     "    print(str(e), file=sys.stderr)\n" +
+                    "    sys.exit(1)\n" +
+                    "with open('" + targetPath + "') as f:\n" +
+                    "    tree = ast.parse(f.read())\n" +
+                    "funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]\n" +
+                    "if 'run' not in funcs:\n" +
+                    "    print('Missing required function: def run(params)', file=sys.stderr)\n" +
                     "    sys.exit(1)\n",
                     StandardCharsets.UTF_8);
 

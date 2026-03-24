@@ -99,7 +99,7 @@ public class AgentTrajectory {
      * </ul>
      */
     public String toPromptSummary() {
-        return toPromptSummary(500);
+        return toPromptSummary(300);
     }
 
     /**
@@ -156,8 +156,11 @@ public class AgentTrajectory {
                 } else if (output.length() <= maxOlderOutputChars) {
                     sb.append("\nOutput: ").append(output);
                 } else {
-                    sb.append("\nOutput (truncated): ").append(output, 0, maxOlderOutputChars)
-                            .append("... [").append(output.length()).append(" chars total]");
+                    // Smart truncation: keep head + tail
+                    int half = maxOlderOutputChars / 2;
+                    sb.append("\nOutput: ").append(output, 0, half)
+                            .append("\n...[" ).append(output.length()).append(" chars, middle omitted]...\n")
+                            .append(output, output.length() - half, output.length());
                 }
             }
             sb.append("\n\n");

@@ -97,20 +97,19 @@ public class ToolRegistry {
         return subset.stream()
                 .sorted(Comparator.comparing(Tool::name))
                 .map(t -> formatToolEntry(t, availableCredentials))
-                .collect(Collectors.joining("\n\n"));
+                .collect(Collectors.joining("\n"));
     }
 
     private String formatToolEntry(Tool tool, List<String> availableCredentials) {
         var sb = new StringBuilder();
         sb.append(tool.name()).append(": ").append(tool.description());
 
-        if (tool.requiresNetwork()) sb.append(" [network]");
-        if (tool.hasSideEffects()) sb.append(" [side-effects]");
+        if (tool.requiresNetwork()) sb.append(" [net]");
+        if (tool.hasSideEffects()) sb.append(" [se]");
 
-        // Annotate credential status for skills that need credentials
         List<String> creds = tool.requiredCredentials();
         if (!creds.isEmpty()) {
-            sb.append(" [credentials:");
+            sb.append(" [cred:");
             for (String key : creds) {
                 sb.append(" ").append(key);
                 sb.append(availableCredentials.contains(key) ? "\u2713" : "\u2717");
@@ -120,12 +119,15 @@ public class ToolRegistry {
 
         Map<String, ToolParam> schema = tool.inputSchema();
         if (schema != null && !schema.isEmpty()) {
+            sb.append("\n ");
+            boolean first = true;
             for (var entry : schema.entrySet()) {
-                sb.append("\n  ").append(entry.getKey());
+                if (!first) sb.append(" | ");
+                first = false;
+                sb.append(entry.getKey());
                 ToolParam param = entry.getValue();
-                sb.append(" (").append(param.type());
-                sb.append(", ").append(param.required() ? "required" : "optional");
-                sb.append("): ").append(param.description());
+                if (param.required()) sb.append("*");
+                sb.append("(").append(param.type()).append("): ").append(param.description());
             }
         }
 

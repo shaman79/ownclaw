@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.*;
@@ -203,13 +204,27 @@ public class ThinkingEngine {
         ToolSelector.Selection selection = toolSelector.select(
                 context.originalMessage(), context.trajectory());
         sb.append("## Tools\n");
-        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-        sb.append(manifest).append("\n");
-        if (!selection.otherNames().isEmpty()) {
-            sb.append("\nAlso: ").append(String.join(", ", selection.otherNames())).append("\n");
-        }
-        if (manifest.isBlank()) {
-            sb.append("No tools yet — use skill_create.\n");
+        if (context.trajectory().isEmpty()) {
+            // Step 0: full manifest (first exposure — cached in prefix for later steps)
+            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+            sb.append(manifest).append("\n");
+            if (!selection.otherNames().isEmpty()) {
+                sb.append("\nAlso: ").append(String.join(", ", selection.otherNames())).append("\n");
+            }
+            if (manifest.isBlank()) {
+                sb.append("No tools yet — use skill_create.\n");
+            }
+        } else {
+            // Step 1+: names only (full descriptions cached in prior turns)
+            List<String> names = selection.detailed().stream()
+                    .sorted(Comparator.comparing(Tool::name))
+                    .map(Tool::name)
+                    .toList();
+            sb.append(String.join(", ", names));
+            if (!selection.otherNames().isEmpty()) {
+                sb.append(" | also: ").append(String.join(", ", selection.otherNames()));
+            }
+            sb.append("\n");
         }
 
         List<String> vaultKeys = context.credentialKeys();
@@ -265,11 +280,14 @@ public class ThinkingEngine {
 
         String output = turn.observation().output();
         if (output != null && !output.isBlank()) {
-            if (fullDetail || output.length() <= 500) {
+            if (fullDetail || output.length() <= 300) {
                 sb.append(output);
             } else {
-                sb.append(output, 0, 500)
-                        .append("... [").append(output.length()).append(" chars total]");
+                // Smart truncation: keep head + tail to preserve context from both ends
+                int half = 150;
+                sb.append(output, 0, half)
+                        .append("\n...[" ).append(output.length()).append(" chars, middle omitted]...\n")
+                        .append(output, output.length() - half, output.length());
             }
         }
         return sb.toString();
@@ -357,30 +375,17 @@ public class ThinkingEngine {
 
         // Behavioral guidelines + cost + self-improvement combined
         sb.append("## Rules\n");
-        sb.append("- No tools needed → respond directly.\n");
-        sb.append("- On failure: 2-3 alternative approaches before giving up.\n");
+        sb.append("- No tools needed → respond directly. Never fabricate outputs.\n");
+        sb.append("- On failure: diagnose WHY, then try fundamentally different approach. Never repeat failed actions.\n");
         sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
-        sb.append("- Minimize tool calls. Never fabricate outputs.\n");
-        sb.append("- Explore thoroughly before 'not found'. Verify results.\n");
-        sb.append("- Respond in user's language. Search/selectors in target content's language.\n");
-        sb.append("- 2+ sequential calls without judgment → ALWAYS delegate (free).\n");
-        sb.append("- After creating/fixing skill → delegate remaining batch execution.\n");
-        sb.append("- No suitable tool → create one (reusable, general-purpose).\n");
-        sb.append("- Poor results → read skill code (skill_manage read), overwrite fix.\n");
-        sb.append("- Multiple failures → reconsider approach entirely.\n");
-        sb.append("- Outputs: clean text only. No raw HTML/XML. Strip boilerplate.\n");
+        sb.append("- 2+ sequential calls → ALWAYS delegate (free). After creating/fixing skill → delegate batch.\n");
+        sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
+        sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");
+        sb.append("- Respond in user's language. Search/selectors in content's language.\n");
+        sb.append("- Outputs: clean text. Extract file content (PDF/DOCX/CSV), don't just report links.\n");
         sb.append("- Garbled text → encoding bug, fix the tool.\n");
-        sb.append("- Files (PDF/DOCX/CSV): extract content, don't just report links.\n");
-
-        sb.append("\n## Problem Solving\n");
-        sb.append("- THINK DEEPLY before each step. Understand WHY something failed before retrying.\n");
-        sb.append("- Stuck? Search the internet.\n");
-        sb.append("- Try fundamentally different approaches, not variations of the same idea.\n");
-        sb.append("- Blocked on one path? Pivot: different library, different API, different data source, manual parsing.\n");
-        sb.append("- Invest in diagnosis: read error messages carefully, check logs, test assumptions.\n");
-        sb.append("- A partial but USEFUL result beats an empty failure. Deliver what you can.\n");
-        sb.append("- Never waste steps repeating failed actions. Each step must make new progress.\n");
-        sb.append("- NEVER write multi-line Python/code via shell_exec heredocs or python3 -c. Escaping WILL break. Use skill_create instead.\n");
+        sb.append("- Partial USEFUL result beats empty failure. Each step must make new progress.\n");
+        sb.append("- NEVER write multi-line code via shell_exec/python3 -c. Use skill_create.\n");
 
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
