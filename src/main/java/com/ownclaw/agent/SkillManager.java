@@ -320,7 +320,11 @@ public class SkillManager {
 
     // ────────────────────── Helpers ──────────────────────
 
-    private String checkPythonSyntax(String code) {
+    /**
+     * Check Python code for syntax errors without writing to the skill directory.
+     * @return error message if syntax error found, null if code is valid.
+     */
+    String checkPythonSyntax(String code) {
         Path tempDir = null;
         try {
             tempDir = Files.createTempDirectory("ownclaw_syntax_");

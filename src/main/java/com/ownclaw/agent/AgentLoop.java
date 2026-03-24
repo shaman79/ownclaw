@@ -545,20 +545,21 @@ public class AgentLoop {
                         if (skillName != null && skillName.equals(prevName)) sameNameFails++;
                     }
                 }
-                if (sameNameFails >= 2) {
+                if (sameNameFails >= 3) {
                     String msg = "ERROR: Skill '" + skillName + "' has failed " + sameNameFails
-                            + " times with syntax errors. Do NOT try creating it again. "
-                            + "Use a different approach: break the problem into smaller skills, "
-                            + "use shell_exec directly, or simplify your requirements.";
+                            + " times. Do NOT try creating it again with the same approach. "
+                            + "Simplify the skill description, break into smaller sub-skills, "
+                            + "or use ask_user to get clarification on requirements.";
                     context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
                     context.markProgress();
                     log.warn("Task {} step {}: blocked repeated skill_create for '{}' ({} fails)",
                             context.taskId(), step + 1, skillName, sameNameFails);
                     continue;
                 }
-                if (totalSkillFails >= 3) {
+                if (totalSkillFails >= 5) {
                     String msg = "ERROR: " + totalSkillFails + " skill creation attempts have failed. "
-                            + "Stop creating skills. Use shell_exec or simpler existing tools instead.";
+                            + "Simplify your approach. Describe the exact behavior needed in "
+                            + "skill_create with a clear, specific description — the cloud LLM generates the code.";
                     context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
                     context.markProgress();
                     log.warn("Task {} step {}: blocked skill_create after {} total failures",
@@ -1415,9 +1416,19 @@ public class AgentLoop {
      */
     private Map<String, Object> generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
         LlmProvider cloud = llmRouter.cloud();
+        boolean usingLocalFallback = false;
+        LlmProvider codeGenProvider = cloud;
         if (!cloud.isAvailable()) {
-            log.error("Cloud provider unavailable — cannot generate skill code");
-            return null;
+            // Degraded fallback: attempt code generation with local LLM
+            LlmProvider local = llmRouter.local();
+            if (local.isAvailable()) {
+                log.warn("Cloud provider unavailable — falling back to local LLM for skill code generation (degraded quality)");
+                codeGenProvider = local;
+                usingLocalFallback = true;
+            } else {
+                log.error("Both cloud and local providers unavailable — cannot generate skill code");
+                return null;
+            }
         }
 
         String name = str(originalParams, "name");
@@ -1442,13 +1453,22 @@ public class AgentLoop {
                     name, lastError != null ? " (error found)" : " (no error in trajectory)");
         }
 
+        String providerLabel = usingLocalFallback ? "local (degraded)" : "cloud";
         statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
-                    oldCode != null ? "Fixing skill code · cloud" : "Generating skill code · cloud",
+                    oldCode != null ? "Fixing skill code · " + providerLabel : "Generating skill code · " + providerLabel,
                     tokenData(context));
         try {
             List<LlmMessage> messages = buildSkillCodePrompt(
                     name, description, parameters, requirements, originalParams, context,
                     oldCode, lastError);
+
+            // For local LLM fallback: add extra constraint to keep code simple
+            if (usingLocalFallback) {
+                messages.add(LlmMessage.user(
+                        "CRITICAL: You are a local model. Keep code SIMPLE. "
+                        + "Use only stdlib + one well-known library. Avoid complex logic. "
+                        + "Prefer straightforward imperative code over abstractions."));
+            }
 
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
@@ -1462,7 +1482,7 @@ public class AgentLoop {
                     "Generating code for '" + name + "'");
             LlmResponse response;
             try {
-                response = cloud.chat(messages, codeGenConfig);
+                response = codeGenProvider.chat(messages, codeGenConfig);
             } finally {
                 stopHeartbeat(heartbeat);
             }
@@ -1475,14 +1495,65 @@ public class AgentLoop {
             }
 
             // Track cloud tokens for skill code generation
-            context.addCloudTokens(response.totalTokens());
+            if (!usingLocalFallback) {
+                context.addCloudTokens(response.totalTokens());
+            }
             if (response.totalTokens() > 0) {
-                budgetTracker.recordUsage(context.userId(), cloud.name(),
+                budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
                         response.totalTokens(), 0.0);
             }
 
+            // --- Inner syntax-repair loop: fix syntax errors without burning outer agent steps ---
             if (cloudCode != null && !cloudCode.isBlank()) {
-                log.info("Cloud LLM generated {} chars of skill code for '{}' ({} tokens)",
+                String syntaxError = skillManager.checkPythonSyntax(cloudCode);
+                for (int repair = 0; repair < 2 && syntaxError != null; repair++) {
+                    log.warn("Skill '{}' syntax error (repair attempt {}/2): {}", name, repair + 1, syntaxError);
+                    statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                            "Repairing syntax error · " + providerLabel + " (attempt " + (repair + 1) + "/2)",
+                            tokenData(context));
+
+                    messages.add(LlmMessage.assistant(response.content()));
+                    messages.add(LlmMessage.user(
+                            "Syntax error in generated code:\n" + syntaxError
+                            + "\n\nFix the error and return the complete corrected code in a ```python fence."));
+
+                    ScheduledFuture<?> repairHeartbeat = startLlmHeartbeat(context.userId(),
+                            "Repairing code for '" + name + "'");
+                    LlmResponse repairResponse;
+                    try {
+                        repairResponse = codeGenProvider.chat(messages, codeGenConfig);
+                    } finally {
+                        stopHeartbeat(repairHeartbeat);
+                    }
+
+                    if (!usingLocalFallback) {
+                        context.addCloudTokens(repairResponse.totalTokens());
+                    }
+                    if (repairResponse.totalTokens() > 0) {
+                        budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
+                                repairResponse.totalTokens(), 0.0);
+                    }
+
+                    String repairedCode = extractPythonCode(repairResponse.content());
+                    if (repairedCode != null && !repairedCode.isBlank()) {
+                        cloudCode = repairedCode;
+                        response = repairResponse;
+                        syntaxError = skillManager.checkPythonSyntax(cloudCode);
+                    } else {
+                        log.warn("Repair attempt {}/2 returned no extractable code", repair + 1);
+                        break;
+                    }
+                }
+                if (syntaxError != null) {
+                    log.error("Skill '{}' still has syntax errors after repair attempts: {}", name, syntaxError);
+                    // Still return the code — let SkillManager.createSkill() report the error
+                    // so the outer agent loop can track the failure properly
+                }
+            }
+
+            if (cloudCode != null && !cloudCode.isBlank()) {
+                log.info("{} generated {} chars of skill code for '{}' ({} tokens)",
+                        usingLocalFallback ? "Local LLM (fallback)" : "Cloud LLM",
                         cloudCode.length(), name, response.totalTokens());
 
                 // Build enhanced params with cloud-generated code
@@ -1528,6 +1599,8 @@ public class AgentLoop {
         sys.append("Expert Python developer. Generate production-quality skill code.\n\n");
         sys.append("CRITICAL: Mentally trace your code before outputting. Verify imports exist, types match, edge cases handled. Rework burns tokens — get it right first try.\n\n");
         sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
+        sys.append("IMPORTANT: ALWAYS use `def run(params):` signature — never individual keyword args like `def run(url=None)`. Access parameters via `params.get('key')`.\n");
+        sys.append("Example:\n```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text[:2000]}\n```\n");
         sys.append("Environment: local, full system access. Credentials as env vars. system_packages on PATH. Fix HTTP encoding.\n");
         sys.append("Output: ```python fence + ```requirements fence (correct pip names, empty if none).\n\n");
 
