@@ -423,6 +423,9 @@ public class AgentLoop {
                     action.tool() + " (" + String.format("%,d", thinkResult.totalTokens()) + " tok)",
                     tokenData(context));
 
+            // Emit thinking detail: user prompt (skip system — it repeats), reasoning, chosen tool
+            emitThinkDetail(context.userId(), thinkResult, step + 1, providerLabel);
+
             // Emit debug info when debug mode is active
             if (debug) {
                 emitDebugPrompt(context.userId(), thinkResult, step + 1);
@@ -772,6 +775,7 @@ public class AgentLoop {
             }
 
             // === ACT ===
+            emitActDetail(context.userId(), action, step + 1);
             statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
                     "Running " + action.tool() + "...");
             ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context.userId(),
@@ -808,6 +812,9 @@ public class AgentLoop {
             // Track tool usage for skill curation analytics
             curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
                     observation.success(), observation.durationMs());
+
+            // Emit observation detail with output preview
+            emitObserveDetail(context.userId(), action, observation, step + 1, context);
 
             if (observation.success()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
@@ -1764,6 +1771,83 @@ public class AgentLoop {
     private String str(Map<String, Object> m, String key) {
         Object v = m.get(key);
         return v != null ? v.toString() : null;
+    }
+
+    // ── Detail emission helpers (always-on activity panel enrichment) ──
+
+    /** Emit thinking step detail: user prompt messages (skip system), reasoning, chosen action. */
+    private void emitThinkDetail(String userId, ThinkResult result, int step, String provider) {
+        var detail = new LinkedHashMap<String, Object>();
+        detail.put("category", "think");
+        detail.put("step", step);
+        detail.put("provider", provider);
+        detail.put("tokens", result.totalTokens());
+
+        // Collect user/assistant prompt messages (skip system — it repeats every step)
+        var promptParts = new ArrayList<String>();
+        for (var msg : result.promptMessages()) {
+            if (msg.role() == LlmMessage.Role.SYSTEM) continue;
+            promptParts.add("[" + msg.role().apiValue() + "] " + truncate(msg.content(), 800));
+        }
+        detail.put("prompt", String.join("\n---\n", promptParts));
+
+        // LLM decision
+        detail.put("tool", result.action().tool());
+        detail.put("reasoning", truncate(result.action().reasoning(), 500));
+
+        // Include params preview for non-respond actions
+        if (!result.action().isResponse() && result.action().params() != null) {
+            detail.put("params", truncate(result.action().params().toString(), 300));
+        }
+
+        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
+                "💭 Think · Step " + step + " → " + result.action().tool(), detail));
+    }
+
+    /** Emit tool execution detail: tool name + input parameters. */
+    private void emitActDetail(String userId, AgentAction action, int step) {
+        var detail = new LinkedHashMap<String, Object>();
+        detail.put("category", "act");
+        detail.put("step", step);
+        detail.put("tool", action.tool());
+        if (action.params() != null && !action.params().isEmpty()) {
+            // Show param keys + truncated values
+            var paramPreview = new LinkedHashMap<String, String>();
+            for (var entry : action.params().entrySet()) {
+                String val = entry.getValue() != null ? entry.getValue().toString() : "null";
+                paramPreview.put(entry.getKey(), truncate(val, 200));
+            }
+            detail.put("params", paramPreview);
+        }
+        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
+                "⚡ Act · " + action.tool(), detail));
+    }
+
+    /** Emit observation detail: success/fail status, duration, output preview. */
+    private void emitObserveDetail(String userId, AgentAction action,
+                                    AgentObservation obs, int step, AgentContext context) {
+        var detail = new LinkedHashMap<String, Object>();
+        detail.put("category", "observe");
+        detail.put("step", step);
+        detail.put("tool", action.tool());
+        detail.put("success", obs.success());
+        detail.put("durationMs", obs.durationMs());
+        detail.put("output", truncate(obs.output(), 1000));
+
+        // Stats snapshot
+        int totalSteps = context.trajectory().size();
+        int successes = (int) context.trajectory().turns().stream()
+                .filter(t -> t.observation().success()).count();
+        detail.put("totalSteps", totalSteps);
+        detail.put("successCount", successes);
+        detail.put("cloudTokens", context.cloudTokens());
+        detail.put("localTokens", context.localTokens());
+        detail.put("elapsedMs", context.elapsedMs());
+
+        String status = obs.success() ? "✓" : "✗";
+        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
+                "👁 Observe · " + action.tool() + " " + status + " " + formatDurationMs(obs.durationMs()),
+                detail));
     }
 
     // ── Debug helpers ──
