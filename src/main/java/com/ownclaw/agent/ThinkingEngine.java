@@ -340,7 +340,8 @@ public class ThinkingEngine {
         sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");
         sb.append("  requires_network | has_side_effects | timeout: max secs (default 30)\n");
         sb.append("  credentials: comma-separated vault keys, auto-injected as env vars. NEVER pass values directly.\n");
-        sb.append("  system_packages: space-separated apt pkg names → auto-installed in a container. Use for ANY needed OS binary or library.\n\n");
+        sb.append("  system_packages: space-separated apt pkg names \u2192 auto-installed in a container. Use for ANY needed OS binary or library.\n");
+        sb.append("  container_image: Docker base image. Optional \u2014 system picks a sensible default and auto-recovers if unavailable.\n\n");
 
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");

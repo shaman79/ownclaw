@@ -186,18 +186,38 @@ public class ContainerSandbox {
     // ────────────────────── Image Management ──────────────────────
 
     /**
+     * Ordered fallback chain of Python base images.
+     * If the preferred image (from SKILL.yaml or config) fails to build or validate,
+     * we try the next one. This makes the system resilient to image unavailability.
+     */
+    private static final List<String> PYTHON_IMAGE_FALLBACKS = List.of(
+            "docker.io/library/python:3.11-slim",
+            "docker.io/library/python:3.12-slim",
+            "docker.io/library/python:3-slim",
+            "docker.io/library/python:3.11",
+            "docker.io/library/python:3"
+    );
+
+    /**
      * Ensure a container image exists for the given system packages and pip requirements.
      * Builds the image if not already built. Uses content-based hashing for cache keys.
+     * Tries the preferred image first, then config default, then fallback images.
      *
-     * @param systemPackages  system packages to install (e.g. ["nmap", "net-tools"])
-     * @param pipRequirements pip requirements content (from requirements.txt), or null
-     * @param skillDir        skill directory (for copying requirements.txt into build context)
+     * @param systemPackages   system packages to install (e.g. ["nmap", "net-tools"])
+     * @param pipRequirements  pip requirements content (from requirements.txt), or null
+     * @param skillDir         skill directory (for copying requirements.txt into build context)
+     * @param preferredImage   preferred base image from SKILL.yaml (e.g. "python:3.11-slim"), or null
      * @return the image tag (e.g. "ownclaw-skill-a1b2c3d4")
      */
-    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir)
+    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
+                              String preferredImage)
             throws IOException, InterruptedException {
 
-        String imageTag = computeImageTag(systemPackages, pipRequirements);
+        // Build ordered list of base images to try: preferred first, then config default, then fallbacks
+        List<String> candidates = buildImageCandidateList(preferredImage);
+        String firstCandidate = candidates.get(0);
+
+        String imageTag = computeImageTag(firstCandidate, systemPackages, pipRequirements);
 
         if (builtImages.contains(imageTag)) {
             return imageTag;
@@ -210,10 +230,49 @@ public class ContainerSandbox {
             return imageTag;
         }
 
-        // Build the image
-        buildImage(imageTag, systemPackages, pipRequirements, skillDir);
-        builtImages.add(imageTag);
-        return imageTag;
+        // Try building with each candidate base image in order
+        IOException lastError = null;
+        for (String baseImage : candidates) {
+            String candidateTag = computeImageTag(baseImage, systemPackages, pipRequirements);
+            // Maybe a fallback image was already built previously
+            if (!candidateTag.equals(imageTag)
+                    && (builtImages.contains(candidateTag) || imageExists(candidateTag))) {
+                builtImages.add(candidateTag);
+                log.info("Using previously built fallback image '{}'", candidateTag);
+                return candidateTag;
+            }
+            try {
+                buildImage(candidateTag, baseImage, systemPackages, pipRequirements, skillDir);
+                builtImages.add(candidateTag);
+                return candidateTag;
+            } catch (IOException e) {
+                log.warn("Base image '{}' failed: {}. Trying next candidate...",
+                        baseImage, truncate(e.getMessage(), 200));
+                lastError = e;
+            }
+        }
+        throw new IOException("All base image candidates failed. Last error: "
+                + (lastError != null ? lastError.getMessage() : "unknown"));
+    }
+
+    /**
+     * Build the ordered list of base images to try.
+     * Preferred image goes first, then config default, then hardcoded fallbacks.
+     * All entries are qualified and deduplicated.
+     */
+    private List<String> buildImageCandidateList(String preferredImage) {
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        // 1. Skill-specified preferred image (may be null if invalid)
+        if (preferredImage != null && !preferredImage.isBlank()) {
+            String qualified = qualifyImageName(preferredImage);
+            if (qualified != null) seen.add(qualified);
+        }
+        // 2. Config default (may be null if invalid)
+        String configDefault = qualifyImageName(config.getSandbox().getContainerBaseImage());
+        if (configDefault != null) seen.add(configDefault);
+        // 3. Hardcoded fallbacks (always valid)
+        seen.addAll(PYTHON_IMAGE_FALLBACKS);
+        return new ArrayList<>(seen);
     }
 
     private boolean imageExists(String imageTag) {
@@ -231,12 +290,11 @@ public class ContainerSandbox {
     }
 
     /**
-     * Build a container image with the specified system packages and pip requirements.
+     * Build a container image with the specified base image, system packages, and pip requirements.
      */
-    private void buildImage(String imageTag, List<String> systemPackages, String pipRequirements,
-                            Path skillDir) throws IOException, InterruptedException {
-
-        String baseImage = config.getSandbox().getContainerBaseImage();
+    private void buildImage(String imageTag, String baseImage, List<String> systemPackages,
+                            String pipRequirements, Path skillDir)
+            throws IOException, InterruptedException {
 
         // Create a temporary build context directory
         Path buildCtx = Files.createTempDirectory("ownclaw-build-");
@@ -307,6 +365,16 @@ public class ContainerSandbox {
             }
 
             log.info("Successfully built container image '{}' with {}", imageTag, containerRuntime);
+
+            // Validate the built image: verify python3 is actually usable.
+            // This catches cases where the base image was pulled from a wrong registry
+            // (Podman doesn't default to Docker Hub) or layers are broken.
+            if (!validateImage(imageTag)) {
+                builtImages.remove(imageTag);
+                throw new IOException("Container image '" + imageTag + "' built but python3 is not "
+                        + "usable inside it. The base image may have been pulled from a wrong registry. "
+                        + "Check that '" + baseImage + "' is reachable.");
+            }
 
         } finally {
             // Clean up build context
@@ -587,15 +655,67 @@ public class ContainerSandbox {
 
     // ────────────────────── Helpers ──────────────────────
 
+    /** Regex for valid Docker image names: registry/org/name:tag or name:tag@digest */
+    private static final java.util.regex.Pattern VALID_IMAGE_NAME =
+            java.util.regex.Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$");
+
+    /**
+     * Qualify a Docker image name for Podman compatibility.
+     * Podman doesn't default to Docker Hub — unqualified names like "python:3.11-slim"
+     * may resolve to a wrong registry or fail entirely. Prefix with "docker.io/library/"
+     * for official images to ensure correct resolution on both Docker and Podman.
+     *
+     * Also validates the image name to prevent Dockerfile injection via newlines or
+     * other special characters (the value may originate from LLM output).
+     */
+    static String qualifyImageName(String imageName) {
+        if (imageName == null || imageName.isBlank()) return null;
+        String trimmed = imageName.trim();
+        if (!VALID_IMAGE_NAME.matcher(trimmed).matches()) {
+            log.warn("Rejecting invalid container image name: '{}'", truncate(trimmed, 100));
+            return null;
+        }
+        // Already qualified (contains a slash indicating registry/org)
+        if (trimmed.contains("/")) return trimmed;
+        // Unqualified official image (e.g. "python:3.11-slim") → "docker.io/library/python:3.11-slim"
+        return "docker.io/library/" + trimmed;
+    }
+
+    /**
+     * Validate that a built container image actually has a working python3.
+     * Catches broken images early (wrong registry pull, missing layers, etc.)
+     */
+    private boolean validateImage(String imageTag) {
+        try {
+            Process p = new ProcessBuilder(containerRuntime, "run", "--rm", imageTag,
+                    "python3", "--version")
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
+            boolean finished = p.waitFor(30, TimeUnit.SECONDS);
+            if (!finished) { p.destroyForcibly(); return false; }
+            if (p.exitValue() != 0) {
+                log.warn("Image validation failed for '{}': exit={}, output={}",
+                        imageTag, p.exitValue(), truncate(output, 500));
+                return false;
+            }
+            log.debug("Image validation passed for '{}': {}", imageTag, output.strip());
+            return true;
+        } catch (Exception e) {
+            log.warn("Image validation error for '{}': {}", imageTag, e.getMessage());
+            return false;
+        }
+    }
+
     /**
      * Compute a deterministic image tag based on the content hash of
-     * system packages + pip requirements.
+     * base image + system packages + pip requirements.
      */
-    private String computeImageTag(List<String> systemPackages, String pipRequirements) {
+    private String computeImageTag(String baseImage, List<String> systemPackages, String pipRequirements) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            // Include base image in hash so changing it invalidates cache
-            md.update(config.getSandbox().getContainerBaseImage().getBytes(StandardCharsets.UTF_8));
+            // Include the base image in hash so different base images produce different tags.
+            md.update(baseImage.getBytes(StandardCharsets.UTF_8));
             md.update((byte) 0);
             if (systemPackages != null) {
                 List<String> sorted = new ArrayList<>(systemPackages);

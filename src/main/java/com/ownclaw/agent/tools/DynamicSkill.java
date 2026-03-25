@@ -79,13 +79,15 @@ public class DynamicSkill implements Tool {
     private final List<String> requiredCredentials;
     private final CredentialVault credentialVault;
     private final List<String> systemPackages;
+    private final String containerImage;
     private final ContainerSandbox containerSandbox;
 
     public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
                         Path skillDir, boolean requiresNetwork, boolean hasSideEffects,
                         int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
                         List<String> requiredCredentials, CredentialVault credentialVault,
-                        List<String> systemPackages, ContainerSandbox containerSandbox) {
+                        List<String> systemPackages, String containerImage,
+                        ContainerSandbox containerSandbox) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
@@ -98,6 +100,7 @@ public class DynamicSkill implements Tool {
         this.requiredCredentials = requiredCredentials != null ? requiredCredentials : List.of();
         this.credentialVault = credentialVault;
         this.systemPackages = systemPackages != null ? systemPackages : List.of();
+        this.containerImage = containerImage;
         this.containerSandbox = containerSandbox;
     }
 
@@ -114,6 +117,9 @@ public class DynamicSkill implements Tool {
 
     /** System packages required by this skill (e.g. nmap, net-tools). */
     public List<String> systemPackages() { return systemPackages; }
+
+    /** Preferred container base image (e.g. "python:3.11-slim"), or null for system default. */
+    public String containerImage() { return containerImage; }
 
     /**
      * Read the requirements.txt file content, or null if not present.
@@ -296,7 +302,7 @@ public class DynamicSkill implements Tool {
             if (!systemPackages.isEmpty() && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
-                containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage);
                 usedContainer = true;
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
@@ -388,7 +394,7 @@ public class DynamicSkill implements Tool {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
                 String pipReqs = readRequirements();
-                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir);
+                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec);

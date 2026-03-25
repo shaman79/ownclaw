@@ -128,6 +128,7 @@ public class SkillManager {
         int timeout = toInt(params.get("timeout"), 30);
         String credentials = str(params, "credentials");
         String systemPackagesStr = str(params, "system_packages");
+        String containerImage = str(params, "container_image");
 
         // --- Write to disk & register ---
 
@@ -137,7 +138,7 @@ public class SkillManager {
 
             Files.writeString(skillDir.resolve("SKILL.yaml"),
                     buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
-                            timeout, credentials, systemPackagesStr),
+                            timeout, credentials, systemPackagesStr, containerImage),
                     StandardCharsets.UTF_8);
             Files.writeString(skillDir.resolve("skill.py"), code, StandardCharsets.UTF_8);
             if (requirements != null && !requirements.isBlank()) {
@@ -364,7 +365,7 @@ public class SkillManager {
 
     private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
-                                  String credentials, String systemPackages)
+                                  String credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
@@ -399,6 +400,9 @@ public class SkillManager {
             if (!pkgList.isEmpty()) {
                 yaml.put("system_packages", pkgList);
             }
+        }
+        if (containerImage != null && !containerImage.isBlank()) {
+            yaml.put("container_image", containerImage.trim());
         }
         return yamlMapper.writeValueAsString(yaml);
     }

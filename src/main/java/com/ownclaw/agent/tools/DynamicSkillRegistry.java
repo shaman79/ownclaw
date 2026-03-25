@@ -128,10 +128,11 @@ public class DynamicSkillRegistry {
         int timeout = yaml.containsKey("timeout") ? toInt(yaml.get("timeout"), 30) : 30;
         List<String> credentials = parseCredentials(yaml);
         List<String> systemPackages = parseStringList(yaml, "system_packages");
+        String containerImage = getString(yaml, "container_image");
 
         return new DynamicSkill(name, description, parameters, skillDir,
                 requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
-                credentials, credentialVault, systemPackages, containerSandbox);
+                credentials, credentialVault, systemPackages, containerImage, containerSandbox);
     }
 
     /**
