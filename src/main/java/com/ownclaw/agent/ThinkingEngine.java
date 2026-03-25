@@ -320,8 +320,8 @@ public class ThinkingEngine {
         // Identity
         sb.append("## Identity\n");
         sb.append("Personal agent running locally. Full system access via Python skills.\n");
-        sb.append("system_packages → container with auto-installed OS packages.\n");
-        sb.append("NEVER refuse. Use skill_create for any missing capability.\n\n");
+        sb.append("ANY system dependency is installable — use system_packages in skill_create.\n");
+        sb.append("NEVER refuse or claim a package/tool is unavailable. Use skill_create for any missing capability.\n\n");
 
         // NOTE: CapabilityResolver hints are handled deterministically in AgentLoop.runLoop()
         // at step 0 — the hint bypasses the ThinkingEngine entirely and synthesizes the
@@ -340,7 +340,7 @@ public class ThinkingEngine {
         sb.append("  parameters*: JSON {key: {type, description, required}} | requirements: pip pkgs (one/line)\n");
         sb.append("  requires_network | has_side_effects | timeout: max secs (default 30)\n");
         sb.append("  credentials: comma-separated vault keys, auto-injected as env vars. NEVER pass values directly.\n");
-        sb.append("  system_packages: space-separated apt pkgs → triggers container execution.\n\n");
+        sb.append("  system_packages: space-separated apt pkg names → auto-installed in a container. Use for ANY needed OS binary or library.\n\n");
 
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check|store, [key], [value])\n");
@@ -386,6 +386,7 @@ public class ThinkingEngine {
         sb.append("- Garbled text → encoding bug, fix the tool.\n");
         sb.append("- Partial USEFUL result beats empty failure. Each step must make new progress.\n");
         sb.append("- NEVER write multi-line code via shell_exec/python3 -c. Use skill_create.\n");
+        sb.append("- Need an OS binary or system library? Add it to system_packages in skill_create. NEVER say a package is unavailable.\n");
 
         // Anthropic: return static-only system prompt. Dynamic content (datetime,
         // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
@@ -502,7 +503,8 @@ public class ThinkingEngine {
         sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — FREE local LLM. MUST USE for 2+ sequential calls.\n\n");
 
         // Problem-solving nudge (compact version of the full prompt's ## Problem Solving)
-        sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n\n");
+        sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n");
+        sb.append("Need OS tools/binaries? system_packages in skill_create auto-installs any apt package in a container.\n\n");
 
         // Credential reminder in compact prompt
         List<String> vaultKeys = context.credentialKeys();
