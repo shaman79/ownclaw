@@ -302,7 +302,8 @@ public class DynamicSkill implements Tool {
             if (!systemPackages.isEmpty() && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
-                containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage);
+                containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
+                        context.progressCallback());
                 usedContainer = true;
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
@@ -394,7 +395,7 @@ public class DynamicSkill implements Tool {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
                 String pipReqs = readRequirements();
-                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage);
+                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage, null);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec);

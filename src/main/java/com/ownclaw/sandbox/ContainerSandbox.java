@@ -212,6 +212,15 @@ public class ContainerSandbox {
     public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
                               String preferredImage)
             throws IOException, InterruptedException {
+        return ensureImage(systemPackages, pipRequirements, skillDir, preferredImage, null);
+    }
+
+    /**
+     * Ensure a container image exists, streaming build progress through the callback.
+     */
+    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
+                              String preferredImage, SandboxManager.ProgressCallback progressCallback)
+            throws IOException, InterruptedException {
 
         // Build ordered list of base images to try: preferred first, then config default, then fallbacks
         List<String> candidates = buildImageCandidateList(preferredImage);
@@ -232,7 +241,9 @@ public class ContainerSandbox {
 
         // Try building with each candidate base image in order
         IOException lastError = null;
+        int candidateIndex = 0;
         for (String baseImage : candidates) {
+            candidateIndex++;
             String candidateTag = computeImageTag(baseImage, systemPackages, pipRequirements);
             // Maybe a fallback image was already built previously
             if (!candidateTag.equals(imageTag)
@@ -242,7 +253,14 @@ public class ContainerSandbox {
                 return candidateTag;
             }
             try {
-                buildImage(candidateTag, baseImage, systemPackages, pipRequirements, skillDir);
+                log.info("Building image attempt {}/{} with base '{}'",
+                        candidateIndex, candidates.size(), baseImage);
+                if (progressCallback != null) {
+                    progressCallback.onProgress(
+                            "Building container image (" + candidateIndex + "/" + candidates.size()
+                            + "): " + baseImage, null);
+                }
+                buildImage(candidateTag, baseImage, systemPackages, pipRequirements, skillDir, progressCallback);
                 builtImages.add(candidateTag);
                 return candidateTag;
             } catch (IOException e) {
@@ -293,7 +311,8 @@ public class ContainerSandbox {
      * Build a container image with the specified base image, system packages, and pip requirements.
      */
     private void buildImage(String imageTag, String baseImage, List<String> systemPackages,
-                            String pipRequirements, Path skillDir)
+                            String pipRequirements, Path skillDir,
+                            SandboxManager.ProgressCallback progressCallback)
             throws IOException, InterruptedException {
 
         // Create a temporary build context directory
@@ -344,13 +363,13 @@ public class ContainerSandbox {
 
             // Try primary runtime first, fall back to secondary if build fails
             String buildRuntime = containerRuntime;
-            String buildError = tryBuildImage(buildRuntime, imageTag, buildCtx);
+            String buildError = tryBuildImage(buildRuntime, imageTag, buildCtx, progressCallback);
 
             if (buildError != null && fallbackRuntime != null) {
                 log.warn("Build failed with '{}': {}. Trying fallback runtime '{}'...",
                         buildRuntime, truncate(buildError, 200), fallbackRuntime);
                 buildRuntime = fallbackRuntime;
-                String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx);
+                String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx, progressCallback);
                 if (fallbackError != null) {
                     throw new IOException("Container image build failed with both runtimes.\n"
                             + containerRuntime + ": " + truncate(buildError, 1000) + "\n"
@@ -390,7 +409,8 @@ public class ContainerSandbox {
      *
      * @return null on success, or the error output on failure
      */
-    private String tryBuildImage(String runtime, String imageTag, Path buildCtx)
+    private String tryBuildImage(String runtime, String imageTag, Path buildCtx,
+                                   SandboxManager.ProgressCallback progressCallback)
             throws InterruptedException {
         try {
             List<String> cmd = new ArrayList<>();
@@ -415,19 +435,38 @@ public class ContainerSandbox {
                     .redirectErrorStream(true)
                     .start();
 
-            // Stall detection for builds: no hard wall-clock timeout.
-            // As long as the build produces output (downloading packages, compiling, etc.)
-            // it's allowed to continue. Killed if no output for 5 minutes.
+            // Stall detection only — no hard wall-clock cap.
+            // As long as the build produces output (layer downloads, package installs)
+            // it's allowed to continue. The user sees real-time progress via WebSocket.
             AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
-            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(p.getInputStream(), lastBuildActivity));
+
+            // Read output line-by-line to stream build progress to the user.
+            // Also feeds lastBuildActivity for stall detection.
+            StringBuilder outputBuf = new StringBuilder();
+            CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
+                try (var reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        lastBuildActivity.set(System.currentTimeMillis());
+                        outputBuf.append(line).append('\n');
+                        if (progressCallback != null) {
+                            // Summarize the line for the UI — strip ANSI codes and truncate
+                            String clean = line.replaceAll("\\x1B\\[[0-9;]*m", "").trim();
+                            if (!clean.isEmpty()) {
+                                progressCallback.onProgress(
+                                        "\uD83D\uDCE6 " + truncate(clean, 120), null);
+                            }
+                        }
+                    }
+                } catch (IOException ignored) {}
+                return outputBuf.toString();
+            });
 
             int buildStallTimeout = config.getSandbox().getStallTimeout();
             boolean finished = waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
 
             if (!finished) {
-                // Capture stall duration BEFORE killing — drainStreamWithActivity updates
-                // lastBuildActivity on each chunk, so joining after kill gives "0s".
                 long stallSec = (System.currentTimeMillis() - lastBuildActivity.get()) / 1000;
                 p.destroyForcibly();
                 try { p.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -435,7 +474,7 @@ public class ContainerSandbox {
                 return "Build stalled (no output for " + stallSec + "s)";
             }
 
-            String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
+            String output = outputFuture.join();
 
             if (p.exitValue() != 0) {
                 return "exit " + p.exitValue() + ": " + output;
@@ -691,9 +730,19 @@ public class ContainerSandbox {
                     "python3", "--version")
                     .redirectErrorStream(true)
                     .start();
-            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
+            // Drain async so the 30s waitFor timeout is actually reachable.
+            // Previous version drained synchronously (blocking until EOF) which
+            // made the timeout dead code — a hanging container blocked forever.
+            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
+                    () -> drainStream(p.getInputStream()));
             boolean finished = p.waitFor(30, TimeUnit.SECONDS);
-            if (!finished) { p.destroyForcibly(); return false; }
+            if (!finished) {
+                p.destroyForcibly();
+                outputFuture.cancel(true);
+                log.warn("Image validation timed out for '{}'", imageTag);
+                return false;
+            }
+            String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
             if (p.exitValue() != 0) {
                 log.warn("Image validation failed for '{}': exit={}, output={}",
                         imageTag, p.exitValue(), truncate(output, 500));
