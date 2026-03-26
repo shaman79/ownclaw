@@ -1,11 +1,15 @@
 package com.ownclaw.conversation;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Manages chat sessions and message persistence.
@@ -15,8 +19,16 @@ import java.util.UUID;
 @Service
 public class ConversationService {
 
+    private static final Logger log = LoggerFactory.getLogger(ConversationService.class);
+
     private final JdbcTemplate jdbc;
     private final ConversationCompressor compressor;
+    private final ExecutorService compressionExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "conversation-compressor");
+                t.setDaemon(true);
+                return t;
+            });
 
     public ConversationService(JdbcTemplate jdbc, ConversationCompressor compressor) {
         this.jdbc = jdbc;
@@ -41,8 +53,16 @@ public class ConversationService {
             WHERE id = ?
             """, role, content, sessionId);
 
-        // Trigger compression check asynchronously (non-blocking, errors non-fatal)
-        compressor.compressIfNeeded(userId, sessionId);
+        // Trigger compression check on a background thread so it never blocks
+        // the caller (web thread or agent loop). The compressor may call the LLM
+        // which can take minutes if Ollama is busy.
+        compressionExecutor.execute(() -> {
+            try {
+                compressor.compressIfNeeded(userId, sessionId);
+            } catch (Exception e) {
+                log.warn("Background compression failed (non-fatal): {}", e.getMessage());
+            }
+        });
     }
 
     /**

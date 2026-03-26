@@ -6,7 +6,13 @@ spring:
     url: jdbc:sqlite:${ownclaw.database.path:./data/ownclaw.db}
     driver-class-name: org.sqlite.JDBC
     hikari:
-      maximum-pool-size: 1  # SQLite is single-writer
+      maximum-pool-size: 4  # WAL mode allows concurrent readers + 1 writer
+      connection-init-sql: |
+        PRAGMA journal_mode=WAL;
+        PRAGMA busy_timeout=5000;
+        PRAGMA synchronous=NORMAL;
+        PRAGMA cache_size=-8000;
+        PRAGMA foreign_keys=ON;
 
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.yaml

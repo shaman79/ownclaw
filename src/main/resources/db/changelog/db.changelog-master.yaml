@@ -32,3 +32,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/011-scheduled-task-runs.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/012-performance-indexes.sql
+      relativeToChangelogFile: false
