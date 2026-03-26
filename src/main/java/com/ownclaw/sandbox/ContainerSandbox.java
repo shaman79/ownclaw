@@ -422,7 +422,7 @@ public class ContainerSandbox {
             CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
                     () -> drainStreamWithActivity(p.getInputStream(), lastBuildActivity));
 
-            int buildStallTimeout = config.getTasks().getStallTimeout();
+            int buildStallTimeout = config.getSandbox().getStallTimeout();
             boolean finished = waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
 
             if (!finished) {
