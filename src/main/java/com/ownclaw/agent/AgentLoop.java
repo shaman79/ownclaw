@@ -367,7 +367,7 @@ public class AgentLoop {
                     AgentObservation obs = ok
                             ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                             : AgentObservation.failure(action.tool(), result, durationMs);
-                    context.trajectory().record(action, obs);
+                    recordAndEmitObservation(context, action, obs, step + 1);
                     context.markProgress();
                     if (debug) {
                         emitDebug(context.userId(),
@@ -376,9 +376,9 @@ public class AgentLoop {
                                         + truncate(result, 2000));
                     }
                 } else {
-                    context.trajectory().record(action,
-                            AgentObservation.failure(action.tool(),
-                                    "ERROR: Cloud LLM unavailable — cannot generate skill code", 0));
+                    AgentObservation cloudFailObs = AgentObservation.failure(action.tool(),
+                                    "ERROR: Cloud LLM unavailable — cannot generate skill code", 0);
+                    recordAndEmitObservation(context, action, cloudFailObs, step + 1);
                     context.markProgress();
                 }
 
@@ -494,7 +494,7 @@ public class AgentLoop {
 
                         AgentObservation failedThink = AgentObservation.failure(
                                 "_thinking", feedback.toString(), 0);
-                        context.trajectory().record(action, failedThink);
+                        recordAndEmitObservation(context, action, failedThink, step + 1);
                         context.markProgress(); // LLM produced output (even if malformed)
                         continue;
                     }
@@ -553,7 +553,8 @@ public class AgentLoop {
                             + " times. Do NOT try creating it again with the same approach. "
                             + "Simplify the skill description, break into smaller sub-skills, "
                             + "or use ask_user to get clarification on requirements.";
-                    context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
+                    recordAndEmitObservation(context, action,
+                            AgentObservation.failure(action.tool(), msg, 0), step + 1);
                     context.markProgress();
                     log.warn("Task {} step {}: blocked repeated skill_create for '{}' ({} fails)",
                             context.taskId(), step + 1, skillName, sameNameFails);
@@ -563,7 +564,8 @@ public class AgentLoop {
                     String msg = "ERROR: " + totalSkillFails + " skill creation attempts have failed. "
                             + "Simplify your approach. Describe the exact behavior needed in "
                             + "skill_create with a clear, specific description — the cloud LLM generates the code.";
-                    context.trajectory().record(action, AgentObservation.failure(action.tool(), msg, 0));
+                    recordAndEmitObservation(context, action,
+                            AgentObservation.failure(action.tool(), msg, 0), step + 1);
                     context.markProgress();
                     log.warn("Task {} step {}: blocked skill_create after {} total failures",
                             context.taskId(), step + 1, totalSkillFails);
@@ -578,7 +580,8 @@ public class AgentLoop {
                 if (enhancedParams == null) {
                     String errMsg = "ERROR: Cloud LLM unavailable — cannot generate skill code. " +
                             "Skill creation requires the cloud provider.";
-                    context.trajectory().record(action, AgentObservation.failure(action.tool(), errMsg, 0));
+                    recordAndEmitObservation(context, action,
+                            AgentObservation.failure(action.tool(), errMsg, 0), step + 1);
                     context.markProgress();
                     if (debug) emitDebug(context.userId(), "SKILL_CREATE FAILED: cloud unavailable");
                     continue;
@@ -591,7 +594,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
@@ -612,7 +615,7 @@ public class AgentLoop {
                     if (debug) emitDebug(context.userId(), "CRITIC BLOCKED skill_manage: " + smVerdict.blockReason());
                     AgentObservation blockObs = AgentObservation.failure(
                             action.tool(), "BLOCKED: " + smVerdict.blockReason(), 0);
-                    context.trajectory().record(action, blockObs);
+                    recordAndEmitObservation(context, action, blockObs, step + 1);
                     context.markProgress();
                     continue;
                 }
@@ -631,7 +634,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
@@ -652,7 +655,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
@@ -673,7 +676,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
 
@@ -704,7 +707,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
@@ -723,7 +726,7 @@ public class AgentLoop {
                 if (plan.goal().isBlank()) {
                     AgentObservation obs = AgentObservation.failure(action.tool(),
                             "ERROR: 'goal' parameter is required for delegate action.", 0);
-                    context.trajectory().record(action, obs);
+                    recordAndEmitObservation(context, action, obs, step + 1);
                     context.markProgress();
                     continue;
                 }
@@ -738,7 +741,7 @@ public class AgentLoop {
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
                         : AgentObservation.failure(action.tool(), result, durationMs);
-                context.trajectory().record(action, obs);
+                recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
@@ -763,7 +766,7 @@ public class AgentLoop {
                         "BLOCKED: " + verdict.blockReason(),
                         0
                 );
-                context.trajectory().record(action, blockObs);
+                recordAndEmitObservation(context, action, blockObs, step + 1);
                 context.markProgress();
                 continue;
             }
@@ -797,7 +800,7 @@ public class AgentLoop {
             }
 
             // === OBSERVE ===
-            context.trajectory().record(action, observation);
+            recordAndEmitObservation(context, action, observation, step + 1);
             context.markProgress(); // tool completed — task is alive
             consecutiveFallbacks = 0; // Reset on successful tool execution
 
@@ -812,9 +815,6 @@ public class AgentLoop {
             // Track tool usage for skill curation analytics
             curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
                     observation.success(), observation.durationMs());
-
-            // Emit observation detail with output preview
-            emitObserveDetail(context.userId(), action, observation, step + 1, context);
 
             if (observation.success()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
@@ -1821,6 +1821,13 @@ public class AgentLoop {
         }
         statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
                 "⚡ Act · " + action.tool(), detail));
+    }
+
+    /** Record an observation in trajectory AND emit detail to the frontend (for live stats). */
+    private void recordAndEmitObservation(AgentContext context, AgentAction action,
+                                           AgentObservation obs, int step) {
+        context.trajectory().record(action, obs);
+        emitObserveDetail(context.userId(), action, obs, step, context);
     }
 
     /** Emit observation detail: success/fail status, duration, output preview. */

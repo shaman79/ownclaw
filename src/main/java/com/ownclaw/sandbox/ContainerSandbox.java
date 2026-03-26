@@ -49,8 +49,8 @@ public class ContainerSandbox {
 
     private static final Logger log = LoggerFactory.getLogger(ContainerSandbox.class);
 
-    /** Prefix for all images built by this sandbox. */
-    private static final String IMAGE_PREFIX = "ownclaw-skill-";
+    /** Prefix for all images built by this sandbox. Includes localhost/ for Podman compatibility. */
+    private static final String IMAGE_PREFIX = "localhost/ownclaw-skill-";
 
     private final OwnClawConfig config;
 
@@ -207,7 +207,7 @@ public class ContainerSandbox {
      * @param pipRequirements  pip requirements content (from requirements.txt), or null
      * @param skillDir         skill directory (for copying requirements.txt into build context)
      * @param preferredImage   preferred base image from SKILL.yaml (e.g. "python:3.11-slim"), or null
-     * @return the image tag (e.g. "ownclaw-skill-a1b2c3d4")
+     * @return the image tag (e.g. "localhost/ownclaw-skill-a1b2c3d4")
      */
     public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
                               String preferredImage)
