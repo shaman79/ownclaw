@@ -1413,9 +1413,14 @@ public class AgentLoop {
 
     /** Build structured token data for status messages. */
     private Map<String, Object> tokenData(AgentContext context) {
+        int totalSteps = context.trajectory().size();
+        int successes = (int) context.trajectory().turns().stream()
+                .filter(t -> t.observation().success()).count();
         return Map.of(
                 "cloudTokens", context.cloudTokens(),
-                "localTokens", context.localTokens()
+                "localTokens", context.localTokens(),
+                "totalSteps", totalSteps,
+                "successCount", successes
         );
     }
 

@@ -4305,6 +4305,8 @@
                     var detail = data.data && data.data.category ? data.data : null;
                     // Update token counter whenever data.data has token info
                     if (data.data) updateTokens(data.data);
+                    // Update stats bar whenever data.data carries stats fields
+                    if (data.data && data.data.totalSteps != null) updateStats(data.data);
                     if (sub === 'completed' || sub === 'failed' || sub === 'rollback') {
                         showActivity(content, null);
                         setThinking(false);
