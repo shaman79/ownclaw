@@ -619,13 +619,6 @@ public class ScheduledTaskService {
 
         eventLog.info(userId, null, "scheduled.completed",
                 "Task #" + taskId + " completed (run #" + newRunCount + ")");
-
-        // Post result to user's chat
-        String sessionId = conversationService.getCurrentSession(userId);
-        conversationService.saveMessage(userId, sessionId, "system",
-                "📋 **Scheduled task completed** (#" + taskId + ")\n"
-                        + "**Task:** " + description + "\n"
-                        + "**Result:** " + summarizeIfNeeded(response, 2000));
     }
 
     /**
@@ -669,13 +662,6 @@ public class ScheduledTaskService {
 
         eventLog.warn(userId, null, "scheduled.failed",
                 "Task #" + taskId + " failed: " + truncate(error, 100));
-
-        // Notify in chat
-        String sessionId = conversationService.getCurrentSession(userId);
-        conversationService.saveMessage(userId, sessionId, "system",
-                "❌ **Scheduled task failed** (#" + taskId + ")\n"
-                        + "**Task:** " + description + "\n"
-                        + "**Error:** " + summarizeIfNeeded(error, 300));
     }
 
     // ──────────────────────────────────────────────────────────────────────

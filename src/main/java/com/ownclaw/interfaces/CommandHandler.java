@@ -123,7 +123,8 @@ public class CommandHandler {
                 - `/log tokens` — Token usage today
                 - `/tokens` — Token budget summary
                 - `/skills` — List available tools
-                - `/debug` — Toggle debug mode (Web UI only)
+                - `/debug` — Toggle debug mode
+                - `/cancel` — Cancel the running task
                 - `/grant <tool> <credential>` — Grant credential access to a tool
                 - `/revoke <tool>` — Revoke credential access
                 - `/cred set <KEY> <VALUE>` — Store a credential

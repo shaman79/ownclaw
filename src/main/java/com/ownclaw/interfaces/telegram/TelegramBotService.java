@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
+import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.UserRepository;
 import okhttp3.*;
@@ -20,6 +22,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,12 +41,17 @@ public class TelegramBotService {
     private final ConversationService conversationService;
     private final SkillInteractionHandler interactionHandler;
     private final CommandHandler commandHandler;
+    private final TaskCancellationService cancellationService;
+    private final DebugSessionService debugService;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
     private volatile boolean running = false;
     private Thread pollingThread;
     private long lastUpdateId = 0;
+
+    /** Maps Telegram chatId → userId for users that have interacted. */
+    private final Map<String, Long> userChatIds = new ConcurrentHashMap<>();
 
     @SuppressWarnings("unused") // setupWizard injected to guarantee applyOverrides() runs first
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
@@ -52,7 +60,9 @@ public class TelegramBotService {
                               ConversationService conversationService,
                               SkillInteractionHandler interactionHandler,
                               SetupWizardService setupWizard,
-                              CommandHandler commandHandler) {
+                              CommandHandler commandHandler,
+                              TaskCancellationService cancellationService,
+                              DebugSessionService debugService) {
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
@@ -60,6 +70,8 @@ public class TelegramBotService {
         this.conversationService = conversationService;
         this.interactionHandler = interactionHandler;
         this.commandHandler = commandHandler;
+        this.cancellationService = cancellationService;
+        this.debugService = debugService;
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
@@ -184,14 +196,57 @@ public class TelegramBotService {
         String userId = userRepo.findByTelegramId(telegramUserId)
                 .orElseGet(() -> userRepo.createUser(firstName, telegramUserId));
 
-        // Subscribe to status messages for this user → send to Telegram
-        statusEmitter.subscribe(userId, msg -> sendMessage(chatId, msg.formatted()));
+        // Track chatId for this user
+        userChatIds.put(userId, chatId);
+
+        // Subscribe to status messages for this user → send to Telegram with stats
+        statusEmitter.subscribe(userId, msg -> {
+            StringBuilder sb = new StringBuilder(msg.formatted());
+            // Append token/step stats if available
+            Map<String, Object> data = msg.data();
+            if (data != null) {
+                Object cloud = data.get("cloudTokens");
+                Object local = data.get("localTokens");
+                Object steps = data.get("totalSteps");
+                Object ok = data.get("successCount");
+                if (steps != null || cloud != null) {
+                    sb.append("\n_");
+                    if (steps != null) sb.append("Steps ").append(steps).append(" OK ").append(ok != null ? ok : 0).append(" | ");
+                    if (cloud != null) sb.append("Cloud ").append(cloud);
+                    if (local != null) sb.append(" Local ").append(local);
+                    sb.append("_");
+                }
+            }
+            sendMessage(chatId, sb.toString());
+        });
+
+        // ── /cancel — stop the running task ──
+        if (text.strip().equalsIgnoreCase("/cancel")) {
+            cancellationService.request(userId);
+            interactionHandler.cancelPending(userId);
+            sendMessage(chatId, "⏹ Cancellation requested.");
+            return;
+        }
+
+        // ── /debug — toggle debug mode ──
+        if (text.strip().equalsIgnoreCase("/debug")) {
+            boolean enabled = debugService.toggle(userId);
+            sendMessage(chatId, enabled
+                    ? "\uD83D\uDC1B Debug mode *ON* — you will see full prompts, raw LLM output, critic verdicts, and tool results."
+                    : "\uD83D\uDC1B Debug mode *OFF*");
+            return;
+        }
 
         // Handle slash commands consistently with the Web UI
         if (text.startsWith("/")) {
             var cmdResult = commandHandler.handle(userId, text);
             if (cmdResult.isPresent()) {
                 sendMessage(chatId, cmdResult.get());
+                // Session commands: send active session info
+                if (commandHandler.isSessionCommand(text)) {
+                    String sessionId = conversationService.getCurrentSession(userId);
+                    sendMessage(chatId, "\uD83D\uDCC2 Active session: *" + sessionId + "*");
+                }
                 return;
             }
             // Not a recognized command — fall through to agent
@@ -200,7 +255,7 @@ public class TelegramBotService {
         // Interactive skill input: if a skill is waiting for user input, route this message
         // to the pending need_input prompt instead of starting a new task.
         if (interactionHandler.hasPending(userId)) {
-            boolean handled = interactionHandler.provideInput(userId, null, text);
+            boolean handled = interactionHandler.provideInput(userId, userId, text);
             if (!handled) {
                 sendMessage(chatId, "No pending input request.");
             }
@@ -251,6 +306,8 @@ public class TelegramBotService {
         try {
             var commands = List.of(
                     Map.of("command", "new",     "description", "Start a new chat session"),
+                    Map.of("command", "cancel",  "description", "Cancel the running task"),
+                    Map.of("command", "debug",   "description", "Toggle debug mode"),
                     Map.of("command", "history", "description", "List recent chat sessions"),
                     Map.of("command", "help",    "description", "Show available commands"),
                     Map.of("command", "skills",  "description", "List available tools"),
