@@ -39,12 +39,33 @@ public class ConversationService {
      * Save a message to the conversation store.
      * Updates the session's updated_at timestamp and preview snippet.
      * Triggers compression check after saving.
+     *
+     * @return the generated message ID
      */
-    public void saveMessage(String userId, String sessionId, String role, String content) {
+    public String saveMessage(String userId, String sessionId, String role, String content) {
+        return saveMessage(userId, sessionId, role, content, List.of());
+    }
+
+    /**
+     * Save a message with optional file attachments.
+     *
+     * @return the generated message ID
+     */
+    public String saveMessage(String userId, String sessionId, String role, String content,
+                              List<String> attachmentIds) {
+        String messageId = UUID.randomUUID().toString();
         jdbc.update("""
             INSERT INTO conversations (id, user_id, session_id, role, content)
             VALUES (?, ?, ?, ?, ?)
-            """, UUID.randomUUID().toString(), userId, sessionId, role, content);
+            """, messageId, userId, sessionId, role, content);
+
+        // Link file attachments to this message
+        if (attachmentIds != null) {
+            for (String fileId : attachmentIds) {
+                jdbc.update("INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
+                        messageId, fileId);
+            }
+        }
 
         // Update session timestamp and preview (first user message becomes the preview)
         jdbc.update("""
@@ -63,6 +84,7 @@ public class ConversationService {
                 log.warn("Background compression failed (non-fatal): {}", e.getMessage());
             }
         });
+        return messageId;
     }
 
     /**
@@ -70,7 +92,7 @@ public class ConversationService {
      */
     public List<Map<String, Object>> getRecentMessages(String userId, String sessionId, int limit) {
         return jdbc.queryForList("""
-            SELECT role, content, timestamp FROM conversations
+            SELECT id, role, content, timestamp FROM conversations
             WHERE user_id = ? AND session_id = ?
             ORDER BY timestamp DESC LIMIT ?
             """, userId, sessionId, limit);

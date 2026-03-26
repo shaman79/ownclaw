@@ -38,3 +38,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/013-task-run-tokens.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/014-file-attachments.sql
+      relativeToChangelogFile: false

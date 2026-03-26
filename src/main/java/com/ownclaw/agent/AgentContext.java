@@ -33,6 +33,9 @@ public class AgentContext {
     private int localTokens;
     private int cloudTokens;
 
+    /** File attachment IDs associated with the current user message. */
+    private List<String> attachmentIds = List.of();
+
     public AgentContext(String userId, String taskId, String originalMessage) {
         this.userId = userId;
         this.taskId = taskId;
@@ -85,4 +88,9 @@ public class AgentContext {
     public int localTokens() { return localTokens; }
     public int cloudTokens() { return cloudTokens; }
     public int totalTokens() { return localTokens + cloudTokens; }
+
+    // ── File attachments ──
+
+    public List<String> attachmentIds() { return attachmentIds; }
+    public void setAttachmentIds(List<String> ids) { this.attachmentIds = ids != null ? ids : List.of(); }
 }

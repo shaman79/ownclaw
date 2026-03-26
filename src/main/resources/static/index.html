@@ -813,6 +813,83 @@
             letter-spacing: .01em;
         }
 
+        /*  File upload  */
+        #attach-btn {
+            width: 36px; height: 36px;
+            margin: 6px 0 6px 8px;
+            flex-shrink: 0;
+            background: none;
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+            color: var(--text-2);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color .15s, border-color .15s;
+        }
+        #attach-btn:hover { color: var(--accent-hi); border-color: var(--accent) }
+        #attach-btn svg { width: 16px; height: 16px; fill: currentColor }
+
+        #file-chips {
+            max-width: 780px;
+            margin: 0 auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 0;
+        }
+        #file-chips:empty { display: none }
+        #file-chips + .input-wrap { margin-top: 6px }
+
+        .file-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--surface);
+            border: 1px solid var(--border-mid);
+            border-radius: 20px;
+            padding: 4px 10px 4px 12px;
+            font-size: 12px;
+            color: var(--text-2);
+            max-width: 200px;
+        }
+        .file-chip-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .file-chip-remove {
+            width: 16px; height: 16px;
+            background: none;
+            border: none;
+            color: var(--text-3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: color .15s, background .15s;
+            padding: 0;
+            flex-shrink: 0;
+        }
+        .file-chip-remove:hover { color: var(--red); background: var(--red-dim) }
+        .file-chip-remove svg { width: 10px; height: 10px; fill: currentColor }
+
+        .file-chip.uploading {
+            opacity: .6;
+        }
+        .file-chip.uploading .file-chip-name::after {
+            content: '...';
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse { 50% { opacity: .4 } }
+
+        .input-wrap.dragover {
+            border-color: var(--accent-hi);
+            background: rgba(91,95,199,.08);
+        }
+
         /*  Responsive  */
         @media (max-width: 600px) {
             #messages { padding: 16px 10px 12px }
@@ -2293,7 +2370,12 @@
 
 <!--  Input bar  -->
 <div id="input-area">
+    <div id="file-chips"></div>
     <div class="input-wrap">
+        <button id="attach-btn" title="Attach files">
+            <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6h-1.5v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6H16.5z"/></svg>
+        </button>
+        <input type="file" id="file-input" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message OwnClaw..." autocomplete="off"></textarea>
         <button id="send" title="Send (Enter)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -2302,7 +2384,7 @@
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
-    <div class="input-hint">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</div>
+    <div class="input-hint">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line &nbsp;&middot;&nbsp; Drag & drop or 📎 to attach files</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -2345,6 +2427,9 @@
     var inputEl         = document.getElementById('input');
     var sendBtn         = document.getElementById('send');
     var stopBtn         = document.getElementById('stop');
+    var attachBtn       = document.getElementById('attach-btn');
+    var fileInput       = document.getElementById('file-input');
+    var fileChips       = document.getElementById('file-chips');
     var connPill        = document.getElementById('conn-pill');
     var connLabel       = document.getElementById('conn-label');
     var connBanner      = document.getElementById('conn-banner');
@@ -4510,14 +4595,110 @@
         wrapper.appendChild(btn);
     }
 
+    //  File Upload 
+    var pendingFiles = []; // {id, name, chip}
+
+    attachBtn.addEventListener('click', function() { fileInput.click(); });
+    fileInput.addEventListener('change', function() {
+        if (fileInput.files.length) uploadFiles(fileInput.files);
+        fileInput.value = '';
+    });
+
+    // Drag & drop
+    var inputWrap = document.querySelector('.input-wrap');
+    inputWrap.addEventListener('dragover', function(e) { e.preventDefault(); inputWrap.classList.add('dragover'); });
+    inputWrap.addEventListener('dragleave', function() { inputWrap.classList.remove('dragover'); });
+    inputWrap.addEventListener('drop', function(e) {
+        e.preventDefault();
+        inputWrap.classList.remove('dragover');
+        if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+    });
+
+    function uploadFiles(files) {
+        var formData = new FormData();
+        var chips = [];
+        for (var i = 0; i < files.length; i++) {
+            formData.append('files', files[i]);
+            var chip = createFileChip(files[i].name, null);
+            chips.push(chip);
+        }
+        fetch('/api/files/upload', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token },
+            body: formData
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                chips.forEach(function(c) { c.remove(); });
+                addMsg('system', 'Upload failed: ' + data.error);
+                return;
+            }
+            var uploaded = data.files || [];
+            for (var i = 0; i < uploaded.length; i++) {
+                if (i < chips.length) {
+                    chips[i].classList.remove('uploading');
+                    chips[i].dataset.fileId = uploaded[i].id;
+                    pendingFiles.push({ id: uploaded[i].id, name: uploaded[i].original_name, chip: chips[i] });
+                }
+            }
+        })
+        .catch(function(err) {
+            chips.forEach(function(c) { c.remove(); });
+            addMsg('system', 'Upload failed: ' + err.message);
+        });
+    }
+
+    function createFileChip(name, fileId) {
+        var chip = document.createElement('span');
+        chip.className = 'file-chip' + (fileId ? '' : ' uploading');
+        if (fileId) chip.dataset.fileId = fileId;
+
+        var nameEl = document.createElement('span');
+        nameEl.className = 'file-chip-name';
+        nameEl.textContent = name;
+        nameEl.title = name;
+        chip.appendChild(nameEl);
+
+        var removeBtn = document.createElement('button');
+        removeBtn.className = 'file-chip-remove';
+        removeBtn.title = 'Remove';
+        removeBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="3" fill="none"/></svg>';
+        removeBtn.addEventListener('click', function() {
+            pendingFiles = pendingFiles.filter(function(f) { return f.chip !== chip; });
+            chip.remove();
+        });
+        chip.appendChild(removeBtn);
+
+        fileChips.appendChild(chip);
+        return chip;
+    }
+
     //  Send 
     function send() {
         var text = inputEl.value.trim();
         if (!text || !ws || ws.readyState !== 1) return;
-        addMsg('user', text);
-        ws.send(JSON.stringify({ message: text }));
+
+        // Collect file attachment IDs
+        var attachmentIds = pendingFiles.map(function(f) { return f.id; }).filter(Boolean);
+
+        // Show attached file names in the user message bubble
+        var display = text;
+        if (pendingFiles.length > 0) {
+            var names = pendingFiles.map(function(f) { return '📎 ' + f.name; });
+            display = names.join('\n') + '\n' + text;
+        }
+        addMsg('user', display);
+
+        var payload = { message: text };
+        if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;
+        ws.send(JSON.stringify(payload));
+
+        // Clear
         inputEl.value = '';
         inputEl.style.height = 'auto';
+        pendingFiles = [];
+        fileChips.innerHTML = '';
         busy = true;
         resetActivity();
         setThinking(true);

@@ -81,13 +81,15 @@ public class DynamicSkill implements Tool {
     private final List<String> systemPackages;
     private final String containerImage;
     private final ContainerSandbox containerSandbox;
+    private final com.ownclaw.conversation.FileStorageService fileStorage;
 
     public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
                         Path skillDir, boolean requiresNetwork, boolean hasSideEffects,
                         int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
                         List<String> requiredCredentials, CredentialVault credentialVault,
                         List<String> systemPackages, String containerImage,
-                        ContainerSandbox containerSandbox) {
+                        ContainerSandbox containerSandbox,
+                        com.ownclaw.conversation.FileStorageService fileStorage) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
@@ -102,6 +104,7 @@ public class DynamicSkill implements Tool {
         this.systemPackages = systemPackages != null ? systemPackages : List.of();
         this.containerImage = containerImage;
         this.containerSandbox = containerSandbox;
+        this.fileStorage = fileStorage;
     }
 
     @Override public String name() { return name; }
@@ -255,8 +258,33 @@ public class DynamicSkill implements Tool {
             runnerScript = skillDir.resolve("_runner_" + runnerId + ".py");
             Files.writeString(runnerScript, RUNNER_HARNESS, java.nio.charset.StandardCharsets.UTF_8);
 
-            // Serialize input parameters as JSON for stdin
-            String inputJson = mapper.writeValueAsString(params != null ? params : Map.of());
+            // Serialize input parameters as JSON for stdin.
+            // If the current message has file attachments, inject their paths so the skill can access them.
+            Map<String, Object> effectiveParams = params != null ? new HashMap<>(params) : new HashMap<>();
+            if (context.attachmentIds() != null && !context.attachmentIds().isEmpty()) {
+                var attachedFiles = new java.util.ArrayList<Map<String, String>>();
+                for (String fileId : context.attachmentIds()) {
+                    if (fileStorage != null) {
+                        var info = fileStorage.getFileInfo(fileId);
+                        if (info != null) {
+                            java.nio.file.Path filePath = fileStorage.getFilePath(fileId);
+                            if (filePath != null) {
+                                attachedFiles.add(Map.of(
+                                        "id", fileId,
+                                        "name", (String) info.get("original_name"),
+                                        "content_type", (String) info.get("content_type"),
+                                        "path", filePath.toAbsolutePath().toString(),
+                                        "container_path", "/uploads/" + filePath.getFileName().toString()
+                                ));
+                            }
+                        }
+                    }
+                }
+                if (!attachedFiles.isEmpty()) {
+                    effectiveParams.put("_attached_files", attachedFiles);
+                }
+            }
+            String inputJson = mapper.writeValueAsString(effectiveParams);
 
             Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
             // Force UTF-8 for Python's stdin/stdout/stderr — prevents mojibake when
@@ -305,10 +333,16 @@ public class DynamicSkill implements Tool {
                 containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
                         context.progressCallback());
                 usedContainer = true;
+                // Mount uploads directory so attached files are accessible inside the container
+                Map<String, String> extraVolumes = null;
+                if (fileStorage != null && context.attachmentIds() != null && !context.attachmentIds().isEmpty()) {
+                    extraVolumes = Map.of(
+                            fileStorage.getUploadsDir().toAbsolutePath().toString(), "/uploads");
+                }
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
-                        context.progressCallback());
+                        context.progressCallback(), extraVolumes);
             } else {
                 if (!systemPackages.isEmpty()) {
                     log.warn("Skill '{}' needs system packages {} but no container runtime available — "

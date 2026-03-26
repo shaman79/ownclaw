@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.skills.PythonEnvironmentService;
@@ -44,19 +45,22 @@ public class DynamicSkillRegistry {
     private final ContainerSandbox containerSandbox;
     private final PythonEnvironmentService pythonEnv;
     private final CredentialVault credentialVault;
+    private final FileStorageService fileStorage;
 
     private final Map<String, DynamicSkill> dynamicSkills = new ConcurrentHashMap<>();
 
     public DynamicSkillRegistry(OwnClawConfig config, @Lazy ToolRegistry toolRegistry,
                                 SandboxManager sandbox, ContainerSandbox containerSandbox,
                                 PythonEnvironmentService pythonEnv,
-                                CredentialVault credentialVault) {
+                                CredentialVault credentialVault,
+                                FileStorageService fileStorage) {
         this.config = config;
         this.toolRegistry = toolRegistry;
         this.sandbox = sandbox;
         this.containerSandbox = containerSandbox;
         this.pythonEnv = pythonEnv;
         this.credentialVault = credentialVault;
+        this.fileStorage = fileStorage;
     }
 
     @PostConstruct
@@ -132,7 +136,8 @@ public class DynamicSkillRegistry {
 
         return new DynamicSkill(name, description, parameters, skillDir,
                 requiresNetwork, hasSideEffects, timeout, sandbox, pythonEnv,
-                credentials, credentialVault, systemPackages, containerImage, containerSandbox);
+                credentials, credentialVault, systemPackages, containerImage, containerSandbox,
+                fileStorage);
     }
 
     /**

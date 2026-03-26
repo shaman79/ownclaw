@@ -147,14 +147,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String payload = message.getPayload();
         String userMessage;
 
-        // Accept plain text or JSON {"message": "...", "type": "...", "taskId": "..."}
+        // Accept plain text or JSON {"message": "...", "type": "...", "taskId": "...", "attachmentIds": [...]}
         String messageType = "message";
         String taskId = null;
+        java.util.List<String> attachmentIds = java.util.List.of();
         try {
             JsonNode json = mapper.readTree(payload);
             messageType = json.has("type") ? json.path("type").asText("message") : "message";
             userMessage = json.has("message") ? json.path("message").asText() : payload;
             taskId = json.has("taskId") ? json.path("taskId").asText(null) : null;
+            if (json.has("attachmentIds") && json.get("attachmentIds").isArray()) {
+                var ids = new java.util.ArrayList<String>();
+                for (JsonNode id : json.get("attachmentIds")) {
+                    ids.add(id.asText());
+                }
+                attachmentIds = ids;
+            }
         } catch (Exception e) {
             userMessage = payload;
         }
@@ -226,7 +234,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Persist user message BEFORE submitting to the agent loop so conversation
         // history is available when AgentLoop loads context for the LLM.
-        conversationService.saveMessage(userId, currentSessionId, "user", userMessage);
+        conversationService.saveMessage(userId, currentSessionId, "user", userMessage, attachmentIds);
 
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);

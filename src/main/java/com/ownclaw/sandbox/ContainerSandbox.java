@@ -572,14 +572,26 @@ public class ContainerSandbox {
                                  Path skillDir, String stdinJson,
                                  Map<String, String> envVars, int timeoutSec,
                                  SandboxManager.ProgressCallback progressCallback) {
-        if (progressCallback == null) {
+        return execute(imageTag, python, scriptPath, skillDir, stdinJson, envVars, timeoutSec,
+                progressCallback, null);
+    }
+
+    /**
+     * Execute with progress callback and extra volume mounts.
+     */
+    public SandboxResult execute(String imageTag, String python, Path scriptPath,
+                                 Path skillDir, String stdinJson,
+                                 Map<String, String> envVars, int timeoutSec,
+                                 SandboxManager.ProgressCallback progressCallback,
+                                 Map<String, String> extraVolumes) {
+        if (progressCallback == null && extraVolumes == null) {
             return execute(imageTag, python, scriptPath, skillDir, stdinJson, envVars, timeoutSec);
         }
 
         long startTime = System.currentTimeMillis();
 
         try {
-            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars);
+            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, extraVolumes);
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.redirectErrorStream(false);
@@ -660,6 +672,12 @@ public class ContainerSandbox {
      */
     private List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
                                          Path skillDir, Map<String, String> envVars) {
+        return buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, null);
+    }
+
+    private List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
+                                         Path skillDir, Map<String, String> envVars,
+                                         Map<String, String> extraVolumes) {
         List<String> cmd = new ArrayList<>();
         cmd.add(containerRuntime);
         cmd.add("run");
@@ -670,6 +688,14 @@ public class ContainerSandbox {
         // Bind-mount the skill directory at /skill (read-write for temp files)
         cmd.add("-v");
         cmd.add(skillDir.toAbsolutePath() + ":/skill");
+
+        // Extra bind-mounts (e.g. uploads directory for attached files)
+        if (extraVolumes != null) {
+            for (var vol : extraVolumes.entrySet()) {
+                cmd.add("-v");
+                cmd.add(vol.getKey() + ":" + vol.getValue() + ":ro");
+            }
+        }
 
         // Ensure Python shared library is always findable at runtime
         cmd.add("-e");

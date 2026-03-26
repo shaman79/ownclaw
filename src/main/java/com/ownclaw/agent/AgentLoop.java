@@ -4,6 +4,7 @@ import com.ownclaw.agent.memory.AgentMemory;
 import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskCancellationService;
@@ -62,6 +63,7 @@ public class AgentLoop {
     private final EventLogService eventLog;
     private final ScheduledTaskService scheduledTaskService;
     private final LocalExecutor localExecutor;
+    private final FileStorageService fileStorage;
 
     /** Max recent messages to include as conversation context for the LLM. */
     private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
@@ -85,7 +87,8 @@ public class AgentLoop {
             TokenBudgetTracker budgetTracker,
             EventLogService eventLog,
             @Lazy ScheduledTaskService scheduledTaskService,
-            LocalExecutor localExecutor
+            LocalExecutor localExecutor,
+            FileStorageService fileStorage
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -106,6 +109,7 @@ public class AgentLoop {
         this.eventLog = eventLog;
         this.scheduledTaskService = scheduledTaskService;
         this.localExecutor = localExecutor;
+        this.fileStorage = fileStorage;
     }
 
     /**
@@ -219,6 +223,15 @@ public class AgentLoop {
             List<Map<String, Object>> recent = conversationService.getRecentMessages(
                     userId, sessionId, CONVERSATION_CONTEXT_MESSAGES + 1);
 
+            // Capture attachment IDs from the current message (index 0) for skill/tool access
+            if (!recent.isEmpty()) {
+                String currentMsgId = (String) recent.getFirst().get("id");
+                if (currentMsgId != null) {
+                    List<String> attIds = fileStorage.getMessageAttachments(currentMsgId);
+                    context.setAttachmentIds(attIds);
+                }
+            }
+
             StringBuilder sb = new StringBuilder();
 
             // Include compressed summary of older conversation if available
@@ -238,6 +251,30 @@ public class AgentLoop {
                     String role = (String) row.get("role");
                     String content = (String) row.get("content");
                     sb.append(role.toUpperCase()).append(": ").append(content).append("\n");
+
+                    // Include file attachment info for messages that have them
+                    String msgId = (String) row.get("id");
+                    if (msgId != null) {
+                        List<Map<String, Object>> attachments = fileStorage.getMessageAttachmentDetails(msgId);
+                        for (var att : attachments) {
+                            String fileName = (String) att.get("original_name");
+                            String fileId = (String) att.get("id");
+                            String ct = (String) att.get("content_type");
+                            sb.append("[Attached file: ").append(fileName);
+
+                            // For text files, inline the content so the LLM can reason over it
+                            if (fileStorage.isTextContent(ct)) {
+                                String text = fileStorage.readAsText(fileId);
+                                if (text != null) {
+                                    sb.append("]\n```\n").append(text).append("\n```\n");
+                                } else {
+                                    sb.append(" (file too large to inline)]\n");
+                                }
+                            } else {
+                                sb.append(" (binary, ").append(att.get("size_bytes")).append(" bytes)]\n");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -888,7 +925,8 @@ public class AgentLoop {
                 context.taskId(),
                 null, // workDir — can be extended later
                 context::isCancelled,
-                progressCallback
+                progressCallback,
+                context.attachmentIds()
         );
 
         long startMs = System.currentTimeMillis();
