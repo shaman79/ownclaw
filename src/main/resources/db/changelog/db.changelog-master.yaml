@@ -35,3 +35,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/012-performance-indexes.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/013-task-run-tokens.sql
+      relativeToChangelogFile: false

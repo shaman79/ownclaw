@@ -104,4 +104,26 @@ public class EventLogService {
             WHERE user_id = ? AND event_type = 'task_completed' AND timestamp >= date('now')
             """, userId);
     }
+
+    /**
+     * Get cloud/local token breakdown from the most recent task_completed event for a user.
+     * Returns a two-element array [cloudTokens, localTokens], or [0, 0] if not found.
+     */
+    public long[] lastCompletedTaskTokens(String userId) {
+        try {
+            var row = jdbc.queryForMap("""
+                SELECT COALESCE(json_extract(details, '$.cloudTokens'), 0) AS cloud,
+                       COALESCE(json_extract(details, '$.localTokens'), 0) AS local
+                FROM events
+                WHERE user_id = ? AND event_type = 'task_completed'
+                ORDER BY id DESC LIMIT 1
+                """, userId);
+            return new long[]{
+                    ((Number) row.get("cloud")).longValue(),
+                    ((Number) row.get("local")).longValue()
+            };
+        } catch (Exception e) {
+            return new long[]{0, 0};
+        }
+    }
 }

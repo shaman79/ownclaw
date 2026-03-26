@@ -1282,6 +1282,11 @@
             font-family: var(--font-mono);
             font-size: 11px;
         }
+        .task-run-tokens {
+            color: var(--accent);
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
         .task-run-toggle {
             font-size: 10px;
             color: var(--text-3);
@@ -2630,7 +2635,9 @@
             '<div class="task-stat"><div class="task-stat-value">' + (stats.activeTasks || 0) + '</div><div class="task-stat-label">Active Tasks</div></div>' +
             '<div class="task-stat"><div class="task-stat-value">' + (stats.totalRuns || 0) + '</div><div class="task-stat-label">Total Runs</div></div>' +
             '<div class="task-stat"><div class="task-stat-value green">' + (stats.completedRuns || 0) + '</div><div class="task-stat-label">Succeeded</div></div>' +
-            '<div class="task-stat"><div class="task-stat-value red">' + (stats.failedRuns || 0) + '</div><div class="task-stat-label">Failed</div></div>';
+            '<div class="task-stat"><div class="task-stat-value red">' + (stats.failedRuns || 0) + '</div><div class="task-stat-label">Failed</div></div>' +
+            '<div class="task-stat"><div class="task-stat-value">' + formatTokenCount(stats.totalCloudTokens || 0) + '</div><div class="task-stat-label">Cloud Tokens</div></div>' +
+            '<div class="task-stat"><div class="task-stat-value">' + formatTokenCount(stats.totalLocalTokens || 0) + '</div><div class="task-stat-label">Local Tokens</div></div>';
         container.appendChild(statsDiv);
 
         // ── All tasks section — grouped by status ──
@@ -2941,6 +2948,8 @@
         var timeStr = run.executed_at ? formatTime(run.executed_at) : '\u2014';
         var statusClass = run.status || 'completed';
         var statusIcon = statusClass === 'completed' ? '\u2705' : '\u274C';
+        var tokenTotal = (run.cloud_tokens || 0) + (run.local_tokens || 0);
+        var tokenStr = tokenTotal > 0 ? formatTokenCount(tokenTotal) + ' tok' : '';
 
         // Header (clickable)
         var header = document.createElement('div');
@@ -2950,6 +2959,7 @@
             '<div class="task-run-desc">' + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
             '<div class="task-run-meta">' +
                 '<span>' + timeStr + '</span>' +
+                (tokenStr ? '<span class="task-run-tokens">' + tokenStr + '</span>' : '') +
                 '<span class="task-run-duration">' + durationStr + '</span>' +
             '</div>' +
             '<span class="task-run-toggle">\u25BC</span>';
@@ -2971,6 +2981,14 @@
             '<div class="task-detail-row"><span class="task-detail-label">Run #</span><span class="task-detail-value">' + (run.run_number || '—') + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Duration</span><span class="task-detail-value">' + durationStr + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Executed</span><span class="task-detail-value">' + (execDate ? execDate.toLocaleString() : '—') + '</span></div>';
+
+        if (run.cloud_tokens || run.local_tokens) {
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Tokens</span><span class="task-detail-value">' +
+                (run.cloud_tokens ? formatTokenCount(run.cloud_tokens) + ' cloud' : '') +
+                (run.cloud_tokens && run.local_tokens ? ' + ' : '') +
+                (run.local_tokens ? formatTokenCount(run.local_tokens) + ' local' : '') +
+                '</span></div>';
+        }
 
         if (run.cron_expression) {
             detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(run.cron_expression) + '</span></div>';
@@ -3034,6 +3052,12 @@
         var hr = Math.floor(min / 60);
         var m = min % 60;
         return hr + 'h ' + m + 'm';
+    }
+
+    function formatTokenCount(n) {
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+        if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+        return String(n);
     }
 
     // ────────── Settings View ──────────

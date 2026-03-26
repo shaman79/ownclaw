@@ -756,15 +756,20 @@ public class ScheduledTaskService {
                            String status, String result, String error, int runNumber) {
         Long startTime = taskStartTimes.remove(taskId);
         Long durationMs = (startTime != null) ? System.currentTimeMillis() - startTime : null;
+
+        // Retrieve token usage from the most recent task_completed event
+        long[] tokens = eventLog.lastCompletedTaskTokens(userId);
+
         try {
             jdbc.update("""
                 INSERT INTO scheduled_task_runs
                     (task_id, user_id, description, task_type, status, result, error,
-                     duration_ms, run_number, executed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                     duration_ms, run_number, executed_at, cloud_tokens, local_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
                 """,
                 taskId, userId, description, taskType, status,
-                result, error, durationMs, runNumber);
+                result, error, durationMs, runNumber,
+                tokens[0], tokens[1]);
         } catch (Exception e) {
             log.error("Failed to record task run for task #{}: {}", taskId, e.getMessage());
         }
@@ -813,11 +818,19 @@ public class ScheduledTaskService {
         int activeTasks = Optional.ofNullable(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM scheduled_tasks WHERE user_id = ? AND status IN ('active', 'paused')",
                 Integer.class, userId)).orElse(0);
+        long totalCloudTokens = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COALESCE(SUM(cloud_tokens), 0) FROM scheduled_task_runs WHERE user_id = ?",
+                Long.class, userId)).orElse(0L);
+        long totalLocalTokens = Optional.ofNullable(jdbc.queryForObject(
+                "SELECT COALESCE(SUM(local_tokens), 0) FROM scheduled_task_runs WHERE user_id = ?",
+                Long.class, userId)).orElse(0L);
         return Map.of(
                 "totalRuns", totalRuns,
                 "completedRuns", completedRuns,
                 "failedRuns", failedRuns,
-                "activeTasks", activeTasks
+                "activeTasks", activeTasks,
+                "totalCloudTokens", totalCloudTokens,
+                "totalLocalTokens", totalLocalTokens
         );
     }
 }
