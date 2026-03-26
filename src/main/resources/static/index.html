@@ -2407,6 +2407,7 @@
             document.getElementById('input-area').style.display = '';
             ws.send(JSON.stringify({ type: 'new_session', message: '' }));
             clearMessages();
+            resetActivity();
             sidebar.classList.remove('mobile-open');
         }
     });
@@ -2468,12 +2469,12 @@
         currentView = 'chat';
         // Show chat UI elements, hide task history/settings/skills
         document.getElementById('input-area').style.display = '';
-        document.getElementById('activity-wrap').style.display = '';
         settingsBtn.classList.remove('active');
         skillsBtn.classList.remove('active');
         tasksBtn.classList.remove('active');
         ws.send(JSON.stringify({ type: 'switch_session', message: sessionId }));
         clearMessages();
+        resetActivity();
         // Update sidebar active states
         updateSidebarActive(sessionId);
         // Load session messages via REST
@@ -4126,6 +4127,24 @@
                 activityStats.classList.remove('visible');
             }
         }, 8000);
+    }
+
+    /** Immediately reset the activity bar to a clean state (new/switch session). */
+    function resetActivity() {
+        activityWrap.style.display = 'none';
+        activitySpinner.classList.remove('done');
+        activityLabel.textContent = 'Working...';
+        activityTokens.textContent = '';
+        activityElapsed.textContent = '';
+        activityStepsEl.innerHTML = '';
+        activityStepList = [];
+        activityStats.classList.remove('visible');
+        statSteps.textContent = '0';
+        statSuccess.textContent = '0';
+        statFail.textContent = '0';
+        statCloud.textContent = '0';
+        statLocal.textContent = '0';
+        stopElapsedTimer();
     }
 
     function resetActivity() {
