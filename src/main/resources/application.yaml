@@ -41,6 +41,13 @@ ownclaw:
     max-tokens-per-task: 10000
     temperature: 0.4
 
+    # Optional: use the local LLM (Ollama) to pre-select which tools to include
+    # in the cloud prompt. Helps reduce Anthropic step-0 prompt size.
+    local-tool-selection: true
+    local-tool-selection-max-tools: 12
+    local-tool-selection-candidate-limit: 120
+    tool-name-preview-limit: 50
+
   budgets:
     daily-cloud-tokens: 0
     per-task-cloud-tokens: 0

@@ -3,8 +3,10 @@ package com.ownclaw.agent;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.ownclaw.agent.tools.Tool;
+import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.*;
@@ -54,11 +56,13 @@ public class ThinkingEngine {
     private final ToolRegistry toolRegistry;
     private final ToolSelector toolSelector;
     private final OwnClawConfig config;
+    private final LlmRouter llmRouter;
 
-    public ThinkingEngine(ToolRegistry toolRegistry, ToolSelector toolSelector, OwnClawConfig config) {
+    public ThinkingEngine(ToolRegistry toolRegistry, ToolSelector toolSelector, OwnClawConfig config, LlmRouter llmRouter) {
         this.toolRegistry = toolRegistry;
         this.toolSelector = toolSelector;
         this.config = config;
+        this.llmRouter = llmRouter;
     }
 
     /**
@@ -201,15 +205,14 @@ public class ThinkingEngine {
             sb.append(context.userPreferences()).append("\n\n");
         }
 
-        ToolSelector.Selection selection = toolSelector.select(
-                context.originalMessage(), context.trajectory());
+        ToolSelector.Selection selection = selectToolsForPrompt(context);
         sb.append("## Tools\n");
         if (context.trajectory().isEmpty()) {
             // Step 0: full manifest (first exposure — cached in prefix for later steps)
             String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
             sb.append(manifest).append("\n");
             if (!selection.otherNames().isEmpty()) {
-                sb.append("\nAlso: ").append(String.join(", ", selection.otherNames())).append("\n");
+                sb.append("\nAlso: ").append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit())).append("\n");
             }
             if (manifest.isBlank()) {
                 sb.append("No tools yet — use skill_create.\n");
@@ -222,7 +225,7 @@ public class ThinkingEngine {
                     .toList();
             sb.append(String.join(", ", names));
             if (!selection.otherNames().isEmpty()) {
-                sb.append(" | also: ").append(String.join(", ", selection.otherNames()));
+                sb.append(" | also: ").append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()));
             }
             sb.append("\n");
         }
@@ -243,6 +246,135 @@ public class ThinkingEngine {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Select tools for prompt injection.
+     *
+     * <p>Default behavior uses the heuristic {@link ToolSelector}.
+     * When enabled, step-0 selection can be delegated to the local LLM (Ollama)
+     * to reduce prompt size while keeping relevant tools.
+     */
+    private ToolSelector.Selection selectToolsForPrompt(AgentContext context) {
+        ToolSelector.Selection heuristic = toolSelector.select(context.originalMessage(), context.trajectory());
+
+        // Only run local selection on step 0 (biggest prompt) and only if enabled.
+        if (!context.trajectory().isEmpty()) return heuristic;
+        if (!config.getMentor().isLocalToolSelection()) return heuristic;
+
+        LlmProvider local = llmRouter.local();
+        if (local == null || !local.isAvailable()) return heuristic;
+
+        int maxTools = Math.max(1, config.getMentor().getLocalToolSelectionMaxTools());
+        int candidateLimit = Math.max(maxTools, config.getMentor().getLocalToolSelectionCandidateLimit());
+
+        try {
+            List<Tool> all = toolRegistry.all().stream()
+                    .sorted(Comparator.comparing(Tool::name))
+                    .toList();
+
+            // Cap candidate list deterministically to keep local prompt bounded.
+            if (all.size() > candidateLimit) {
+                all = all.subList(0, candidateLimit);
+            }
+
+            String selectorSystem = "You are a tool selection assistant. "
+                    + "Given a task and a list of available tools, choose the smallest useful set of tools. "
+                    + "Return ONLY valid JSON: {\"tools\": [\"name\", ...]}. "
+                    + "Rules: pick at most " + maxTools + " tools; only choose names that appear in the list; "
+                    + "prefer task-specific tools over generic ones; if unsure, return an empty list.";
+
+            String selectorUser = buildLocalToolSelectionUserPrompt(context.originalMessage(), all);
+            List<LlmMessage> messages = List.of(
+                    LlmMessage.system(selectorSystem),
+                    LlmMessage.user(selectorUser)
+            );
+
+            // Small, structured response.
+            LlmRequestConfig req = new LlmRequestConfig(
+                    null,
+                    0.0,
+                    512,
+                    true,
+                    null
+            );
+
+            LlmResponse resp = local.chat(messages, req);
+            Set<String> picked = parseSelectedToolNames(resp.content(), maxTools);
+            if (picked.isEmpty()) return heuristic;
+
+            List<Tool> detailed = new ArrayList<>();
+            for (Tool t : toolRegistry.all()) {
+                if (picked.contains(t.name())) {
+                    detailed.add(t);
+                }
+            }
+
+            // Ensure we don't exceed maxTools even if duplicates/extra names slip through.
+            if (detailed.size() > maxTools) {
+                detailed = detailed.subList(0, maxTools);
+            }
+
+            Set<String> detailedNames = detailed.stream().map(Tool::name).collect(java.util.stream.Collectors.toSet());
+            List<String> otherNames = toolRegistry.all().stream()
+                    .map(Tool::name)
+                    .filter(n -> !detailedNames.contains(n))
+                    .sorted()
+                    .toList();
+
+            return new ToolSelector.Selection(detailed, otherNames);
+        } catch (Exception e) {
+            log.debug("Local tool selection failed (non-fatal): {}", e.getMessage());
+            return heuristic;
+        }
+    }
+
+    private String buildLocalToolSelectionUserPrompt(String task, List<Tool> candidates) {
+        var sb = new StringBuilder();
+        sb.append("Task:\n").append(task == null ? "" : task).append("\n\n");
+        sb.append("Available tools (name: short description | params):\n");
+
+        for (Tool t : candidates) {
+            sb.append("- ").append(t.name()).append(": ").append(truncate(t.description(), 160));
+            Map<String, ToolParam> schema = t.inputSchema();
+            if (schema != null && !schema.isEmpty()) {
+                List<String> keys = schema.keySet().stream().sorted().toList();
+                sb.append(" | params: ").append(String.join(", ", keys));
+            }
+            sb.append("\n");
+        }
+        sb.append("\nReturn JSON only.");
+        return sb.toString();
+    }
+
+    private Set<String> parseSelectedToolNames(String raw, int maxTools) {
+        if (raw == null || raw.isBlank()) return Set.of();
+        try {
+            String cleaned = LlmOutputUtils.stripCodeFences(raw.strip());
+            JsonNode root = mapper.readTree(cleaned);
+            JsonNode arr = root.path("tools");
+            if (!arr.isArray()) return Set.of();
+            Set<String> out = new LinkedHashSet<>();
+            for (JsonNode n : arr) {
+                if (n.isTextual()) {
+                    String name = n.asText("").trim();
+                    if (!name.isBlank()) out.add(name);
+                }
+                if (out.size() >= maxTools) break;
+            }
+            return out;
+        } catch (Exception e) {
+            return Set.of();
+        }
+    }
+
+    private String formatNamePreview(List<String> names, int limit) {
+        if (names == null || names.isEmpty()) return "";
+        int capped = Math.max(0, limit);
+        if (capped == 0) return "(" + names.size() + " omitted)";
+        if (names.size() <= capped) return String.join(", ", names);
+        List<String> head = names.subList(0, capped);
+        return String.join(", ", head) + " … (+" + (names.size() - capped) + " more)";
     }
 
     /**
