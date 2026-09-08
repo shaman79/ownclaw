@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Anthropic Messages API provider for cloud LLM inference.
@@ -24,6 +26,7 @@ import java.util.concurrent.TimeUnit;
  * - No response_format: json_object — use prompt engineering for JSON mode
  * - Uses max_tokens instead of max_completion_tokens
  * - Returns usage.input_tokens / usage.output_tokens
+ * - Newer models reject sampling parameters — see {@link #supportsSampling(String)}
  */
 @Component
 public class AnthropicProvider implements LlmProvider {
@@ -32,6 +35,24 @@ public class AnthropicProvider implements LlmProvider {
     private static final MediaType JSON_TYPE = MediaType.get("application/json");
     private static final String BASE_URL = "https://api.anthropic.com/v1";
     private static final String API_VERSION = "2023-06-01";
+
+    /**
+     * Fallback output budget when the caller doesn't set one. {@code max_tokens} is a
+     * required field on the Messages API, so it can't simply be omitted. It is set well
+     * above the old 4096 because on the newer models this budget also has to cover
+     * thinking tokens — a tight ceiling truncates the answer mid-JSON, which surfaces as
+     * a parse failure rather than an obvious error. 16k still returns comfortably inside
+     * the non-streaming read timeout.
+     */
+    private static final int DEFAULT_MAX_TOKENS = 16000;
+
+    /**
+     * Matches a modern model id: {@code claude-<family>-<major>[-<minor>][-<date>]}.
+     * The minor group is written so it never swallows an 8-digit date suffix
+     * (claude-sonnet-4-20250514 parses as 4, not 4.20).
+     */
+    private static final Pattern MODEL_GENERATION =
+            Pattern.compile("claude-([a-z]+)-(\\d+)(?:-(\\d{1,2})(?!\\d))?");
 
     private final OwnClawConfig.Mentor config;
     private final ObjectMapper mapper;
@@ -59,13 +80,20 @@ public class AnthropicProvider implements LlmProvider {
         }
 
         String model = reqConfig.model() != null ? reqConfig.model() : config.getAnthropicModel();
-        double temperature = reqConfig.temperature() != null ? reqConfig.temperature() : config.getTemperature();
-        int maxTokens = reqConfig.maxTokens() != null ? reqConfig.maxTokens() : 4096;
+        int maxTokens = reqConfig.maxTokens() != null ? reqConfig.maxTokens() : DEFAULT_MAX_TOKENS;
 
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
-        body.put("temperature", temperature);
         body.put("max_tokens", maxTokens);
+
+        // Newer models decide sampling themselves and reject the parameter with
+        // HTTP 400 "temperature is deprecated for this model."
+        if (supportsSampling(model)) {
+            double temperature = reqConfig.temperature() != null ? reqConfig.temperature() : config.getTemperature();
+            body.put("temperature", temperature);
+        } else {
+            log.debug("Anthropic [{}]: omitting temperature, not supported by this model", model);
+        }
 
         // Claude: system prompt is a top-level field, not in messages.
         // We use structured content blocks with cache_control to enable prompt caching.
@@ -191,6 +219,43 @@ public class AnthropicProvider implements LlmProvider {
         block.put("type", "text");
         block.put("text", rawContent);
         block.putObject("cache_control").put("type", "ephemeral");
+    }
+
+    /**
+     * Whether a model still accepts sampling parameters (temperature / top_p / top_k).
+     * <p>
+     * Anthropic removed them from the newer generations: sending {@code temperature}
+     * to one of those models fails with HTTP 400
+     * {@code "temperature is deprecated for this model."} There is no replacement
+     * parameter — those models manage sampling themselves, so it is simply left out.
+     * <p>
+     * Removed on: every fable/mythos model, Opus 4.7 and newer, Sonnet 5 and newer.
+     * Still accepted on: Opus 4.6 and older, Sonnet 4.6 and older, Haiku 4.5 and older,
+     * and the legacy {@code claude-3-*} ids. The check is version-based rather than a
+     * hardcoded list so that models released later default to the correct behaviour.
+     */
+    static boolean supportsSampling(String model) {
+        if (model == null || model.isBlank()) {
+            return true;
+        }
+        Matcher m = MODEL_GENERATION.matcher(model.trim().toLowerCase());
+        if (!m.find()) {
+            // Legacy ids such as claude-3-5-sonnet-20241022 put the version first.
+            // Every model in that era accepts sampling parameters.
+            return true;
+        }
+        String family = m.group(1);
+        int major = Integer.parseInt(m.group(2));
+        int minor = m.group(3) != null ? Integer.parseInt(m.group(3)) : 0;
+
+        if ("fable".equals(family) || "mythos".equals(family)) {
+            return false;
+        }
+        if ("opus".equals(family)) {
+            return major < 4 || (major == 4 && minor < 7);
+        }
+        // sonnet, haiku, and any family introduced later: gone from the 5.x generation on.
+        return major < 5;
     }
 
     @Override
