@@ -10,6 +10,7 @@ import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.ownclaw.users.AuthService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -34,13 +35,16 @@ public class SkillController {
     private final SkillManager skillManager;
     private final DynamicSkillRegistry dynamicSkillRegistry;
     private final SkillCuratorService curatorService;
+    private final AuthService authService;
 
     public SkillController(SkillManager skillManager,
                            DynamicSkillRegistry dynamicSkillRegistry,
-                           SkillCuratorService curatorService) {
+                           SkillCuratorService curatorService,
+                           AuthService authService) {
         this.skillManager = skillManager;
         this.dynamicSkillRegistry = dynamicSkillRegistry;
         this.curatorService = curatorService;
+        this.authService = authService;
     }
 
     /**
@@ -176,7 +180,12 @@ public class SkillController {
     @PutMapping("/{name}")
     public ResponseEntity<Map<String, Object>> updateSkill(
             @PathVariable String name,
-            @RequestBody Map<String, Object> body) {
+            @RequestBody Map<String, Object> body,
+            @RequestAttribute("userId") String userId) {
+
+        // Writing a skill is writing code that later runs with a vault-backed environment,
+        // and generated skills are global, so this would also reshape the owner's tools.
+        if (!authService.isOwner(userId)) return ownerOnly();
 
         if (!dynamicSkillRegistry.isDynamic(name)) {
             return ResponseEntity.notFound().build();
@@ -221,7 +230,9 @@ public class SkillController {
      * DELETE /api/skills/{name} — permanently delete a skill.
      */
     @DeleteMapping("/{name}")
-    public ResponseEntity<Map<String, Object>> deleteSkill(@PathVariable String name) {
+    public ResponseEntity<Map<String, Object>> deleteSkill(@PathVariable String name,
+                                                           @RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         String result = skillManager.deleteSkill(name);
 
         if (result.startsWith("ERROR:")) {
@@ -237,7 +248,11 @@ public class SkillController {
     @PostMapping("/{name}/run")
     public ResponseEntity<Map<String, Object>> runSkill(
             @PathVariable String name,
-            @RequestBody Map<String, Object> body) {
+            @RequestBody Map<String, Object> body,
+            @RequestAttribute("userId") String userId) {
+
+        // This executes code on the host as the service user.
+        if (!authService.isOwner(userId)) return ownerOnly();
 
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) {
@@ -278,7 +293,9 @@ public class SkillController {
      * POST /api/skills/reload — reload all dynamic skills from disk.
      */
     @PostMapping("/reload")
-    public ResponseEntity<Map<String, Object>> reloadSkills() {
+    public ResponseEntity<Map<String, Object>> reloadSkills(
+            @RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         dynamicSkillRegistry.reload();
         int count = dynamicSkillRegistry.allDynamic().size();
         return ResponseEntity.ok(Map.of(
@@ -291,5 +308,11 @@ public class SkillController {
         var list = new ArrayList<>(skills);
         list.sort(Comparator.comparing(DynamicSkill::name));
         return list;
+    }
+
+    /** Every account is otherwise equal, so anything dangerous is gated on the owner. */
+    private static ResponseEntity<Map<String, Object>> ownerOnly() {
+        return ResponseEntity.status(403).body(Map.of("error",
+                "Only the owner may use this endpoint."));
     }
 }

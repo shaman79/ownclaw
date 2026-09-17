@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -49,6 +50,7 @@ public class DebugController {
     private final DebugSessionService debugService;
     private final ChatStatusEmitter statusEmitter;
     private final JdbcTemplate jdbc;
+    private final AuthService authService;
 
     /** Stored execution traces, keyed by taskId. */
     private final Map<String, Map<String, Object>> storedTraces = new ConcurrentHashMap<>();
@@ -61,7 +63,8 @@ public class DebugController {
             SkillManager skillManager,
             DebugSessionService debugService,
             ChatStatusEmitter statusEmitter,
-            JdbcTemplate jdbc
+            JdbcTemplate jdbc,
+            AuthService authService
     ) {
         this.agentLoop = agentLoop;
         this.toolRegistry = toolRegistry;
@@ -69,6 +72,7 @@ public class DebugController {
         this.debugService = debugService;
         this.statusEmitter = statusEmitter;
         this.jdbc = jdbc;
+        this.authService = authService;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -96,6 +100,7 @@ public class DebugController {
             @RequestBody Map<String, String> body,
             @RequestAttribute("userId") String userId
     ) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         String message = body.get("message");
         if (message == null || message.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Message is required"));
@@ -119,6 +124,7 @@ public class DebugController {
             AgentResult result = agentLoop.executeFull(userId, message);
 
             Map<String, Object> trace = buildTrace(result, message, capturedMessages);
+            trace.put("userId", userId);   // so a trace can be scoped to whoever produced it
             String taskId = (String) trace.get("taskId");
             storeTrace(taskId, trace);
 
@@ -143,7 +149,9 @@ public class DebugController {
     // ────────────────────────────────────────────────────────────────
 
     @GetMapping("/output/{taskId}")
-    public ResponseEntity<?> getOutput(@PathVariable String taskId) {
+    public ResponseEntity<?> getOutput(@PathVariable String taskId,
+                                       @RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         var trace = storedTraces.get(taskId);
         if (trace == null) {
             return ResponseEntity.notFound().build();
@@ -156,7 +164,8 @@ public class DebugController {
     // ────────────────────────────────────────────────────────────────
 
     @GetMapping("/traces")
-    public ResponseEntity<?> listTraces() {
+    public ResponseEntity<?> listTraces(@RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         List<Map<String, Object>> summaries = new ArrayList<>();
         for (String taskId : traceOrder) {
             var trace = storedTraces.get(taskId);
@@ -173,161 +182,14 @@ public class DebugController {
         }
         return ResponseEntity.ok(summaries);
     }
-
-    // ────────────────────────────────────────────────────────────────
-    //  POST /api/debug/deploy — trigger git pull + build + restart
-    // ────────────────────────────────────────────────────────────────
-
-    /**
-     * Trigger deployment by running deploy.sh on the server.
-     *
-     * <p>By default runs {@code --update} (skip build if no new commits).
-     * Use {@code ?force=true} to force a full rebuild even when up-to-date.
-     *
-     * Response: { "success": true, "exitCode": 0, "output": "...", "durationMs": 30000 }
-     */
-    @PostMapping("/deploy")
-    public ResponseEntity<?> deploy(@RequestParam(defaultValue = "false") boolean force) {
-        log.info("Debug API deploy triggered (force={})", force);
-
-        // Locate deploy.sh relative to the running JAR or repo
-        String deployScript = findDeployScript();
-        if (deployScript == null) {
-            return ResponseEntity.internalServerError().body(Map.of(
-                    "error", "deploy.sh not found. Expected at /opt/ownclaw/repo/deploy/deploy.sh"
-            ));
-        }
-
-        long startMs = System.currentTimeMillis();
-        try {
-            // --update = incremental (skip if no changes); no flag = full rebuild
-            List<String> cmd = force
-                    ? List.of("bash", deployScript)
-                    : List.of("bash", deployScript, "--update");
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            pb.environment().put("TERM", "dumb");
-
-            Process process = pb.start();
-            String output;
-            try (var reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                output = reader.lines().collect(Collectors.joining("\n"));
-            }
-
-            // Wait up to 5 minutes for deploy
-            boolean finished = process.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
-            long durationMs = System.currentTimeMillis() - startMs;
-
-            if (!finished) {
-                process.destroyForcibly();
-                return ResponseEntity.ok(Map.of(
-                        "success", false,
-                        "exitCode", -1,
-                        "output", output + "\n[TIMEOUT: deploy did not finish within 5 minutes]",
-                        "durationMs", durationMs
-                ));
-            }
-
-            int exitCode = process.exitValue();
-            return ResponseEntity.ok(Map.of(
-                    "success", exitCode == 0,
-                    "exitCode", exitCode,
-                    "output", output,
-                    "durationMs", durationMs
-            ));
-        } catch (Exception e) {
-            long durationMs = System.currentTimeMillis() - startMs;
-            log.error("Deploy failed: {}", e.getMessage(), e);
-            return ResponseEntity.internalServerError().body(Map.of(
-                    "error", "Deploy execution failed: " + e.getMessage(),
-                    "durationMs", durationMs
-            ));
-        }
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    //  POST /api/debug/restart — force JVM exit so systemd restarts
-    // ────────────────────────────────────────────────────────────────
-
-    /**
-     * Emergency restart: calls System.exit(1) to terminate the JVM.
-     * systemd's Restart=on-failure will automatically restart the service,
-     * picking up whatever JAR is currently on disk.
-     *
-     * Use this when the normal deploy --update can't restart (e.g. missing sudoers).
-     *
-     * Response: { "message": "Restarting in 2 seconds..." }
-     * (response is sent before the JVM exits)
-     */
-    @PostMapping("/restart")
-    public ResponseEntity<?> restart() {
-        log.warn("Debug API restart triggered — JVM will exit in 2 seconds");
-
-        // Schedule exit on a separate thread so the HTTP response can be sent first
-        Thread.ofVirtual().start(() -> {
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ignored) {}
-            log.warn("Executing System.exit(1) for restart");
-            System.exit(1);
-        });
-
-        return ResponseEntity.ok(Map.of(
-                "message", "Restarting in 2 seconds...",
-                "note", "systemd Restart=on-failure will bring the service back up within ~12 seconds"
-        ));
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    //  POST /api/debug/skill — create or update a skill directly
-    // ────────────────────────────────────────────────────────────────
-
-    /**
-     * Create or update a Python skill directly, bypassing the LLM.
-     * This allows an external AI assistant to inject properly-written skill code.
-     *
-     * Request body: {
-     *   "name": "web_fetch",
-     *   "description": "Fetches a web page...",
-     *   "code": "import requests\n...",
-     *   "parameters": "{\"url\":{\"type\":\"string\",\"description\":\"URL\",\"required\":true}}",
-     *   "requirements": "requests\nbeautifulsoup4",   // optional
-     *   "requires_network": true,                      // optional
-     *   "has_side_effects": false,                     // optional
-     *   "timeout": 30                                  // optional
-     * }
-     */
-    @PostMapping("/skill")
-    public ResponseEntity<?> createSkill(@RequestBody Map<String, Object> body) {
-        String name = body.get("name") != null ? body.get("name").toString() : null;
-        if (name == null || name.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Skill name is required"));
-        }
-
-        log.info("Debug API skill create/update: {}", name);
-
-        try {
-            String result = skillManager.createSkill(body);
-            boolean success = !result.startsWith("ERROR");
-            return ResponseEntity.ok(Map.of(
-                    "success", success,
-                    "name", name,
-                    "result", result
-            ));
-        } catch (Exception e) {
-            log.error("Skill creation failed: {}", e.getMessage(), e);
-            return ResponseEntity.internalServerError().body(Map.of(
-                    "error", "Skill creation failed: " + e.getMessage()
-            ));
-        }
-    }
-
-    // ────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────
     //  DELETE /api/debug/skill/{name} — delete a generated skill
     // ────────────────────────────────────────────────────────────────
 
     @DeleteMapping("/skill/{name}")
-    public ResponseEntity<?> deleteSkill(@PathVariable String name) {
+    public ResponseEntity<?> deleteSkill(@PathVariable String name,
+                                        @RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         log.info("Debug API skill delete: {}", name);
         String result = skillManager.deleteSkill(name);
         boolean success = !result.startsWith("ERROR");
@@ -338,8 +200,17 @@ public class DebugController {
     //  GET /api/debug/status — system health and registered skills
     // ────────────────────────────────────────────────────────────────
 
+    // REMOVED 2026-09-17 — all four were JWT-only, so any account could use them:
+    //   POST /deploy                    ran the deploy script (git pull + build + restart)
+    //   POST /restart                   System.exit(1), with no busy check
+    //   POST /skill                     wrote arbitrary Python and registered it as a tool
+    //   POST /skill/{name}/credentials  changed which vault keys a skill receives
+    // Deploys belong to deploy.sh and its rollback path. For diagnostics and one-shot agent runs
+    // use the token-gated ops API (/api/ops/*), which deliberately offers none of these.
+
     @GetMapping("/status")
-    public ResponseEntity<?> status() {
+    public ResponseEntity<?> status(@RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         var skills = toolRegistry.all().stream()
                 .map(tool -> Map.of(
                         "name", tool.name(),
@@ -471,23 +342,17 @@ public class DebugController {
      * TODO: REMOVE THIS once credential issues are resolved.
      */
     @GetMapping("/skill/{name}")
-    public ResponseEntity<?> readSkill(@PathVariable String name) {
+    public ResponseEntity<?> readSkill(@PathVariable String name,
+                                       @RequestAttribute("userId") String userId) {
+        if (!authService.isOwner(userId)) return ownerOnly();
         log.info("DEBUG: Reading skill '{}'", name);
         String result = skillManager.readSkill(name);
         return ResponseEntity.ok(Map.of("skill", name, "content", result));
     }
 
-    /**
-     * TEMPORARY DEBUG ENDPOINT — patches credentials field for an existing skill.
-     * TODO: REMOVE THIS once credential issues are resolved.
-     */
-    @PostMapping("/skill/{name}/credentials")
-    public ResponseEntity<?> patchSkillCredentials(
-            @PathVariable String name,
-            @RequestBody Map<String, String> body) {
-        String credentials = body.get("credentials");
-        log.warn("DEBUG: Patching credentials for skill '{}': {}", name, credentials);
-        String result = skillManager.patchCredentials(name, credentials);
-        return ResponseEntity.ok(Map.of("skill", name, "result", result));
+    /** Every account is otherwise equal, so anything dangerous is gated on the owner. */
+    private static ResponseEntity<?> ownerOnly() {
+        return ResponseEntity.status(403).body(Map.of("error",
+                "Only the owner may use this endpoint."));
     }
 }

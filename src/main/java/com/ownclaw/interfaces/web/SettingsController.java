@@ -2,6 +2,7 @@ package com.ownclaw.interfaces.web;
 
 import com.ownclaw.agent.LlmRouter;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.users.AuthService;
 import com.ownclaw.config.SetupWizardService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -22,18 +23,29 @@ public class SettingsController {
     private final SetupWizardService setupWizard;
     private final OwnClawConfig config;
     private final LlmRouter llmRouter;
+    private final AuthService authService;
 
-    public SettingsController(SetupWizardService setupWizard, OwnClawConfig config, LlmRouter llmRouter) {
+    public SettingsController(SetupWizardService setupWizard, OwnClawConfig config,
+                              LlmRouter llmRouter, AuthService authService) {
         this.setupWizard = setupWizard;
         this.config = config;
         this.llmRouter = llmRouter;
+        this.authService = authService;
     }
 
     /**
      * GET /api/settings — return all current settings (keys masked for secrets).
      */
     @GetMapping
-    public ResponseEntity<Map<String, Object>> getSettings() {
+    public ResponseEntity<Map<String, Object>> getSettings(
+            @RequestAttribute("userId") String userId) {
+        // Discloses the provider, the models, the Ollama URL and masked key state.
+        if (!authService.isOwner(userId)) return ownerOnly();
+        return currentSettings();
+    }
+
+    /** The settings body, without the access check — for callers that already made one. */
+    private ResponseEntity<Map<String, Object>> currentSettings() {
         var result = new HashMap<String, Object>();
 
         // Cloud LLM
@@ -64,7 +76,12 @@ public class SettingsController {
      * Only known keys are accepted.
      */
     @PutMapping
-    public ResponseEntity<Map<String, Object>> updateSettings(@RequestBody Map<String, String> updates) {
+    public ResponseEntity<Map<String, Object>> updateSettings(
+            @RequestBody Map<String, String> updates,
+            @RequestAttribute("userId") String userId) {
+        // Writing here replaces the cloud API keys and can repoint the "local" model URL at an
+        // arbitrary host, which would send every supposedly-local prompt off the machine.
+        if (!authService.isOwner(userId)) return ownerOnly();
         for (var entry : updates.entrySet()) {
             String key = entry.getKey();
             String value = entry.getValue();
@@ -131,7 +148,7 @@ public class SettingsController {
         setupWizard.runDiagnostics();
 
         // Return updated settings
-        return getSettings();
+        return currentSettings();
     }
 
     /**
@@ -141,5 +158,11 @@ public class SettingsController {
         if (key == null || key.isBlank()) return "";
         if (key.length() <= 12) return "***";
         return key.substring(0, 8) + "..." + key.substring(key.length() - 4);
+    }
+
+    /** Every account is otherwise equal, so anything dangerous is gated on the owner. */
+    private static ResponseEntity<Map<String, Object>> ownerOnly() {
+        return ResponseEntity.status(403).body(Map.of("error",
+                "Only the owner may use this endpoint."));
     }
 }
