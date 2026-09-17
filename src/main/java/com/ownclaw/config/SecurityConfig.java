@@ -2,6 +2,7 @@ package com.ownclaw.config;
 
 import com.ownclaw.auth.JwtAuthFilter;
 import com.ownclaw.auth.OpsAuthFilter;
+import com.ownclaw.auth.SecurityHeadersFilter;
 import com.ownclaw.users.AuthService;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -13,6 +14,15 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class SecurityConfig {
+
+    /** Response headers for every request, including the static client. */
+    @Bean
+    public FilterRegistrationBean<SecurityHeadersFilter> securityHeadersFilter() {
+        var reg = new FilterRegistrationBean<>(new SecurityHeadersFilter());
+        reg.addUrlPatterns("/*");
+        reg.setOrder(-1);
+        return reg;
+    }
 
     /**
      * Authenticates /api/ops/* with the ops token. Registered at order 0 so it runs before

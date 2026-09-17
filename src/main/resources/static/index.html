@@ -5,9 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OwnClaw</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+          integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+            integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"
+            integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <style>
         /*  Design tokens  */
         :root {
@@ -2555,7 +2558,7 @@
                     item.className = 'search-result-item';
                     item.innerHTML =
                         '<div class="search-result-title">' + escapeHtml(r.title || 'Untitled') + '</div>' +
-                        '<div class="search-result-snippet">' + (r.snippet || '') + '</div>';
+                        '<div class="search-result-snippet">' + safeSnippet(r.snippet) + '</div>';
                     item.addEventListener('click', function() {
                         switchToSession(r.session_id);
                         searchInput.value = '';
@@ -4684,9 +4687,80 @@
         scrollBottom();
     }
 
+    // Chat messages are persisted and re-rendered on every load, so anything unsafe here is
+    // STORED XSS — and the agent quotes web pages and e-mail it fetched, i.e. attacker-controlled
+    // text. marked has had no sanitiser since v5, so the output is filtered here against an
+    // allowlist: any element not on the list is unwrapped (its text is kept), every attribute not
+    // on that element's list is dropped, and every URL must pass MD_SAFE_URL. An allowlist is used
+    // rather than a denylist so that a tag or attribute nobody thought of is refused by default.
+    var MD_ALLOWED = {
+        P: [], BR: [], HR: [], STRONG: [], EM: [], B: [], I: [], U: [], S: [], DEL: [], INS: [],
+        H1: [], H2: [], H3: [], H4: [], H5: [], H6: [], BLOCKQUOTE: [], UL: [], OL: ['start'],
+        LI: [], DL: [], DT: [], DD: [], MARK: [], SUP: [], SUB: [], SMALL: [],
+        CODE: ['class'], PRE: ['class'], SPAN: ['class'], DIV: ['class'],
+        A: ['href', 'title'], IMG: ['src', 'alt', 'title'],
+        TABLE: [], THEAD: [], TBODY: [], TFOOT: [], TR: [], TH: ['align'], TD: ['align']
+    };
+    // Relative and anchor links are fine; everything else must be an explicit safe scheme.
+    var MD_SAFE_URL = /^(https?:\/\/|mailto:|#|\/|\.\/|[^:]*$)/i;
+
+    function mdIsSafeUrl(value) {
+        if (value === null || value === undefined) return false;
+        // Strip characters a browser ignores when resolving a scheme (\t, \n, \r, NUL, spaces).
+        var v = String(value).replace(/[\u0000-\u0020]/g, '').toLowerCase();
+        if (v.indexOf('javascript:') === 0 || v.indexOf('data:') === 0 || v.indexOf('vbscript:') === 0) {
+            return false;
+        }
+        return MD_SAFE_URL.test(v);
+    }
+
+    function mdSanitize(root) {
+        // Static list first: the tree is mutated while walking it.
+        var all = Array.prototype.slice.call(root.querySelectorAll('*'));
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (!el.parentNode) continue;                 // already removed with an ancestor
+            var allowedAttrs = MD_ALLOWED[el.tagName];
+            if (!allowedAttrs) {
+                // Not on the allowlist. Drop the element but keep its text, so a message that
+                // merely mentions "<script>" still reads correctly instead of silently vanishing.
+                el.replaceWith(document.createTextNode(el.textContent || ''));
+                continue;
+            }
+            var attrs = Array.prototype.slice.call(el.attributes);
+            for (var j = 0; j < attrs.length; j++) {
+                var name = attrs[j].name.toLowerCase();
+                if (allowedAttrs.indexOf(name) === -1) {
+                    el.removeAttribute(attrs[j].name);
+                } else if ((name === 'href' || name === 'src') && !mdIsSafeUrl(attrs[j].value)) {
+                    el.removeAttribute(attrs[j].name);
+                }
+            }
+            if (el.tagName === 'A' && el.getAttribute('href')) {
+                el.setAttribute('rel', 'noopener noreferrer nofollow');
+                el.setAttribute('target', '_blank');
+            }
+        }
+        return root;
+    }
+
     function renderMarkdown(text) {
-        try { return marked.parse(text); }
-        catch(e) { return '<p>' + escapeHtml(text) + '</p>'; }
+        var holder = document.createElement('div');
+        try {
+            holder.innerHTML = marked.parse(text);
+        } catch (e) {
+            return '<p>' + escapeHtml(text) + '</p>';
+        }
+        return mdSanitize(holder).innerHTML;
+    }
+
+    // SQLite FTS snippet() wraps matches in <mark>, so the value is intentionally HTML — but the
+    // rest of it is raw message text. Escape everything, then put just the <mark> tags back.
+    function safeSnippet(snippet) {
+        if (!snippet) return '';
+        return escapeHtml(String(snippet))
+            .replace(/&lt;mark&gt;/g, '<mark>')
+            .replace(/&lt;\/mark&gt;/g, '</mark>');
     }
 
     function escapeHtml(s) {
