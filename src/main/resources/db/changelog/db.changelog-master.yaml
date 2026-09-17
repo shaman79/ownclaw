@@ -41,3 +41,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/014-file-attachments.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/015-conversation-compressed-flag.sql
+      relativeToChangelogFile: false

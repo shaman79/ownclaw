@@ -28,6 +28,9 @@ public class ConversationCompressor {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationCompressor.class);
 
+    /** Shorter than this and the summary is treated as a failure, not a summary. */
+    private static final int MIN_SUMMARY_CHARS = 40;
+
     /** Messages to keep uncompressed (the "active window"). */
     private static final int ACTIVE_WINDOW = 10;
     /** Compress when session has this many uncompressed messages beyond the active window. */
@@ -57,7 +60,8 @@ public class ConversationCompressor {
         try {
             // Count total non-status messages in this session
             Integer totalCount = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM conversations WHERE user_id = ? AND session_id = ? AND role != 'status'",
+                    "SELECT COUNT(*) FROM conversations WHERE user_id = ? AND session_id = ? "
+                            + "AND role != 'status' AND compressed = 0",
                     Integer.class, userId, sessionId);
 
             if (totalCount == null || totalCount <= ACTIVE_WINDOW + COMPRESS_THRESHOLD) {
@@ -68,7 +72,7 @@ public class ConversationCompressor {
             int toCompress = totalCount - ACTIVE_WINDOW;
             List<Map<String, Object>> oldMessages = jdbc.queryForList("""
                     SELECT id, role, content FROM conversations
-                    WHERE user_id = ? AND session_id = ? AND role != 'status'
+                    WHERE user_id = ? AND session_id = ? AND compressed = 0 AND role != 'status'
                     ORDER BY timestamp ASC LIMIT ?
                     """, userId, sessionId, toCompress);
 
@@ -97,6 +101,17 @@ public class ConversationCompressor {
             // Compress via local LLM
             String compressed = compressWithLlm(textToCompress.toString());
 
+            // Refuse to advance on a summary the local model did not really produce. This used
+            // to run unconditionally, so an empty or failed summary still deleted the originals.
+            // The local model on this deployment can fail in exactly that way (a model with no
+            // chat template returns an empty message), which would silently destroy history.
+            if (compressed == null || compressed.isBlank() || compressed.length() < MIN_SUMMARY_CHARS) {
+                log.warn("Compression for session {} produced {} chars — keeping all {} messages "
+                                + "uncompressed rather than advancing on a bad summary",
+                        sessionId, compressed == null ? 0 : compressed.length(), oldMessages.size());
+                return;
+            }
+
             // Store/update the rolling summary
             jdbc.update("""
                     INSERT INTO session_summaries (session_id, user_id, summary, total_messages)
@@ -107,12 +122,13 @@ public class ConversationCompressor {
                         last_updated = datetime('now')
                     """, sessionId, userId, compressed, oldMessages.size());
 
-            // Delete the compressed messages from conversations table
+            // Mark, do not delete. getRecentMessages() (the LLM context) skips compressed rows,
+            // so the prompt is unchanged; the UI, history and FTS search keep the originals.
             for (Map<String, Object> msg : oldMessages) {
-                jdbc.update("DELETE FROM conversations WHERE id = ?", msg.get("id"));
+                jdbc.update("UPDATE conversations SET compressed = 1 WHERE id = ?", msg.get("id"));
             }
 
-            log.info("Compressed {} messages for session {} -> {} chars summary",
+            log.info("Compressed {} messages for session {} -> {} chars summary (originals kept)",
                     oldMessages.size(), sessionId, compressed.length());
 
         } catch (Exception e) {
