@@ -36,3 +36,6 @@ bin/
 
 # Secrets
 *.env
+
+# Local-only working notes (never published: this repo is public)
+*.local.md

@@ -23,7 +23,11 @@ public class JwtAuthFilter implements Filter {
     private static final Set<String> PUBLIC_PREFIXES = Set.of(
             "/api/auth/",
             "/api/health",
-            "/ws/"
+            "/ws/",
+            // /api/ops/* is not public: OpsAuthFilter (order 0) authenticates it with the
+            // ops token and rejects it outright when that token is unset. It must bypass
+            // JWT because operators and assistants are not users and have no account.
+            "/api/ops/"
     );
 
     private final AuthService authService;
@@ -80,7 +84,7 @@ public class JwtAuthFilter implements Filter {
         for (String prefix : PUBLIC_PREFIXES) {
             if (path.startsWith(prefix)) return true;
         }
-        // Exact match for /api/health (no trailing slash)
-        return "/api/health".equals(path);
+        // Exact matches for the paths whose prefixes carry a trailing slash above.
+        return "/api/health".equals(path) || "/api/ops".equals(path);
     }
 }

@@ -17,6 +17,7 @@ public class OwnClawConfig {
     private Tasks tasks = new Tasks();
     private Telegram telegram = new Telegram();
     private Auth auth = new Auth();
+    private Ops ops = new Ops();
     private Webui webui = new Webui();
     private Sandbox sandbox = new Sandbox();
     private Skills skills = new Skills();
@@ -164,6 +165,17 @@ public class OwnClawConfig {
         public void setOwner(String owner) { this.owner = owner; }
     }
 
+    public static class Ops {
+        /**
+         * Shared secret for /api/ops/*. Env-only (OWNCLAW_OPS_TOKEN); never persisted.
+         * Blank, or shorter than 32 characters, disables the whole ops API.
+         */
+        private String token = "";
+
+        public String getToken() { return token; }
+        public void setToken(String token) { this.token = token; }
+    }
+
     public static class Webui {
         private boolean enabled = true;
 
@@ -293,6 +305,8 @@ public class OwnClawConfig {
     public void setTelegram(Telegram v) { this.telegram = v; }
     public Auth getAuth() { return auth; }
     public void setAuth(Auth auth) { this.auth = auth; }
+    public Ops getOps() { return ops; }
+    public void setOps(Ops ops) { this.ops = ops; }
     public Webui getWebui() { return webui; }
     public void setWebui(Webui v) { this.webui = v; }
     public Sandbox getSandbox() { return sandbox; }

@@ -1,6 +1,7 @@
 package com.ownclaw.config;
 
 import com.ownclaw.auth.JwtAuthFilter;
+import com.ownclaw.auth.OpsAuthFilter;
 import com.ownclaw.users.AuthService;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -12,6 +13,19 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class SecurityConfig {
+
+    /**
+     * Authenticates /api/ops/* with the ops token. Registered at order 0 so it runs before
+     * the JWT filter, which treats /api/ops/ as exempt. Refuses everything when the token
+     * is unset, so the ops API is off by default.
+     */
+    @Bean
+    public FilterRegistrationBean<OpsAuthFilter> opsAuthFilter(OwnClawConfig config) {
+        var reg = new FilterRegistrationBean<>(new OpsAuthFilter(config));
+        reg.addUrlPatterns("/api/ops", "/api/ops/*");
+        reg.setOrder(0);
+        return reg;
+    }
 
     @Bean
     public FilterRegistrationBean<JwtAuthFilter> jwtAuthFilter(AuthService authService) {

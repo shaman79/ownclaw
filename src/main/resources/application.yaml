@@ -83,6 +83,13 @@ ownclaw:
     # set a username here only to override that.
     owner: ${OWNCLAW_OWNER:}
 
+  # Ops API (/api/ops/*) — read-only diagnostics plus a few safe actions, for operators
+  # and AI assistants. DISABLED unless a token of at least 32 chars is set. The token is
+  # read from the environment only and is never stored in the database.
+  #   OWNCLAW_OPS_TOKEN=$(openssl rand -hex 32)
+  ops:
+    token: ${OWNCLAW_OPS_TOKEN:}
+
   sandbox:
     type: auto
     stall-timeout: 120   # kill process if no output for this many seconds
@@ -133,3 +140,12 @@ ownclaw:
         env:
           PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium-browser"
           PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+
+logging:
+  file:
+    name: ${OWNCLAW_LOG_FILE:./logs/ownclaw.log}
+  logback:
+    rollingpolicy:
+      max-file-size: 20MB
+      max-history: 7
+      total-size-cap: 200MB

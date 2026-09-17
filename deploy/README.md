@@ -178,6 +178,113 @@ The deploy script waits up to 60 seconds for this endpoint to respond after a re
 
 ---
 
+## Ops API
+
+`/api/ops/*` gives an operator — or an AI assistant driving a test → inspect → fix loop — read-only
+insight into a running instance, plus a few safe actions. It is **off by default**.
+
+### Enabling it
+
+```bash
+# in /opt/ownclaw/.env
+OWNCLAW_OPS_TOKEN=$(openssl rand -hex 32)
+OWNCLAW_LOG_FILE=/opt/ownclaw/logs/ownclaw.log
+```
+
+Then `sudo systemctl restart ownclaw`. The startup log says which state it is in:
+
+```
+Ops API enabled at /api/ops/* (token 64 chars)
+Ops API disabled — set OWNCLAW_OPS_TOKEN (at least 32 chars) to enable it
+```
+
+Unset, or shorter than 32 characters, and **every** ops request returns 503 — the endpoints do not
+exist as far as a caller is concerned. The token is read from the environment only: it is never
+written to the database, so a database dump cannot disclose it and no stored setting can enable the
+API.
+
+### Using it
+
+```bash
+T=$(sudo grep '^OWNCLAW_OPS_TOKEN=' /opt/ownclaw/.env | cut -d= -f2)
+curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops | jq      # lists every endpoint
+```
+
+`Authorization: Bearer <token>` works too.
+
+| Endpoint | What it gives you |
+|---|---|
+| `GET /api/ops/health` | database, cloud provider, local model, queue, JVM, log file, owner |
+| `GET /api/ops/config` | effective configuration with secrets redacted, plus `system_settings` key names and their `updated_at` (useful for spotting tampering) |
+| `GET /api/ops/logs?lines=200&grep=&level=` | tail of the log file, filtered; newest matches first |
+| `GET /api/ops/db/tables` | every table with its row count |
+| `POST /api/ops/db/query` | one read-only `SELECT` — `{"sql":"SELECT ...","limit":200}` |
+| `GET /api/ops/users` | accounts, who the owner is, who is disabled |
+| `GET /api/ops/forensics/{userId}` | everything recorded for one account: messages, tasks, tool calls, memory, scheduled tasks, uploads, spend |
+| `GET /api/ops/skills` | each generated skill with size, mtime and SHA-256, so an unexpected change is visible |
+| `GET /api/ops/ollama` | installed and loaded models, capabilities, and a live chat round-trip test |
+| `GET /api/ops/tasks`, `GET /api/ops/tasks/{taskId}` | recent tasks; one task correlated across events, tool calls and memory |
+| `POST /api/ops/selftest` | pass/fail across database, tools, cloud key, local model, skills dir, log file |
+| `POST /api/ops/agent/run` | run one agent task and get the outcome plus the full step trajectory |
+| `POST /api/ops/agent/cancel/{userId}` | request cancellation (observed between steps) |
+| `POST /api/ops/skills/reload` | re-read the generated skills directory |
+
+### What it will not do
+
+No endpoint returns a credential value, runs arbitrary shell, triggers a deploy or restarts the
+service. Those are what made the old `/api/debug` surface dangerous; `GET /api/debug/credentials`,
+which returned the whole vault in plaintext, was deleted on 2026-09-17.
+
+Secrets are withheld in two independent ways: configuration values whose key looks secret are
+replaced with a placeholder, and SQL results are redacted by column name — so even
+`SELECT * FROM users` comes back without password hashes. `db/query` additionally refuses any
+statement that is not a single `SELECT`, and any statement that so much as names a secret column.
+
+### Diagnosing the local model
+
+The single most useful call when the local tier misbehaves:
+
+```bash
+curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops/ollama | jq '.modelInfo, .chatRoundTrip'
+```
+
+`configuredModelInstalled: false` means Ollama does not have the model the app is asking for, and
+every local call is failing with a 404. `supportsChat: false` or `templateLooksUnusable: true`
+means the model has no chat template, so `/api/chat` silently discards the system prompt and the
+role structure — `promptEvalCount` comes back far smaller than the prompt, and every local job
+returns nonsense. Either pull a chat-capable model, or wrap the one you have in a `Modelfile` that
+supplies a proper template.
+
+### Reading a task
+
+Every task has an id. Given one, these three views line up:
+
+```bash
+curl -s -H "X-Ops-Token: $T" ".../api/ops/tasks/$ID"            # events, tool calls, memory
+curl -s -H "X-Ops-Token: $T" ".../api/ops/logs?grep=$ID"        # the think/act/observe trail
+curl -s -H "X-Ops-Token: $T" -X POST ".../api/ops/db/query" \
+     -d "{\"sql\":\"SELECT * FROM skill_usage WHERE task_id='$ID'\"}"
+```
+
+Note when reading outcomes: in this build `success` is `true` for every ending except a cancel or a
+crash, including the step cap and a reasoning-failure abort. Check `terminationReason` and the
+response text before believing a task delivered anything. `POST /api/ops/agent/run` repeats that
+caveat in its own response.
+
+### Exposure
+
+The ops API is reachable wherever the app is. If the instance is on a public hostname, restrict
+`/api/ops/` at the reverse proxy to addresses you control, or reach it over a VPN or an SSH tunnel:
+
+```bash
+ssh -L 8080:localhost:8080 you@host    # then use http://localhost:8080
+```
+
+Every accepted call is logged with method, path, query and source address; rejected calls are logged
+without the presented token. `db/query` logs the SQL text.
+
+---
+
 ## Security Notes
 
 The systemd service runs with these hardening options:
