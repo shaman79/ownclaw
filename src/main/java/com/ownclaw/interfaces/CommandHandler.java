@@ -141,7 +141,7 @@ public class CommandHandler {
                 - `/cred set <KEY> <VALUE>` — Store a credential
                 - `/cred list` — List stored credential keys
                 - `/cred delete <KEY>` — Delete a credential
-                - `/user list` — List accounts (owner only)
+                - `/user list` — List accounts (owner only; also in Settings → Accounts)
                 - `/user add <username> <password>` — Create an account (owner only)
                 - `/user disable <username|id>` — Revoke an account's access (owner only)
                 - `/user telegram <username> <telegram id>` — Let a Telegram ID use the bot (owner only)
@@ -193,14 +193,13 @@ public class CommandHandler {
             }
             case "disable" -> {
                 if (parts.length != 2) return usage;
-                String target = userRepo.findAccountByUsername(parts[1])
-                        .or(() -> userRepo.findById(parts[1]).map(u -> (String) u.get("id")))
-                        .orElse(null);
-                if (target == null) return "\u274C No such account: " + parts[1];
-                if (authService.isOwner(target)) return "\u274C The owner account cannot be disabled.";
-                userRepo.disable(target);
-                return "\u2705 Account `" + target + "` disabled: it can no longer log in, its sessions are "
-                        + "signed out and its Telegram ID is unlinked. Its data is kept.";
+                try {
+                    String target = authService.disableAccount(parts[1]);
+                    return "\u2705 Account `" + target + "` disabled: it can no longer log in, its sessions are "
+                            + "signed out and its Telegram ID is unlinked. Its data is kept.";
+                } catch (IllegalArgumentException e) {
+                    return "\u274C " + e.getMessage();
+                }
             }
             case "telegram" -> {
                 if (parts.length != 3) return usage;

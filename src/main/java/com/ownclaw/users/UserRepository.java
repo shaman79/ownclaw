@@ -73,11 +73,11 @@ public class UserRepository {
     }
 
     /**
-     * Link a Telegram ID to a user so that messages from it are accepted.
+     * Link a Telegram ID to a user so that messages from it are accepted; {@code null} unlinks.
      *
      * @throws org.springframework.dao.DataAccessException if the ID is already linked to someone
      */
-    public void linkTelegram(String userId, long telegramId) {
+    public void linkTelegram(String userId, Long telegramId) {
         jdbc.update("UPDATE users SET telegram_id = ?, updated_at = datetime('now') WHERE id = ?",
                 telegramId, userId);
     }

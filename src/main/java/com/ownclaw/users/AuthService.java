@@ -164,6 +164,25 @@ public class AuthService {
     }
 
     /**
+     * Revoke an account's access (see {@link UserRepository#disable}).
+     *
+     * @param usernameOrId username of a login account, or any user ID
+     * @return the disabled user's ID
+     * @throws IllegalArgumentException if there is no such user, or it is the owner
+     */
+    public String disableAccount(String usernameOrId) {
+        String target = userRepo.findAccountByUsername(usernameOrId)
+                .or(() -> userRepo.findById(usernameOrId).map(u -> (String) u.get("id")))
+                .orElseThrow(() -> new IllegalArgumentException("No such account: " + usernameOrId));
+        if (isOwner(target)) {
+            throw new IllegalArgumentException("The owner account cannot be disabled.");
+        }
+        userRepo.disable(target);
+        log.info("Disabled account {}", target);
+        return target;
+    }
+
+    /**
      * Validate a JWT token and return the user ID.
      *
      * @return userId if token is valid, empty otherwise

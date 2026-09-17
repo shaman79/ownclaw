@@ -1837,6 +1837,42 @@
             z-index: 400;
             animation: fadeIn .15s;
         }
+        .account-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 9px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .account-row:last-of-type { border-bottom: none }
+        .account-name { font-size: 13px; font-weight: 600; color: var(--text-1) }
+        .account-name.disabled { color: var(--text-3); text-decoration: line-through }
+        .account-meta { font-size: 11px; color: var(--text-3) }
+        .account-badge {
+            padding: 2px 7px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 10px;
+            color: var(--text-2);
+        }
+        .account-badge.owner { color: var(--green); border-color: rgba(52,211,153,.3) }
+        .account-spacer { flex: 1 }
+        .account-btn {
+            padding: 4px 10px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-2);
+            font-size: 11px;
+            font-family: var(--font);
+            cursor: pointer;
+        }
+        .account-btn:hover { color: var(--text-1); border-color: var(--border-mid) }
+        .account-btn.danger:hover { color: var(--red); border-color: rgba(248,113,113,.4) }
+        .account-add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px }
+        .account-add input { flex: 1; min-width: 140px }
+        .account-add .settings-save-btn { padding: 9px 16px }
         .settings-toast.error {
             background: var(--red-dim);
             color: var(--red);
@@ -3275,7 +3311,15 @@
         actions.innerHTML = '<button class="settings-save-btn" id="settings-save">Save Settings</button>';
         view.appendChild(actions);
 
+        // ── Accounts (owner only; filled in by loadAccounts) ──
+        var accountsSection = document.createElement('div');
+        accountsSection.className = 'settings-section';
+        accountsSection.id = 'settings-accounts';
+        accountsSection.style.display = 'none';
+        view.appendChild(accountsSection);
+
         messagesEl.appendChild(view);
+        loadAccounts();
 
         // ── Wire up events ──
         // "Change" buttons for API keys — unlock the field for editing
@@ -3380,6 +3424,99 @@
             showSettingsToast(e.message, true);
             btn.disabled = false;
             btn.textContent = 'Save Settings';
+        });
+    }
+
+    // Accounts: the API answers 403 to everyone but the owner, and then the section stays hidden.
+    function accountsRequest(method, path, body) {
+        return fetch('/api/users' + path, {
+            method: method,
+            headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined
+        }).then(function(r) {
+            return r.json().then(function(data) {
+                if (!r.ok) throw new Error(data.error || 'Request failed');
+                return data;
+            });
+        });
+    }
+
+    function loadAccounts() {
+        var section = document.getElementById('settings-accounts');
+        if (!section || !authToken) return;
+        accountsRequest('GET', '').then(function(accounts) {
+            renderAccounts(section, accounts);
+        }).catch(function() { section.style.display = 'none'; });
+    }
+
+    function renderAccounts(section, accounts) {
+        // Usernames may come from whoever registered while registration was still open, and
+        // escapeHtml() does not escape quotes — so they only ever go in via textContent.
+        function el(tag, className, text) {
+            var node = document.createElement(tag);
+            if (className) node.className = className;
+            if (text !== undefined) node.textContent = text;
+            return node;
+        }
+
+        section.innerHTML =
+            '<div class="settings-section-title"><span class="status-dot ok"></span>Accounts</div>' +
+            '<div class="settings-field"><div class="field-hint">Only you, the owner, can create accounts. ' +
+            'Every account can run code on this server, so add only people you trust.</div></div>';
+
+        accounts.forEach(function(a) {
+            var hasTelegram = a.telegramId !== null && a.telegramId !== undefined;
+            var row = el('div', 'account-row');
+            row.appendChild(el('span', 'account-name' + (a.disabled ? ' disabled' : ''), a.username));
+            if (a.owner) row.appendChild(el('span', 'account-badge owner', 'owner'));
+            if (a.webLogin) row.appendChild(el('span', 'account-badge', 'web login'));
+            if (hasTelegram) row.appendChild(el('span', 'account-badge', 'Telegram ' + a.telegramId));
+            if (a.disabled) row.appendChild(el('span', 'account-badge', 'disabled'));
+            row.appendChild(el('span', 'account-meta', 'created ' + (a.createdAt || '').substring(0, 10)));
+            row.appendChild(el('span', 'account-spacer'));
+
+            if (!a.disabled) {
+                var telegramBtn = el('button', 'account-btn', hasTelegram ? 'Change Telegram' : 'Link Telegram');
+                telegramBtn.addEventListener('click', function() {
+                    var value = prompt('Telegram user ID that may use the bot as "' + a.username + '" (leave empty to unlink):');
+                    if (value === null) return;
+                    accountsRequest('PUT', '/' + encodeURIComponent(a.id) + '/telegram', { telegramId: value.trim() || null })
+                        .then(function() { showSettingsToast('Telegram link updated', false); loadAccounts(); })
+                        .catch(function(e) { showSettingsToast(e.message, true); });
+                });
+                row.appendChild(telegramBtn);
+            }
+            if (!a.owner && !a.disabled) {
+                var disableBtn = el('button', 'account-btn danger', 'Disable');
+                disableBtn.addEventListener('click', function() {
+                    if (!confirm('Disable "' + a.username + '"? They are signed out at once and can no longer log in. Their data is kept.')) return;
+                    accountsRequest('POST', '/' + encodeURIComponent(a.id) + '/disable')
+                        .then(function() { showSettingsToast('Account disabled', false); loadAccounts(); })
+                        .catch(function(e) { showSettingsToast(e.message, true); });
+                });
+                row.appendChild(disableBtn);
+            }
+            section.appendChild(row);
+        });
+
+        var add = el('div', 'settings-field account-add');
+        add.innerHTML =
+            '<input type="text" id="account-new-name" placeholder="New username" autocomplete="off">' +
+            '<input type="password" id="account-new-password" placeholder="Password (min 4 characters)" autocomplete="new-password">' +
+            '<button class="settings-save-btn" id="account-create">Create account</button>';
+        section.appendChild(add);
+        section.style.display = '';
+
+        document.getElementById('account-create').addEventListener('click', function() {
+            var name = document.getElementById('account-new-name').value.trim();
+            var password = document.getElementById('account-new-password').value;
+            if (!name || password.length < 4) {
+                showSettingsToast('Username required and password must be at least 4 characters', true);
+                return;
+            }
+            accountsRequest('POST', '', { username: name, password: password })
+                .then(function() { showSettingsToast('Account "' + name + '" created', false); loadAccounts(); })
+                .catch(function(e) { showSettingsToast(e.message, true); });
         });
     }
 

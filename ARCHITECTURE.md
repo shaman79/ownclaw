@@ -878,7 +878,7 @@ The Executor maintains a `preferences.json` per user:
 
 - **WebUI**: Login via username/password. Session token via JWT (30 days).
 - **Owner**: The first account created is the owner (`ownclaw.auth.owner` overrides this by username). Self-registration exists only for that first account; afterwards `POST /api/auth/register` requires the owner's token. Every account can run code on the host, so accounts are never open to the public.
-- **Managing accounts** (owner only, chat commands): `/user list`, `/user add <username> <password>`, `/user disable <username|id>` (blocks login, invalidates existing tokens, unlinks Telegram; data is kept), `/user telegram <username> <telegram id>`.
+- **Managing accounts** (owner only; Settings → Accounts in the web UI, `/api/users`, or chat commands): `/user list`, `/user add <username> <password>`, `/user disable <username|id>` (blocks login, invalidates existing tokens, unlinks Telegram; data is kept), `/user telegram <username> <telegram id>`.
 - **Telegram**: Only Telegram IDs the owner has linked may use the bot. An unknown sender is told their ID and ignored; no account is created for them.
 - There are no other roles yet: apart from account management, every account has the same powers.
 
