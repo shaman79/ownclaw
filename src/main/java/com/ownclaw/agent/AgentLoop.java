@@ -1000,7 +1000,7 @@ public class AgentLoop {
     private String executeCredentialManage(Map<String, Object> params, String userId) {
         String action = params.get("action") != null ? params.get("action").toString() : "";
         String key = params.get("key") != null ? params.get("key").toString().strip().toUpperCase() : null;
-        String value = params.get("value") != null ? params.get("value").toString().strip() : null;
+        // NOTE: a 'value' is deliberately NOT read. See the 'store' branch below.
 
         return switch (action) {
             case "list" -> {
@@ -1019,22 +1019,29 @@ public class AgentLoop {
                         ? "Credential '" + key + "' exists in the vault."
                         : "Credential '" + key + "' NOT found. Use ask_user to request it from the user, then store it with action='store'.";
             }
+            // Storing through this action is refused on purpose.
+            //
+            // The old flow was: ask_user for the password -> the user types it into chat ->
+            // credential_manage(store, key, value). That put the secret in plaintext in
+            // conversations (and the FTS index), sent it to the cloud model as the next task,
+            // had the model echo it back as a parameter, replayed it in the action params of
+            // every later step, folded it into the rolling summary, wrote 200 chars of it to
+            // events, stored it in an episode, and showed it in the activity panel. Only the
+            // vault copy was ever encrypted.
+            //
+            // /cred set writes straight to the vault, never reaches an LLM, and its command text
+            // is not saved to the conversation. So the agent asks the user to run that instead.
             case "store" -> {
-                if (key == null || key.isBlank()) {
-                    yield "ERROR: 'key' parameter is required for action='store'";
-                }
-                if (value == null || value.isBlank()) {
-                    yield "ERROR: 'value' parameter is required for action='store'";
-                }
-                try {
-                    credentialVault.storeCredential(userId, key, value);
-                    yield "Credential '" + key + "' stored securely (AES-256-GCM encrypted).";
-                } catch (Exception e) {
-                    log.error("Failed to store credential '{}': {}", key, e.getMessage());
-                    yield "ERROR: Failed to store credential: " + e.getMessage();
-                }
+                String name = (key == null || key.isBlank()) ? "THE_KEY" : key;
+                log.info("credential_manage(store) refused for key='{}' — directing user to /cred set", name);
+                yield "Storing a credential through this action is disabled: it would send the secret "
+                        + "through the model and leave it in plaintext chat history. Ask the user to type "
+                        + "this in chat instead, which writes it straight to the encrypted vault without "
+                        + "the value passing through you:\n\n    /cred set " + name + " <value>\n\n"
+                        + "Then continue — the value is injected into skills that declare '" + name + "' "
+                        + "as a required credential. Do not ask the user to paste the value to you.";
             }
-            default -> "ERROR: Unknown action '" + action + "'. Use one of: list, check, store";
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: list, check";
         };
     }
 

@@ -308,8 +308,8 @@ public class DynamicSkill implements Tool {
                     log.warn("Skill '{}' missing credentials: {}", name, missing);
                     return ToolResult.failure(
                             "Missing required credentials: " + String.join(", ", missing)
-                            + ". Use credential_manage(action='store') to store them first, "
-                            + "or ask the user to provide them with ask_user.");
+                            + ". Ask the user to store each one by typing: /cred set KEY value"
+                            + " — do not ask them to paste the value to you.");
                 }
                 log.info("Skill '{}': all {} credentials injected as env vars", name, creds.size());
             } else {

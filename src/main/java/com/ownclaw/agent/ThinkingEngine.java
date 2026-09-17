@@ -476,7 +476,7 @@ public class ThinkingEngine {
         sb.append("  container_image: Docker base image. Optional \u2014 system picks a sensible default and auto-recovers if unavailable.\n\n");
 
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
-        sb.append("credential_manage(action=list|check|store, [key], [value])\n");
+        sb.append("credential_manage(action=list|check, [key])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n\n");
 
         sb.append("schedule_manage:\n");
@@ -494,8 +494,10 @@ public class ThinkingEngine {
         sb.append("Vault values auto-injected as env vars into skills declaring them.\n");
         sb.append("- Declare in skill_create 'credentials' param (exact vault key names).\n");
         sb.append("- All present → create and run. Don't ask user.\n");
-        sb.append("- Auth failure with present creds → ask user for the wrong value, update via credential_manage.\n");
-        sb.append("- Only ask for credentials NOT in vault.\n\n");
+        sb.append("- NEVER ask the user to paste a secret to you, and never put one in an action.\n");
+        sb.append("  To add or fix one, tell the user to type: /cred set KEY value\n");
+        sb.append("  That writes straight to the vault without the value passing through you.\n");
+        sb.append("- Only mention credentials NOT already in the vault.\n\n");
 
         sb.append("## Memory\n");
         sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n\n");
@@ -630,7 +632,7 @@ public class ThinkingEngine {
         sb.append("skill_create(name, description, parameters[JSON], [requirements], [credentials], [system_packages→container], [timeout])\n");
         sb.append("Fix skill: reuse SAME name. NEVER _v2/_fixed/_new.\n");
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
-        sb.append("credential_manage(action=list|check|store, [key], [value])\n");
+        sb.append("credential_manage(action=list|check, [key])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
         sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — FREE local LLM. MUST USE for 2+ sequential calls.\n\n");
