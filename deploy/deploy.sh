@@ -68,6 +68,13 @@ BUSY_URL="http://localhost:8080/api/health/busy"
 HEALTH_TIMEOUT=60
 BUSY_WAIT_TIMEOUT=300  # max 5 minutes to wait for task to finish
 RESTART_PENDING_MARKER="${DEPLOY_DIR}/.restart-pending"
+# Commit the installed JAR was built from. --update compares origin against this rather
+# than against the repo checkout: the checkout moves to the new commit *before* the build,
+# so a failed or interrupted build used to leave it "up to date" with the old JAR still
+# running, and nothing ever retried.
+DEPLOYED_COMMIT_FILE="${DEPLOY_DIR}/.deployed-commit"
+DEPLOY_ATTEMPTS_FILE="${DEPLOY_DIR}/.deploy-attempts"  # "<commit> <attempts>"
+MAX_DEPLOY_ATTEMPTS=3  # --update stops retrying a commit after this many failed tries
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -850,7 +857,52 @@ repair_repo_perms() {
     return 1
 }
 
-# === Pull latest code, return 0 if there are changes ===
+# === Deploy state ===
+# Replace a small state file via rename. Atomic, and unlike '>' it also works when the
+# existing file belongs to another user (e.g. left behind by a deploy run as root).
+write_state_file() {
+    local file="$1" content="$2"
+    local tmp="${file}.tmp.$$"
+    echo "$content" > "$tmp" && mv -f "$tmp" "$file"
+}
+
+# Commit the installed JAR was built from. Empty if unknown (JAR predates this record).
+deployed_commit() {
+    local commit=""
+    if [ -f "$DEPLOYED_COMMIT_FILE" ]; then
+        read -r commit _ < "$DEPLOYED_COMMIT_FILE" || true
+    fi
+    echo "$commit"
+}
+
+# Count an --update attempt for a commit; returns 1 once it has used up MAX_DEPLOY_ATTEMPTS.
+# The attempt is recorded before the build starts, so a run that is killed half-way
+# (OOM, reboot) counts too. Without the cap, a commit that cannot build would run
+# Gradle on every cron cycle forever.
+register_deploy_attempt() {
+    local commit="$1" prev_commit="" attempts=0
+    if [ -f "$DEPLOY_ATTEMPTS_FILE" ]; then
+        read -r prev_commit attempts < "$DEPLOY_ATTEMPTS_FILE" || true
+    fi
+    if [ "$prev_commit" != "$commit" ] || ! [[ "$attempts" =~ ^[0-9]+$ ]]; then
+        attempts=0
+    fi
+
+    if [ "$attempts" -ge "$MAX_DEPLOY_ATTEMPTS" ]; then
+        log "ERROR: ${commit:0:8} failed to deploy $MAX_DEPLOY_ATTEMPTS times — not retrying automatically."
+        log "  Find the build error earlier in this log, then push a fix or run: $REPO_DIR/deploy/deploy.sh"
+        return 1
+    fi
+
+    attempts=$((attempts + 1))
+    if ! write_state_file "$DEPLOY_ATTEMPTS_FILE" "$commit $attempts"; then
+        log "ERROR: Cannot write $DEPLOY_ATTEMPTS_FILE — skipping auto-deploy rather than retrying unbounded"
+        return 1
+    fi
+    log "Deploy attempt $attempts/$MAX_DEPLOY_ATTEMPTS for ${commit:0:8}"
+}
+
+# === Pull latest code, return 0 if there is a commit to deploy ===
 pull_latest() {
     if [ ! -d "$REPO_DIR/.git" ]; then
         log "Cloning repository..."
@@ -887,19 +939,33 @@ pull_latest() {
         return 2
     }
 
-    if [ "$before" = "$after" ]; then
-        return 1  # No changes
+    if [ "$before" != "$after" ]; then
+        log "New commits: ${before:0:8} -> ${after:0:8}"
+
+        # Try git reset; if it fails (e.g. permission denied), repair and retry
+        if ! git reset --hard "origin/$BRANCH" --quiet 2>/dev/null; then
+            log "git reset failed — attempting permission repair..."
+            if repair_repo_perms; then
+                git reset --hard "origin/$BRANCH" --quiet
+            else
+                die "Cannot update repo: permission denied. Run: sudo chown -R ownclaw:ownclaw $REPO_DIR"
+            fi
+        fi
     fi
 
-    log "New commits: ${before:0:8} -> ${after:0:8}"
+    # Whether there is anything to deploy is decided by what is installed, not by the
+    # checkout: the checkout already points at $after even if its build never succeeded.
+    local deployed
+    deployed=$(deployed_commit)
+    if [ "$after" = "$deployed" ]; then
+        return 1  # Installed JAR is already built from the latest commit
+    fi
 
-    # Try git reset; if it fails (e.g. permission denied), repair and retry
-    if ! git reset --hard "origin/$BRANCH" --quiet 2>/dev/null; then
-        log "git reset failed — attempting permission repair..."
-        if repair_repo_perms; then
-            git reset --hard "origin/$BRANCH" --quiet
+    if [ "$before" = "$after" ]; then
+        if [ -z "$deployed" ]; then
+            log "No record of which commit the installed JAR was built from — rebuilding ${after:0:8} once to establish it"
         else
-            die "Cannot update repo: permission denied. Run: sudo chown -R ownclaw:ownclaw $REPO_DIR"
+            log "${after:0:8} is checked out but was never deployed (installed: ${deployed:0:8})"
         fi
     fi
     return 0
@@ -987,6 +1053,16 @@ deploy_jar() {
     mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
     log "Deployed new JAR"
 
+    # Record it at the swap, not after the restart: from here on the JAR on disk is the
+    # new build, and getting it loaded is the restart-pending marker's job.
+    local commit
+    commit=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)
+    if [ -n "$commit" ] && write_state_file "$DEPLOYED_COMMIT_FILE" "$commit"; then
+        rm -f "$DEPLOY_ATTEMPTS_FILE"
+    else
+        log "WARN: Could not record the deployed commit in $DEPLOYED_COMMIT_FILE"
+    fi
+
     ensure_runtime_permissions
 
     # Ensure sudoers rule exists when possible (root deploys, or environments where sudo -n works).
@@ -1005,6 +1081,9 @@ deploy_jar() {
         log "Restarting $SERVICE_NAME..."
         if ! restart_service; then
             restart_instructions
+            # The new JAR is installed but not loaded — let the next --update retry the
+            # restart, otherwise the old build keeps running until someone notices.
+            touch "$RESTART_PENDING_MARKER"
             die "Service restart failed (insufficient permissions)."
         fi
         rm -f "$RESTART_PENDING_MARKER"
@@ -1045,6 +1124,15 @@ rollback() {
 
     log "Rolling back to: $(basename "$latest_backup")"
     cp "$latest_backup" "$DEPLOY_DIR/ownclaw.jar"
+
+    # Keep the backed-out commit on record (flagged) so --update doesn't redeploy the
+    # build we just rolled back from on every cycle. It moves on with the next commit.
+    local commit
+    commit=$(deployed_commit)
+    if [ -n "$commit" ]; then
+        write_state_file "$DEPLOYED_COMMIT_FILE" "$commit rolled-back" || true
+        log "${commit:0:8} will not be redeployed automatically — push a fix, or run deploy.sh to force it"
+    fi
 
     ensure_sudoers_restart_rule || true
     if ! restart_service; then
@@ -1099,12 +1187,18 @@ main() {
             local pull_rc=0
             pull_latest || pull_rc=$?
             if [ "$pull_rc" -eq 0 ]; then
-                local jar
-                jar=$(build_jar)
-                deploy_jar "$jar" || { log "Deploy failed, attempting rollback"; rollback; }
-                log "--- Update complete ---"
+                if register_deploy_attempt "$(git -C "$REPO_DIR" rev-parse HEAD)"; then
+                    local jar
+                    jar=$(build_jar)
+                    deploy_jar "$jar" || { log "Deploy failed, attempting rollback"; rollback; }
+                    log "--- Update complete ---"
+                fi
             elif [ "$pull_rc" -eq 1 ]; then
-                log "Already up to date"
+                if grep -q "rolled-back" "$DEPLOYED_COMMIT_FILE" 2>/dev/null; then
+                    log "Latest commit was rolled back — waiting for a newer one (run deploy.sh to force it)"
+                else
+                    log "Already up to date"
+                fi
             else
                 log "--- Update check failed (rc=$pull_rc) — will retry next cycle ---"
             fi
@@ -1134,6 +1228,8 @@ main() {
             if [ -d "$REPO_DIR/.git" ]; then
                 cd "$REPO_DIR"
                 log "  HEAD: $(git rev-parse HEAD 2>/dev/null || echo 'FAILED')"
+                log "  Installed JAR built from: $(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || echo 'unknown (next --update rebuilds once)')"
+                log "  Failed deploy attempts: $(cat "$DEPLOY_ATTEMPTS_FILE" 2>/dev/null || echo 'none') (gives up at $MAX_DEPLOY_ATTEMPTS)"
                 log "  Branch: $(git branch --show-current 2>/dev/null || echo 'UNKNOWN')"
                 log "  Remote URL: $(git remote get-url origin 2>/dev/null | sed 's/x-access-token:[^@]*/x-access-token:***/' || echo 'FAILED')"
                 log "  Fetch test:"

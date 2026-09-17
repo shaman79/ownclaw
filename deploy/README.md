@@ -10,6 +10,7 @@ Auto-updates are handled by a cron job that polls GitHub for new commits.
 ├── ownclaw.jar          # Application
 ├── jdk/                 # Adoptium Temurin 21
 ├── .env                 # Secrets (not in git)
+├── .deployed-commit     # Commit the installed JAR was built from (written by deploy.sh)
 ├── data/                # SQLite database
 ├── skills/              # Dynamic skills (agent-created)
 │   ├── generated/       # Skill directories (SKILL.yaml + skill.py)
@@ -108,6 +109,15 @@ Add:
 ```
 
 This checks for new commits on `main` every 15 minutes. If changes are found, it builds, deploys, restarts, and runs a health check. On failure it automatically rolls back.
+
+"Changes" means `main` differs from the commit the installed JAR was built from, which the script records in `/opt/ownclaw/.deployed-commit` when it installs a JAR. It deliberately does not compare against the git checkout, which already points at the new commit while it is still being built:
+
+- **Build failed or the run was interrupted** — retried on the next cycle, up to 3 attempts per commit (tracked in `.deploy-attempts`). After that it logs an error every cycle and waits for a new commit or a manual force deploy, so a commit that cannot compile does not run Gradle every 15 minutes.
+- **Restart failed** (e.g. missing sudoers rule) — the new JAR stays installed and only the restart is retried each cycle.
+- **Health check failed and the JAR was rolled back** — that commit is marked `rolled-back` and is not deployed again automatically; the next commit is.
+- **No `.deployed-commit` yet** (server set up before this record existed) — the first `--update` rebuilds and deploys once to establish it.
+
+`deploy.sh --test-cron` prints the recorded commit and the attempt counter.
 
 ---
 
