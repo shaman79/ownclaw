@@ -54,11 +54,8 @@ public class ProcessSandbox implements SandboxManager {
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        // Inject env vars (credentials, config)
-        Map<String, String> env = pb.environment();
-        if (envVars != null) {
-            env.putAll(envVars);
-        }
+        // Only the allow-listed environment plus the skill's declared credentials.
+        applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -186,9 +183,7 @@ public class ProcessSandbox implements SandboxManager {
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        if (envVars != null) {
-            pb.environment().putAll(envVars);
-        }
+        applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -368,9 +363,7 @@ public class ProcessSandbox implements SandboxManager {
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        if (envVars != null) {
-            pb.environment().putAll(envVars);
-        }
+        applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -506,5 +499,48 @@ public class ProcessSandbox implements SandboxManager {
             }
         }
         return trimmed;
+    }
+
+    /**
+     * Variables a skill legitimately needs. Everything else is removed before the process
+     * starts, so generated code no longer inherits the service's own secrets.
+     * <p>
+     * The systemd unit loads {@code /opt/ownclaw/.env}, so the JVM environment holds the
+     * cloud API keys, the GitHub token, the Telegram token and the ops token. Until now
+     * {@code pb.environment()} handed all of them to every skill, which meant one buggy or
+     * prompt-injected skill could read them and post them anywhere.
+     */
+    private static final java.util.Set<String> ENV_ALLOWLIST = java.util.Set.of(
+            "PATH",                 // find python and system binaries
+            "HOME",                 // pip, venv and several libraries expect it
+            "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",   // UTF-8 in and out
+            "TZ",
+            "TMPDIR", "TMP", "TEMP",
+            "VIRTUAL_ENV",          // set by PythonEnvironmentService for venv skills
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",       // Windows needs these to run at all
+            "TEMPDIR", "USERPROFILE");
+
+    /**
+     * Replaces the inherited environment with the allow-listed subset plus the variables the
+     * caller explicitly asked for (the skill's declared credentials).
+     */
+    private static void applyEnvironment(ProcessBuilder pb, Map<String, String> envVars) {
+        Map<String, String> env = pb.environment();
+        Map<String, String> keep = new java.util.LinkedHashMap<>();
+        for (String name : ENV_ALLOWLIST) {
+            String value = env.get(name);
+            if (value != null) {
+                keep.put(name, value);
+            }
+        }
+        env.clear();
+        env.putAll(keep);
+        // Default to UTF-8 rather than the platform encoding: skills handle Czech text and
+        // mojibake has been a recurring source of bad output.
+        env.putIfAbsent("PYTHONIOENCODING", "utf-8");
+        if (envVars != null) {
+            env.putAll(envVars);
+        }
     }
 }
