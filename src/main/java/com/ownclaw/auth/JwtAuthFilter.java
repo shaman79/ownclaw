@@ -42,7 +42,10 @@ public class JwtAuthFilter implements Filter {
 
         HttpServletRequest request = (HttpServletRequest) req;
         HttpServletResponse response = (HttpServletResponse) res;
-        String path = request.getRequestURI();
+        // Decoded and normalised, NOT getRequestURI(): the container and Spring route on the
+        // decoded path, so authorising on the raw one let "/%61pi/settings" past this filter
+        // and straight into the controller. See RequestPaths.
+        String path = RequestPaths.effectivePath(request);
 
         // Skip public paths and static resources
         if (isPublic(path)) {
@@ -50,7 +53,9 @@ public class JwtAuthFilter implements Filter {
             return;
         }
 
-        // Only protect /api/* paths — static resources (HTML, CSS, JS) pass through
+        // Only protect /api/* paths — static resources (HTML, CSS, JS) pass through.
+        // Safe now that `path` is the decoded path Spring will route on: an encoded
+        // "/%61pi/..." normalises to "/api/..." here and is protected like any other.
         if (!path.startsWith("/api/")) {
             chain.doFilter(req, res);
             return;

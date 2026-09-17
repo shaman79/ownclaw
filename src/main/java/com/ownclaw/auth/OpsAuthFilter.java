@@ -60,7 +60,9 @@ public class OpsAuthFilter implements Filter {
         HttpServletRequest request = (HttpServletRequest) req;
         HttpServletResponse response = (HttpServletResponse) res;
 
-        if (!isOpsPath(request.getRequestURI())) {
+        // Decoded and normalised, NOT getRequestURI() — see RequestPaths for why.
+        String path = RequestPaths.effectivePath(request);
+        if (!isOpsPath(path)) {
             chain.doFilter(req, res);
             return;
         }
@@ -73,13 +75,13 @@ public class OpsAuthFilter implements Filter {
         if (!matches(presentedToken(request))) {
             // Log the attempt but never the presented value.
             log.warn("Ops API rejected: {} {} from {}", request.getMethod(),
-                    request.getRequestURI(), clientAddress(request));
+                    path, clientAddress(request));
             deny(response, 401, "Valid ops token required");
             return;
         }
 
         // Every accepted ops call is audited: these endpoints read internal state.
-        log.info("Ops API: {} {}{} from {}", request.getMethod(), request.getRequestURI(),
+        log.info("Ops API: {} {}{} from {}", request.getMethod(), path,
                 request.getQueryString() == null ? "" : "?" + request.getQueryString(),
                 clientAddress(request));
         chain.doFilter(req, res);
