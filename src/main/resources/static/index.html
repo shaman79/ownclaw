@@ -170,15 +170,6 @@
             background: var(--red-dim);
             border-radius: 8px;
         }
-        #auth-toggle {
-            color: var(--accent-hi);
-            font-size: 13px;
-            text-align: center;
-            margin-top: 18px;
-            cursor: pointer;
-            transition: opacity .15s;
-        }
-        #auth-toggle:hover { opacity: .75 }
 
         /*  Header  */
         #header {
@@ -2279,7 +2270,6 @@
         </div>
         <button id="auth-submit">Sign In</button>
         <div id="auth-error"></div>
-        <div id="auth-toggle" style="display:none"></div>
     </div>
 </div>
 
@@ -2401,7 +2391,6 @@
     var authPassword = document.getElementById('auth-password');
     var authSubmit   = document.getElementById('auth-submit');
     var authError    = document.getElementById('auth-error');
-    var authToggle   = document.getElementById('auth-toggle');
     var logoutBtn    = document.getElementById('logout-btn');
     var settingsBtn  = document.getElementById('settings-btn');
     var skillsBtn    = document.getElementById('skills-btn');
@@ -4256,7 +4245,7 @@
                 if (authToken) { authToken = null; localStorage.removeItem('ownclaw_token'); }
                 authLoading.style.display = 'none';
                 authBox.style.display = 'block';
-                if (data.hasUsers) switchToLogin(); else switchToRegister();
+                if (data.registrationOpen) switchToRegister(); else switchToLogin();
             })
             .catch(function() {
                 authLoading.textContent = 'Cannot reach server - retrying...';
@@ -4271,7 +4260,6 @@
         authSubmit.textContent = 'Create Account';
         authPassword.placeholder = 'Password (min 4 characters)';
         authPassword.autocomplete = 'new-password';
-        authToggle.style.display = 'none';
         authError.style.display = 'none';
     }
 
@@ -4282,14 +4270,8 @@
         authSubmit.textContent = 'Sign In';
         authPassword.placeholder = 'Password';
         authPassword.autocomplete = 'current-password';
-        authToggle.style.display = 'block';
-        authToggle.textContent = "Don't have an account? Register";
         authError.style.display = 'none';
     }
-
-    authToggle.addEventListener('click', function() {
-        if (isRegisterMode) switchToLogin(); else switchToRegister();
-    });
 
     function doAuth() {
         var username = authUsername.value.trim();

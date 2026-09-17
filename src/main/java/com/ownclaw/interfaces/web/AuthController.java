@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * REST controller for authentication: register and login.
@@ -32,29 +33,36 @@ public class AuthController {
     @GetMapping("/status")
     public ResponseEntity<?> status(@RequestHeader(value = "Authorization", required = false) String authHeader) {
         boolean hasUsers = authService.hasRegisteredUsers();
-        boolean authenticated = false;
-        String username = null;
-
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-            var userId = authService.validateToken(token);
-            authenticated = userId.isPresent();
-        }
+        var userId = bearerUserId(authHeader);
+        boolean authenticated = userId.isPresent();
 
         return ResponseEntity.ok(Map.of(
                 "hasUsers", hasUsers,
-                "authenticated", authenticated
+                "authenticated", authenticated,
+                // Self-registration exists only for first-run setup (see AuthService.register)
+                "registrationOpen", !hasUsers,
+                "owner", authService.isOwner(userId.orElse(null))
         ));
+    }
+
+    private Optional<String> bearerUserId(String authHeader) {
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authService.validateToken(authHeader.substring(7));
+        }
+        return Optional.empty();
     }
 
     /**
      * Register a new user.
      * POST /api/auth/register
      * Body: {"username": "...", "password": "..."}
-     * Returns: {"token": "jwt...", "userId": "..."}
+     * Returns: {"token": "jwt...", "username": "..."} for the first account (first-run setup).
+     * Once an account exists this needs the owner's Bearer token and returns no token,
+     * so that adding an account for someone else does not sign the owner out of theirs.
      */
     @PostMapping("/register")
-    public ResponseEntity<?> register(@RequestBody Map<String, String> body) {
+    public ResponseEntity<?> register(@RequestHeader(value = "Authorization", required = false) String authHeader,
+                                      @RequestBody Map<String, String> body) {
         String username = body.get("username");
         String password = body.get("password");
 
@@ -63,9 +71,15 @@ public class AuthController {
                     .body(Map.of("error", "Username required, password must be at least 4 characters"));
         }
 
+        String requesterId = bearerUserId(authHeader).orElse(null);
         try {
-            String token = authService.register(username.trim(), password);
+            String token = authService.register(username.trim(), password, requesterId);
+            if (requesterId != null) {
+                return ResponseEntity.ok(Map.of("username", username.trim(), "created", true));
+            }
             return ResponseEntity.ok(Map.of("token", token, "username", username.trim()));
+        } catch (AuthService.RegistrationClosedException e) {
+            return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }

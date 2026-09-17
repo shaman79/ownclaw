@@ -7,8 +7,11 @@ import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.users.AuthService;
 import com.ownclaw.users.CredentialGrantService;
 import com.ownclaw.users.CredentialVault;
+import com.ownclaw.users.UserRepository;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -38,12 +41,15 @@ public class CommandHandler {
     private final CredentialGrantService credentialGrants;
     private final TaskQueue taskQueue;
     private final ScheduledTaskService scheduledTaskService;
+    private final AuthService authService;
+    private final UserRepository userRepo;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
                           CredentialVault credentialVault,
                           CredentialGrantService credentialGrants, TaskQueue taskQueue,
-                          ScheduledTaskService scheduledTaskService) {
+                          ScheduledTaskService scheduledTaskService,
+                          AuthService authService, UserRepository userRepo) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -52,6 +58,8 @@ public class CommandHandler {
         this.credentialGrants = credentialGrants;
         this.taskQueue = taskQueue;
         this.scheduledTaskService = scheduledTaskService;
+        this.authService = authService;
+        this.userRepo = userRepo;
     }
 
     /**
@@ -103,6 +111,9 @@ public class CommandHandler {
                 if (command.startsWith("/schedule")) {
                     yield Optional.of(handleSchedule(userId, message.trim()));
                 }
+                if (command.equals("/user") || command.startsWith("/user ")) {
+                    yield Optional.of(handleUser(userId, message.trim().substring(5).strip()));
+                }
                 // Not a recognized shared command — caller may handle interface-specific
                 // commands (like /debug, /setup) or treat as unknown.
                 yield Optional.empty();
@@ -130,6 +141,10 @@ public class CommandHandler {
                 - `/cred set <KEY> <VALUE>` — Store a credential
                 - `/cred list` — List stored credential keys
                 - `/cred delete <KEY>` — Delete a credential
+                - `/user list` — List accounts (owner only)
+                - `/user add <username> <password>` — Create an account (owner only)
+                - `/user disable <username|id>` — Revoke an account's access (owner only)
+                - `/user telegram <username> <telegram id>` — Let a Telegram ID use the bot (owner only)
                 - `/schedule` — List scheduled/deferred tasks
                 - `/schedule in <time> <task>` — Run a task after a delay
                 - `/schedule every <schedule> : <task>` — Recurring task
@@ -137,6 +152,73 @@ public class CommandHandler {
                 - `/setup` — Run setup wizard (Web UI only)
                 - `/status` — System status
                 - `/help` — This message""";
+    }
+
+    // ── Accounts (owner only) ──
+
+    private String handleUser(String userId, String args) {
+        if (!authService.isOwner(userId)) {
+            return "Only the owner can manage accounts.";
+        }
+        String[] parts = args.split("\\s+");
+        String usage = "Usage: /user list | /user add <username> <password> | "
+                + "/user disable <username|id> | /user telegram <username> <telegram id>";
+
+        switch (parts[0].toLowerCase()) {
+            case "list" -> {
+                var sb = new StringBuilder("### Accounts\n");
+                for (Map<String, Object> u : userRepo.listUsers()) {
+                    String id = (String) u.get("id");
+                    boolean hasPassword = ((Number) u.get("has_password")).intValue() != 0;
+                    Object telegramId = u.get("telegram_id");
+                    sb.append("- `").append(id).append("` **").append(u.get("display_name")).append("**");
+                    if (authService.isOwner(id)) sb.append(" — owner");
+                    sb.append(hasPassword ? " — web login" : "");
+                    sb.append(telegramId != null ? " — Telegram " + telegramId : "");
+                    if (!hasPassword && telegramId == null) sb.append(" — disabled");
+                    sb.append(" — created ").append(u.get("created_at")).append("\n");
+                }
+                return sb.toString();
+            }
+            case "add" -> {
+                if (parts.length != 3 || parts[2].length() < 4) {
+                    return "Usage: /user add <username> <password> (password: at least 4 characters, no spaces)";
+                }
+                try {
+                    authService.register(parts[1], parts[2], userId);
+                    return "\u2705 Account **" + parts[1] + "** created.";
+                } catch (IllegalArgumentException e) {
+                    return "\u274C " + e.getMessage();
+                }
+            }
+            case "disable" -> {
+                if (parts.length != 2) return usage;
+                String target = userRepo.findAccountByUsername(parts[1])
+                        .or(() -> userRepo.findById(parts[1]).map(u -> (String) u.get("id")))
+                        .orElse(null);
+                if (target == null) return "\u274C No such account: " + parts[1];
+                if (authService.isOwner(target)) return "\u274C The owner account cannot be disabled.";
+                userRepo.disable(target);
+                return "\u2705 Account `" + target + "` disabled: it can no longer log in, its sessions are "
+                        + "signed out and its Telegram ID is unlinked. Its data is kept.";
+            }
+            case "telegram" -> {
+                if (parts.length != 3) return usage;
+                Optional<String> target = userRepo.findAccountByUsername(parts[1]);
+                if (target.isEmpty()) return "\u274C No such account: " + parts[1];
+                try {
+                    userRepo.linkTelegram(target.get(), Long.parseLong(parts[2]));
+                    return "\u2705 Telegram ID " + parts[2] + " can now use the bot as **" + parts[1] + "**.";
+                } catch (NumberFormatException e) {
+                    return "\u274C The Telegram ID must be a number.";
+                } catch (DataAccessException e) {
+                    return "\u274C That Telegram ID is already linked to another account (see /user list).";
+                }
+            }
+            default -> {
+                return usage;
+            }
+        }
     }
 
     // ── Session management ──

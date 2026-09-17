@@ -876,9 +876,11 @@ The Executor maintains a `preferences.json` per user:
 
 ### 6.4 Authentication
 
-- **Telegram**: User identified by Telegram user ID. First message triggers registration flow.
-- **WebUI**: Login via username/password or OAuth (configurable). Session token via JWT.
-- **Admin**: First registered user becomes admin. Admin can manage other users.
+- **WebUI**: Login via username/password. Session token via JWT (30 days).
+- **Owner**: The first account created is the owner (`ownclaw.auth.owner` overrides this by username). Self-registration exists only for that first account; afterwards `POST /api/auth/register` requires the owner's token. Every account can run code on the host, so accounts are never open to the public.
+- **Managing accounts** (owner only, chat commands): `/user list`, `/user add <username> <password>`, `/user disable <username|id>` (blocks login, invalidates existing tokens, unlinks Telegram; data is kept), `/user telegram <username> <telegram id>`.
+- **Telegram**: Only Telegram IDs the owner has linked may use the bot. An unknown sender is told their ID and ignored; no account is created for them.
+- There are no other roles yet: apart from account management, every account has the same powers.
 
 ### 6.5 User Isolation
 
@@ -1420,7 +1422,10 @@ ownclaw:
   telegram:
     enabled: true
     bot_token: ${TELEGRAM_BOT_TOKEN}
-    registration: open           # open | invite-only | closed
+
+  # Accounts: only the owner can create them (see 6.4)
+  auth:
+    owner: ${OWNCLAW_OWNER:}     # username; blank = the oldest account
 
   # WebUI
   webui:

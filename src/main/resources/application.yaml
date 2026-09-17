@@ -74,10 +74,14 @@ ownclaw:
   telegram:
     enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}
     bot-token: ${TELEGRAM_BOT_TOKEN:}
-    registration: open
 
   webui:
     enabled: true
+
+  auth:
+    # Only the owner can create accounts (/user add). The owner is the oldest account;
+    # set a username here only to override that.
+    owner: ${OWNCLAW_OWNER:}
 
   sandbox:
     type: auto

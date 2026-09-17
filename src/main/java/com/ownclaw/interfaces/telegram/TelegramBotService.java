@@ -192,9 +192,16 @@ public class TelegramBotService {
 
         if (text.isBlank()) return;
 
-        // Resolve or create user
-        String userId = userRepo.findByTelegramId(telegramUserId)
-                .orElseGet(() -> userRepo.createUser(firstName, telegramUserId));
+        // Only Telegram IDs the owner has linked (/user telegram) may use the bot. Accounts
+        // are never created for whoever happens to message it: every account can run code.
+        var linkedUser = userRepo.findByTelegramId(telegramUserId);
+        if (linkedUser.isEmpty()) {
+            log.warn("Ignoring Telegram message from unlinked id={} ({})", telegramUserId, firstName);
+            sendMessage(chatId, "This bot is private. To get access, ask the owner to link your Telegram ID: "
+                    + telegramUserId);
+            return;
+        }
+        String userId = linkedUser.get();
 
         // Track chatId for this user
         userChatIds.put(userId, chatId);

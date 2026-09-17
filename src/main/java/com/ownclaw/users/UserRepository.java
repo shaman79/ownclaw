@@ -53,6 +53,48 @@ public class UserRepository {
     }
 
     /**
+     * Find a login account (one with a password) by username.
+     */
+    public Optional<String> findAccountByUsername(String username) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id FROM users WHERE display_name = ? AND password_hash IS NOT NULL", username);
+        return rows.isEmpty() ? Optional.empty() : Optional.of((String) rows.getFirst().get("id"));
+    }
+
+    /**
+     * All users, oldest first. Never includes password hashes or salts.
+     */
+    public List<Map<String, Object>> listUsers() {
+        return jdbc.queryForList("""
+            SELECT id, display_name, telegram_id, created_at,
+                   password_hash IS NOT NULL AS has_password
+            FROM users ORDER BY created_at, rowid
+            """);
+    }
+
+    /**
+     * Link a Telegram ID to a user so that messages from it are accepted.
+     *
+     * @throws org.springframework.dao.DataAccessException if the ID is already linked to someone
+     */
+    public void linkTelegram(String userId, long telegramId) {
+        jdbc.update("UPDATE users SET telegram_id = ?, updated_at = datetime('now') WHERE id = ?",
+                telegramId, userId);
+    }
+
+    /**
+     * Revoke all access: the user can no longer log in, existing tokens stop validating
+     * (see AuthService.validateToken) and their Telegram ID is no longer recognised.
+     * The row and the user's data stay, so nothing referencing it breaks.
+     */
+    public boolean disable(String userId) {
+        return jdbc.update("""
+            UPDATE users SET password_hash = NULL, telegram_id = NULL, updated_at = datetime('now')
+            WHERE id = ?
+            """, userId) > 0;
+    }
+
+    /**
      * Get or create a default user (Phase 1: single-user mode).
      */
     public String getDefaultUserId() {

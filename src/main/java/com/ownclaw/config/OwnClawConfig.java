@@ -16,6 +16,7 @@ public class OwnClawConfig {
     private Queue queue = new Queue();
     private Tasks tasks = new Tasks();
     private Telegram telegram = new Telegram();
+    private Auth auth = new Auth();
     private Webui webui = new Webui();
     private Sandbox sandbox = new Sandbox();
     private Skills skills = new Skills();
@@ -148,14 +149,19 @@ public class OwnClawConfig {
     public static class Telegram {
         private boolean enabled = true;
         private String botToken;
-        private String registration = "open";
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getBotToken() { return botToken; }
         public void setBotToken(String botToken) { this.botToken = botToken; }
-        public String getRegistration() { return registration; }
-        public void setRegistration(String registration) { this.registration = registration; }
+    }
+
+    public static class Auth {
+        /** Username of the owner account. Blank = the oldest account (see AuthService.ownerId). */
+        private String owner = "";
+
+        public String getOwner() { return owner; }
+        public void setOwner(String owner) { this.owner = owner; }
     }
 
     public static class Webui {
@@ -285,6 +291,8 @@ public class OwnClawConfig {
     public void setTasks(Tasks v) { this.tasks = v; }
     public Telegram getTelegram() { return telegram; }
     public void setTelegram(Telegram v) { this.telegram = v; }
+    public Auth getAuth() { return auth; }
+    public void setAuth(Auth auth) { this.auth = auth; }
     public Webui getWebui() { return webui; }
     public void setWebui(Webui v) { this.webui = v; }
     public Sandbox getSandbox() { return sandbox; }
