@@ -140,13 +140,38 @@ public class SkillManager {
                     buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
                             timeout, credentials, systemPackagesStr, containerImage),
                     StandardCharsets.UTF_8);
-            Files.writeString(skillDir.resolve("skill.py"), code, StandardCharsets.UTF_8);
+            // Keep whatever was there before. An update overwrites in place, so without this a
+            // broken regeneration destroys a skill that worked -- the failure mode where a model
+            // "fixes" an edge case at 2am and replaces six months of working code with something
+            // that cannot even import.
+            Path codeFile = skillDir.resolve("skill.py");
+            String previousCode = Files.exists(codeFile)
+                    ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
+
+            Files.writeString(codeFile, code, StandardCharsets.UTF_8);
             if (requirements != null && !requirements.isBlank()) {
                 Files.writeString(skillDir.resolve("requirements.txt"),
                         requirements.strip() + "\n", StandardCharsets.UTF_8);
             } else {
                 // Remove stale requirements.txt so the old venv isn't used
                 Files.deleteIfExists(skillDir.resolve("requirements.txt"));
+            }
+
+            // Does it actually load? py_compile above proves the file parses, which is a much
+            // weaker claim than it sounds: it never executes a single import, so a skill that
+            // imports a package nobody installed passes and then fails on first real use, long
+            // after the context that produced it is gone.
+            String loadError = verifyLoads(skillDir, name);
+            if (loadError != null) {
+                if (previousCode != null) {
+                    Files.writeString(codeFile, previousCode, StandardCharsets.UTF_8);
+                    log.warn("Skill '{}' failed to load; restored the previous version", name);
+                    return "ERROR: the new code for '" + name + "' does not load, so the previous "
+                            + "working version was kept. Fix and retry with the SAME name.\n" + loadError;
+                }
+                log.warn("New skill '{}' failed to load: {}", name, loadError.replace('\n', ' '));
+                return "ERROR: '" + name + "' was written but does not load, so it was not "
+                        + "registered. Fix and retry with the SAME name.\n" + loadError;
             }
 
             DynamicSkill skill = dynamicSkillRegistry.loadSkill(skillDir);
@@ -320,6 +345,69 @@ public class SkillManager {
     }
 
     // ────────────────────── Helpers ──────────────────────
+
+    /**
+     * Import the skill in its own environment and confirm {@code run} is callable.
+     * Returns an error message, or null when it loads.
+     * <p>
+     * The gate before this was {@code py_compile} plus an AST check for a function named
+     * {@code run} — "it parses and has the right shape". That is a much weaker claim than it
+     * sounds, because compiling never executes a single import. A skill importing {@code bs4}
+     * when nothing declared it in requirements.txt passed, registered, and then failed on first
+     * real use, by which time the reasoning that produced it was long gone and the failure had
+     * to be diagnosed from scratch.
+     * <p>
+     * Importing runs everything at module level — the imports, the constants, the decorators —
+     * which is where dead-on-arrival code actually dies. It resolves the skill's real venv
+     * first, so this also verifies that the declared requirements genuinely cover the imports.
+     * <p>
+     * Deliberately only an import, not an invocation. Calling {@code run()} would need
+     * parameters, and invented parameters produce failures that say nothing about the code —
+     * a URL of "test" fails for reasons that are not the skill's fault, and a check that cries
+     * wolf gets ignored or, worse, triggers repairs of code that was fine. This answers exactly
+     * one question, mechanically: can this thing load at all? Whether it does the right thing
+     * is a different question and needs real cases.
+     */
+    private String verifyLoads(Path skillDir, String name) {
+        Path checkScript = null;
+        try {
+            var resolution = pythonEnv.resolveExecution(skillDir, name);
+            checkScript = skillDir.resolve("_load_check.py");
+            Files.writeString(checkScript,
+                    "import sys, importlib.util, traceback\n" +
+                    "try:\n" +
+                    "    spec = importlib.util.spec_from_file_location('skill_under_test', 'skill.py')\n" +
+                    "    mod = importlib.util.module_from_spec(spec)\n" +
+                    "    spec.loader.exec_module(mod)\n" +
+                    "    if not callable(getattr(mod, 'run', None)):\n" +
+                    "        print('Module imported but has no callable run()', file=sys.stderr)\n" +
+                    "        sys.exit(1)\n" +
+                    "except Exception:\n" +
+                    "    traceback.print_exc()\n" +
+                    "    sys.exit(1)\n",
+                    StandardCharsets.UTF_8);
+
+            SandboxResult result = sandbox.execute(resolution.python(), checkScript, skillDir,
+                    null, resolution.extraEnv(), 60);
+            if (result.isSuccess()) return null;
+            if (result.timedOut()) {
+                return "Importing the module timed out after 60s — module-level code should not "
+                        + "do real work; put it inside run().";
+            }
+            String detail = result.stderr().isBlank() ? result.stdout() : result.stderr();
+            return detail.isBlank() ? "Import failed with exit code " + result.exitCode() : detail;
+        } catch (Exception e) {
+            // A failure of the CHECK must not block a skill. Better to register something
+            // unverified than to lose a capability because the sandbox hiccuped.
+            log.warn("Load check for '{}' could not run ({}); registering unverified",
+                    name, e.getMessage());
+            return null;
+        } finally {
+            if (checkScript != null) {
+                try { Files.deleteIfExists(checkScript); } catch (IOException ignored) {}
+            }
+        }
+    }
 
     /**
      * Check Python code for syntax errors without writing to the skill directory.
