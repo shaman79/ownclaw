@@ -89,16 +89,50 @@ public class DynamicSkillRegistry {
             }
         } catch (Exception e) {
             log.warn("Failed to load dynamic skill from {}: {}", skillDir, e.getMessage());
-            // Auto-remove broken skill directory so it doesn't block startup repeatedly
-            try {
-                try (Stream<Path> files = Files.walk(skillDir)) {
-                    files.sorted(java.util.Comparator.reverseOrder())
-                         .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
-                }
-                log.warn("Removed broken skill directory: {}", skillDir.getFileName());
-            } catch (Exception deleteEx) {
-                log.error("Could not remove broken skill directory {}: {}", skillDir, deleteEx.getMessage());
-            }
+            quarantine(skillDir, e);
+        }
+    }
+
+    /**
+     * Move a skill that would not load out of the way, instead of deleting it.
+     * <p>
+     * This used to recursively delete the directory, with the justification that a broken skill
+     * "blocks startup repeatedly". It does not: the exception is caught per directory, so a skill
+     * that fails to load costs one log line and nothing else. What the deletion did do was destroy
+     * working Python, permanently and silently. {@code loadSkill} throws on any YAML syntax error
+     * — {@code yamlMapper.readValue} is not lenient — and on a malformed parameter block, so one
+     * bad edit to SKILL.yaml by the model that writes these files was enough to lose the skill's
+     * code. Generated skills live outside the repository and are not in any backup that git
+     * provides, so there was nothing to restore from. A transient IO error during a deploy could
+     * do the same to a skill that was perfectly fine.
+     * <p>
+     * Quarantine achieves the stated goal — the directory stops being rescanned, so the warning
+     * does not repeat — while keeping the code recoverable. The destination is a sibling of the
+     * generated directory rather than a child, because {@link #loadAll} lists every subdirectory
+     * of {@code generated/} and would otherwise try to load the quarantined copy again.
+     * <p>
+     * If the move itself fails, the directory is deliberately left alone. A skill that logs a
+     * warning on every startup is a far better outcome than one that is gone.
+     */
+    private void quarantine(Path skillDir, Exception cause) {
+        try {
+            Path quarantineDir = skillDir.getParent().resolveSibling("quarantine");
+            Files.createDirectories(quarantineDir);
+            String stamp = java.time.Instant.now().toString().replace(':', '-');
+            Path dest = quarantineDir.resolve(skillDir.getFileName() + "-" + stamp);
+            Files.move(skillDir, dest);
+            Files.writeString(dest.resolve("QUARANTINE-REASON.txt"),
+                    "Quarantined because it could not be loaded.\n"
+                            + "When:  " + java.time.Instant.now() + "\n"
+                            + "Cause: " + cause.getClass().getSimpleName() + ": " + cause.getMessage() + "\n\n"
+                            + "The code is intact. Fix SKILL.yaml and move the directory back into\n"
+                            + "generated/ to restore the skill.\n");
+            log.warn("Quarantined unloadable skill '{}' to {} — its code is intact and recoverable",
+                    skillDir.getFileName(), dest);
+        } catch (Exception moveEx) {
+            log.error("Could not quarantine broken skill {} ({}). Leaving it in place — it will be "
+                            + "skipped on every startup until SKILL.yaml is fixed.",
+                    skillDir, moveEx.getMessage());
         }
     }
 
