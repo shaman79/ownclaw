@@ -122,6 +122,54 @@ service_name() {
     printf '%s\n' "$units" | head -1
 }
 
+# Every Environment= line currently in effect, drop-ins included.
+unit_env_lines() {
+    local svc="$1"
+    [ -n "$svc" ] || return 0
+    systemctl cat "$svc" 2>/dev/null |
+        grep -E '^[[:space:]]*Environment=' | sed 's/^[[:space:]]*//' | sort -u
+}
+
+# The official installer rewrites /etc/systemd/system/ollama.service from its own
+# template. Anything the host added to that file is silently discarded - and the
+# line that matters most is OLLAMA_HOST: without it the server reverts to listening
+# on 127.0.0.1 only, so every other machine on the LAN loses Ollama entirely and the
+# only symptom is a connection refused from somewhere else. OLLAMA_MODELS is just as
+# bad, because a wrong value makes every model look like it vanished.
+#
+# So snapshot the lines first and, if the installer dropped any, restore them as a
+# drop-in under ollama.service.d/ - which the installer does NOT overwrite, so this
+# repairs the host once and then keeps surviving future upgrades.
+#
+# Sets RESTORED_ENV=1 when it actually wrote something, so the caller knows whether a
+# restart is needed; without a change there is nothing to restart for.
+restore_lost_unit_env() {
+    local svc="$1" before="$2" after lost=""
+    RESTORED_ENV=0
+    [ -n "$svc" ] && [ -n "$before" ] || return 0
+    after=$(unit_env_lines "$svc")
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$after" | grep -qxF "$line" || lost+="$line"$'\n'
+    done <<< "$before"
+    [ -n "$lost" ] || { log "Unit settings survived the upgrade — nothing to restore."; return 0; }
+
+    local dir="/etc/systemd/system/${svc}.d"
+    local f="$dir/10-preserved-env.conf"
+    log "The installer dropped settings from $svc. Restoring them as a drop-in:"
+    printf '%s' "$lost" | while IFS= read -r l; do [ -n "$l" ] && log "    $l"; done
+    mkdir -p "$dir"
+    { echo "# Restored by ollama-update.sh: the official installer rewrites the main unit"
+      echo "# file and discards these. A drop-in survives that, so this only happens once."
+      echo "[Service]"
+      printf '%s' "$lost"
+    } > "$f"
+    chmod 0644 "$f"
+    systemctl daemon-reload
+    RESTORED_ENV=1
+    log "  Wrote $f"
+}
+
 # Only touch a unit that is genuinely in use, and never wait on it forever.
 maybe_restart() {
     local svc="$1"
@@ -172,10 +220,16 @@ do_update() {
         official)
             need_root
             backup_binary
-            log "Re-running the official installer (it upgrades in place and keeps the unit)"
+            local env_before; env_before=$(unit_env_lines "$svc")
+            [ -n "$env_before" ] && log "Noted $(printf '%s\n' "$env_before" | grep -c .) Environment= line(s) on $svc to preserve"
+            log "Re-running the official installer (it rewrites the unit file - see below)"
             curl -fsSL https://ollama.com/install.sh | sh || die "official installer failed"
-            # The installer enables and starts ollama.service itself, so there is
-            # nothing left to restart and a second restart is just another outage.
+            # The installer starts the service itself, but it may have just thrown away
+            # the host's OLLAMA_HOST / OLLAMA_MODELS. Put them back, then restart so the
+            # server actually comes up with them.
+            svc=$(service_name)
+            restore_lost_unit_env "$svc" "$env_before"
+            [ "${RESTORED_ENV:-0}" = "1" ] && maybe_restart "$svc"
             return 0
             ;;
         source)
