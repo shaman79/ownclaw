@@ -239,18 +239,29 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);
 
-        // Submit to task queue
+        // Submit to task queue.
+        //
+        // Deliberately NOT capturing `session` here. A task takes minutes, and any laptop
+        // sleep, Wi-Fi blip or proxy idle-timeout closes the socket that arrived with the
+        // request. The client reconnects within seconds and registers a *new* session under
+        // the same userId, but the old object stays closed forever -- so delivering to the
+        // captured one meant sendToSession's `if (!session.isOpen()) return;` silently
+        // dropped the finished answer. The status stream still showed the task completing,
+        // because that path resolves the live socket, so the task looked successful and the
+        // answer simply never arrived. It is persisted just above, so the only way to see it
+        // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
+        // sendSystemToUser already does.
         taskQueue.submit(userId, userMessage)
                 .thenAccept(response -> {
                     // Persist the assistant response for conversation history
                     conversationService.saveMessage(userId, currentSessionId, "assistant", response);
-                    sendToSession(session, "response", response);
+                    sendToUser(userId, "response", response);
                     // Notify frontend to refresh session list (title/preview may have changed)
-                    sendToSession(session, "session_updated", currentSessionId);
+                    sendToUser(userId, "session_updated", currentSessionId);
                 })
                 .exceptionally(ex -> {
                     log.error("Task failed for {}: {}", userId, ex.getMessage());
-                    sendToSession(session, "response", "Something went wrong: " + ex.getMessage());
+                    sendToUser(userId, "response", "Something went wrong: " + ex.getMessage());
                     return null;
                 });
     }
@@ -385,6 +396,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } catch (Exception e) {
             log.warn("Failed to send status to WebSocket: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Send to whichever socket the user holds <em>now</em>, rather than to one captured
+     * earlier. Anything produced asynchronously — the result of a task that ran for minutes —
+     * must go through here, because the socket that started the work is frequently not the
+     * socket that is still connected when the work finishes. If the user is away entirely the
+     * message is dropped, which is safe: everything sent this way is persisted first and the
+     * client reloads history on connect.
+     */
+    private void sendToUser(String userId, String type, String content) {
+        WebSocketSession live = sessions.get(userId);
+        if (live == null || !live.isOpen()) {
+            log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
+            return;
+        }
+        sendToSession(live, type, content);
     }
 
     private void sendToSession(WebSocketSession session, String type, String content) {
