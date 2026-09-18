@@ -48,6 +48,25 @@ public class OllamaProvider implements LlmProvider {
         body.put("model", model);
         body.put("stream", false);
 
+        // Keep the model resident between calls.
+        //
+        // Nothing here set keep_alive, so every request inherited whatever the server default
+        // happened to be. Ollama's own default is five minutes, and this deployment makes
+        // local calls in bursts separated by much longer gaps -- a scheduled summary, then
+        // nothing for an hour -- so the model was liable to be evicted between them. Reloading
+        // it costs 35-119 seconds measured on this hardware, which is longer than most of the
+        // calls themselves.
+        //
+        // -1 means never unload. It is set per request rather than relying on the host, because
+        // the host's setting lives in a systemd unit that the Ollama installer rewrites on every
+        // upgrade -- that is exactly how OLLAMA_HOST was silently lost. A value carried in the
+        // request cannot be lost that way.
+        //
+        // The cost is that the model holds its memory permanently on that box. That is the right
+        // trade for a dedicated inference host and the wrong one for a shared machine; if it
+        // ever needs to change, this is the single place to change it.
+        body.put("keep_alive", -1);
+
         // JSON mode: force structured JSON output when requested
         if (reqConfig.jsonMode()) {
             body.put("format", "json");
