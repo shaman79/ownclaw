@@ -59,9 +59,26 @@ die() { printf '[ollama-recover] ERROR: %s\n' "$*" >&2; exit 1; }
 # CRITICAL - identity and placement. A changed value here breaks the host outright
 # (models invisible, endpoint unreachable, wrong GPU), and no new default is ever a
 # better answer than what the operator had. Restored automatically.
-CRITICAL="OLLAMA_MODELS OLLAMA_HOST OLLAMA_ORIGINS CUDA_VISIBLE_DEVICES
+#
+# These are all scalars that round-trip exactly: OLLAMA_HOST is logged as
+# "http://0.0.0.0:11434" and Host() parses that same string back, OLLAMA_MODELS is a
+# plain path, and the *_VISIBLE_DEVICES family are plain device lists.
+CRITICAL="OLLAMA_MODELS OLLAMA_HOST CUDA_VISIBLE_DEVICES
           HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES HSA_OVERRIDE_GFX_VERSION
           GPU_DEVICE_ORDINAL"
+#
+# DERIVED - present in the log but NOT restorable, because what is logged is the
+# resolved value rather than the input that produced it. Restoring these verbatim
+# writes garbage:
+#   OLLAMA_ORIGINS  is a Go []string rendered as "[a b c]" - space separated, brackets
+#                   included - whereas the env var Ollama reads is COMMA separated. It is
+#                   also the EFFECTIVE list, so it always contains the ~17 built-in
+#                   defaults; pinning it freezes today's defaults forever and hides any
+#                   the next version adds.
+#   OLLAMA_REMOTES  same shape, same problem.
+#   OLLAMA_DEBUG    logged as a level ("INFO"), set as a boolean/int.
+# Reported so nothing is hidden, never written.
+DERIVED="OLLAMA_ORIGINS OLLAMA_REMOTES"
 #
 # TUNING - performance knobs. Here an old value is usually an old DEFAULT, and pinning
 # it back is actively harmful: restoring OLLAMA_FLASH_ATTENTION=false from a 0.18 log
@@ -73,7 +90,12 @@ TUNING="OLLAMA_KEEP_ALIVE OLLAMA_CONTEXT_LENGTH OLLAMA_FLASH_ATTENTION
         OLLAMA_MAX_QUEUE OLLAMA_SCHED_SPREAD OLLAMA_GPU_OVERHEAD OLLAMA_LOAD_TIMEOUT
         OLLAMA_NOPRUNE OLLAMA_DEBUG OLLAMA_NEW_ENGINE OLLAMA_MULTIUSER_CACHE"
 
-CARE="$CRITICAL $TUNING"
+CARE="$CRITICAL $TUNING $DERIVED"
+
+# systemd gives "%" a meaning of its own inside unit files (%h, %i, ...), so a literal
+# percent - as in a proxy URL with percent-encoding - has to be doubled or the unit
+# fails to parse or silently mangles the value.
+esc_systemd() { printf '%s' "${1//%/%%}"; }
 
 service_name() {
     local units
@@ -197,9 +219,25 @@ for k in $CRITICAL; do
     printf '    %-26s was %-34s now %s\n' "$k" "${o:-<unset>}" "${n:-<unset>}"
     # Only restore something that actually had a value before. A setting that was
     # empty before and is set now came from the new default; leave it alone.
-    [ -n "$o" ] && LOST+="Environment=\"$k=$o\""$'\n'
+    [ -n "$o" ] && LOST+="Environment=\"$k=$(esc_systemd "$o")\""$'\n'
 done
 [ -n "$LOST" ] || printf '    (none)\n'
+
+# Derived values: show the difference, refuse to write it, say what to do instead.
+for k in $DERIVED; do
+    o=$(map_get "$OLD" "$k"); n=$(map_get "$NEW" "$k")
+    [ "$o" = "$n" ] && continue
+    found=1
+    printf '\n'
+    log "$k changed, and is NOT restorable from this log:"
+    log "    was: ${o:-<unset>}"
+    log "    now: ${n:-<unset>}"
+    log "  What the log shows is the RESOLVED list, rendered as a Go slice (space"
+    log "  separated, in brackets). The environment variable takes a COMMA separated"
+    log "  list, and setting the whole resolved list would also pin today's built-in"
+    log "  defaults permanently. Set only the entries you added yourself, e.g.:"
+    log "      Environment=\"$k=https://app.example.com,https://other.example.com\""
+done
 
 printf '\n'
 log "TUNING settings that changed (NOT restored -- an old value here is usually just"
@@ -232,7 +270,7 @@ esac
 
 if [ "$RESTORE_ALL" = "1" ] && [ -n "$TUNED" ]; then
     log "--restore-all: pinning the tuning values back too"
-    while IFS= read -r kv; do [ -n "$kv" ] && LOST+="Environment=\"$kv\""$'\n'; done <<< "$TUNED"
+    while IFS= read -r kv; do [ -n "$kv" ] && LOST+="Environment=\"$(esc_systemd "$kv")\""$'\n'; done <<< "$TUNED"
     TUNED=""
 fi
 
