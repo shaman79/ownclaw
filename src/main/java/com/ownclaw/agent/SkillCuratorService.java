@@ -57,14 +57,79 @@ public class SkillCuratorService {
      */
     public void recordUsage(String toolName, String userId, String taskId,
                             boolean success, long durationMs) {
+        recordUsage(toolName, userId, taskId, success, durationMs, null, null);
+    }
+
+    /**
+     * Record an invocation, keeping enough to reproduce it when it failed.
+     * <p>
+     * The counters alone said a skill failed; they could not say what it was asked to do or what
+     * went wrong, so nothing could act on the failure. A failed invocation with its parameters
+     * and its error IS a test case — which matters because the alternative, synthesising inputs
+     * to test a skill, produces failures the skill is not responsible for. Real calls that
+     * really broke are the only inputs that are certainly worth passing.
+     * <p>
+     * Parameters are redacted and truncated on the way in: a skill parameter can carry a token
+     * or a password, and this database already holds the owner's conversation history.
+     */
+    public void recordUsage(String toolName, String userId, String taskId,
+                            boolean success, long durationMs,
+                            Map<String, Object> params, String error) {
         try {
             jdbc.update(
-                    "INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms) " +
-                    "VALUES (?, ?, ?, ?, ?)",
-                    toolName, userId, taskId, success ? 1 : 0, durationMs
+                    "INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms, "
+                    + "params_json, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    toolName, userId, taskId, success ? 1 : 0, durationMs,
+                    redactParams(params), truncate(error, 2000)
             );
         } catch (Exception e) {
             log.debug("Failed to record tool usage for '{}': {}", toolName, e.getMessage());
+        }
+    }
+
+    /** Keys whose values must never be written to the database. */
+    private static final java.util.regex.Pattern SECRET_KEY = java.util.regex.Pattern.compile(
+            "(?i)(pass|pwd|secret|token|api[_-]?key|credential|auth|bearer|cookie|session)");
+
+    private String redactParams(Map<String, Object> params) {
+        if (params == null || params.isEmpty()) return null;
+        var out = new LinkedHashMap<String, Object>();
+        for (var e : params.entrySet()) {
+            String k = e.getKey();
+            if (k != null && SECRET_KEY.matcher(k).find()) {
+                out.put(k, "[REDACTED]");
+            } else {
+                Object v = e.getValue();
+                out.put(k, v instanceof String s ? truncate(s, 500) : v);
+            }
+        }
+        try {
+            return truncate(new com.fasterxml.jackson.databind.ObjectMapper()
+                    .writeValueAsString(out), 4000);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max) + "…";
+    }
+
+    /**
+     * The failed invocations of a skill, most recent first — the cases a repair must fix, and
+     * the cases a repaired version must then survive.
+     */
+    public List<Map<String, Object>> recentFailures(String toolName, int limit) {
+        try {
+            return jdbc.queryForList(
+                    "SELECT params_json, error, created_at FROM skill_usage "
+                    + "WHERE tool_name = ? AND success = 0 AND params_json IS NOT NULL "
+                    + "ORDER BY created_at DESC LIMIT ?",
+                    toolName, limit);
+        } catch (Exception e) {
+            log.debug("Could not read failures for '{}': {}", toolName, e.getMessage());
+            return List.of();
         }
     }
 

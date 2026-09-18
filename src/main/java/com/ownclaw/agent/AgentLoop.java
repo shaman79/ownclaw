@@ -875,9 +875,15 @@ public class AgentLoop {
                                 + truncate(observation.output(), 50_000));
             }
 
-            // Track tool usage for skill curation analytics
+            // Track tool usage for skill curation analytics. On a FAILURE, keep the parameters
+            // and the error too: that is what makes the failure reproducible, and a call that
+            // really broke is a better test case than any input we could invent. Successes stay
+            // counters only — there is no reason to store the arguments of every call that
+            // worked, and doing so would put far more of the user's data in the database.
             curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
-                    observation.success(), observation.durationMs());
+                    observation.success(), observation.durationMs(),
+                    observation.success() ? null : action.params(),
+                    observation.success() ? null : observation.output());
 
             if (observation.success()) {
                 statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
