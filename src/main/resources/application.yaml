@@ -42,8 +42,22 @@ ownclaw:
     temperature: 0.4
 
     # Optional: use the local LLM (Ollama) to pre-select which tools to include
-    # in the cloud prompt. Helps reduce Anthropic step-0 prompt size.
-    local-tool-selection: true
+    # in the cloud prompt, to reduce the step-0 cloud prompt size.
+    #
+    # OFF by default, because on this hardware it costs far more than it saves. A local call
+    # measures 60-133 seconds and holds the single Ollama permit, and this one runs at step 0
+    # of every task — before the cloud has been asked anything — so it is pure added latency on
+    # the critical path of an attended turn, to save roughly 1 kB of prompt.
+    #
+    # It also does not reliably shrink anything: the deterministic heuristic in ToolSelector
+    # sends every tool in full detail below its MAX_DETAILED_TOOLS threshold, so with a small
+    # library the local call can only narrow the manifest below what would have been sent
+    # anyway — and a narrower manifest is how the model ends up not seeing the tool it should
+    # have reused.
+    #
+    # Turn it back on only with a much larger library AND a measurement showing the cloud
+    # prompt actually shrinks by more than the local call costs.
+    local-tool-selection: false
     local-tool-selection-max-tools: 12
     local-tool-selection-candidate-limit: 120
     tool-name-preview-limit: 50

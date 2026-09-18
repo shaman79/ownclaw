@@ -496,7 +496,11 @@ public class AgentLoop {
                         log.error("Task {} step {}: {} consecutive LLM failures — aborting task",
                                 context.taskId(), step + 1, consecutiveFallbacks);
                         String progress = summarizeProgress(context);
-                        return AgentResult.completed(
+                        // failureLimit, not completed: three consecutive reasoning failures is
+                        // an abort. Recording it as COMPLETED marked the event log "info" and
+                        // stored the episode with a [SUCCESS] prefix, so the memory layer later
+                        // recalled a failed task as a worked example.
+                        return AgentResult.failureLimit(
                                 "I had trouble completing this request (" + consecutiveFallbacks +
                                 " consecutive reasoning failures). Here's what happened:\n\n" + progress,
                                 context.trajectory(),
@@ -509,7 +513,7 @@ public class AgentLoop {
                         log.error("Task {} step {}: {} total thinking failures — aborting task",
                                 context.taskId(), step + 1, totalThinkingFailures);
                         String progress = summarizeProgress(context);
-                        return AgentResult.completed(
+                        return AgentResult.failureLimit(
                                 "I've had " + totalThinkingFailures + " reasoning failures during this task. " +
                                 "Here's what happened:\n\n" + progress,
                                 context.trajectory(),
@@ -881,7 +885,9 @@ public class AgentLoop {
         // Exhausted max steps — ask user if they want to continue instead of hard-failing
         log.warn("Task {} hit max steps ({})", context.taskId(), maxSteps);
         String progress = summarizeProgress(context);
-        return AgentResult.completed(
+        // maxSteps, not completed. The message invites the user to continue, which is friendly,
+        // but the task did NOT finish and must not be stored as a successful episode.
+        return AgentResult.maxSteps(
                 "I've used all " + maxSteps + " steps allocated for this task. " +
                         "Here's what I've done so far:\n" + progress + "\n\n" +
                         "Would you like me to continue working on this? " +
