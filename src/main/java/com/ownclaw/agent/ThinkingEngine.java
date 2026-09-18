@@ -208,29 +208,38 @@ public class ThinkingEngine {
             sb.append(context.userPreferences()).append("\n\n");
         }
 
+        // The full manifest on EVERY step, not just step 0.
+        //
+        // This block used to send descriptions once, at step 0, and names only from step 1
+        // onwards — the comment claimed the descriptions stayed available "cached in prior
+        // turns", but the message list is rebuilt from scratch on every call and the dynamic
+        // block is attached to the newest message, so the step-0 manifest is simply gone by
+        // step 1. From then on the agent could see that it owned imap_unread_summarizer but
+        // not what it did.
+        //
+        // That matters most at exactly the wrong moment: skill_create is almost never the
+        // first action, it happens at step 2 or later after something else has failed. So the
+        // decision to build a new capability was being taken with the least information the
+        // agent ever has, which is a large part of how the library reached 31 skills with
+        // eight of them doing IMAP.
+        //
+        // It costs a few thousand tokens per step, and it is not cached — the dynamic block
+        // hangs off the newest message, which is outside the Anthropic cache breakpoints by
+        // design. That is the right trade: rebuilding a capability the agent already owns
+        // costs far more than describing it. If the cost ever bites, the fix is to consolidate
+        // the library rather than to hide it again — a manifest too big to send is a signal
+        // that the library needs curating.
         ToolSelector.Selection selection = selectToolsForPrompt(context);
         sb.append("## Tools\n");
-        if (context.trajectory().isEmpty()) {
-            // Step 0: full manifest (first exposure — cached in prefix for later steps)
-            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-            sb.append(manifest).append("\n");
-            if (!selection.otherNames().isEmpty()) {
-                sb.append("\nAlso: ").append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit())).append("\n");
-            }
-            if (manifest.isBlank()) {
-                sb.append("No tools yet — use skill_create.\n");
-            }
-        } else {
-            // Step 1+: names only (full descriptions cached in prior turns)
-            List<String> names = selection.detailed().stream()
-                    .sorted(Comparator.comparing(Tool::name))
-                    .map(Tool::name)
-                    .toList();
-            sb.append(String.join(", ", names));
-            if (!selection.otherNames().isEmpty()) {
-                sb.append(" | also: ").append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()));
-            }
-            sb.append("\n");
+        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+        sb.append(manifest).append("\n");
+        if (!selection.otherNames().isEmpty()) {
+            sb.append("\nAlso available, names only: ")
+              .append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()))
+              .append("\n");
+        }
+        if (manifest.isBlank()) {
+            sb.append("No tools yet — use skill_create.\n");
         }
 
         List<String> vaultKeys = context.credentialKeys();

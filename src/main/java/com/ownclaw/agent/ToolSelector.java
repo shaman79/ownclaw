@@ -35,10 +35,20 @@ public class ToolSelector {
     private static final int FULL_INCLUDE_THRESHOLD = 5;
 
     /**
-     * Maximum number of tools to include with full descriptions when filtering
-     * is active.
+     * Maximum number of tools to include with full descriptions when filtering is active.
+     * <p>
+     * This was 20 against a library of 31, so a third of the capability reached the model as
+     * bare names with no description — and a name alone does not say whether
+     * {@code imap_unread_summarizer} covers the task. A model that cannot see what it has will
+     * build another one; that is most of why the library grew to 31 in the first place.
+     * <p>
+     * Deliberately NOT solved with retrieval or embeddings. For a library of tens of items the
+     * whole manifest is a few thousand tokens once per task, sitting in the cached prefix
+     * thereafter — cheaper than the machinery to avoid sending it, and it cannot rank the right
+     * tool out of view. If the library ever grows past this, the answer is to consolidate it,
+     * not to hide more of it: a library too large to describe is the bug, not the constraint.
      */
-    private static final int MAX_DETAILED_TOOLS = 20;
+    private static final int MAX_DETAILED_TOOLS = 60;
 
     private final ToolRegistry toolRegistry;
 
@@ -110,8 +120,13 @@ public class ToolSelector {
         }
 
         if (!otherNames.isEmpty()) {
-            log.debug("ToolSelector: {} tools detailed, {} omitted for query: {}",
-                    detailed.size(), otherNames.size(), truncate(query, 80));
+            // WARN, not debug. Hiding part of the library is a decision with a consequence —
+            // the model may rebuild something it already has — and at debug level nobody ever
+            // saw it happen. If this fires, the library needs consolidating.
+            log.warn("ToolSelector: {} tools shown in full, {} hidden as names only ({}). "
+                            + "The agent cannot judge a hidden tool's fitness from its name; "
+                            + "consolidate the library or raise MAX_DETAILED_TOOLS.",
+                    detailed.size(), otherNames.size(), String.join(", ", otherNames));
         }
 
         return new Selection(detailed, otherNames);
