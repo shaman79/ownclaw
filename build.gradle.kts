@@ -52,4 +52,19 @@ dependencies {
 
     // Dev tools
     developmentOnly("org.springframework.boot:spring-boot-devtools")
+
+    // Tests. The deploy build runs `gradlew build -x test`, so a failing test can never
+    // block a deployment — which is deliberate for now: a broken test must not be able to
+    // take production down, and this project had no tests at all until there was something
+    // worth guarding. Run them explicitly with `./gradlew test`.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = false
+    }
 }
