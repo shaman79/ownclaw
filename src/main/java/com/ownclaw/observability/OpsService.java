@@ -116,6 +116,7 @@ public class OpsService {
         out.put("uptimeSeconds", Duration.between(startedAt, Instant.now()).toSeconds());
         out.put("startedAt", startedAt.toString());
         out.put("deployedCommit", deployedCommit());
+        out.put("deploy", deployFreshness());
         return out;
     }
 
@@ -927,10 +928,54 @@ public class OpsService {
     }
 
     private String deployedCommit() {
-        for (Path p : List.of(Path.of("/opt/ownclaw/.deployed-commit"), Path.of(".deployed-commit"))) {
+        Path p = deployMarkerPath();
+        if (p != null) {
             String s = readTextOrNull(p);
             if (s != null && !s.isBlank()) return s.trim().split("\\s+")[0];
         }
         return "unknown";
+    }
+
+    private Path deployMarkerPath() {
+        for (Path p : List.of(Path.of("/opt/ownclaw/.deployed-commit"), Path.of(".deployed-commit"))) {
+            if (Files.exists(p)) return p;
+        }
+        return null;
+    }
+
+    /**
+     * Whether the commit in the deploy marker is actually the one running.
+     * <p>
+     * {@code deployedCommit} reads a marker file that deploy.sh writes <em>before</em> it
+     * restarts the service, so between those two moments health reports a commit that is not
+     * running yet. That is not a hypothetical: it caused two wrong conclusions in one session —
+     * a database migration was reported missing when it had simply not been applied yet, and a
+     * change was judged not to work when the test had run against the previous jar.
+     * <p>
+     * The marker's modification time versus this process's start time settles it. If the marker
+     * is newer than the process, the running code predates it and a restart is still pending.
+     */
+    private Map<String, Object> deployFreshness() {
+        var out = new LinkedHashMap<String, Object>();
+        Path p = deployMarkerPath();
+        if (p == null) {
+            out.put("markerFound", false);
+            return out;
+        }
+        out.put("markerFound", true);
+        try {
+            Instant markerAt = Files.getLastModifiedTime(p).toInstant();
+            out.put("markerWrittenAt", markerAt.toString());
+            boolean stale = markerAt.isAfter(startedAt);
+            out.put("running", !stale);
+            out.put("note", stale
+                    ? "RESTART PENDING — the marker was written after this process started, so "
+                      + "the reported commit is NOT the code currently running."
+                    : "The reported commit is the code currently running.");
+        } catch (Exception e) {
+            out.put("running", "unknown");
+            out.put("note", "Could not read the marker's timestamp: " + e.getMessage());
+        }
+        return out;
     }
 }
