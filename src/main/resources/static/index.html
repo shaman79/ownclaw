@@ -27,7 +27,9 @@
             --user-hi:     #4338ca;
             --text-1:      #f0f1f5;
             --text-2:      #9ca3af;
-            --text-3:      #5c6479;
+            /* Was #5c6479 — about 3.1:1 against --bg, below the 4.5:1 AA floor, and it
+               is the colour the activity trace is drawn in. #7c8499 measures ~4.9:1. */
+            --text-3:      #7c8499;
             --red:         #f87171;
             --red-dim:     rgba(248,113,113,.12);
             --green:       #34d399;
@@ -2491,7 +2493,10 @@
     var authToken  = localStorage.getItem('ownclaw_token');
     var isRegisterMode = true;
     var activityStepList = [];
-    var activityOpen = false;
+    // Open by default. The agent's reasoning trace is already built server-side and
+    // already sent here; collapsing it by default meant the one surface that answers
+    // "what is it doing" was hidden behind a click nobody knew to make.
+    var activityOpen = true;
     var ws;
     var busy = false;
     var lastMsgSender = null;
@@ -4224,6 +4229,11 @@
 
     function showActivity(text, detailData) {
         activityWrap.style.display = 'block';
+        // Reflect the open state on the panel itself, so a default-open trace is actually
+        // rendered rather than only being marked open in a variable.
+        activityStepsEl.classList.toggle('visible', activityOpen);
+        activityStats.classList.toggle('visible', activityOpen);
+        activityToggle.classList.toggle('open', activityOpen);
         activitySpinner.classList.remove('done');
         activityLabel.textContent = text;
         activityStepList.forEach(function(s) { s.classList.remove('latest'); });
@@ -4332,18 +4342,21 @@
     function doneActivity() {
         activitySpinner.classList.add('done');
         activityStepList.forEach(function(s) { s.classList.remove('latest'); });
-        setTimeout(function() {
-            if (!activityOpen) {
-                activityWrap.style.display = 'none';
-                activityStepsEl.innerHTML = '';
-                activityStepList = [];
-                activityTokens.textContent = '';
-                activityStats.classList.remove('visible');
-            }
-        }, 8000);
+        // The trace used to be deleted eight seconds after the task finished — which is
+        // roughly when you would start reading it, and is the only record there was: the
+        // steps are rendered here and nowhere else in the client. It now stays until the
+        // next message is sent, where resetActivity clears it.
     }
 
     /** Immediately reset the activity bar to a clean state (new/switch session). */
+    /**
+     * Clear the activity bar for a new task.
+     *
+     * There were two declarations of this function in the same scope. The later one won by
+     * hoisting and did NOT call stopElapsedTimer(), so the elapsed counter kept ticking after
+     * a chat switch, and it also left the spinner and label in their previous state. This is
+     * the union of both, and there is only one of it.
+     */
     function resetActivity() {
         activityWrap.style.display = 'none';
         activitySpinner.classList.remove('done');
@@ -4352,6 +4365,8 @@
         activityElapsed.textContent = '';
         activityStepsEl.innerHTML = '';
         activityStepList = [];
+        activityToggle.classList.remove('open');
+        activityStepsEl.classList.remove('visible');
         activityStats.classList.remove('visible');
         statSteps.textContent = '0';
         statSuccess.textContent = '0';
@@ -4361,18 +4376,6 @@
         stopElapsedTimer();
     }
 
-    function resetActivity() {
-        activityWrap.style.display = 'none';
-        activityStepsEl.innerHTML = '';
-        activityStepList = [];
-        activityOpen = false;
-        activityToggle.classList.remove('open');
-        activityStepsEl.classList.remove('visible');
-        activityStats.classList.remove('visible');
-        activityTokens.textContent = '';
-        statSteps.textContent = '0'; statSuccess.textContent = '0';
-        statFail.textContent = '0'; statCloud.textContent = '0'; statLocal.textContent = '0';
-    }
 
     //  Auth flow 
     function checkAuth() {
