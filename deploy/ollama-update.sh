@@ -108,8 +108,33 @@ detect_method() {
     METHOD="source"; DETAIL="unpackaged binary at $BINARY, no /usr/local/lib/ollama"
 }
 
+# The unit that actually serves the API. A box often carries helpers next to it -
+# ollama-warmup.service, ollama-models.service - and those sort BEFORE ollama.service
+# alphabetically, so taking the first match picked the wrong one. Restarting a warmup
+# unit is not merely useless: it usually preloads a model and blocks, which hangs the
+# caller. Match the canonical name exactly and only fall back to a prefix search.
 service_name() {
-    systemctl list-unit-files 2>/dev/null | grep -oE '^ollama[^ ]*\.service' | head -1
+    local units
+    units=$(systemctl list-unit-files --no-legend 2>/dev/null | grep -oE '^ollama[^ ]*\.service')
+    if printf '%s\n' "$units" | grep -qx 'ollama.service'; then
+        echo "ollama.service"; return
+    fi
+    printf '%s\n' "$units" | head -1
+}
+
+# Only touch a unit that is genuinely in use, and never wait on it forever.
+maybe_restart() {
+    local svc="$1"
+    [ -n "$svc" ] || return 0
+    if ! systemctl is-enabled --quiet "$svc" 2>/dev/null &&
+       ! systemctl is-active  --quiet "$svc" 2>/dev/null; then
+        log "Not restarting $svc — it is neither enabled nor running"
+        return 0
+    fi
+    need_root
+    log "Restarting $svc"
+    timeout 120 systemctl restart "$svc" ||
+        log "WARN: restarting $svc did not finish in 120s — check: systemctl status $svc"
 }
 
 # ── Actions ──────────────────────────────────────────────────────────────────
@@ -149,6 +174,9 @@ do_update() {
             backup_binary
             log "Re-running the official installer (it upgrades in place and keeps the unit)"
             curl -fsSL https://ollama.com/install.sh | sh || die "official installer failed"
+            # The installer enables and starts ollama.service itself, so there is
+            # nothing left to restart and a second restart is just another outage.
+            return 0
             ;;
         source)
             log "This binary was built from source, not installed by a package manager."
@@ -162,11 +190,7 @@ do_update() {
         *)  die "Could not determine how Ollama was installed. Nothing changed. Evidence: ${DETAIL:-none}" ;;
     esac
 
-    if [ -n "$svc" ]; then
-        need_root
-        log "Restarting $svc"
-        systemctl restart "$svc" || log "WARN: could not restart $svc — restart it yourself"
-    fi
+    maybe_restart "$svc"
     return 0
 }
 
@@ -177,8 +201,7 @@ do_rollback() {
     [ -n "$BINARY" ] || die "Cannot locate the current ollama binary to replace"
     log "Restoring $target -> $BINARY"
     install -m 0755 "$target" "$BINARY" || die "restore failed"
-    local svc; svc=$(service_name)
-    [ -n "$svc" ] && systemctl restart "$svc"
+    maybe_restart "$(service_name)"
     log "Rolled back to $(installed_version)"
 }
 
