@@ -11,6 +11,8 @@
 #   ./deploy.sh --harden     # Remove the service user's path to root (run once, as root):
 #                            #   root-owns the repo, replaces the ownclaw crontab with a
 #                            #   root-owned systemd timer, deletes the sudoers grants.
+#   ./deploy.sh --harden-status    # Is this host hardened? Read-only, no root needed.
+#                            #   Exit 0 = hardened, 1 = the service user can reach root.
 #   ./deploy.sh --install-sudoers  # Legacy: only needed on a host that is NOT hardened
 #   ./deploy.sh --install-ollama   # Install Ollama and pull the default model (qwen2.5:14b)
 #   ./deploy.sh --rollback   # Restore previous JAR
@@ -905,7 +907,7 @@ warn_if_unhardened() {
     issues=$(hardening_issues)
     [ -z "$issues" ] && return 0
     log "SECURITY: this host still allows the service user to reach root:"
-    printf '%b' "$issues" | while IFS= read -r line; do
+    printf '%b' "$issues" | while IFS= read -r line || [ -n "$line" ]; do
         [ -n "$line" ] && log "  - $line"
     done
     log "  Fix with one command, as root:  sudo $REPO_DIR/deploy/deploy.sh --harden"
@@ -1310,6 +1312,32 @@ main() {
         --harden)
             harden_host
             exit 0
+            ;;
+        --harden-status)
+            # Read-only. --harden is idempotent, but "run it again and see what it says"
+            # is a poor way to answer "is this host safe?", and it needs root. This
+            # answers the question without changing anything and without privileges,
+            # so it is also the thing to run before and after --harden to confirm.
+            log "=== Hardening status ==="
+            _issues=$(hardening_issues)
+            if [ -z "$_issues" ]; then
+                log "HARDENED — the service user has no path to root."
+                log "  Checked: $SUDOERS_FILE absent, $REPO_DIR owned by root,"
+                log "           no deploy entry in the ownclaw crontab."
+                if systemctl is-enabled --quiet ownclaw-update.timer 2>/dev/null; then
+                    log "  Updater: ownclaw-update.timer (root-owned) is enabled."
+                else
+                    log "  NOTE: ownclaw-update.timer is not enabled, so nothing is auto-updating."
+                    log "        Re-run --harden to install it."
+                fi
+                exit 0
+            fi
+            log "NOT HARDENED — the service user can still reach root:"
+            printf '%b' "$_issues" | while IFS= read -r line || [ -n "$line" ]; do
+                [ -n "$line" ] && log "  - $line"
+            done
+            log "  Fix with: sudo $REPO_DIR/deploy/deploy.sh --harden"
+            exit 1
             ;;
         --install-sudoers)
             if [ "$(id -u)" -ne 0 ]; then
