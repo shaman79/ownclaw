@@ -61,6 +61,10 @@ public class AgentLoop {
     private final LongRunningTaskManager longRunningTaskManager;
     private final CapabilityResolver capabilityResolver;
     private final TokenBudgetTracker budgetTracker;
+    /** For serialising step details into events.details. Jackson's mapper is thread-safe once built. */
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
     private final EventLogService eventLog;
     private final ScheduledTaskService scheduledTaskService;
     private final LocalExecutor localExecutor;
@@ -1959,6 +1963,51 @@ public class AgentLoop {
                                            AgentObservation obs, int step) {
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
+        persistStep(context, action, obs, step);
+    }
+
+    /**
+     * Write one row per step, so what a task did outlives the task.
+     * <p>
+     * The trajectory was in memory only — no INSERT anywhere in the codebase — so the durable
+     * record of a multi-minute run was a single {@code task_completed} row plus the final chat
+     * message. Ten minutes later nobody, including the agent, could answer "why did it do that"
+     * or "what did that skill actually return", which is most of what "user insight into what is
+     * happening is limited" means in practice.
+     * <p>
+     * No new table: {@code events} already has task_id, a JSON details column and an index on
+     * (user_id, task_id), and json_extract is already used elsewhere. The severity carries the
+     * outcome, so failed steps are greppable without parsing anything.
+     * <p>
+     * Parameters are deliberately NOT stored here. The tool sequence is what this is for —
+     * seeing what a run did, and later noticing that the same sequence keeps succeeding, which
+     * is the signal a capability is worth consolidating. Arguments would put far more of the
+     * user's data in the database for no added signal, and where they genuinely are needed —
+     * reproducing a failure — skill_usage already keeps them, redacted.
+     * <p>
+     * Never allowed to break a task: a task that works but is not recorded is much better than a
+     * task that dies because recording failed.
+     */
+    private void persistStep(AgentContext context, AgentAction action,
+                             AgentObservation obs, int step) {
+        try {
+            var details = new LinkedHashMap<String, Object>();
+            details.put("step", step);
+            details.put("tool", action.tool());
+            details.put("success", obs.success());
+            details.put("durationMs", obs.durationMs());
+            details.put("localTokens", context.localTokens());
+            details.put("cloudTokens", context.cloudTokens());
+
+            eventLog.log(context.userId(), context.taskId(), "step",
+                    obs.success() ? "info" : "warn",
+                    action.tool() + (obs.success() ? " ok" : " FAILED")
+                            + " (" + obs.durationMs() + "ms)",
+                    JSON.writeValueAsString(details), 0);
+        } catch (Exception e) {
+            log.debug("Could not persist step {} of task {}: {}",
+                    step, context.taskId(), e.getMessage());
+        }
     }
 
     /** Emit observation detail: success/fail status, duration, output preview. */
