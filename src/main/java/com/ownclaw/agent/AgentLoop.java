@@ -596,10 +596,18 @@ public class AgentLoop {
                     }
                 }
                 if (sameNameFails >= 3) {
+                    // The advice here used to be "break into smaller sub-skills", and the counter
+                    // above keys on the skill NAME — so the cheapest way out of this block was to
+                    // rename, which reset the count to zero and produced a sibling. That is how
+                    // imap_move_to_trash_by_sender acquired _imaplib and _gmail variants. Renaming
+                    // is now refused by the critic's duplicate gate anyway, so suggesting it would
+                    // just deadlock the model between two blocks.
                     String msg = "ERROR: Skill '" + skillName + "' has failed " + sameNameFails
-                            + " times. Do NOT try creating it again with the same approach. "
-                            + "Simplify the skill description, break into smaller sub-skills, "
-                            + "or use ask_user to get clarification on requirements.";
+                            + " times. Do not retry the same approach, and do NOT create a "
+                            + "differently-named variant of it — that is refused. Either change "
+                            + "the implementation of '" + skillName + "' itself (a different "
+                            + "library or approach, same name), or use ask_user to clarify the "
+                            + "requirement.";
                     recordAndEmitObservation(context, action,
                             AgentObservation.failure(action.tool(), msg, 0), step + 1);
                     context.markProgress();
