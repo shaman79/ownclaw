@@ -1516,6 +1516,40 @@ public class AgentLoop {
      * @return enhanced params with cloud-generated code, or {@code null} if cloud
      *         generation fails (caller should record the failure).
      */
+    /**
+     * Real calls to this skill that failed, as evidence for a repair.
+     * <p>
+     * Returns null when there is nothing recorded. The parameters were redacted and truncated
+     * when they were stored, so this is safe to put in a prompt.
+     * <p>
+     * Deliberately evidence and not a test harness. Re-running these calls to check whether a
+     * repair worked would be the obvious next step and it is not safe: replaying a recorded
+     * invocation of a skill like {@code imap_move_to_trash_by_sender} would move real mail. The
+     * only thing that could gate such a replay is the skill's own {@code has_side_effects} flag,
+     * which the model that wrote the skill supplied — trusting a model's self-declaration to
+     * decide whether it is safe to execute something is exactly the kind of judgement that fails
+     * quietly on the case nobody thought about. Showing the failures to the model repairing the
+     * code gets most of the benefit with none of that risk.
+     */
+    private String pastFailureEvidence(String skillName) {
+        try {
+            var failures = curatorService.recentFailures(skillName, 3);
+            if (failures.isEmpty()) return null;
+            var sb = new StringBuilder("Real calls to this skill that FAILED previously "
+                    + "(parameters are redacted where they looked sensitive):\n");
+            for (var f : failures) {
+                sb.append("- called with: ").append(f.get("params_json")).append('\n')
+                  .append("  failed with: ").append(truncate(String.valueOf(f.get("error")), 600))
+                  .append('\n');
+            }
+            sb.append("Make sure the fixed code handles these cases.");
+            return sb.toString();
+        } catch (Exception e) {
+            log.debug("Could not load failure history for '{}': {}", skillName, e.getMessage());
+            return null;
+        }
+    }
+
     private Map<String, Object> generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
         LlmProvider cloud = llmRouter.cloud();
         boolean usingLocalFallback = false;
@@ -1551,8 +1585,19 @@ public class AgentLoop {
                     break;
                 }
             }
-            log.info("Skill '{}' exists — will attempt targeted fix{}",
-                    name, lastError != null ? " (error found)" : " (no error in trajectory)");
+            // The trajectory only knows about failures in THIS task. A skill that broke last
+            // week, in a different conversation, left nothing here — so the repair regenerated
+            // blind, against an error it could not see. skill_usage now keeps the parameters
+            // and the error of real failures, which is evidence rather than guesswork: the
+            // exact calls that broke, so the fix can be aimed at them.
+            String history = pastFailureEvidence(name);
+            if (history != null) {
+                lastError = lastError == null ? history : lastError + "\n\n" + history;
+            }
+            log.info("Skill '{}' exists — will attempt targeted fix{}{}",
+                    name,
+                    lastError != null ? " (error available)" : " (no error known)",
+                    history != null ? " + recorded failure history" : "");
         }
 
         String providerLabel = usingLocalFallback ? "local (degraded)" : "cloud";
