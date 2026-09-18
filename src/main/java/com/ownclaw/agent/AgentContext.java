@@ -20,6 +20,8 @@ public class AgentContext {
     private volatile long lastProgressMs;
 
     private volatile boolean cancelled;
+    /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
+    private volatile java.util.function.BooleanSupplier externalCancel;
     private String conversationSummary;
     private String userPreferences;
 
@@ -64,8 +66,35 @@ public class AgentContext {
     /** Milliseconds since the last forward progress. */
     public long msSinceLastProgress() { return System.currentTimeMillis() - lastProgressMs; }
 
-    public boolean isCancelled() { return cancelled; }
+    /**
+     * Whether this task should stop, consulting both the local flag and the external source
+     * the Stop button writes to.
+     * <p>
+     * This used to read the local flag only, and nothing ever called {@link #cancel()} — zero
+     * callers repo-wide — so it was permanently false for the lifetime of every task. The main
+     * loop polls {@code cancellationService} itself at the top of each step, so Stop appeared to
+     * work; what was dead was everything <em>inside</em> a step. The per-step check in
+     * {@code LocalExecutor} and the {@code context::isCancelled} supplier handed to every tool
+     * could never fire, so a running tool or an in-flight local call — 60 to 133 seconds on this
+     * deployment, and up to ten of them in a delegated plan — carried on to completion after the
+     * user pressed Stop.
+     * <p>
+     * Consulting the external source here revives all of those checks at once, rather than
+     * relying on each caller to remember to poll two places.
+     */
+    public boolean isCancelled() {
+        if (cancelled) return true;
+        java.util.function.BooleanSupplier ext = externalCancel;
+        return ext != null && ext.getAsBoolean();
+    }
+
     public void cancel() { this.cancelled = true; }
+
+    /**
+     * Attach the authoritative cancellation source for this task, normally
+     * {@code () -> cancellationService.isCancelled(userId)}. Set once at task start.
+     */
+    public void setExternalCancel(java.util.function.BooleanSupplier supplier) { this.externalCancel = supplier; }
 
     public String conversationSummary() { return conversationSummary; }
     public void setConversationSummary(String summary) { this.conversationSummary = summary; }

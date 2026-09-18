@@ -278,11 +278,18 @@ public class ThinkingEngine {
                 all = all.subList(0, candidateLimit);
             }
 
+            // The rule here used to read 'prefer task-specific tools over generic ones', which is
+            // exactly backwards for a library that is supposed to be reused. A general tool
+            // invoked with a parameter IS the reuse we want; a narrowly named one is the bloat we
+            // are trying to stop. Ranking specific above general taught the selector to surface
+            // web_search_bikes ahead of a general web search, and to surface one of eight IMAP
+            // variants rather than the one that actually covers the case.
             String selectorSystem = "You are a tool selection assistant. "
                     + "Given a task and a list of available tools, choose the smallest useful set of tools. "
                     + "Return ONLY valid JSON: {\"tools\": [\"name\", ...]}. "
                     + "Rules: pick at most " + maxTools + " tools; only choose names that appear in the list; "
-                    + "prefer task-specific tools over generic ones; if unsure, return an empty list.";
+                    + "prefer general tools that take the specifics as parameters over narrowly "
+                    + "named ones; if unsure, return an empty list.";
 
             String selectorUser = buildLocalToolSelectionUserPrompt(context.originalMessage(), all);
             List<LlmMessage> messages = List.of(

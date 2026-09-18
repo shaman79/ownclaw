@@ -192,6 +192,12 @@ public class AgentLoop {
         // Clear any stale cancel flag from a previous task
         cancellationService.clear(userId);
 
+        // Point the context at the authoritative cancel source. Without this, every
+        // context.isCancelled() check inside a step — LocalExecutor's per-step poll and the
+        // supplier handed to every tool — reads a flag nothing ever sets, so Stop could only
+        // take effect between steps. A step here can be a 60-133 s local call.
+        context.setExternalCancel(() -> cancellationService.isCancelled(userId));
+
         AgentResult result = runLoop(context);
         emitResult(context, result);
 

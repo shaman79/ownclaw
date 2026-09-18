@@ -33,6 +33,15 @@ public class CriticAgent {
     /** Maximum times the same tool+params can be invoked consecutively. */
     private static final int MAX_IDENTICAL_CONSECUTIVE = 3;
 
+    /**
+     * Jaccard threshold above which a proposed skill name is treated as a duplicate of an
+     * existing tool. Calibrated against the real production library: at 0.6,
+     * {@code imap_move_to_bin_by_sender_gmail} vs {@code imap_move_to_trash_by_sender} blocks
+     * (0.63) while {@code imap_list_mailboxes} vs {@code imap_unread_summarizer} does not
+     * (0.20) — those are genuinely different capabilities that happen to share a prefix word.
+     */
+    private static final double NAME_OVERLAP_BLOCK = 0.6;
+
     /** Maximum consecutive failures before the critic recommends stopping. */
     private static final int MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -52,8 +61,15 @@ public class CriticAgent {
     public Verdict evaluate(AgentAction action, AgentContext context) {
         List<String> warnings = new ArrayList<>();
 
-        // 1. Response/ask/skill_create are always allowed
-        if (action.isResponse() || action.isAskUser() || action.isSkillCreate()) {
+        // 1. Response/ask are always allowed — they end or pause the task, they cannot loop.
+        //
+        // skill_create used to be in this list. It should not be: it is the one action that
+        // permanently changes the system's capability surface, and exempting it from every check
+        // while throttling skill_manage (below) created a pronounced bias toward writing a new
+        // skill rather than looking at what already exists. In production that produced 31
+        // generated skills including eight for IMAP and a web_search_bikes, and the block text on
+        // skill_manage literally instructed the model to stop looking and start creating.
+        if (action.isResponse() || action.isAskUser()) {
             return Verdict.allow(warnings);
         }
 
@@ -62,18 +78,32 @@ public class CriticAgent {
             AgentTrajectory trajectory = context.trajectory();
             int identicalCount = countIdenticalTrailingActions(trajectory, action);
             if (identicalCount >= 2) {
+                // Loop detection is right; the old advice was not. Repeating an identical
+                // inventory call is pointless, but "so create a new skill instead" is the
+                // instruction that produced eight IMAP skills. Point at the result already in
+                // the trajectory instead.
                 return Verdict.block("You have called skill_manage with the same parameters " +
-                        identicalCount + " times in a row. The inventory is not going to change. " +
-                        "Use 'skill_create' to build the tool you need for this task instead.");
+                        identicalCount + " times in a row and the inventory has not changed. " +
+                        "The result of the earlier call is already in your context — use it. " +
+                        "If an existing tool fits, call it. Only create a new skill if you have " +
+                        "checked the inventory and nothing covers this capability.");
             }
             // Also detect any excessive skill_manage calls (different params but same tool)
             long totalManage = trajectory.toolInvocationCount("skill_manage");
             if (totalManage >= 4) {
                 return Verdict.block("You have called skill_manage " + totalManage +
-                        " times total. Stop managing and start CREATING. " +
-                        "Use 'skill_create' to build the tool you need.");
+                        " times. Stop inspecting and act on what you already know: call an " +
+                        "existing tool, combine several, or — if nothing covers this capability " +
+                        "— create one new general skill that takes the specifics as parameters.");
             }
             return Verdict.allow(warnings);
+        }
+
+        // 1c. skill_create is dispatched directly by AgentLoop (:564) and is NOT a registered
+        // Tool, so it must not fall through to the registry and schema checks below — those
+        // would block it outright. It gets the checks that actually apply to it.
+        if (action.isSkillCreate()) {
+            return evaluateSkillCreate(action, context, warnings);
         }
 
         // 2. Check tool exists
@@ -155,6 +185,106 @@ public class CriticAgent {
         }
 
         return Verdict.allow(warnings);
+    }
+
+    /**
+     * The compose-before-create gate.
+     * <p>
+     * Creating a skill permanently changes the capability surface, and until now it was the one
+     * action exempt from every check. The production library is what that produced: 31 generated
+     * skills, among them eight for IMAP — three near-identical move-to-trash-by-sender variants —
+     * two left-over {@code _debug} artifacts, four overlapping network scanners, and a
+     * {@code web_search_bikes}.
+     * <p>
+     * Both checks are deterministic string comparisons against the live registry. No model and no
+     * embeddings: the library is tens of items rather than thousands, and a gate that itself
+     * needed a 60-133 s local call would not be affordable on an attended turn.
+     * <ul>
+     *   <li><b>Prefix sibling</b> — the proposed name begins with an existing tool's name followed
+     *       by {@code _}. That is the signature of a narrowing ({@code web_search_bikes} over a
+     *       general web search) or of a failed repair escaping under a new name
+     *       ({@code imap_move_to_trash_by_sender_imaplib}, {@code imap_list_mailboxes_debug}).</li>
+     *   <li><b>Token overlap</b> — Jaccard similarity over underscore-separated tokens, catching
+     *       siblings that share no prefix, such as {@code imap_move_to_bin_by_sender_gmail}
+     *       against {@code imap_move_to_trash_by_sender}.</li>
+     * </ul>
+     * A block is never a dead end. The message names the specific tool believed to cover the case,
+     * and {@code force: true} overrides it — "capable of anything I ask" means a genuinely new
+     * capability must stay reachable, and a gate with no escape hatch is a worse failure than the
+     * bloat it prevents. A forced creation is recorded as a warning rather than passing silently.
+     */
+    private Verdict evaluateSkillCreate(AgentAction action, AgentContext context,
+                                        List<String> warnings) {
+        Map<String, Object> params = action.params();
+        Object rawName = params == null ? null : params.get("name");
+        String proposed = rawName == null ? "" : rawName.toString().trim().toLowerCase();
+
+        Object force = params == null ? null : params.get("force");
+        boolean forced = force != null && Boolean.parseBoolean(force.toString());
+
+        if (!proposed.isEmpty() && !forced) {
+            // First pass: is this a GENERALISATION of something that already exists? If an
+            // existing tool's name extends the proposed one — web_search_bikes when web_search
+            // is proposed — then the proposal is the broader capability, and creating it is the
+            // consolidation we want. Checking this first matters: the narrow sibling would
+            // otherwise block its own replacement by token overlap (web_search vs
+            // web_search_bikes scores 0.67), leaving the library permanently stuck with the
+            // specific version and no way to create the general one.
+            List<String> superseded = new ArrayList<>();
+            for (String existing : toolRegistry.names()) {
+                if (existing.toLowerCase().startsWith(proposed + "_")) superseded.add(existing);
+            }
+            if (!superseded.isEmpty()) {
+                warnings.add("'" + proposed + "' generalises " + String.join(", ", superseded)
+                        + " — retire the narrower skill(s) once this works");
+                log.info("skill_create '{}' generalises existing narrow skill(s): {}",
+                        proposed, superseded);
+                return Verdict.allow(warnings);
+            }
+
+            for (String existing : toolRegistry.names()) {
+                String e = existing.toLowerCase();
+                // Re-creating the same name is a repair/overwrite, which is the behaviour we
+                // actually want instead of a sibling. Never block it here.
+                if (proposed.equals(e)) continue;
+                if (proposed.startsWith(e + "_")) {
+                    return Verdict.block("'" + proposed + "' is a narrower version of the existing "
+                            + "tool '" + existing + "'. Call '" + existing + "' and pass the "
+                            + "specifics as parameters instead. If '" + existing + "' genuinely "
+                            + "cannot do this, either extend it under its own name, or retry with "
+                            + "force=true and state what is missing.");
+                }
+                if (tokenOverlap(proposed, e) >= NAME_OVERLAP_BLOCK) {
+                    return Verdict.block("'" + proposed + "' looks like a duplicate of the existing "
+                            + "tool '" + existing + "'. Use '" + existing + "', or extend it to "
+                            + "cover this case under its own name. If it is genuinely a different "
+                            + "capability, retry with force=true and say how it differs.");
+                }
+            }
+        }
+        if (forced) {
+            warnings.add("skill_create forced past the duplicate check for '" + proposed + "'");
+            log.warn("skill_create for '{}' forced past the duplicate check", proposed);
+        }
+
+        // Repeating an identical creation is a loop whatever it is called.
+        int identical = countIdenticalTrailingActions(context.trajectory(), action);
+        if (identical >= MAX_IDENTICAL_CONSECUTIVE) {
+            return Verdict.block("You have tried to create '" + proposed + "' with identical "
+                    + "parameters " + identical + " times. Change the approach or ask the user.");
+        }
+        return Verdict.allow(warnings);
+    }
+
+    /** Jaccard similarity over underscore-separated name tokens. */
+    static double tokenOverlap(String a, String b) {
+        java.util.Set<String> ta = new java.util.HashSet<>(java.util.Arrays.asList(a.split("_")));
+        java.util.Set<String> tb = new java.util.HashSet<>(java.util.Arrays.asList(b.split("_")));
+        ta.remove(""); tb.remove("");
+        if (ta.isEmpty() || tb.isEmpty()) return 0;
+        java.util.Set<String> union = new java.util.HashSet<>(ta); union.addAll(tb);
+        java.util.Set<String> inter = new java.util.HashSet<>(ta); inter.retainAll(tb);
+        return (double) inter.size() / union.size();
     }
 
     /**
