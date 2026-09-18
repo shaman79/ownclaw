@@ -294,7 +294,8 @@ public class ThinkingEngine {
             LlmRequestConfig req = new LlmRequestConfig(
                     null,
                     0.0,
-                    512,
+                    // Uncapped: local generation is free and a cap starves thinking models.
+                    null,
                     true,
                     null
             );

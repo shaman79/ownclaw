@@ -95,26 +95,56 @@ public class LocalModelCheck {
                 capabilities.add(c.asText());
             }
             String template = show.path("template").asText("").trim();
-            boolean chat = capabilities.contains("chat");
-            boolean templateUnusable = template.isEmpty() || template.equals("{{ .Prompt }}");
+            boolean chatUsable = chatUsable(template, capabilities);
 
-            if (!chat || templateUnusable) {
+            if (!chatUsable) {
                 log.error("LOCAL TIER BROKEN: model '{}' cannot be used through /api/chat. "
-                                + "capabilities={}, template={} chars{}. Without a chat template Ollama "
-                                + "discards the system prompt and the message roles, so delegation, "
-                                + "conversation compression, tool pre-selection and scheduled summaries "
-                                + "return unrelated text. Pull a chat-capable model, or wrap this one in a "
-                                + "Modelfile that supplies the proper template. Verify with "
-                                + "GET /api/ops/ollama — promptEvalCount should match the prompt size.",
-                        model, capabilities, template.length(),
-                        template.equals("{{ .Prompt }}") ? " (the bare \"{{ .Prompt }}\" placeholder)" : "");
+                                + "capabilities={}, template is the bare \"{{ .Prompt }}\" placeholder and "
+                                + "Ollama has no built-in renderer for this architecture, so it cannot "
+                                + "render the message list: the system prompt and the roles are discarded "
+                                + "(prompt_eval_count comes back near 1) and delegation, conversation "
+                                + "compression, tool pre-selection and scheduled summaries all receive "
+                                + "unrelated text. The weights are almost certainly fine — the GGUF simply "
+                                + "ships without a chat_template, which is common for community HuggingFace "
+                                + "GGUF uploads. Either point OWNCLAW_EXECUTOR_MODEL at a model whose "
+                                + "template renders messages, or re-create this one with a Modelfile that "
+                                + "supplies the right template for its tokeniser. Confirm either way with "
+                                + "GET /api/ops/ollama — promptEvalCount must match the prompt size.",
+                        model, capabilities);
                 return;
             }
 
-            log.info("Local model '{}' ready on {} (capabilities={})", model, url, capabilities);
+            if (capabilities.contains("thinking")) {
+                log.info("Local model '{}' ready on {} (capabilities={}) — a thinking model, so its "
+                        + "reasoning shares the output budget with the answer; local calls need enough "
+                        + "max_tokens for both.", model, url, capabilities);
+            } else {
+                log.info("Local model '{}' ready on {} (capabilities={})", model, url, capabilities);
+            }
         } catch (Exception e) {
             log.warn("Could not inspect local model '{}' on {}: {}", model, url, e.getMessage());
         }
+    }
+
+    /**
+     * Whether this model can be driven through {@code /api/chat}.
+     * <p>
+     * Ollama has no "chat" capability — the real values are completion, tools, insert, vision,
+     * embedding and thinking — so asking for one was a bug that flagged every model as broken.
+     * The chat path works when either the Go template renders the message list, or Ollama has a
+     * built-in renderer for the architecture. A renderer is not exposed directly, but a model
+     * with a bare {@code {{ .Prompt }}} template that still advertises tools or thinking must
+     * have one (observed: nemotron_h_moe reports [completion, tools, thinking] with that
+     * template and honours a system message; qwen35moe reports [completion] only and receives
+     * one token of a fifty-token prompt).
+     */
+    public static boolean chatUsable(String template, List<String> capabilities) {
+        String t = template == null ? "" : template.trim();
+        if (t.contains(".Messages") || t.contains(".System")) {
+            return true;    // the template renders a conversation itself
+        }
+        // A bare placeholder plus a richer capability set means a built-in renderer is in play.
+        return capabilities.contains("tools") || capabilities.contains("thinking");
     }
 
     private List<String> installedModels(String url) throws Exception {

@@ -35,9 +35,6 @@ public class ConversationCompressor {
     private static final int ACTIVE_WINDOW = 10;
     /** Compress when session has this many uncompressed messages beyond the active window. */
     private static final int COMPRESS_THRESHOLD = 6;
-    /** Max tokens for the compression LLM call. */
-    private static final int MAX_SUMMARY_TOKENS = 512;
-
     private final JdbcTemplate jdbc;
     private final OllamaProvider ollama;
     private final OllamaSemaphore semaphore;
@@ -168,7 +165,11 @@ public class ConversationCompressor {
 
         semaphore.acquire();
         try {
-            var response = ollama.chat(messages, LlmRequestConfig.withMaxTokens(MAX_SUMMARY_TOKENS));
+            // Local generation is free, so no token cap is set: Ollama then generates until the model stops or
+            // the context window fills. The real bounds are num_ctx and the 600 s read timeout. Capping output
+            // here used to starve thinking models, which spend part of the budget reasoning before they
+            // answer.
+            var response = ollama.chat(messages, LlmRequestConfig.DEFAULT);
             return response.content();
         } finally {
             semaphore.release();

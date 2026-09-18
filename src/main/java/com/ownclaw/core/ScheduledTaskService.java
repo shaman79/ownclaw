@@ -727,7 +727,8 @@ public class ScheduledTaskService {
 
             ollamaSemaphore.acquire();
             try {
-                var response = ollama.chat(messages, LlmRequestConfig.withMaxTokens(maxLen / 3));
+                // Brevity is requested in the prompt; a token cap would be spent on reasoning.
+                var response = ollama.chat(messages, LlmRequestConfig.DEFAULT);
                 String summary = response.content();
                 if (summary != null && !summary.isBlank()) {
                     log.debug("Summarized {} chars -> {} chars", text.length(), summary.length());

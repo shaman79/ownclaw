@@ -244,10 +244,12 @@ public class OpsService {
             String template = show.path("template").asText("");
             var m = new LinkedHashMap<String, Object>();
             m.put("capabilities", caps);
-            m.put("supportsChat", caps.contains("chat"));
+            // NOT caps.contains("chat"): Ollama has no such capability. See LocalModelCheck.
+            m.put("chatUsable", com.ownclaw.llm.LocalModelCheck.chatUsable(template, caps));
             m.put("supportsTools", caps.contains("tools"));
+            m.put("supportsThinking", caps.contains("thinking"));
             m.put("templateLength", template.length());
-            m.put("templateLooksUnusable", template.trim().equals("{{ .Prompt }}"));
+            m.put("templateRendersMessages", template.contains(".Messages") || template.contains(".System"));
             m.put("parameterSize", show.path("details").path("parameter_size").asText(""));
             out.put("modelInfo", m);
         } catch (Exception e) {
@@ -280,20 +282,31 @@ public class OpsService {
                             Map.of("role", "user", "content", "hello")),
                     "options", Map.of("temperature", 0, "num_predict", 32)));
             String content = r.path("message").path("content").asText("");
+            // A thinking model answers in two parts, so the canary may legitimately appear in
+            // the reasoning when the budget ran out before the final answer.
+            String thinking = r.path("message").path("thinking").asText("");
             int promptEval = r.path("prompt_eval_count").asInt(-1);
-            boolean honoured = content.toUpperCase(Locale.ROOT).contains(canary);
+            String doneReason = r.path("done_reason").asText("");
+            boolean honoured = (content + " " + thinking).toUpperCase(Locale.ROOT).contains(canary);
 
             m.put("ok", honoured);
             m.put("systemMessageHonoured", honoured);
             m.put("promptEvalCount", promptEval);
-            m.put("doneReason", r.path("done_reason").asText(""));
+            m.put("doneReason", doneReason);
             m.put("latencyMs", System.currentTimeMillis() - t0);
             m.put("reply", content.length() > 200 ? content.substring(0, 200) + "..." : content);
+            m.put("thinkingChars", thinking.length());
+            if (honoured && content.isBlank() && !thinking.isBlank()) {
+                m.put("note", "The system message was followed, but the answer never arrived: the whole "
+                        + "output budget went on reasoning. Local calls need a larger max_tokens for this "
+                        + "model, not a different model.");
+            }
             if (!honoured) {
-                m.put("diagnosis", "The model did not follow a system message. If templateLooksUnusable "
-                        + "is true, or promptEvalCount is far below the prompt size, this model has no chat "
-                        + "template and /api/chat discards roles — every local job will misbehave. Pull a "
-                        + "chat-capable model or wrap this one in a Modelfile with a proper template.");
+                m.put("diagnosis", "The model did not follow a system message. If chatUsable is false, or "
+                        + "promptEvalCount is far below the prompt size, Ollama cannot render the message "
+                        + "list for this model and every local job receives unrelated text — the GGUF ships "
+                        + "without a chat_template. Point the executor at a model whose template renders "
+                        + "messages, or re-create this one with a Modelfile carrying the right template.");
             }
         } catch (Exception e) {
             m.put("ok", false);

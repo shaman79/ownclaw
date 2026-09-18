@@ -84,6 +84,14 @@ public class OllamaProvider implements LlmProvider {
 
             JsonNode json = mapper.readTree(response.body().string());
             String content = json.path("message").path("content").asText("");
+            // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
+            // separate field and only then write the answer to content. Thinking is left ENABLED
+            // deliberately — it is what makes a small local model usable on real work — but the
+            // reasoning consumes the num_predict budget, so a budget that is too small ends the
+            // turn mid-thought with an empty content. Reading only content made that look like a
+            // successful empty reply, which downstream became "unparseable output" and a retry.
+            String thinking = json.path("message").path("thinking").asText("");
+            String doneReason = json.path("done_reason").asText("");
             int promptTokens = json.path("prompt_eval_count").asInt(0);
             int completionTokens = json.path("eval_count").asInt(0);
             long promptDurationNs = json.path("prompt_eval_duration").asLong(0);
@@ -108,6 +116,23 @@ public class OllamaProvider implements LlmProvider {
                 }
             } else {
                 log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
+            }
+            if (!thinking.isBlank()) {
+                log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinking.length());
+            }
+            if (content.isBlank() && !thinking.isBlank()) {
+                // Fail loudly instead of returning "" — the caller can raise the budget, whereas
+                // an empty string just becomes a mystery parse failure several layers away.
+                throw new LlmException("ollama",
+                        "Model '" + model + "' used its whole output budget on reasoning and never "
+                                + "produced an answer (" + completionTokens + " tokens generated, done_reason="
+                                + doneReason + ", " + thinking.length() + " chars of thinking). Raise "
+                                + "max_tokens for this call, or use a model that reasons more briefly.",
+                        0, null);
+            }
+            if ("length".equals(doneReason)) {
+                log.warn("Ollama [{}]: output truncated at the token limit ({} tokens) — the answer is "
+                        + "incomplete", model, completionTokens);
             }
             return new LlmResponse(content, promptTokens, completionTokens);
 

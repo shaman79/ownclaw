@@ -37,6 +37,8 @@ import java.util.stream.Collectors;
 @Component
 public class LocalExecutor {
 
+
+
     private static final Logger log = LoggerFactory.getLogger(LocalExecutor.class);
 
     // Lenient JSON mapper — same config as ThinkingEngine for local model quirks
@@ -91,8 +93,13 @@ public class LocalExecutor {
             // THINK: ask local LLM for next action
             LlmResponse response;
             try {
+
+                // Local generation is free, so no token cap is set: Ollama then generates until the model stops or
+                // the context window fills. The real bounds are num_ctx and the 600 s read timeout. Capping output
+                // here used to starve thinking models, which spend part of the budget reasoning before they
+                // answer.
                 response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, 2048, true, null));
+                        new LlmRequestConfig(null, null, null, true, null));
             } catch (Exception e) {
                 log.error("Local LLM call failed during delegation step {}", step + 1, e);
                 return buildPartialResult("Local LLM call failed: " + e.getMessage(), stepResults);
@@ -413,7 +420,9 @@ public class LocalExecutor {
                         LlmMessage.system("Summarize preserving ALL key facts, data, numbers, URLs. Output ONLY the summary."),
                         LlmMessage.user(text.length() > 12000 ? text.substring(0, 12000) : text)
                 );
-                var response = local.chat(msgs, LlmRequestConfig.withMaxTokens(maxLen / 3));
+                // Length is asked for in the prompt, not enforced by a token cap: a cap would be
+                // spent on reasoning first and leave no summary at all.
+                var response = local.chat(msgs, LlmRequestConfig.DEFAULT);
                 if (response.content() != null && !response.content().isBlank()) {
                     return "[summarized] " + response.content();
                 }
