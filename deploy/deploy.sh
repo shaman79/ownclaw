@@ -8,7 +8,10 @@
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
 #                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, Docker/Podman, git,
 #                            #   systemd service, sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
-#   ./deploy.sh --install-sudoers  # Install/repair sudoers rule (run once, as root)
+#   ./deploy.sh --harden     # Remove the service user's path to root (run once, as root):
+#                            #   root-owns the repo, replaces the ownclaw crontab with a
+#                            #   root-owned systemd timer, deletes the sudoers grants.
+#   ./deploy.sh --install-sudoers  # Legacy: only needed on a host that is NOT hardened
 #   ./deploy.sh --install-ollama   # Install Ollama and pull the default model (qwen2.5:14b)
 #   ./deploy.sh --rollback   # Restore previous JAR
 #   ./deploy.sh --reset      # Reset workspace to defaults (preserves .env, API keys, ollama config)
@@ -68,6 +71,9 @@ BUSY_URL="http://localhost:8080/api/health/busy"
 HEALTH_TIMEOUT=60
 BUSY_WAIT_TIMEOUT=300  # max 5 minutes to wait for task to finish
 RESTART_PENDING_MARKER="${DEPLOY_DIR}/.restart-pending"
+SUDOERS_FILE="/etc/sudoers.d/ownclaw-ownclaw-restart"
+UPDATE_UNIT="/etc/systemd/system/ownclaw-update.service"
+UPDATE_TIMER="/etc/systemd/system/ownclaw-update.timer"
 # Commit the installed JAR was built from. --update compares origin against this rather
 # than against the repo checkout: the checkout moves to the new commit *before* the build,
 # so a failed or interrupted build used to leave it "up to date" with the old JAR still
@@ -511,19 +517,12 @@ do_setup() {
     log "Running initial build..."
     su -s /bin/bash ownclaw -c "$REPO_DIR/deploy/deploy.sh"
 
-    # ── Cron job ───────────────────────────────────────────────────────────
+    # ── Auto-updates: root-owned timer, and lock the service user out of the repo ──
     if [ "$_opt_cron" = "Y" ]; then
-        local cron_line="*/15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
-        # Install only if not already present
-        if crontab -u ownclaw -l 2>/dev/null | grep -Fq "deploy.sh --update"; then
-            log "Cron job already installed for ownclaw"
-        else
-            ( crontab -u ownclaw -l 2>/dev/null || true; echo "$cron_line" ) | crontab -u ownclaw -
-            log "Cron job installed: auto-update every 15 minutes"
-        fi
+        harden_host
     else
-        log "Skipping cron job. Install later: sudo crontab -u ownclaw -e"
-        log "  Add: */15 * * * * $REPO_DIR/deploy/deploy.sh --update >> $LOG_DIR/deploy.log 2>&1"
+        log "Skipping auto-updates. Install them later with: sudo $REPO_DIR/deploy/deploy.sh --harden"
+        log "  (that also removes the service user's path to root — see --harden)"
     fi
 
     log ""
@@ -857,6 +856,162 @@ repair_repo_perms() {
     return 1
 }
 
+# =============================================================================
+# Host hardening
+# =============================================================================
+# The original arrangement gave the service user a path to root:
+#
+#   * /opt/ownclaw/repo (including deploy/ownclaw.service) was owned by ownclaw
+#   * sudoers let ownclaw run, passwordless:
+#       cp /opt/ownclaw/repo/deploy/ownclaw.service /etc/systemd/system/...
+#       systemctl daemon-reload
+#       systemctl restart ownclaw
+#   * the unit ran with ReadWritePaths=/opt/ownclaw and NoNewPrivileges off
+#
+# So anything running as ownclaw - which means any skill the agent generates, and
+# therefore anything a prompt-injected web page can reach - could write User=root
+# into the unit file and have it installed and started. Even without the sudo
+# rules, the 15-minute cron job ran OUTSIDE the service's mount namespace and
+# copied that same file itself, so editing the unit and touching .restart-pending
+# was enough.
+#
+# The fix inverts ownership: root owns the repo and the deploy script, the service
+# user owns only its data, and the updater runs as a root-owned systemd timer
+# instead of the service user's crontab. root needs no sudoers rules, so they go.
+#
+# This CANNOT be done by the cron updater itself: it runs as ownclaw, and the only
+# way it could gain root is the escalation being removed. That is the property we
+# want - an unprivileged service must not be able to rewrite its own privileges.
+# So --update only detects and reports, and `sudo deploy.sh --harden` applies it.
+
+# Is the dangerous arrangement still in place? Echoes the reasons, one per line.
+hardening_issues() {
+    local issues=""
+    if [ -f "$SUDOERS_FILE" ]; then
+        issues+="sudoers file $SUDOERS_FILE still grants the service user root for cp/daemon-reload\n"
+    fi
+    if [ -d "$REPO_DIR" ] && [ "$(stat -c '%U' "$REPO_DIR" 2>/dev/null)" != "root" ]; then
+        issues+="$REPO_DIR is owned by $(stat -c '%U' "$REPO_DIR" 2>/dev/null) — the service user can edit the unit file and this script\n"
+    fi
+    if crontab -u ownclaw -l 2>/dev/null | grep -Fq "deploy.sh --update"; then
+        issues+="the updater runs from the ownclaw crontab instead of a root-owned timer\n"
+    fi
+    printf '%b' "$issues"
+}
+
+# Called from --update (which runs unprivileged): report, never attempt.
+warn_if_unhardened() {
+    local issues
+    issues=$(hardening_issues)
+    [ -z "$issues" ] && return 0
+    log "SECURITY: this host still allows the service user to reach root:"
+    printf '%b' "$issues" | while IFS= read -r line; do
+        [ -n "$line" ] && log "  - $line"
+    done
+    log "  Fix with one command, as root:  sudo $REPO_DIR/deploy/deploy.sh --harden"
+    log "  (--update cannot fix this itself: it runs as ownclaw, and reaching root"
+    log "   from here is exactly the escalation being removed.)"
+}
+
+# Apply the safe arrangement. Root only, idempotent, safe to re-run.
+harden_host() {
+    [ "$(id -u)" -eq 0 ] || die "--harden must run as root: sudo $REPO_DIR/deploy/deploy.sh --harden"
+
+    log "=== Hardening host ==="
+    local issues
+    issues=$(hardening_issues)
+    if [ -z "$issues" ]; then
+        log "Already hardened — nothing to change."
+    fi
+
+    # Order matters. The replacement updater goes in FIRST and is verified, so that
+    # a failure part-way through never leaves the host with no updater at all.
+
+    # 1. Root-owned systemd timer to replace the user crontab.
+    log "Installing root-owned update timer..."
+    cat > "$UPDATE_UNIT" <<UNIT
+[Unit]
+Description=OwnClaw auto-update (pull, build, deploy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root on purpose: it owns the repo and installs the unit file, so the
+# service user never needs write access to either.
+User=root
+WorkingDirectory=${DEPLOY_DIR}
+ExecStart=${REPO_DIR}/deploy/deploy.sh --update
+StandardOutput=append:${LOG_DIR}/deploy.log
+StandardError=append:${LOG_DIR}/deploy.log
+UNIT
+
+    cat > "$UPDATE_TIMER" <<TIMER
+[Unit]
+Description=Run the OwnClaw auto-update every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=ownclaw-update.service
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+    chown root:root "$UPDATE_UNIT" "$UPDATE_TIMER"
+    chmod 0644 "$UPDATE_UNIT" "$UPDATE_TIMER"
+    systemctl daemon-reload
+    systemctl enable --now ownclaw-update.timer >/dev/null 2>&1 || true
+
+    if systemctl is-enabled --quiet ownclaw-update.timer 2>/dev/null; then
+        log "  Timer active: $(systemctl show -p NextElapseUSecRealtime --value ownclaw-update.timer 2>/dev/null || echo scheduled)"
+    else
+        die "Update timer did not enable — leaving the existing crontab in place. Check: systemctl status ownclaw-update.timer"
+    fi
+
+    # 2. Only now remove the old updater, so there is never a window with neither.
+    if crontab -u ownclaw -l 2>/dev/null | grep -Fq "deploy.sh --update"; then
+        crontab -u ownclaw -l 2>/dev/null | grep -Fv "deploy.sh --update" | crontab -u ownclaw - || true
+        log "  Removed the deploy entry from the ownclaw crontab"
+    fi
+
+    # 3. Take the repo away from the service user. It keeps only its own data.
+    log "Re-owning the repository to root..."
+    chown -R root:root "$REPO_DIR"
+    find "$REPO_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+    find "$REPO_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
+    chmod 755 "$REPO_DIR/deploy/deploy.sh" "$REPO_DIR/gradlew" 2>/dev/null || true
+    # Gradle needs a writable home; keep it outside the repo and owned by root.
+    mkdir -p "$DEPLOY_DIR/.gradle" && chown -R root:root "$DEPLOY_DIR/.gradle"
+    # The service user still owns everything it writes at runtime.
+    for d in data skills logs backups; do
+        [ -d "$DEPLOY_DIR/$d" ] && chown -R ownclaw:ownclaw "$DEPLOY_DIR/$d"
+    done
+    [ -f "$DEPLOY_DIR/.env" ] && { chown root:ownclaw "$DEPLOY_DIR/.env"; chmod 0640 "$DEPLOY_DIR/.env"; }
+    [ -f "$DEPLOY_DIR/ownclaw.jar" ] && chown root:root "$DEPLOY_DIR/ownclaw.jar"
+    log "  $REPO_DIR is now root-owned; data/, skills/, logs/ and backups/ stay with ownclaw"
+
+    # 4. The sudo grants existed only so an unprivileged updater could install the
+    #    unit and restart. The timer runs as root, so they are now pure liability.
+    if [ -f "$SUDOERS_FILE" ]; then
+        rm -f "$SUDOERS_FILE"
+        log "  Removed $SUDOERS_FILE"
+        if command -v visudo >/dev/null 2>&1 && ! visudo -c >/dev/null 2>&1; then
+            log "  WARN: visudo reports a problem with the remaining sudoers files — check manually"
+        fi
+    fi
+
+    # 5. Narrow the unit's writable paths and install it from the now-root-owned repo.
+    sync_service_file || log "  WARN: could not sync the service file"
+    systemctl daemon-reload
+
+    log "=== Hardening complete ==="
+    log "The service user can no longer edit the unit file, this script, or reach root."
+    log "Auto-updates now run from ownclaw-update.timer (systemctl list-timers ownclaw-update)."
+    log "Verify:  sudo -u ownclaw test -w $REPO_DIR/deploy/ownclaw.service && echo STILL WRITABLE || echo ok"
+}
+
 # === Deploy state ===
 # Replace a small state file via rename. Atomic, and unlike '>' it also works when the
 # existing file belongs to another user (e.g. left behind by a deploy run as root).
@@ -1152,6 +1307,10 @@ main() {
             do_setup
             exit 0
             ;;
+        --harden)
+            harden_host
+            exit 0
+            ;;
         --install-sudoers)
             if [ "$(id -u)" -ne 0 ]; then
                 die "Must be run as root: sudo $REPO_DIR/deploy/deploy.sh --install-sudoers"
@@ -1165,6 +1324,7 @@ main() {
             ;;
         --update)
             log "--- Auto-update check (user=$(whoami), home=$HOME) ---"
+            warn_if_unhardened
 
             # If a previous deploy staged a new JAR but couldn't restart (agent was busy),
             # retry the restart now before checking for new code.

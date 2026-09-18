@@ -178,6 +178,64 @@ The deploy script waits up to 60 seconds for this endpoint to respond after a re
 
 ---
 
+## Host hardening (`--harden`)
+
+The original setup gave the service user a path to root. `/opt/ownclaw/repo` — including
+`deploy/ownclaw.service` and `deploy.sh` itself — was owned by `ownclaw`, sudoers let `ownclaw`
+run `cp <that unit file> /etc/systemd/system/`, `systemctl daemon-reload` and
+`systemctl restart` passwordless, and the unit ran with `ReadWritePaths=/opt/ownclaw` and
+`NoNewPrivileges` off.
+
+So anything running as `ownclaw` — which means any skill the agent generates, and therefore
+anything a prompt-injected web page can reach — could write `User=root` into the unit file and
+have it installed and started. Even without the sudo rules, the 15-minute cron job ran outside
+the service's mount namespace and copied that same file itself, so editing the unit and touching
+`.restart-pending` was enough.
+
+```bash
+sudo /opt/ownclaw/repo/deploy/deploy.sh --harden
+```
+
+That is idempotent and safe to re-run. It:
+
+1. installs a **root-owned** `ownclaw-update.timer` (every 15 minutes) and verifies it enabled,
+2. only then removes the `deploy.sh --update` line from the `ownclaw` crontab,
+3. re-owns `/opt/ownclaw/repo` to `root`, leaving `data/`, `skills/`, `logs/` and `backups/`
+   with `ownclaw`,
+4. deletes `/etc/sudoers.d/ownclaw-ownclaw-restart` — the updater runs as root now, so the
+   grants are pure liability,
+5. re-installs the unit with `ReadWritePaths` narrowed to the four directories the service
+   actually writes.
+
+The order matters: if the timer fails to enable, it stops before touching the crontab, the
+sudoers file or ownership, so the host is never left with no updater and never half-changed.
+
+### Why `--update` cannot fix this itself
+
+`--update` runs as `ownclaw`. Undoing the arrangement needs root, and the only route to root
+from there is the escalation being removed. An unprivileged service must not be able to rewrite
+its own privileges — so `--update` only detects the unsafe state and logs what to run:
+
+```
+SECURITY: this host still allows the service user to reach root:
+  - sudoers file /etc/sudoers.d/ownclaw-ownclaw-restart still grants ...
+  - /opt/ownclaw/repo is owned by ownclaw — the service user can edit the unit file and this script
+  Fix with one command, as root:  sudo /opt/ownclaw/repo/deploy/deploy.sh --harden
+```
+
+`--setup` now calls `--harden` instead of installing the sudoers rules and the user crontab, so
+a fresh install never has the problem. `--install-sudoers` remains only for a host you have
+deliberately not hardened.
+
+Verify afterwards:
+
+```bash
+sudo -u ownclaw test -w /opt/ownclaw/repo/deploy/ownclaw.service && echo "STILL WRITABLE" || echo ok
+systemctl list-timers ownclaw-update
+```
+
+---
+
 ## Ops API
 
 `/api/ops/*` gives an operator — or an AI assistant driving a test → inspect → fix loop — read-only

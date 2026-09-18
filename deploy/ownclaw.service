@@ -29,7 +29,10 @@ RestartSec=10
 # Container isolation replaces the privilege restriction.
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/ownclaw
+# Only what the service writes at runtime. The repo, this unit file and deploy.sh are
+# root-owned and deliberately NOT writable: the service runs LLM-generated code, and
+# a writable unit file plus the old sudoers grants was a direct path to root.
+ReadWritePaths=/opt/ownclaw/data /opt/ownclaw/skills /opt/ownclaw/logs /opt/ownclaw/backups
 PrivateTmp=true
 
 # Logging
