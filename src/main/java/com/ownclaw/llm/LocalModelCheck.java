@@ -131,17 +131,36 @@ public class LocalModelCheck {
      * <p>
      * Ollama has no "chat" capability — the real values are completion, tools, insert, vision,
      * embedding and thinking — so asking for one was a bug that flagged every model as broken.
-     * The chat path works when either the Go template renders the message list, or Ollama has a
-     * built-in renderer for the architecture. A renderer is not exposed directly, but a model
-     * with a bare {@code {{ .Prompt }}} template that still advertises tools or thinking must
-     * have one (observed: nemotron_h_moe reports [completion, tools, thinking] with that
-     * template and honours a system message; qwen35moe reports [completion] only and receives
-     * one token of a fifty-token prompt).
+     * The chat path works when something renders the message list. Three things can:
+     * <ol>
+     *   <li><b>A Go template</b> that walks {@code .Messages} or inserts {@code .System}.</li>
+     *   <li><b>A Jinja chat template</b>, which Ollama 0.34 and later read straight from the
+     *       GGUF's {@code tokenizer.chat_template} metadata. Jinja statement syntax
+     *       ({@code {%- if ... %}}) is the giveaway; the bare {@code {{ .Prompt }}} fallback
+     *       contains none of it.</li>
+     *   <li><b>A built-in renderer</b> for the architecture. Ollama does not expose which
+     *       architectures have one, but a model left with the bare placeholder that still
+     *       advertises tools or thinking must have it, because neither capability is reachable
+     *       without structured messages.</li>
+     * </ol>
+     * The Jinja case is not hypothetical and is the reason this method is not just a capability
+     * check. On this deployment, {@code qwen35moe} under Ollama 0.18.3 reported
+     * {@code capabilities: [completion]} with a {@code {{ .Prompt }}} template and received one
+     * token of a fifty-token prompt — the GGUF's Jinja template was there all along, but 0.18.3
+     * could not parse Jinja and silently fell back. Upgrading the server to 0.34.2 turned the
+     * same unmodified model into {@code [tools, thinking, completion]} with a 7.7 kB Jinja
+     * template. So a model that looks unusable is often a server too old to render it, and the
+     * fix is the Ollama version rather than the model.
      */
     public static boolean chatUsable(String template, List<String> capabilities) {
         String t = template == null ? "" : template.trim();
         if (t.contains(".Messages") || t.contains(".System")) {
-            return true;    // the template renders a conversation itself
+            return true;    // Go template that renders a conversation itself
+        }
+        if (t.contains("{%")
+                && (t.contains("messages") || t.contains("im_start")
+                    || t.contains("add_generation_prompt"))) {
+            return true;    // Jinja chat template from the GGUF metadata
         }
         // A bare placeholder plus a richer capability set means a built-in renderer is in play.
         return capabilities.contains("tools") || capabilities.contains("thinking");

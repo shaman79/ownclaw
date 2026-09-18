@@ -97,12 +97,19 @@ config_lines() {
 # so a naive space-split truncates it at the first element and would write a
 # corrupt Environment= line back into the unit. Re-join tokens until the closing
 # bracket when a value opens with one.
-map_get() {
-    local map="$1" key="$2" tok val="" joining=0
+#
+# Runs in a subshell with `set -f`. Splitting the map needs word splitting, which means
+# leaving $map unquoted, which also invites pathname expansion - and the origins list
+# genuinely contains both "[" and "*" (http://127.0.0.1:*). If a token ever matched a
+# file in the working directory it would be silently replaced by that filename. Globbing
+# off, word splitting on; the subshell keeps it from leaking into the rest of the script,
+# which does rely on globbing to find the backup file.
+map_get() ( set -f
+    map="$1"; key="$2"; val=""; joining=0
     for tok in $map; do
         if [ "$joining" = 1 ]; then
             val+=" $tok"
-            case "$tok" in *']') printf '%s' "$val"; return ;; esac
+            case "$tok" in *']') printf '%s' "$val"; exit 0 ;; esac
             continue
         fi
         case "$tok" in
@@ -112,13 +119,13 @@ map_get() {
                     '['*']') ;;                       # single-element list, already whole
                     '['*)    joining=1; continue ;;   # list continues into later tokens
                 esac
-                printf '%s' "$val"; return
+                printf '%s' "$val"; exit 0
                 ;;
         esac
     done
     [ "$joining" = 1 ] && printf '%s' "$val"   # unterminated list; return what we have
-    return 0
-}
+    exit 0
+)
 
 SVC=$(service_name)
 [ -n "$SVC" ] || die "No ollama systemd unit found on this host."
@@ -207,6 +214,21 @@ done
 [ -n "$TUNED" ] || printf '    (none)\n'
 
 [ "$found" = 1 ] || { printf '\n'; log "Nothing changed -- the upgrade preserved everything."; exit 0; }
+
+# A recovered value can be faithfully restored and still be wrong, because it was
+# already wrong before the upgrade. Call out the one that bites hardest.
+ka=$(map_get "$OLD" OLLAMA_KEEP_ALIVE)
+case "$ka" in
+    ""|-*) ;;                                     # unset, or negative = never unload
+    *[!0-9]*) ;;                                  # a duration like 30m0s; fine
+    *)  printf '\n'
+        log "WARNING: OLLAMA_KEEP_ALIVE was the bare number '$ka'. Ollama reads a bare"
+        log "  integer as SECONDS, so that unloads the model ${ka}s after each request and"
+        log "  every call then pays a full reload -- minutes, for a model this size."
+        log "  If the intent was 'never unload', the value is -1. A duration also works:"
+        log "  OLLAMA_KEEP_ALIVE=30m. Restoring '$ka' verbatim would preserve the bug."
+        ;;
+esac
 
 if [ "$RESTORE_ALL" = "1" ] && [ -n "$TUNED" ]; then
     log "--restore-all: pinning the tuning values back too"
