@@ -96,7 +96,10 @@ public class ThinkingEngine {
             log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
                     truncate(response.content(), 200));
             AgentAction action = parseAction(response.content());
-            return new ThinkResult(action, messages, response.content(), response.totalTokens());
+            return new ThinkResult(action, messages, response.content(), response.totalTokens(),
+                    response.promptTokens(), response.completionTokens(),
+                    response.cacheCreationTokens(), response.cacheReadTokens(),
+                    provider.model());
         } catch (LlmException e) {
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
             AgentAction action = new AgentAction(AgentAction.RESPOND,

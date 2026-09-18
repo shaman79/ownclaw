@@ -9,6 +9,7 @@ import com.ownclaw.core.LongRunningTaskManager;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TokenBudgetTracker;
+import com.ownclaw.llm.ModelPricing;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -456,8 +457,15 @@ public class AgentLoop {
                 context.addCloudTokens(thinkResult.totalTokens());
                 // Persist cloud usage for budget tracking
                 if (thinkResult.totalTokens() > 0) {
+                    // Priced from the component breakdown, not the total: cache reads cost about
+                    // a tenth of base input and cache writes about a quarter more, so a single
+                    // summed figure cannot be costed. This was hardcoded 0.0, which left
+                    // token_usage.cost_usd a column of zeros and every budget ceiling inert.
+                    double cost = ModelPricing.costUsd(thinkResult.model(),
+                            thinkResult.promptTokens(), thinkResult.completionTokens(),
+                            thinkResult.cacheWriteTokens(), thinkResult.cacheReadTokens());
                     budgetTracker.recordUsage(context.userId(), provider.name(),
-                            thinkResult.totalTokens(), 0.0);
+                            thinkResult.totalTokens(), cost);
                 }
             }
 
@@ -1588,7 +1596,8 @@ public class AgentLoop {
             }
             if (response.totalTokens() > 0) {
                 budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
-                        response.totalTokens(), 0.0);
+                        response.totalTokens(),
+                        ModelPricing.costUsd(codeGenProvider.model(), response));
             }
 
             // --- Structural pre-check: reject obviously broken code early ---
@@ -1628,7 +1637,8 @@ public class AgentLoop {
                     }
                     if (repairResponse.totalTokens() > 0) {
                         budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
-                                repairResponse.totalTokens(), 0.0);
+                                repairResponse.totalTokens(),
+                                ModelPricing.costUsd(codeGenProvider.model(), repairResponse));
                     }
 
                     String repairedCode = extractPythonCode(repairResponse.content());

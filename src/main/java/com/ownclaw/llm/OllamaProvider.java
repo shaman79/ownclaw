@@ -157,6 +157,9 @@ public class OllamaProvider implements LlmProvider {
         return "ollama";
     }
 
+    @Override
+    public String model() { return config.getModel(); }
+
     /**
      * Return an OkHttpClient with the read timeout from reqConfig (if set),
      * otherwise use the default httpClient. Uses newBuilder() so the

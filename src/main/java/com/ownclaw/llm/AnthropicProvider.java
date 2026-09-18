@@ -199,7 +199,11 @@ public class AnthropicProvider implements LlmProvider {
             } else {
                 log.debug("Anthropic [{}]: {} input + {} output tokens", model, promptTokens, completionTokens);
             }
-            return new LlmResponse(content, promptTokens, completionTokens);
+            // Carry the cache counters through. input_tokens excludes both of these, so dropping
+            // them (as this did) understates the billed input by most of the prompt on a cached
+            // conversation, and makes any token or cost figure downstream unreconcilable with
+            // the actual bill.
+            return new LlmResponse(content, promptTokens, completionTokens, cacheCreation, cacheRead);
 
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
@@ -275,6 +279,9 @@ public class AnthropicProvider implements LlmProvider {
     public String name() {
         return "anthropic";
     }
+
+    @Override
+    public String model() { return config.getAnthropicModel(); }
 
     private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
         if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {

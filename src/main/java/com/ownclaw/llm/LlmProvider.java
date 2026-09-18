@@ -27,4 +27,14 @@ public interface LlmProvider {
      * Human-readable name for logging (e.g. "ollama", "openai").
      */
     String name();
+
+    /**
+     * The model this provider is configured to use by default, for cost attribution.
+     * <p>
+     * Needed because pricing is per model, not per provider: an Opus call and a Haiku call
+     * through the same provider differ by roughly 15x on input. Defaults to null for any
+     * implementation that does not track one, and unknown models are priced at zero rather
+     * than guessed.
+     */
+    default String model() { return null; }
 }
