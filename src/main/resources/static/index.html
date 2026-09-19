@@ -4846,10 +4846,27 @@
             .replace(/&lt;\/mark&gt;/g, '</mark>');
     }
 
+    /**
+     * Escape a value for insertion into HTML, including attribute position.
+     *
+     * textContent/innerHTML escapes &, < and > but NOT quotes, and this function's output is
+     * interpolated into value="..." in eight places — task cron expressions, skill
+     * descriptions, model names, settings fields. A value containing a double quote therefore
+     * closed the attribute early and everything after it was parsed as markup, so
+     *     " onmouseover="…
+     * became a live event handler. The script-src policy allows 'unsafe-inline' because the
+     * whole client is one inline script, so such a handler runs, and the session JWT is in
+     * localStorage.
+     *
+     * The realistic injection source is LLM-authored skill metadata rather than a remote
+     * attacker, which is why this is a correctness fix rather than an emergency — but the
+     * agent reads web pages and e-mail, and quoting is not the place to rely on that staying
+     * true. Escaping quotes is harmless in text position, where they simply render.
+     */
     function escapeHtml(s) {
         var d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
+        d.textContent = s == null ? '' : String(s);
+        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function wrapCodeBlock(pre) {
