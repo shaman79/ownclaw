@@ -23,7 +23,17 @@ public class SkillInteractionHandler {
     private static final Logger log = LoggerFactory.getLogger(SkillInteractionHandler.class);
 
     /** Timeout for waiting for user input (seconds). */
-    private static final int INPUT_TIMEOUT_SEC = 120;
+    /**
+     * How long a skill waits for a human answer.
+     *
+     * Was 120 seconds, which is a machine timeout applied to a person: the prompt has to be
+     * noticed, read, thought about and typed, and the user may not be looking at the tab. When
+     * it expired the skill failed for no visible reason — the question itself was being
+     * rendered into a collapsed activity strip at the time, so there was often nothing to see
+     * at all. Ten minutes is still bounded, so a forgotten prompt cannot block a worker
+     * forever, but it no longer punishes someone for making a cup of tea.
+     */
+    private static final int INPUT_TIMEOUT_SEC = 600;
 
     private final ChatStatusEmitter statusEmitter;
 

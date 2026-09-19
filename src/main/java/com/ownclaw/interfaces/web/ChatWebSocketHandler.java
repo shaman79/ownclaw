@@ -117,6 +117,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             if (msg.type() == ChatStatusEmitter.StatusMessage.Type.DEBUG) {
                 // Debug messages are rendered as full message blocks, not brief activity entries
                 sendToSession(session, "debug", msg.text());
+            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT) {
+                // A question is not a status. Routed as a status it became one grey line in the
+                // activity strip — which is collapsed by default and scrolls — while a skill
+                // sat blocked behind a silent two-minute fuse. The client already renders an
+                // "input_request" message type with its own styling; nothing on the server ever
+                // emitted one, so that renderer was dead code and the feature was unusable
+                // despite being marked complete in ARCHITECTURE.md.
+                sendToSession(session, "input_request", msg.text());
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
                 sendStatusToSession(session, msg);

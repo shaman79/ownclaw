@@ -4652,6 +4652,13 @@
                         resetThinkingSafetyTimer();
                         showActivity(content, detail);
                     }
+                } else if (type === 'input_request') {
+                    // A skill is blocked waiting for an answer. Clear the working state: it
+                    // disables the send button, so until now the only way to reply was the
+                    // Enter handler, which happens not to check it. Clicking Send did nothing.
+                    setThinking(false);
+                    addMsg('input_request', content);
+                    try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
                     addMsg('debug', content);
                 } else if (type === 'pong' || type === 'ping') {
