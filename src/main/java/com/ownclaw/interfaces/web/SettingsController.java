@@ -24,13 +24,16 @@ public class SettingsController {
     private final OwnClawConfig config;
     private final LlmRouter llmRouter;
     private final AuthService authService;
+    private final com.ownclaw.llm.LocalModelCheck localModelCheck;
 
     public SettingsController(SetupWizardService setupWizard, OwnClawConfig config,
-                              LlmRouter llmRouter, AuthService authService) {
+                              LlmRouter llmRouter, AuthService authService,
+                              com.ownclaw.llm.LocalModelCheck localModelCheck) {
         this.setupWizard = setupWizard;
         this.config = config;
         this.llmRouter = llmRouter;
         this.authService = authService;
+        this.localModelCheck = localModelCheck;
     }
 
     /**
@@ -66,6 +69,16 @@ public class SettingsController {
         if (diag != null) {
             result.put("ollama_reachable", diag.ollamaReachable());
         }
+
+        // Live local-tier status. The wizard's ollamaReachable above is a boot-time snapshot
+        // and answers the wrong question anyway: Ollama was reachable throughout the months
+        // the local tier was returning nonsense. This checks that the configured model is
+        // installed AND can actually be driven, which is what was silently false.
+        var local = localModelCheck.status();
+        result.put("local_ok", local.ok());
+        result.put("local_detail", local.detail());
+        result.put("local_installed", local.installed());
+        result.put("local_usable", local.usable());
 
         return ResponseEntity.ok(result);
     }

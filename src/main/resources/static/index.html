@@ -1731,6 +1731,7 @@
         .settings-section-title .status-dot.ok { background: var(--green) }
         .settings-section-title .status-dot.warn { background: #fbbf24 }
         .settings-section-title .status-dot.off { background: var(--text-3) }
+        .settings-section-title .status-dot.err { background: var(--red) }
         .settings-field {
             margin-bottom: 14px;
         }
@@ -3300,9 +3301,15 @@
         ollamaSection.className = 'settings-section';
         ollamaSection.innerHTML =
             '<div class="settings-section-title">' +
-                '<span class="status-dot ok"></span>' +
+                // Was hardcoded 'ok'. This screen reported the local tier healthy throughout
+                // the months it was returning nonsense, which is the worst thing a status
+                // indicator can do. Now driven by a live check of whether the configured
+                // model is installed and can actually be driven.
+                '<span class="status-dot ' + (data.local_ok ? 'ok' : 'err') + '"></span>' +
                 'Ollama (Local)' +
             '</div>' +
+            (data.local_detail ? '<div class="field-hint" style="margin:-4px 0 10px">' +
+                escapeHtml(String(data.local_detail)) + '</div>' : '') +
             '<div class="settings-field">' +
                 '<label>URL</label>' +
                 '<input type="text" id="settings-ollama-url" value="' + escapeHtml(data.ollama_url || '') + '" placeholder="http://localhost:11434">' +

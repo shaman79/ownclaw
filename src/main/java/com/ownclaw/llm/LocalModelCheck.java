@@ -127,6 +127,68 @@ public class LocalModelCheck {
     }
 
     /**
+     * A live status probe for the local tier, cheap enough to run on a settings page load.
+     *
+     * @param ok     the configured model is installed AND can actually be driven
+     * @param detail one line explaining why, for display
+     */
+    public record LocalStatus(boolean ok, String model, boolean reachable,
+                              boolean installed, boolean usable, String detail) {}
+
+    /**
+     * Ask the local tier whether it is genuinely usable right now.
+     * <p>
+     * Written because the Settings page rendered a hardcoded green dot next to Ollama, so the
+     * one screen reporting local health said it was fine throughout the months it was broken.
+     * The obvious fix — binding that dot to the setup wizard's {@code ollamaReachable} — would
+     * not have helped: that is a boot-time snapshot, and Ollama <em>was</em> reachable the whole
+     * time. The server answered, the model was installed, and every call still returned
+     * nonsense, because the server could not render a chat template for that architecture.
+     * Reachability was never the question.
+     * <p>
+     * So this checks what actually matters: is the configured model installed, and can it be
+     * driven through {@code /api/chat}. Both come from {@code /api/tags} and {@code /api/show},
+     * which cost milliseconds — no inference, so no 60-133 second round trip on a page load.
+     */
+    public LocalStatus status() {
+        String url = config.getExecutor().getUrl();
+        String model = config.getExecutor().getModel();
+        if (url == null || url.isBlank() || model == null || model.isBlank()) {
+            return new LocalStatus(false, model, false, false, false,
+                    "Local model or URL is not configured.");
+        }
+        List<String> installed;
+        try {
+            installed = installedModels(url);
+        } catch (Exception e) {
+            return new LocalStatus(false, model, false, false, false,
+                    "Not reachable at " + url + " (" + e.getMessage() + ")");
+        }
+        if (!installed.contains(model)) {
+            return new LocalStatus(false, model, true, false, false,
+                    "Reachable, but '" + model + "' is not installed. Installed: "
+                            + (installed.isEmpty() ? "(none)" : String.join(", ", installed)));
+        }
+        try {
+            JsonNode show = show(url, model);
+            var capabilities = new ArrayList<String>();
+            for (JsonNode c : show.path("capabilities")) capabilities.add(c.asText());
+            String template = show.path("template").asText("").trim();
+            if (!chatUsable(template, capabilities)) {
+                return new LocalStatus(false, model, true, true, false,
+                        "Installed but NOT usable through /api/chat — no renderer for this "
+                        + "architecture, so prompts are discarded and answers are unrelated. "
+                        + "capabilities=" + capabilities + ". Upgrading Ollama often fixes this.");
+            }
+            return new LocalStatus(true, model, true, true, true,
+                    "Ready (capabilities=" + capabilities + ")");
+        } catch (Exception e) {
+            return new LocalStatus(false, model, true, true, false,
+                    "Installed, but could not be inspected: " + e.getMessage());
+        }
+    }
+
+    /**
      * Whether this model can be driven through {@code /api/chat}.
      * <p>
      * Ollama has no "chat" capability — the real values are completion, tools, insert, vision,
