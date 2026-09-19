@@ -266,8 +266,17 @@ public class SkillController {
                 ? (Map<String, Object>) body.get("params")
                 : Map.of();
 
-        // Create a minimal execution context for test runs
-        var context = new ToolExecutionContext("web-ui", "test-run", null, () -> false);
+        // Create a minimal execution context for test runs.
+        //
+        // The userId here is the real caller, not the literal "web-ui" it used to be. That
+        // string was passed straight through to the vault lookup in DynamicSkill, so no
+        // credential was ever found and Test Run could not succeed for ANY skill declaring
+        // one — while the Skills grid marks exactly those skills with a key badge and offers
+        // the run button anyway. The error then told the owner to store a credential they had
+        // already stored, which is about the least helpful failure available.
+        //
+        // isOwner(userId) is checked above, so this is the owner's own vault.
+        var context = new ToolExecutionContext(userId, "test-run", null, () -> false);
 
         try {
             long start = System.currentTimeMillis();
