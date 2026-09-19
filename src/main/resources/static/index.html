@@ -4391,7 +4391,15 @@
         fetch('/api/auth/status', { headers: headers })
             .then(okJson)
             .then(function(data) {
-                if (data.authenticated && authToken) { enterChat(); return; }
+                if (data.authenticated && authToken) {
+                    // The API has always returned an `owner` flag and the client never read it,
+                    // so every account saw the owner-only Skills and Settings buttons. Combined
+                    // with the API correctly refusing those calls, a non-owner got a plausible,
+                    // entirely blank settings screen rather than being told it was not for them.
+                    applyOwnerVisibility(data.owner === true);
+                    enterChat();
+                    return;
+                }
                 if (authToken) { authToken = null; localStorage.removeItem('ownclaw_token'); }
                 authLoading.style.display = 'none';
                 authBox.style.display = 'block';
@@ -4401,6 +4409,20 @@
                 authLoading.textContent = 'Cannot reach server - retrying...';
                 setTimeout(checkAuth, 3000);
             });
+    }
+
+    /**
+     * Show or hide owner-only surfaces.
+     *
+     * Presentation only — the server already enforces this, and must keep doing so. Hiding a
+     * button is a courtesy to the user, never a security boundary: anything that matters is
+     * refused by the API regardless of what the client chooses to render.
+     */
+    function applyOwnerVisibility(isOwner) {
+        ['skills-btn', 'settings-btn'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.style.display = isOwner ? '' : 'none';
+        });
     }
 
     function switchToRegister() {
@@ -4743,7 +4765,9 @@
         }
 
         messagesEl.insertBefore(div, thinkingEl);
-        scrollBottom();
+        // Force for the user's own message: sending is an explicit action, so jumping
+        // to it is expected. Everything else only follows if already following.
+        scrollBottom(type === 'user');
     }
 
     // Chat messages are persisted and re-rendered on every load, so anything unsafe here is
@@ -4956,7 +4980,21 @@
         setThinking(true);
     }
 
-    function scrollBottom() {
+    /**
+     * Follow the conversation, unless the user has scrolled up to read something.
+     *
+     * This used to set scrollTop unconditionally, and it is called from showActivity — which
+     * fires on every status update during a task. On this deployment a task can run for
+     * minutes and emit many steps, so trying to read back an earlier message meant being
+     * yanked to the bottom again a second later, repeatedly.
+     *
+     * Sticking to the bottom is right when you are already at the bottom: that is following
+     * along. It is wrong when you have deliberately scrolled away. The 80px tolerance keeps it
+     * feeling sticky rather than brittle, so being a line or two off the bottom still follows.
+     */
+    function scrollBottom(force) {
+        var nearBottom = (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 80;
+        if (!force && !nearBottom) return;
         requestAnimationFrame(function() { messagesEl.scrollTop = messagesEl.scrollHeight; });
     }
 
