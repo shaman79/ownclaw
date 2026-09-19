@@ -116,7 +116,8 @@ public class DebugController {
 
         // Capture all status/debug messages emitted during execution
         List<String> capturedMessages = new CopyOnWriteArrayList<>();
-        statusEmitter.subscribe(userId, msg -> capturedMessages.add(
+        Object debugKey = new Object();
+        statusEmitter.subscribe(userId, debugKey, msg -> capturedMessages.add(
                 "[" + msg.type().name() + "] " + msg.text()
         ));
 
@@ -139,8 +140,15 @@ public class DebugController {
             if (!wasDebugEnabled && debugService.isEnabled(userId)) {
                 debugService.toggle(userId);
             }
-            // Note: we leave the emitter subscription — the WebSocket handler will re-subscribe
-            // when the user next connects, overwriting our listener (which is fine).
+            // Remove our own listener.
+            //
+            // This used to be left attached, on the reasoning that the WebSocket handler would
+            // overwrite it on the next connect. That was true when the emitter held one listener
+            // per user, and it had a cost: using this endpoint silently killed the live activity
+            // panel until the page was reloaded. Listeners are now keyed per subscriber, so
+            // nothing overwrites anything — leaving it attached would leak a listener that
+            // accumulates messages into a captured list for the lifetime of the process.
+            statusEmitter.unsubscribe(userId, debugKey);
         }
     }
 

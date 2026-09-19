@@ -207,7 +207,7 @@ public class TelegramBotService {
         userChatIds.put(userId, chatId);
 
         // Subscribe to status messages for this user → send to Telegram with stats
-        statusEmitter.subscribe(userId, msg -> {
+        statusEmitter.subscribe(userId, this, msg -> {
             StringBuilder sb = new StringBuilder(msg.formatted());
             // Append token/step stats if available
             Map<String, Object> data = msg.data();

@@ -1,5 +1,7 @@
 package com.ownclaw.observability;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
@@ -13,28 +15,63 @@ import java.util.function.Consumer;
 @Service
 public class ChatStatusEmitter {
 
-    /** Registered listeners per user. Each consumer receives a formatted status string. */
-    private final Map<String, Consumer<StatusMessage>> listeners = new ConcurrentHashMap<>();
+    private static final Logger log = LoggerFactory.getLogger(ChatStatusEmitter.class);
+
+    /**
+     * Listeners per user, each under its own key.
+     * <p>
+     * This used to be one consumer per user, latest wins, with the javadoc noting it covered
+     * "Telegram or WebUI, not both simultaneously". In practice that is not a limitation, it is
+     * three bugs. Opening the web UI silently deafened Telegram. A second browser tab silenced
+     * the first. And because unsubscribe removed whoever happened to be registered rather than
+     * the caller's own listener, closing a STALE tab tore down the live session's status stream
+     * — the task carried on running, invisibly.
+     * <p>
+     * Keying by subscriber means a caller can only ever remove its own listener, and every
+     * attached interface sees every message. Which is what the user expects: a task started in
+     * the browser should report to Telegram too, not instead.
+     */
+    private final Map<String, Map<Object, Consumer<StatusMessage>>> listeners = new ConcurrentHashMap<>();
 
     /**
      * Register a listener for a user's status messages.
-     * Only one listener per user (latest wins — covers Telegram or WebUI, not both simultaneously in Phase 1).
+     *
+     * @param key a stable identity for this subscriber (a WebSocket session, a bot instance).
+     *            Subscribing twice with the same key replaces that one listener and no other.
      */
-    public void subscribe(String userId, Consumer<StatusMessage> listener) {
-        listeners.put(userId, listener);
+    public void subscribe(String userId, Object key, Consumer<StatusMessage> listener) {
+        listeners.computeIfAbsent(userId, u -> new ConcurrentHashMap<>()).put(key, listener);
     }
 
-    public void unsubscribe(String userId) {
-        listeners.remove(userId);
+    /** Remove only this subscriber's listener, leaving any others attached. */
+    public void unsubscribe(String userId, Object key) {
+        Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
+        if (forUser == null) return;
+        forUser.remove(key);
+        if (forUser.isEmpty()) listeners.remove(userId);
+    }
+
+    /** True when at least one interface is listening — i.e. somebody is watching. */
+    public boolean hasListener(String userId) {
+        Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
+        return forUser != null && !forUser.isEmpty();
     }
 
     /**
-     * Emit a status message to the user's active chat interface.
+     * Emit a status message to every attached interface for this user.
+     * <p>
+     * One listener throwing must not stop the others receiving the message: a dead WebSocket
+     * should never be able to silence Telegram.
      */
     public void emit(String userId, StatusMessage message) {
-        Consumer<StatusMessage> listener = listeners.get(userId);
-        if (listener != null) {
-            listener.accept(message);
+        Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
+        if (forUser == null) return;
+        for (Map.Entry<Object, Consumer<StatusMessage>> e : forUser.entrySet()) {
+            try {
+                e.getValue().accept(message);
+            } catch (Exception ex) {
+                log.debug("Status listener {} failed for {}: {}", e.getKey(), userId, ex.toString());
+            }
         }
     }
 

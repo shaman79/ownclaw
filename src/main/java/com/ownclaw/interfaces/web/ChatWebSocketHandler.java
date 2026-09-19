@@ -111,7 +111,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         sessions.put(userId, session);
 
         // Subscribe to status messages
-        statusEmitter.subscribe(userId, msg -> {
+        // Keyed on this session: a second tab adds a listener rather than replacing this
+        // one, and closing a stale tab removes only its own.
+        statusEmitter.subscribe(userId, session, msg -> {
             if (msg.type() == ChatStatusEmitter.StatusMessage.Type.DEBUG) {
                 // Debug messages are rendered as full message blocks, not brief activity entries
                 sendToSession(session, "debug", msg.text());
@@ -271,7 +273,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String userId = (String) session.getAttributes().get("userId");
         if (userId != null) {
             sessions.remove(userId);
-            statusEmitter.unsubscribe(userId);
+            statusEmitter.unsubscribe(userId, session);
             interactionHandler.cancelPending(userId);
             log.info("WebSocket disconnected: user={}", userId);
         }
