@@ -2548,7 +2548,7 @@
         fetch('/api/chats/search?q=' + encodeURIComponent(query), {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             searchResults.innerHTML = '';
             var results = data.results || [];
@@ -2612,7 +2612,7 @@
         fetch('/api/chats/' + sessionId + '/messages', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             clearMessages();
             var msgs = data.messages || [];
@@ -2722,8 +2722,8 @@
 
         // Fetch both tasks and run history in parallel
         Promise.all([
-            fetch('/api/scheduled-tasks', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(function(r) { return r.json(); }),
-            fetch('/api/scheduled-tasks/runs?limit=50', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(function(r) { return r.json(); })
+            fetch('/api/scheduled-tasks', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(okJson),
+            fetch('/api/scheduled-tasks/runs?limit=50', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(okJson)
         ])
         .then(function(results) {
             clearMessages();
@@ -3141,7 +3141,7 @@
         fetch('/api/scheduled-tasks/runs?limit=50&offset=' + offset, {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             var runs = data.runs || [];
             runs.forEach(function(run) {
@@ -3203,7 +3203,7 @@
         fetch('/api/settings', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             clearMessages();
             renderSettings(data);
@@ -3568,7 +3568,7 @@
         fetch('/api/skills', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             clearMessages();
             renderSkillsList(data.skills || []);
@@ -3712,7 +3712,7 @@
                 method: 'POST',
                 headers: { 'Authorization': 'Bearer ' + authToken }
             })
-            .then(function(r) { return r.json(); })
+            .then(okJson)
             .then(function(data) {
                 showSettingsToast(data.message || 'Skills reloaded', false);
                 loadSkills();
@@ -4004,7 +4004,7 @@
         fetch('/api/skills/' + encodeURIComponent(name), {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(skill) {
             // Build modal
             var existing = document.querySelector('.skill-run-overlay');
@@ -4084,7 +4084,7 @@
                     },
                     body: JSON.stringify({ params: runParams })
                 })
-                .then(function(r) { return r.json(); })
+                .then(okJson)
                 .then(function(data) {
                     var statusClass = data.success ? 'success' : 'error';
                     resultDiv.innerHTML =
@@ -4188,7 +4188,7 @@
         return fetch('/api/chats', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             renderSessionList(data.sessions || [], data.activeSessionId);
         })
@@ -4389,7 +4389,7 @@
         var headers = {};
         if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
         fetch('/api/auth/status', { headers: headers })
-            .then(function(r) { return r.json(); })
+            .then(okJson)
             .then(function(data) {
                 if (data.authenticated && authToken) { enterChat(); return; }
                 if (authToken) { authToken = null; localStorage.removeItem('ownclaw_token'); }
@@ -4462,6 +4462,55 @@
         authOverlay.classList.add('hidden');
         connect();
     }
+
+    /**
+     * Parse a response, but only if it actually succeeded.
+     *
+     * Thirteen fetches did `.then(okJson)` with no status check, so
+     * an error response was parsed as data. A 401 or a 500 came back as an object with no
+     * expected fields, `|| []` fired, and the UI cheerfully reported "No skills yet" — the
+     * product looked empty rather than broken. The worst case was Settings: a failed load
+     * rendered a blank form, and pressing Save then wrote those blanks back, so a transient
+     * error could overwrite the configured cloud provider.
+     *
+     * Throwing instead means the success path simply does not run on failure. Errors surface
+     * through the global handler below rather than needing a .catch bolted onto every caller.
+     */
+    function okJson(r) {
+        if (r.status === 401) {
+            logout();
+            throw new Error('Session expired — please log in again.');
+        }
+        if (!r.ok) {
+            throw new Error('Request failed: HTTP ' + r.status + (r.statusText ? ' ' + r.statusText : ''));
+        }
+        return r.json();
+    }
+
+    /**
+     * Surface failures instead of letting them vanish into the console.
+     *
+     * One handler rather than a .catch on every call site: the point is that a failure is
+     * never silent, and a rule that has to be remembered at thirteen places is a rule that
+     * will be forgotten at the fourteenth.
+     */
+    window.addEventListener('unhandledrejection', function(e) {
+        var msg = e.reason && e.reason.message ? e.reason.message : String(e.reason || 'Unknown error');
+        var bar = document.getElementById('global-error');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'global-error';
+            bar.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);'
+                + 'background:var(--red);color:#0d0f14;padding:10px 16px;border-radius:8px;'
+                + 'font-size:13px;z-index:9999;max-width:min(560px,90vw);box-shadow:0 4px 16px rgba(0,0,0,.4);'
+                + 'cursor:pointer';
+            bar.addEventListener('click', function() { bar.remove(); });
+            document.body.appendChild(bar);
+        }
+        bar.textContent = msg;
+        clearTimeout(bar._t);
+        bar._t = setTimeout(function() { if (bar.parentNode) bar.remove(); }, 8000);
+    });
 
     function logout() {
         authToken = null;
@@ -4830,7 +4879,7 @@
             headers: { 'Authorization': 'Bearer ' + authToken },
             body: formData
         })
-        .then(function(r) { return r.json(); })
+        .then(okJson)
         .then(function(data) {
             if (data.error) {
                 chips.forEach(function(c) { c.remove(); });
