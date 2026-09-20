@@ -108,6 +108,9 @@ public class CommandHandler {
                 if (command.startsWith("/cred ")) {
                     yield Optional.of(handleCred(userId, message.trim().substring(6).strip()));
                 }
+                if (command.equals("/bg") || command.startsWith("/bg ")) {
+                    yield Optional.of(handleBackground(userId, message.trim()));
+                }
                 if (command.startsWith("/schedule")) {
                     yield Optional.of(handleSchedule(userId, message.trim()));
                 }
@@ -123,6 +126,29 @@ public class CommandHandler {
 
     // ── Help ──
 
+    /**
+     * {@code /bg <task>} — run something without waiting for it.
+     * <p>
+     * Submitted at background priority, which means two things. It runs on the background lane
+     * rather than ahead of your next message (when that lane is enabled), and it is marked
+     * unattended, which lets the agent spend local inference time it could never justify while
+     * someone is watching — compressing a large tool result with the local model instead of
+     * truncating it, for instance.
+     * <p>
+     * Returns as soon as it is queued. The result arrives on every interface you have attached,
+     * so starting something here and reading the answer on Telegram works.
+     */
+    private String handleBackground(String userId, String fullMessage) {
+        String task = fullMessage.length() > 3 ? fullMessage.substring(3).strip() : "";
+        if (task.isBlank()) {
+            return "Usage: `/bg <task>` — runs it in the background and tells you when it is done.\n"
+                    + "Use it for anything you do not want to sit and wait for.";
+        }
+        taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY);
+        return "Running in the background:\n> " + task
+                + "\n\nYou will get the result here when it finishes — no need to wait.";
+    }
+
     private String helpText() {
         return """
                 ### Commands
@@ -134,6 +160,7 @@ public class CommandHandler {
                 - `/log tokens` — Token usage today
                 - `/tokens` — Token budget summary
                 - `/skills` — List available tools
+                - `/bg <task>` — Run it in the background; the result comes back when ready
                 - `/debug` — Toggle debug mode
                 - `/cancel` — Cancel the running task
                 - `/grant <tool> <credential>` — Grant credential access to a tool

@@ -19,6 +19,14 @@ public class AgentContext {
     /** Timestamp of the last forward progress (step completion, LLM response, etc.). */
     private volatile long lastProgressMs;
 
+    /**
+     * True when nobody is waiting for this task — the scheduler submitted it, or the user
+     * explicitly sent it to the background. It is a fact about ORIGIN, not a guess: the
+     * scheduler genuinely has no one watching. What it buys is permission to spend local
+     * inference time, which is free but slow, on work that would otherwise be truncated.
+     */
+    private boolean unattended;
+
     private volatile boolean cancelled;
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
@@ -82,6 +90,9 @@ public class AgentContext {
      * Consulting the external source here revives all of those checks at once, rather than
      * relying on each caller to remember to poll two places.
      */
+    public boolean isUnattended() { return unattended; }
+    public void setUnattended(boolean unattended) { this.unattended = unattended; }
+
     public boolean isCancelled() {
         if (cancelled) return true;
         java.util.function.BooleanSupplier ext = externalCancel;

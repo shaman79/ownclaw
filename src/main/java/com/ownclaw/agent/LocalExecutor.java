@@ -409,7 +409,16 @@ public class LocalExecutor {
      * Summarize text using the local LLM if it exceeds maxLen, otherwise return as-is.
      * Falls back to smart truncation (head + tail) if the LLM is unavailable.
      */
-    private String summarizeIfLong(String text, int maxLen) {
+    /**
+     * Compress long text with the local model, falling back to head-and-tail truncation.
+     * <p>
+     * Public because AgentLoop is now the caller. This sat private and unused since it was
+     * written: the job it does — turning a large tool result into something small without
+     * throwing the middle away — is worth a local call only where the 60-133 seconds does not
+     * land on someone waiting, and until there was a notion of unattended work there was
+     * nowhere safe to call it from.
+     */
+    public String summarizeIfLong(String text, int maxLen) {
         if (text == null) return "";
         if (text.length() <= maxLen) return text;
 

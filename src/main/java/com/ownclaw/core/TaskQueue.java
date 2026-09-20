@@ -28,8 +28,8 @@ public class TaskQueue {
     private final ChatStatusEmitter statusEmitter;
     private final int maxQueuedTasks;
 
-    /** Priority 2 and above is background work — the scheduler submits at 2. */
-    static final int BACKGROUND_PRIORITY = 2;
+    /** Priority 2 and above is background work — the scheduler and /bg submit at 2. */
+    public static final int BACKGROUND_PRIORITY = 2;
 
     /** Interactive work. When lanes are off, everything goes here and nothing changes. */
     private final PriorityBlockingQueue<QueuedTask> interactiveQueue = new PriorityBlockingQueue<>();
@@ -138,7 +138,10 @@ public class TaskQueue {
                 running.incrementAndGet();
 
                 try {
-                    String response = agentLoop.execute(task.userId(), task.message());
+                    // Priority is the origin signal: the scheduler and /bg submit at 2,
+                    // a chat message at 1. Nobody is waiting on the former.
+                    boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
+                    String response = agentLoop.execute(task.userId(), task.message(), unattended);
                     task.future().complete(response);
                 } catch (Exception e) {
                     log.error("Task processing failed on the {} lane for user {}: {}",

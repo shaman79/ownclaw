@@ -65,6 +65,15 @@ public class AgentLoop {
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
+    /**
+     * Above this many characters, an unattended tool result is worth a local summary.
+     * Below it, a 60-133 second call would be spent shortening something already short.
+     */
+    private static final int LOCAL_COMPRESSION_THRESHOLD = 8_000;
+
+    /** What the summary should aim for — comfortably inside what the cloud sees at full detail. */
+    private static final int LOCAL_COMPRESSION_TARGET = 4_000;
+
     private final EventLogService eventLog;
     private final ScheduledTaskService scheduledTaskService;
     private final LocalExecutor localExecutor;
@@ -126,8 +135,15 @@ public class AgentLoop {
      * @return the agent's final response string
      */
     public String execute(String userId, String message) {
+        return execute(userId, message, false);
+    }
+
+    /**
+     * @param unattended nobody is waiting for this result — see AgentContext.isUnattended
+     */
+    public String execute(String userId, String message, boolean unattended) {
         try {
-            AgentResult result = executeFull(userId, message);
+            AgentResult result = executeFull(userId, message, unattended);
             return result.response();
         } catch (Exception e) {
             log.error("AgentLoop fatal error for user={}: {}", userId, e.getMessage(), e);
@@ -145,8 +161,13 @@ public class AgentLoop {
      * @return the full AgentResult including trajectory, steps, and timing
      */
     public AgentResult executeFull(String userId, String message) {
+        return executeFull(userId, message, false);
+    }
+
+    public AgentResult executeFull(String userId, String message, boolean unattended) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
+        context.setUnattended(unattended);
 
         // Load conversation history so the LLM sees prior exchanges
         loadConversationContext(context, userId);
@@ -1964,9 +1985,50 @@ public class AgentLoop {
     /** Record an observation in trajectory AND emit detail to the frontend (for live stats). */
     private void recordAndEmitObservation(AgentContext context, AgentAction action,
                                            AgentObservation obs, int step) {
+        obs = compressIfUnattended(context, obs);
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
         persistStep(context, action, obs, step);
+    }
+
+    /**
+     * When nobody is waiting, have the local model compress a large tool result before it is
+     * recorded — and therefore before it is sent to the cloud.
+     * <p>
+     * This is the first place the local tier does real work rather than post-hoc bookkeeping,
+     * and it is the one job that clearly pays for itself. A large result otherwise reaches the
+     * cloud head-and-tail truncated, so the middle is simply gone: the model reasons over a
+     * result with a hole in it, and pays for the parts that survived. A local summary keeps the
+     * meaning of the whole thing, and local tokens cost nothing.
+     * <p>
+     * Only when unattended. The call takes 60-133 seconds on this hardware, which is
+     * unacceptable on a turn someone is watching and irrelevant on a scheduled job at 3am.
+     * That is the entire reason the attended/unattended distinction was worth building.
+     * <p>
+     * Only above a threshold, because a local call to shorten something that is already short
+     * would spend a minute to save nothing. And failures are swallowed: summarizeIfLong falls
+     * back to truncation on its own, and a compression step must never be able to fail a task.
+     */
+    private AgentObservation compressIfUnattended(AgentContext context, AgentObservation obs) {
+        if (!context.isUnattended() || obs == null) return obs;
+        String output = obs.output();
+        if (output == null || output.length() < LOCAL_COMPRESSION_THRESHOLD) return obs;
+        try {
+            long t0 = System.currentTimeMillis();
+            String compressed = localExecutor.summarizeIfLong(output, LOCAL_COMPRESSION_TARGET);
+            if (compressed == null || compressed.isBlank() || compressed.length() >= output.length()) {
+                return obs;
+            }
+            log.info("Unattended task {}: compressed {} chars of {} output to {} in {}ms",
+                    context.taskId(), output.length(), obs.tool(), compressed.length(),
+                    System.currentTimeMillis() - t0);
+            return new AgentObservation(obs.tool(), obs.success(), compressed,
+                    obs.structured(), obs.durationMs());
+        } catch (Exception e) {
+            log.debug("Local compression failed for task {}, keeping the raw output: {}",
+                    context.taskId(), e.getMessage());
+            return obs;
+        }
     }
 
     /**
