@@ -36,6 +36,21 @@ public class ThinkingEngine {
      * on this marker to create two system content blocks — only the static prefix gets
      * cache_control, so the Anthropic prompt cache actually hits across requests.
      */
+    /**
+     * Ceiling on a single tool output sent to the cloud at full detail.
+     *
+     * Generous — about 3k tokens — because the recent turns are what the model reasons over and
+     * clipping them too hard makes it ask for the same thing again, which costs more than it
+     * saves. The point is only that there IS a ceiling.
+     *
+     * A local summary would be strictly better than head-and-tail here: it preserves meaning
+     * rather than discarding the middle, and local tokens are free. It is not wired in because
+     * it costs 60-133 seconds on this hardware, which is unacceptable while a user is waiting.
+     * LocalExecutor.summarizeIfLong already exists, unused, for exactly this job — it belongs
+     * here once work can be classified as unattended.
+     */
+    private static final int FULL_DETAIL_MAX_CHARS = 12_000;
+
     static final String CACHE_BOUNDARY_MARKER = "\n<!-- CACHE_BOUNDARY -->\n";
 
     // Lenient mapper: tolerates common LLM JSON quirks.
@@ -432,7 +447,21 @@ public class ThinkingEngine {
 
         String output = turn.observation().output();
         if (output != null && !output.isBlank()) {
-            if (fullDetail || output.length() <= 300) {
+            if (fullDetail && output.length() > FULL_DETAIL_MAX_CHARS) {
+                // fullDetail used to mean "send the whole thing", with no ceiling at all. A tool
+                // that returns a large file, a long page or a verbose command dump therefore went
+                // to the cloud in full, on EVERY step for as long as it stayed in the two-turn
+                // window. At 200 KB that is roughly 50k tokens a step — real money, repeatedly,
+                // for output the model has already read once.
+                //
+                // Head and tail rather than a hard cut: the beginning says what the output is and
+                // the end usually carries the result or the error.
+                int half = FULL_DETAIL_MAX_CHARS / 2;
+                sb.append(output, 0, half)
+                        .append("\n...[").append(output.length())
+                        .append(" chars total, middle omitted]...\n")
+                        .append(output, output.length() - half, output.length());
+            } else if (fullDetail || output.length() <= 300) {
                 sb.append(output);
             } else {
                 // Smart truncation: keep head + tail to preserve context from both ends
