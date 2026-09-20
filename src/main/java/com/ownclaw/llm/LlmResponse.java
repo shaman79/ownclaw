@@ -14,11 +14,31 @@ public record LlmResponse(
     int promptTokens,
     int completionTokens,
     int cacheCreationTokens,
-    int cacheReadTokens
+    int cacheReadTokens,
+    String stopReason
 ) {
     /** For providers with no prompt cache, or calls that did not touch one. */
     public LlmResponse(String content, int promptTokens, int completionTokens) {
-        this(content, promptTokens, completionTokens, 0, 0);
+        this(content, promptTokens, completionTokens, 0, 0, null);
+    }
+
+    public LlmResponse(String content, int promptTokens, int completionTokens,
+                       int cacheCreationTokens, int cacheReadTokens) {
+        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, null);
+    }
+
+    /**
+     * Whether the model was cut off by the output limit rather than finishing.
+     * <p>
+     * Nothing read this before. The consequence was specific and expensive: an answer longer
+     * than max_tokens comes back truncated mid-JSON, so parsing fails, and a truncated reply is
+     * indistinguishable from a malformed one. Both were retried with a byte-identical prompt,
+     * which produced an identically truncated reply, and after a few rounds the run aborted —
+     * discarding prose the model had actually written. Knowing the difference turns "the model
+     * returned nonsense" into "the answer did not fit", which has an obvious fix.
+     */
+    public boolean truncated() {
+        return "max_tokens".equals(stopReason) || "length".equals(stopReason);
     }
 
     /**

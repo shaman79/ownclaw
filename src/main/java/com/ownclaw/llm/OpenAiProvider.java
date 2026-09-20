@@ -119,7 +119,8 @@ public class OpenAiProvider implements LlmProvider {
             int completionTokens = json.path("usage").path("completion_tokens").asInt(0);
 
             log.debug("OpenAI [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
-            return new LlmResponse(content, promptTokens, completionTokens);
+            return new LlmResponse(content, promptTokens, completionTokens, 0, 0,
+                    json.path("choices").path(0).path("finish_reason").asText(null));
 
         } catch (IOException e) {
             throw new LlmException("openai", "Connection failed: " + e.getMessage(), 0, e);

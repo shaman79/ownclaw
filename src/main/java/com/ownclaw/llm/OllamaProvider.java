@@ -153,7 +153,8 @@ public class OllamaProvider implements LlmProvider {
                 log.warn("Ollama [{}]: output truncated at the token limit ({} tokens) — the answer is "
                         + "incomplete", model, completionTokens);
             }
-            return new LlmResponse(content, promptTokens, completionTokens);
+            return new LlmResponse(content, promptTokens, completionTokens, 0, 0,
+                    json.path("done_reason").asText(null));
 
         } catch (IOException e) {
             throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);

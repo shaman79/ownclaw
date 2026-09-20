@@ -203,7 +203,13 @@ public class AnthropicProvider implements LlmProvider {
             // them (as this did) understates the billed input by most of the prompt on a cached
             // conversation, and makes any token or cost figure downstream unreconcilable with
             // the actual bill.
-            return new LlmResponse(content, promptTokens, completionTokens, cacheCreation, cacheRead);
+            String stopReason = json.path("stop_reason").asText(null);
+            if ("max_tokens".equals(stopReason)) {
+                log.warn("Anthropic [{}]: response hit the {}-token output cap and was cut off. "
+                        + "Downstream parsing will fail on the truncated JSON.", model, maxTokens);
+            }
+            return new LlmResponse(content, promptTokens, completionTokens,
+                    cacheCreation, cacheRead, stopReason);
 
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
