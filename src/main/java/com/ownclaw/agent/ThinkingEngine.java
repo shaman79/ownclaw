@@ -36,6 +36,8 @@ public class ThinkingEngine {
      * on this marker to create two system content blocks — only the static prefix gets
      * cache_control, so the Anthropic prompt cache actually hits across requests.
      */
+    static final String CACHE_BOUNDARY_MARKER = "\n<!-- CACHE_BOUNDARY -->\n";
+
     /**
      * Ceiling on a single tool output sent to the cloud at full detail.
      *
@@ -50,8 +52,6 @@ public class ThinkingEngine {
      * here once work can be classified as unattended.
      */
     private static final int FULL_DETAIL_MAX_CHARS = 12_000;
-
-    static final String CACHE_BOUNDARY_MARKER = "\n<!-- CACHE_BOUNDARY -->\n";
 
     // Lenient mapper: tolerates common LLM JSON quirks.
     // - ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: \' and other non-standard escapes
