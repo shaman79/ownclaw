@@ -285,7 +285,11 @@ public class OpsService {
                             Map.of("role", "system",
                                     "content", "Reply with exactly the word " + canary + " and nothing else."),
                             Map.of("role", "user", "content", "hello")),
-                    "options", Map.of("temperature", 0, "num_predict", 32)));
+                    // 32 was not a budget, it was a trap: a thinking model spends its output on
+                    // reasoning first, so it hit the cap mid-thought every time, returned an empty
+                    // answer, and got reported as unable to follow a system message. 256 is enough
+                    // for a short reasoning pass plus one word, and the probe still costs one call.
+                    "options", Map.of("temperature", 0, "num_predict", 256)));
             String content = r.path("message").path("content").asText("");
             // A thinking model answers in two parts, so the canary may legitimately appear in
             // the reasoning when the budget ran out before the final answer.
@@ -294,24 +298,52 @@ public class OpsService {
             String doneReason = r.path("done_reason").asText("");
             boolean honoured = (content + " " + thinking).toUpperCase(Locale.ROOT).contains(canary);
 
+            // Whether the message list was rendered at all is a separate question from whether
+            // the model obeyed it, and it has its own evidence: this probe sends a system message
+            // and a user message that together come to roughly 30 tokens. A working template
+            // reports about that. The bare "{{ .Prompt }}" fallback passes on the user content
+            // alone -- "hello", one token -- and discards the rest, so the two cases are far
+            // apart and not a judgement call.
+            boolean rendered = promptEval >= 10;
+            boolean ranOutThinking = "length".equals(doneReason) && content.isBlank() && !thinking.isBlank();
+
             m.put("ok", honoured);
             m.put("systemMessageHonoured", honoured);
+            m.put("messagesRendered", rendered);
             m.put("promptEvalCount", promptEval);
             m.put("doneReason", doneReason);
             m.put("latencyMs", System.currentTimeMillis() - t0);
             m.put("reply", content.length() > 200 ? content.substring(0, 200) + "..." : content);
             m.put("thinkingChars", thinking.length());
+
             if (honoured && content.isBlank() && !thinking.isBlank()) {
                 m.put("note", "The system message was followed, but the answer never arrived: the whole "
                         + "output budget went on reasoning. Local calls need a larger max_tokens for this "
                         + "model, not a different model.");
-            }
-            if (!honoured) {
-                m.put("diagnosis", "The model did not follow a system message. If chatUsable is false, or "
-                        + "promptEvalCount is far below the prompt size, Ollama cannot render the message "
-                        + "list for this model and every local job receives unrelated text — the GGUF ships "
-                        + "without a chat_template. Point the executor at a model whose template renders "
-                        + "messages, or re-create this one with a Modelfile carrying the right template.");
+            } else if (!honoured && ranOutThinking && rendered) {
+                // The case that produced a confidently wrong answer: a thinking model that never
+                // reached its answer was reported as proof of a missing chat_template, sending
+                // whoever read it to replace a model that renders messages perfectly well.
+                m.put("diagnosis", "Inconclusive, and NOT a template problem: the message list rendered "
+                        + "fine (promptEvalCount=" + promptEval + ", far above the ~1 a bare "
+                        + "\"{{ .Prompt }}\" fallback would give), but this is a thinking model and it hit "
+                        + "the output cap mid-reasoning, so there was no answer left to check the canary "
+                        + "against. It says nothing bad about the model. Re-run after raising num_predict, "
+                        + "or judge it on a real task instead.");
+            } else if (!honoured && !rendered) {
+                m.put("diagnosis", "The message list was NOT rendered: promptEvalCount=" + promptEval
+                        + " for a prompt of roughly 30 tokens, so Ollama passed the user text through the "
+                        + "bare \"{{ .Prompt }}\" fallback and discarded the system prompt and the roles. "
+                        + "Every local job gets unrelated text. Usually the server is too old to read the "
+                        + "GGUF's Jinja template -- upgrading Ollama has fixed exactly this on this "
+                        + "deployment -- otherwise re-create the model with a Modelfile carrying the right "
+                        + "template, or point the executor at one that renders messages.");
+            } else if (!honoured) {
+                m.put("diagnosis", "The message list rendered (promptEvalCount=" + promptEval + ") but the "
+                        + "reply did not contain the canary, so the model saw the instruction and did not "
+                        + "follow it. That is a model-quality signal, not a configuration fault: this is a "
+                        + "deliberately pedantic instruction and some models answer conversationally "
+                        + "instead. Judge it on a real task before replacing it.");
             }
         } catch (Exception e) {
             m.put("ok", false);

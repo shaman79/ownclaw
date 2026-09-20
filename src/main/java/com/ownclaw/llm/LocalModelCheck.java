@@ -45,6 +45,14 @@ public class LocalModelCheck {
     private final ObjectMapper mapper;
     private final OkHttpClient http;
 
+    /**
+     * The configured model this process gave up on, or null if it is using what it was told to.
+     * <p>
+     * Written once by the startup check and read by {@link #status()}, so the substitution is
+     * visible wherever local health is reported rather than only in a log line nobody tails.
+     */
+    private volatile String substitutedFrom;
+
     public LocalModelCheck(OwnClawConfig config, ObjectMapper mapper) {
         this.config = config;
         this.mapper = mapper;
@@ -61,7 +69,8 @@ public class LocalModelCheck {
         t.start();
     }
 
-    private void check() {
+    /** Package-private rather than private so the tests can run it without a Spring context. */
+    void check() {
         String url = config.getExecutor().getUrl();
         String model = config.getExecutor().getModel();
         if (url == null || url.isBlank() || model == null || model.isBlank()) {
@@ -85,6 +94,7 @@ public class LocalModelCheck {
                             + "on that host, or point ownclaw.executor.model (OWNCLAW_EXECUTOR_MODEL) at one "
                             + "of the models listed.",
                     model, url, installed.isEmpty() ? "(none)" : installed);
+            substitute(url, model, installed);
             return;
         }
 
@@ -111,6 +121,7 @@ public class LocalModelCheck {
                                 + "supplies the right template for its tokeniser. Confirm either way with "
                                 + "GET /api/ops/ollama — promptEvalCount must match the prompt size.",
                         model, capabilities);
+                substitute(url, model, installed);
                 return;
             }
 
@@ -124,6 +135,76 @@ public class LocalModelCheck {
         } catch (Exception e) {
             log.warn("Could not inspect local model '{}' on {}: {}", model, url, e.getMessage());
         }
+    }
+
+    /**
+     * Run on a model that works instead of a model that does not.
+     * <p>
+     * The check above could already tell, at startup, that the configured model would fail every
+     * call — and then let it fail every call for months. On this deployment the working model was
+     * sitting on the same host the whole time: the configured GGUF ships without a chat template,
+     * while {@code nemotron-cascade-2} beside it renders messages fine. Detecting a fault and
+     * then doing nothing about it is not a diagnostic, it is a slower way to be broken.
+     * <p>
+     * So: if anything installed can be driven, use it. The substitution lasts for this process
+     * only and is never written back to configuration, which keeps the owner's setting
+     * authoritative — correcting {@code OWNCLAW_EXECUTOR_MODEL} takes effect on the next restart,
+     * and nothing here has quietly rewritten it in the meantime. It is logged at WARN and carried
+     * in {@link #status()}, because a system that swaps its own model and says nothing is worse
+     * than one that stops.
+     * <p>
+     * Doing nothing is still the right outcome when nothing installed is usable; a bad
+     * substitution would be harder to diagnose than the original fault.
+     */
+    private void substitute(String url, String configured, List<String> installed) {
+        record Candidate(String name, List<String> capabilities) {}
+        var usable = new ArrayList<Candidate>();
+        for (String name : installed) {
+            if (name.equals(configured)) continue;
+            try {
+                JsonNode show = show(url, name);
+                var caps = new ArrayList<String>();
+                for (JsonNode c : show.path("capabilities")) caps.add(c.asText());
+                // An embedding model renders no conversation no matter what else it says.
+                if (caps.contains("embedding")) continue;
+                if (chatUsable(show.path("template").asText("").trim(), caps)) {
+                    usable.add(new Candidate(name, caps));
+                }
+            } catch (Exception e) {
+                log.debug("Could not inspect candidate '{}': {}", name, e.getMessage());
+            }
+        }
+        if (usable.isEmpty()) {
+            log.error("No installed model on {} can be driven through /api/chat, so the local tier "
+                    + "stays down. Install one that renders messages, or upgrade Ollama — a model "
+                    + "that looks unusable is often a server too old to read its Jinja template.", url);
+            return;
+        }
+        // Prefer the most capable: tool use first, then reasoning. Name breaks ties so the choice
+        // is the same on every boot rather than following whatever order /api/tags happened to
+        // return -- a fallback that picks differently each restart is its own kind of bug.
+        usable.sort(java.util.Comparator
+                .comparing((Candidate c) -> c.capabilities().contains("tools"))
+                .thenComparing(c -> c.capabilities().contains("thinking"))
+                .reversed()
+                .thenComparing(Candidate::name));
+        Candidate chosen = usable.get(0);
+
+        config.getExecutor().setModel(chosen.name());
+        substitutedFrom = configured;
+        log.warn("LOCAL TIER SELF-HEALED: '{}' cannot be driven, so this process is using '{}' "
+                        + "instead (capabilities={}). The local tier works now. This lasts until "
+                        + "restart and nothing has been written to your configuration — set "
+                        + "OWNCLAW_EXECUTOR_MODEL to '{}' to make it permanent, or fix the "
+                        + "configured model and restart. Other usable models: {}.",
+                configured, chosen.name(), chosen.capabilities(), chosen.name(),
+                usable.size() == 1 ? "(none)"
+                        : usable.subList(1, usable.size()).stream().map(Candidate::name).toList());
+    }
+
+    /** The configured model that was abandoned this boot, or null if none was. */
+    public String substitutedFrom() {
+        return substitutedFrom;
     }
 
     /**
@@ -180,8 +261,13 @@ public class LocalModelCheck {
                         + "architecture, so prompts are discarded and answers are unrelated. "
                         + "capabilities=" + capabilities + ". Upgrading Ollama often fixes this.");
             }
+            String from = substitutedFrom;
             return new LocalStatus(true, model, true, true, true,
-                    "Ready (capabilities=" + capabilities + ")");
+                    from == null
+                            ? "Ready (capabilities=" + capabilities + ")"
+                            : "Ready (capabilities=" + capabilities + ") — substituted for '" + from
+                              + "', which cannot be driven through /api/chat. Set "
+                              + "OWNCLAW_EXECUTOR_MODEL to '" + model + "' to make this permanent.");
         } catch (Exception e) {
             return new LocalStatus(false, model, true, true, false,
                     "Installed, but could not be inspected: " + e.getMessage());
