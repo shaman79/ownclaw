@@ -347,6 +347,7 @@ public class AgentLoop {
         long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
         int consecutiveFallbacks = 0; // Track consecutive LLM failures to cap retries
         int totalThinkingFailures = 0; // Track total thinking failures across entire task
+        int unansweredQuestions = 0;   // ask_user calls on a task with nobody to answer them
 
         for (int step = 0; step < maxSteps; step++) {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
@@ -581,6 +582,21 @@ public class AgentLoop {
                         context.markProgress(); // LLM produced output (even if malformed)
                         continue;
                     }
+
+                    // Out of steps AND the output is still unparseable. This used to fall through
+                    // to the COMPLETED return below, which handed the user the fallback string
+                    // ("I'm not sure how to help with that") as if it were a considered answer,
+                    // logged the task as info, and stored it in memory as a worked example. The
+                    // two abort branches above already refuse to do that after 3 or 5 failures;
+                    // running out of steps on the very same kind of failure is no different.
+                    log.error("Task {} step {}: unparseable output on the final step — no retry left",
+                            context.taskId(), step + 1);
+                    return AgentResult.maxSteps(
+                            "I ran out of steps while still failing to produce a usable answer. "
+                                    + "Here's what happened:\n\n" + summarizeProgress(context),
+                            context.trajectory(),
+                            context.elapsedMs()
+                    );
                 } else {
                     consecutiveFallbacks = 0; // Reset on any successful action
                 }
@@ -593,7 +609,31 @@ public class AgentLoop {
             }
 
             if (action.isAskUser()) {
-                return AgentResult.completed(
+                // Unattended work has nobody to ask. The question used to be returned as a
+                // COMPLETED result, so a scheduled task could stop on its first uncertainty,
+                // report success, and quietly never do the thing it was scheduled for.
+                //
+                // Telling it so and letting it carry on is better than failing here: most
+                // questions an agent asks have a defensible default, and it is the agent, not a
+                // rule in this file, that knows what the sensible one is. It gets one nudge; a
+                // second question means it genuinely cannot proceed without an answer, and then
+                // the honest outcome is to stop and say what it needed to know.
+                if (context.isUnattended() && unansweredQuestions == 0) {
+                    unansweredQuestions++;
+                    log.info("Task {} step {}: ask_user on unattended work — telling it to decide",
+                            context.taskId(), step + 1);
+                    AgentObservation noOne = AgentObservation.failure("ask_user",
+                            "Nobody can answer: this task is running unattended, with no user at "
+                                    + "the chat. Decide it yourself using the best available "
+                                    + "evidence and say plainly in your final answer which "
+                                    + "assumption you made, so it can be corrected later. If the "
+                                    + "task genuinely cannot proceed without this answer, ask "
+                                    + "again and it will stop and report the question.", 0);
+                    recordAndEmitObservation(context, action, noOne, step + 1);
+                    context.markProgress();
+                    continue;
+                }
+                return AgentResult.needsInput(
                         action.responseText(),
                         context.trajectory(),
                         context.elapsedMs()
@@ -1419,6 +1459,11 @@ public class AgentLoop {
      * Store the completed task as an episodic memory for future recall.
      */
     private void storeEpisode(AgentContext context, AgentResult result) {
+        // A task waiting on an answer has no outcome yet. Storing it as success=false would
+        // teach the memory layer that an approach failed when all that happened is that it
+        // asked a question — the same lie as the COMPLETED it used to report, pointing the
+        // other way. Nothing is recorded until the task actually ends.
+        if (result.awaitingUser()) return;
         try {
             String summary = "Task: " + truncate(context.originalMessage(), 200) +
                     "\nSteps: " + result.totalSteps() +
@@ -1454,6 +1499,8 @@ public class AgentLoop {
         if (result.success()) {
             summary.append(result.totalSteps()).append(" steps · ")
                     .append(formatDurationMs(result.totalDurationMs()));
+        } else if (result.awaitingUser()) {
+            summary.append("waiting for your answer");
         } else {
             summary.append(result.terminationReason());
         }
@@ -1465,7 +1512,11 @@ public class AgentLoop {
             summary.append(" tokens");
         }
 
-        StatusMessage.Type type = result.success() ? StatusMessage.Type.COMPLETED : StatusMessage.Type.FAILED;
+        // Three outcomes, not two. A task that stopped to ask the user a question is neither
+        // done nor broken, and showing it as FAILED is as wrong as the COMPLETED it used to show.
+        StatusMessage.Type type = result.awaitingUser() ? StatusMessage.Type.NEED_INPUT
+                : result.success() ? StatusMessage.Type.COMPLETED
+                : StatusMessage.Type.FAILED;
         statusEmitter.emit(userId, type, summary.toString(), tokenData(context));
 
         // Persist token usage to the events table for auditing
@@ -1474,7 +1525,7 @@ public class AgentLoop {
                     "{\"cloudTokens\":%d,\"localTokens\":%d,\"steps\":%d,\"durationMs\":%d,\"reason\":\"%s\"}",
                     cloud, local, result.totalSteps(), result.totalDurationMs(), result.terminationReason());
             eventLog.log(userId, context.taskId(), "task_completed",
-                    result.success() ? "info" : "warn",
+                    result.success() || result.awaitingUser() ? "info" : "warn",
                     truncate(context.originalMessage(), 200),
                     details, cloud + local);
         } catch (Exception e) {

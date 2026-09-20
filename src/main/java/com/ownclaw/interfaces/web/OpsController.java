@@ -248,10 +248,15 @@ public class OpsController {
             out.put("durationMs", System.currentTimeMillis() - t0);
             out.put("traceHint", taskId == null ? "no task id recorded"
                     : "GET /api/ops/tasks/" + taskId + " and /api/ops/logs?grep=Task+" + taskId);
-            // success=true covers give-up endings in this build; read terminationReason too.
-            out.put("caveat", "success() is true for every non-cancelled ending in this build, "
-                    + "including the step cap and reasoning-failure aborts. Check terminationReason "
-                    + "and the response text before treating this as delivered.");
+            // The caveat this used to carry -- success() being true for every non-cancelled
+            // ending, including the step cap and reasoning aborts -- no longer applies: each of
+            // those endings now sets success=false and carries its own terminationReason.
+            out.put("awaitingUser", result.awaitingUser());
+            out.put("outcomeNote", result.awaitingUser()
+                    ? "The agent asked the user a question and stopped for the answer. Not a "
+                      + "failure and not delivered work; the response field holds the question."
+                    : "success=false means the task did not finish: terminationReason says which "
+                      + "ending it was.");
             return ResponseEntity.ok(out);
         } catch (Exception e) {
             log.error("Ops agent run failed: {}", e.getMessage(), e);
