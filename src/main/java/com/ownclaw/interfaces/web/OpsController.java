@@ -138,6 +138,17 @@ public class OpsController {
                 : ResponseEntity.ok(result);
     }
 
+    /**
+     * GET /api/ops/skills/consolidate — tool sequences that keep succeeding together.
+     * Detection only; nothing is created.
+     */
+    @GetMapping("/skills/consolidate")
+    public ResponseEntity<?> consolidate(@RequestParam(defaultValue = "2") int minLength,
+                                         @RequestParam(defaultValue = "3") int minTasks) {
+        return ResponseEntity.ok(ops.consolidationCandidates(
+                Math.max(2, minLength), Math.max(2, minTasks)));
+    }
+
     @GetMapping("/skills")
     public ResponseEntity<?> skills(@RequestParam(required = false) String name) {
         return ResponseEntity.ok(ops.skills(name));

@@ -84,19 +84,23 @@ public class OpsService {
     private final DynamicSkillRegistry skillRegistry;
     private final TaskQueue taskQueue;
     private final AuthService authService;
+    private final com.ownclaw.agent.SkillCuratorService curatorService;
     private final ObjectMapper mapper;
     private final OkHttpClient http;
     private final Instant startedAt = Instant.now();
 
     public OpsService(OwnClawConfig config, JdbcTemplate jdbc, ToolRegistry toolRegistry,
                       DynamicSkillRegistry skillRegistry, TaskQueue taskQueue,
-                      AuthService authService, ObjectMapper mapper) {
+                      AuthService authService,
+                      com.ownclaw.agent.SkillCuratorService curatorService,
+                      ObjectMapper mapper) {
         this.config = config;
         this.jdbc = jdbc;
         this.toolRegistry = toolRegistry;
         this.skillRegistry = skillRegistry;
         this.taskQueue = taskQueue;
         this.authService = authService;
+        this.curatorService = curatorService;
         this.mapper = mapper;
         // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
         // longer than a normal call would. A hung Ollama therefore blocks one ops request
@@ -925,6 +929,26 @@ public class OpsService {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    /**
+     * Tool sequences that keep succeeding together — candidates for one skill.
+     * <p>
+     * Reports only; it never writes a skill. See SkillCuratorService.consolidationCandidates.
+     */
+    public Map<String, Object> consolidationCandidates(int minLength, int minTasks) {
+        var out = new LinkedHashMap<String, Object>();
+        out.put("minLength", minLength);
+        out.put("minTasks", minTasks);
+        var found = curatorService.consolidationCandidates(minLength, minTasks);
+        out.put("count", found.size());
+        out.put("candidates", found);
+        out.put("note", found.isEmpty()
+                ? "Nothing yet — step history accumulates as tasks run."
+                : "These runs of tools recur across separate tasks. Each is a candidate for a "
+                  + "single skill taking the specifics as parameters. Detection only: nothing "
+                  + "is created automatically.");
+        return out;
     }
 
     private String deployedCommit() {
