@@ -43,13 +43,15 @@ public class CommandHandler {
     private final ScheduledTaskService scheduledTaskService;
     private final AuthService authService;
     private final UserRepository userRepo;
+    private final com.ownclaw.conversation.FileStorageService fileStorage;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
                           CredentialVault credentialVault,
                           CredentialGrantService credentialGrants, TaskQueue taskQueue,
                           ScheduledTaskService scheduledTaskService,
-                          AuthService authService, UserRepository userRepo) {
+                          AuthService authService, UserRepository userRepo,
+                          com.ownclaw.conversation.FileStorageService fileStorage) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -60,6 +62,7 @@ public class CommandHandler {
         this.scheduledTaskService = scheduledTaskService;
         this.authService = authService;
         this.userRepo = userRepo;
+        this.fileStorage = fileStorage;
     }
 
     /**
@@ -108,6 +111,9 @@ public class CommandHandler {
                 if (command.startsWith("/cred ")) {
                     yield Optional.of(handleCred(userId, message.trim().substring(6).strip()));
                 }
+                if (command.equals("/files") || command.startsWith("/files ")) {
+                    yield Optional.of(handleFiles(userId, message.trim()));
+                }
                 if (command.equals("/bg") || command.startsWith("/bg ")) {
                     yield Optional.of(handleBackground(userId, message.trim()));
                 }
@@ -149,6 +155,53 @@ public class CommandHandler {
                 + "\n\nYou will get the result here when it finishes — no need to wait.";
     }
 
+    /**
+     * {@code /files} — list uploaded files, {@code /files rm <id>} — delete one.
+     * <p>
+     * The endpoints behind this have existed since uploads were built and had no callers at
+     * all, so files accumulated on disk with no way to see or remove them. That mattered more
+     * once uploads started working again: they were broken by an undefined variable for long
+     * enough that nobody noticed the other half was missing too.
+     * <p>
+     * A command rather than a panel, because this is housekeeping that is wanted occasionally,
+     * and a list with a delete is the whole feature.
+     */
+    private String handleFiles(String userId, String fullMessage) {
+        String arg = fullMessage.length() > 6 ? fullMessage.substring(6).strip() : "";
+
+        if (arg.startsWith("rm ")) {
+            String fileId = arg.substring(3).strip();
+            if (fileId.isBlank()) return "Usage: `/files rm <id>`";
+            boolean deleted = fileStorage.delete(userId, fileId);
+            return deleted ? "Deleted `" + fileId + "`."
+                           : "No file `" + fileId + "` belonging to you.";
+        }
+
+        var files = fileStorage.listUserFiles(userId);
+        if (files.isEmpty()) return "No uploaded files.";
+
+        long totalBytes = 0;
+        var sb = new StringBuilder("### Uploaded files\n");
+        for (var f : files) {
+            Object sizeObj = f.get("size_bytes");
+            long size = sizeObj instanceof Number n ? n.longValue() : 0;
+            totalBytes += size;
+            sb.append("- `").append(f.get("id")).append("` ")
+              .append(f.get("original_name"))
+              .append(" (").append(humanBytes(size)).append(", ")
+              .append(f.get("uploaded_at")).append(")\n");
+        }
+        sb.append("\n").append(files.size()).append(" file(s), ")
+          .append(humanBytes(totalBytes)).append(" total. Remove one with `/files rm <id>`.");
+        return sb.toString();
+    }
+
+    private static String humanBytes(long b) {
+        if (b < 1024) return b + " B";
+        if (b < 1024 * 1024) return String.format("%.1f KB", b / 1024.0);
+        return String.format("%.1f MB", b / (1024.0 * 1024));
+    }
+
     private String helpText() {
         return """
                 ### Commands
@@ -161,6 +214,7 @@ public class CommandHandler {
                 - `/tokens` — Token budget summary
                 - `/skills` — List available tools
                 - `/bg <task>` — Run it in the background; the result comes back when ready
+                - `/files` — List uploaded files (`/files rm <id>` to delete one)
                 - `/debug` — Toggle debug mode
                 - `/cancel` — Cancel the running task
                 - `/grant <tool> <credential>` — Grant credential access to a tool

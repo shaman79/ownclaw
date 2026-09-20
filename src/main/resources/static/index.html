@@ -2317,7 +2317,7 @@
 
 <!--  Header  -->
 <header id="header">
-    <button id="sidebar-toggle" title="Chat history">
+    <button id="sidebar-toggle" title="Chat history" aria-label="Chat history">
         <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
     </button>
     <div id="header-brand">
@@ -2329,13 +2329,13 @@
         <span id="conn-label">Connecting</span>
     </div>
     <span class="header-spacer"></span>
-    <button id="tasks-btn" title="Scheduled Tasks">
+    <button id="tasks-btn" title="Scheduled Tasks" aria-label="Scheduled Tasks">
         <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM9 10H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2zm-8 4H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2z"/></svg>
     </button>
-    <button id="skills-btn" title="Skills">
+    <button id="skills-btn" title="Skills" aria-label="Skills">
         <svg viewBox="0 0 24 24"><path d="M14.17 5L19 9.83V19H5V5h9.17M14.17 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V9.83c0-.53-.21-1.04-.59-1.41l-4.83-4.83c-.37-.38-.88-.59-1.41-.59zM7 15h10v2H7v-2zm0-4h10v2H7v-2zm0-4h7v2H7V7z"/></svg>
     </button>
-    <button id="settings-btn" title="Settings">
+    <button id="settings-btn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
     </button>
     <button id="logout-btn">
@@ -2370,7 +2370,7 @@
     <div id="chat-main">
 
 <!--  Messages  -->
-<div id="messages">
+<div id="messages" role="log" aria-live="polite" aria-label="Conversation">
     <div id="conn-banner"><div class="spinner"></div><span id="conn-text"></span></div>
 
     <div id="thinking">
@@ -2380,7 +2380,8 @@
 </div>
 
 <!--  Activity status — pinned above input, always visible during task execution  -->
-<div class="activity-wrap" id="activity-wrap" style="display:none">
+<div class="activity-wrap" id="activity-wrap" style="display:none"
+     role="status" aria-live="polite" aria-label="Agent activity">
     <div id="activity">
         <div id="activity-header">
             <div class="activity-spinner" id="activity-spinner"></div>
@@ -2404,15 +2405,15 @@
 <div id="input-area">
     <div id="file-chips"></div>
     <div class="input-wrap">
-        <button id="attach-btn" title="Attach files">
+        <button id="attach-btn" title="Attach files" aria-label="Attach files">
             <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6h-1.5v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6H16.5z"/></svg>
         </button>
         <input type="file" id="file-input" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message OwnClaw..." autocomplete="off"></textarea>
-        <button id="send" title="Send (Enter)">
+        <button id="send" title="Send (Enter)" aria-label="Send (Enter)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
-        <button id="stop" title="Stop task">
+        <button id="stop" title="Stop task" aria-label="Stop task">
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
