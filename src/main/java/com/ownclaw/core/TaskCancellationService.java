@@ -30,8 +30,18 @@ public class TaskCancellationService {
     /** Tasks individually cancelled, by task id. */
     private final Set<String> cancelledTasks = ConcurrentHashMap.newKeySet();
 
-    /** Users whose work has been cancelled wholesale, by user id. */
-    private final Set<String> cancelledUsers = ConcurrentHashMap.newKeySet();
+    /**
+     * When each user last pressed Stop, as epoch millis.
+     *
+     * A timestamp rather than a flag, because a flag has no way to end. Stop means "cancel what
+     * is running now"; it cannot mean "and everything I start later". With one worker the flag
+     * was cleared by the next task and that distinction never surfaced. With two lanes it does:
+     * clearing on start lets a task that begins a moment after Stop swallow a cancellation aimed
+     * at the task still running beside it, and NOT clearing makes Stop permanent. Comparing
+     * against when the task began answers both — a task started after the Stop is simply not
+     * covered by it.
+     */
+    private final java.util.Map<String, Long> stoppedAt = new ConcurrentHashMap<>();
 
     /** Cancel one specific task. */
     public void request(String userId, String taskId) {
@@ -45,33 +55,52 @@ public class TaskCancellationService {
      * going on, stop it".
      */
     public void requestAll(String userId) {
-        if (userId != null) cancelledUsers.add(userId);
-    }
-
-    /** Whether this specific task should stop — either on its own account, or user-wide. */
-    public boolean isCancelled(String userId, String taskId) {
-        if (taskId != null && cancelledTasks.contains(taskId)) return true;
-        return userId != null && cancelledUsers.contains(userId);
+        if (userId != null) stoppedAt.put(userId, System.currentTimeMillis());
     }
 
     /**
-     * Clear cancellation state at the start of a task, so a stale Stop cannot kill the work that
-     * follows it.
+     * Whether this specific task should stop.
      * <p>
-     * Clearing the user-wide flag here is safe only while one task runs at a time. When a second
-     * lane is added this must become task-scoped clearing alone — the user-wide flag will then
-     * need its own lifetime, or a task starting will swallow a Stop meant for a task already
-     * running. The second worker thread is the change that makes this urgent; it is noted here
-     * because that is where it will be missed.
+     * Without a start time this cannot tell a Stop aimed at this task from one aimed at a task
+     * that finished earlier, so it errs toward stopping: a user who pressed Stop wants things to
+     * stop. Callers that know when their task began should use the three-argument form.
+     */
+    public boolean isCancelled(String userId, String taskId) {
+        return isCancelled(userId, taskId, Long.MAX_VALUE);
+    }
+
+    /**
+     * Whether this specific task should stop, given when it started.
+     *
+     * @param taskStartedAtMs when this task began; a user-wide Stop only covers tasks that were
+     *                        already running when it was pressed
+     */
+    public boolean isCancelled(String userId, String taskId, long taskStartedAtMs) {
+        if (taskId != null && cancelledTasks.contains(taskId)) return true;
+        if (userId == null) return false;
+        Long stop = stoppedAt.get(userId);
+        return stop != null && taskStartedAtMs <= stop;
+    }
+
+    /**
+     * Clear this task's own cancellation flag at the start of a task, so a stale per-task
+     * cancellation cannot kill the work that follows it.
+     * <p>
+     * It does not touch the user-wide Stop, and must not: that is bounded by its timestamp
+     * instead, so a task starting now already falls outside it. Clearing it here would discard a
+     * Stop that another task, still running, has not yet noticed — which is exactly the bug that
+     * appears the moment more than one task can run at a time.
      */
     public void clear(String userId, String taskId) {
+        // Only this task's own flag. The user-wide Stop is NOT cleared here: it is bounded by
+        // its timestamp instead, so a task starting now is already outside it. Clearing it would
+        // discard a Stop that a task still running beside this one has not yet noticed.
         if (taskId != null) cancelledTasks.remove(taskId);
-        if (userId != null) cancelledUsers.remove(userId);
     }
 
     /** How many tasks are individually flagged — for diagnostics. */
     public int pendingCancellations() {
-        return cancelledTasks.size() + cancelledUsers.size();
+        return cancelledTasks.size() + stoppedAt.size();
     }
 
     /** Exception thrown by the orchestrator when a task is cancelled mid-flight. */

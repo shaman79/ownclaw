@@ -201,7 +201,8 @@ public class AgentLoop {
         // context.isCancelled() check inside a step — LocalExecutor's per-step poll and the
         // supplier handed to every tool — reads a flag nothing ever sets, so Stop could only
         // take effect between steps. A step here can be a 60-133 s local call.
-        context.setExternalCancel(() -> cancellationService.isCancelled(userId, taskId));
+        context.setExternalCancel(
+                () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
 
         AgentResult result = runLoop(context);
         emitResult(context, result);
@@ -329,7 +330,8 @@ public class AgentLoop {
         for (int step = 0; step < maxSteps; step++) {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
             if (context.isCancelled()
-                    || cancellationService.isCancelled(context.userId(), context.taskId())) {
+                    || cancellationService.isCancelled(context.userId(), context.taskId(),
+                                                       context.startTimeMs())) {
                 log.info("Task {} cancelled by user", context.taskId());
                 // Clean up any long-running task tracking
                 if (longRunningTaskManager.isActive(context.taskId())) {
