@@ -1,6 +1,8 @@
 package com.ownclaw.core;
 
 import com.ownclaw.agent.AgentLoop;
+import com.ownclaw.agent.AgentResult;
+import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -92,13 +94,17 @@ public class TaskQueue {
      * @param priority task priority (0 = highest, 2 = background)
      * @return a future that will contain the response (or an error message)
      */
-    public CompletableFuture<String> submit(String userId, String message, int priority) {
+    public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
         if (queueSize.get() >= maxQueuedTasks) {
             eventLog.warn(userId, null, "queue.full", "Queue full, task rejected");
-            return CompletableFuture.completedFuture("System busy — please try again later.");
+            // An outcome, not a sentence. Returned as a bare string, "System busy" was
+            // indistinguishable from an answer: the scheduler filed the run as completed and
+            // stored it as that run's result.
+            return CompletableFuture.completedFuture(AgentResult.error(
+                    "System busy — please try again later.", new AgentTrajectory(), 0));
         }
 
-        CompletableFuture<String> future = new CompletableFuture<>();
+        CompletableFuture<AgentResult> future = new CompletableFuture<>();
         QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future);
         // With lanes off, background work stays in the interactive queue and the behaviour is
         // byte-for-byte what it was: one queue, one thread, priority order within it.
@@ -118,7 +124,7 @@ public class TaskQueue {
     }
 
     /** Submit with default priority (P1 = normal). */
-    public CompletableFuture<String> submit(String userId, String message) {
+    public CompletableFuture<AgentResult> submit(String userId, String message) {
         return submit(userId, message, 1);
     }
 
@@ -141,12 +147,20 @@ public class TaskQueue {
                     // Priority is the origin signal: the scheduler and /bg submit at 2,
                     // a chat message at 1. Nobody is waiting on the former.
                     boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
-                    String response = agentLoop.execute(task.userId(), task.message(), unattended);
-                    task.future().complete(response);
+                    // executeFull, not execute: execute() returns the response string and throws
+                    // the outcome away. That is where the scheduler lost the ability to tell a
+                    // finished job from one that gave up, and so recorded every run as completed.
+                    task.future().complete(
+                            agentLoop.executeFull(task.userId(), task.message(), unattended));
                 } catch (Exception e) {
                     log.error("Task processing failed on the {} lane for user {}: {}",
                             laneName, task.userId(), e.getMessage(), e);
-                    task.future().complete("Internal error: " + e.getMessage());
+                    // execute() used to emit this before swallowing the exception; executeFull
+                    // lets it out, so the notice has to happen here or a crash goes unannounced.
+                    statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED,
+                            "An unexpected error occurred.");
+                    task.future().complete(AgentResult.error(
+                            "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
                 } finally {
                     running.decrementAndGet();
                 }
@@ -169,7 +183,7 @@ public class TaskQueue {
             String message,
             int priority,
             long enqueuedAt,
-            CompletableFuture<String> future
+            CompletableFuture<AgentResult> future
     ) implements Comparable<QueuedTask> {
 
         @Override

@@ -553,12 +553,44 @@ public class ScheduledTaskService {
 
             // Submit to task queue at P2 (background priority)
             taskQueue.submit(userId, description, 2)
-                    .thenAccept(response -> onTaskCompleted(taskId, userId, taskType, description, response))
+                    .thenAccept(result -> {
+                        // Every run used to land in onTaskCompleted. The exceptionally() branch
+                        // below only fires if the future itself breaks, and the agent loop does
+                        // not throw — it returns an outcome. So a run that hit the step cap, gave
+                        // up after repeated reasoning failures, or asked a question nobody was
+                        // there to answer was recorded status='completed', with the failure text
+                        // stored as that run's result. onTaskFailed already knew how to do the
+                        // right thing, including keeping a recurring task alive to retry; it was
+                        // simply unreachable.
+                        if (result.success()) {
+                            onTaskCompleted(taskId, userId, taskType, description, result.response());
+                        } else {
+                            onTaskFailed(taskId, userId, taskType, description,
+                                    describeFailure(result));
+                        }
+                    })
                     .exceptionally(ex -> {
                         onTaskFailed(taskId, userId, taskType, description, ex.getMessage());
                         return null;
                     });
         }
+    }
+
+    /**
+     * Why a scheduled run did not deliver, in a line the owner can act on.
+     * <p>
+     * The reason alone ("MAX_STEPS") does not say what it was trying to do, and the response
+     * alone reads like an answer. Both together are the only honest summary — and a question
+     * from unattended work is worth naming as such, because the fix is to give the task enough
+     * detail up front rather than to retry it unchanged.
+     */
+    private String describeFailure(com.ownclaw.agent.AgentResult result) {
+        String detail = truncate(result.response(), 400);
+        if (result.awaitingUser()) {
+            return "The task stopped to ask a question, and scheduled runs have nobody to answer: "
+                    + detail;
+        }
+        return result.terminationReason() + " after " + result.totalSteps() + " steps: " + detail;
     }
 
     /**

@@ -272,10 +272,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
         // sendSystemToUser already does.
         taskQueue.submit(userId, userMessage)
-                .thenAccept(response -> {
+                .thenAccept(result -> {
+                    String response = result.response();
                     // Persist the assistant response for conversation history
                     conversationService.saveMessage(userId, currentSessionId, "assistant", response);
-                    sendToUser(userId, "response", response);
+                    // A question is routed as a question, so the client can offer a reply box
+                    // instead of presenting it as the finished answer.
+                    sendToUser(userId, result.awaitingUser() ? "input_request" : "response", response);
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToUser(userId, "session_updated", currentSessionId);
                 })

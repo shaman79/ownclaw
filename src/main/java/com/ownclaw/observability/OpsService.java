@@ -1084,16 +1084,59 @@ public class OpsService {
         try {
             Instant markerAt = Files.getLastModifiedTime(p).toInstant();
             out.put("markerWrittenAt", markerAt.toString());
-            boolean stale = markerAt.isAfter(startedAt);
+            boolean markerNewer = markerAt.isAfter(startedAt);
+
+            // The marker alone is not enough, and trusting it produced a wrong answer a third
+            // time: it said c0e333f while the process was demonstrably running the commit before
+            // it, because deploy.sh records the commit when it swaps the JAR and a restart that
+            // cannot happen yet (the agent was busy) leaves the previous JAR loaded. Comparing
+            // the marker to the start time does not catch that -- the marker was older than this
+            // process, so it looked settled.
+            //
+            // The JAR is the ground truth. This process is running the bytes that file held when
+            // it started; if the file has changed since, the running code is not what is on disk,
+            // whatever any marker says. It needs no cooperation from the deploy script, which is
+            // the point -- every previous version of this check trusted something deploy.sh wrote.
+            Instant jarAt = artifactModifiedAt();
+            boolean jarNewer = jarAt != null && jarAt.isAfter(startedAt);
+            if (jarAt != null) out.put("artifactModifiedAt", jarAt.toString());
+
+            boolean stale = markerNewer || jarNewer;
             out.put("running", !stale);
-            out.put("note", stale
-                    ? "RESTART PENDING — the marker was written after this process started, so "
-                      + "the reported commit is NOT the code currently running."
-                    : "The reported commit is the code currently running.");
+            if (jarNewer) {
+                out.put("note", "STALE — the deployed artifact has been replaced since this process "
+                        + "started, so the reported commit is NOT the code running. A restart is "
+                        + "needed to load it; deploy.sh defers the restart while a task is running. "
+                        + "Verify a change by its behaviour, not by this commit.");
+            } else if (markerNewer) {
+                out.put("note", "RESTART PENDING — the marker was written after this process started, "
+                        + "so the reported commit is NOT the code currently running.");
+            } else {
+                out.put("note", "The reported commit is the code currently running.");
+            }
         } catch (Exception e) {
             out.put("running", "unknown");
             out.put("note", "Could not read the marker's timestamp: " + e.getMessage());
         }
         return out;
+    }
+
+    /**
+     * When the artifact this JVM was launched from was last written, or null if it cannot be
+     * determined (an exploded classpath in development, or a security manager in the way).
+     */
+    private Instant artifactModifiedAt() {
+        try {
+            var src = OpsService.class.getProtectionDomain().getCodeSource();
+            if (src == null || src.getLocation() == null) return null;
+            Path path = Path.of(src.getLocation().toURI());
+            // Spring Boot's launcher reports a nested path inside the fat jar; walk up to the
+            // file that actually exists on disk.
+            while (path != null && !Files.exists(path)) path = path.getParent();
+            if (path == null || Files.isDirectory(path)) return null;   // exploded build: no artifact
+            return Files.getLastModifiedTime(path).toInstant();
+        } catch (Exception e) {
+            return null;
+        }
     }
 }
