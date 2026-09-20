@@ -30,26 +30,61 @@ public class SecurityHeadersFilter implements Filter {
 
     private static final String CDN = "https://cdnjs.cloudflare.com";
 
-    private static final String CSP = String.join("; ",
+    /**
+     * Everything except connect-src, which depends on the request (see {@link #cspFor}).
+     */
+    private static final String CSP_PREFIX = String.join("; ",
             "default-src 'self'",
             // 'unsafe-inline' is required by the single inline application script - see above.
             "script-src 'self' 'unsafe-inline' " + CDN,
             "style-src 'self' 'unsafe-inline' " + CDN,
             "img-src 'self' data:",
-            "font-src 'self' data:",
-            // Same-origin XHR plus the chat WebSocket. No other destination is reachable.
-            "connect-src 'self' ws: wss:",
+            "font-src 'self' data:");
+
+    private static final String CSP_SUFFIX = String.join("; ",
             "object-src 'none'",
             "base-uri 'self'",
             "form-action 'self'",
             "frame-ancestors 'none'");
+
+    /** Host header shapes we will echo into a CSP. Anything else falls back to 'self' only. */
+    private static final java.util.regex.Pattern SAFE_HOST =
+            java.util.regex.Pattern.compile("[A-Za-z0-9.\\-]{1,253}(:[0-9]{1,5})?");
+
+    /**
+     * Build the policy for this request, pinning the WebSocket to this exact host.
+     * <p>
+     * connect-src used to read {@code 'self' ws: wss:}. Those two are SCHEMES, not origins:
+     * they permit a WebSocket to any host on the internet. So the one directive whose job was
+     * to stop an injected script exfiltrating data allowed exactly that, while this class's own
+     * javadoc claimed "no exfiltration to an attacker's server".
+     * <p>
+     * The reason it was written that way is real: the client opens {@code ws://<this host>/ws},
+     * and CSP has no "same origin, other scheme" keyword. {@code 'self'} does cover same-origin
+     * WebSockets under CSP Level 3, but relying on that silently breaks chat on any browser
+     * that disagrees, and the failure would look like a connection problem rather than a policy
+     * one. Naming the host explicitly works everywhere and needs no such bet.
+     * <p>
+     * The Host header is attacker-controllable in principle, so it is validated against a
+     * hostname shape before being echoed, and dropped entirely if it does not match. A bad Host
+     * therefore yields a STRICTER policy, never a weaker one.
+     */
+    static String cspFor(HttpServletRequest request) {
+        String connect = "connect-src 'self'";
+        String host = request == null ? null : request.getHeader("Host");
+        if (host != null && SAFE_HOST.matcher(host).matches()) {
+            connect += " ws://" + host + " wss://" + host;
+        }
+        return CSP_PREFIX + "; " + connect + "; " + CSP_SUFFIX;
+    }
 
     @Override
     public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
             throws IOException, ServletException {
 
         if (res instanceof HttpServletResponse response) {
-            response.setHeader("Content-Security-Policy", CSP);
+            response.setHeader("Content-Security-Policy",
+                    cspFor(req instanceof HttpServletRequest hr ? hr : null));
             response.setHeader("X-Content-Type-Options", "nosniff");
             response.setHeader("Referrer-Policy", "no-referrer");
             response.setHeader("X-Frame-Options", "DENY");
