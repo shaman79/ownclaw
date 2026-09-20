@@ -4977,7 +4977,15 @@
     //  Send 
     function send() {
         var text = inputEl.value.trim();
-        if (!text || !ws || ws.readyState !== 1) return;
+        if (!text) return;
+        // Say so instead of doing nothing. The socket can be closed for up to 30 seconds while
+        // reconnect backoff climbs, and this used to return silently: the text stayed in the
+        // box, nothing was sent, and nothing explained why. Indistinguishable from the app
+        // having frozen.
+        if (!ws || ws.readyState !== 1) {
+            showConnBanner('Not connected — your message was not sent. Reconnecting...');
+            return;
+        }
 
         // Collect file attachment IDs
         var attachmentIds = pendingFiles.map(function(f) { return f.id; }).filter(Boolean);
@@ -5028,7 +5036,19 @@
     });
 
     inputEl.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            // Respect the same state as the Send button. `busy` was set and cleared but never
+            // read, so Enter submitted regardless while Send sat disabled — two controls for
+            // the same action behaving differently. Tasks run on a single worker for minutes,
+            // so the second message queued silently behind the first and the reply arrived
+            // much later, looking like the app had ignored the input.
+            //
+            // A pending skill question is not this case: that path calls setThinking(false)
+            // precisely so the answer can be sent, which clears busy.
+            if (busy) return;
+            send();
+        }
     });
 
     sendBtn.addEventListener('click', send);
