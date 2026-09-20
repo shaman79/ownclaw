@@ -144,7 +144,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             Long last = lastWelcomeAtMs.get(userId);
             if (last == null || (now - last) > WELCOME_THROTTLE_MS) {
                 lastWelcomeAtMs.put(userId, now);
-                sendToSession(session, "system", "**Connected to OwnClaw.** Send a message to get started.");
+                // Name the two things a new session cannot otherwise discover. There are fourteen
+                // slash commands and nothing in the UI mentioned that any exist; /cred matters
+                // most, because it is the only way to store a secret that does NOT send it
+                // through the cloud model and into plaintext conversation history — and the
+                // agent itself tells people to use it.
+                sendToSession(session, "system",
+                        "**Connected to OwnClaw.** Send a message to get started.\n\n"
+                        + "`/help` lists the available commands. "
+                        + "Use `/cred set KEY VALUE` to store a secret — typing one into the "
+                        + "chat sends it to the cloud model and saves it in history.");
             }
         }
     }
