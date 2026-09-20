@@ -44,6 +44,7 @@ public class CommandHandler {
     private final AuthService authService;
     private final UserRepository userRepo;
     private final com.ownclaw.conversation.FileStorageService fileStorage;
+    private final com.ownclaw.core.TaskCancellationService cancellationService;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
@@ -51,7 +52,8 @@ public class CommandHandler {
                           CredentialGrantService credentialGrants, TaskQueue taskQueue,
                           ScheduledTaskService scheduledTaskService,
                           AuthService authService, UserRepository userRepo,
-                          com.ownclaw.conversation.FileStorageService fileStorage) {
+                          com.ownclaw.conversation.FileStorageService fileStorage,
+                          com.ownclaw.core.TaskCancellationService cancellationService) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -63,6 +65,7 @@ public class CommandHandler {
         this.authService = authService;
         this.userRepo = userRepo;
         this.fileStorage = fileStorage;
+        this.cancellationService = cancellationService;
     }
 
     /**
@@ -83,6 +86,16 @@ public class CommandHandler {
         return switch (command) {
             case "/help" -> Optional.of(helpText());
             case "/skills" -> Optional.of(skillsText());
+            case "/cancel" -> {
+                // /cancel was listed in this very help text and handled only by the Telegram
+                // interface, so typing it in the web UI did nothing at all — it fell through to
+                // the agent as an ordinary message. The Stop button worked; the documented
+                // command did not.
+                cancellationService.requestAll(userId);
+                yield Optional.of("Cancelling. Anything already running will stop at its next "
+                        + "checkpoint — a tool or a local model call already in flight has to "
+                        + "return first.");
+            }
             case "/status" -> Optional.of(statusText());
             case "/tokens" -> {
                 String budget = budgetTracker.getUsageSummary(userId);
