@@ -117,6 +117,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             if (msg.type() == ChatStatusEmitter.StatusMessage.Type.DEBUG) {
                 // Debug messages are rendered as full message blocks, not brief activity entries
                 sendToSession(session, "debug", msg.text());
+            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT) {
+                // The output of background work is a message, not a status. Rendered as a status
+                // it would land in the collapsed activity strip, which is exactly how a finished
+                // scheduled task managed to produce a full digest that nobody ever saw.
+                sendToSession(session, "response", msg.text());
             } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT) {
                 // A question is not a status. Routed as a status it became one grey line in the
                 // activity strip — which is collapsed by default and scrolls — while a skill

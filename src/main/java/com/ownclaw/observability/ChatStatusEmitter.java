@@ -126,7 +126,16 @@ public class ChatStatusEmitter {
 
         public enum Type {
             QUEUED, STARTED, STEP, PROGRESS, NEED_INPUT, CREDENTIAL,
-            MENTOR, COMPLETED, FAILED, ROLLBACK, WARNING, DEBUG, SCHEDULED
+            MENTOR, COMPLETED, FAILED, ROLLBACK, WARNING, DEBUG, SCHEDULED,
+            /**
+             * The answer itself, from work that finished while nobody was watching.
+             * <p>
+             * Every other type here is commentary about a task — queued, running, done. This one
+             * is the task's output, which is why it is not decorated and why interfaces render it
+             * as an ordinary assistant message rather than an entry in the activity strip. A
+             * morning digest is not a status line.
+             */
+            RESULT
         }
 
         /** Format with icon prefix for display. */
@@ -145,6 +154,7 @@ public class ChatStatusEmitter {
                 case WARNING    -> "⚠\uFE0F " + text;       // ⚠️
                 case DEBUG      -> "\uD83D\uDC1B " + text;  // 🐛
                 case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
+                case RESULT     -> text;                    // the answer, not a note about it
             };
         }
     }

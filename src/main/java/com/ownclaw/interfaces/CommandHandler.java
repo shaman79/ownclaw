@@ -45,6 +45,7 @@ public class CommandHandler {
     private final UserRepository userRepo;
     private final com.ownclaw.conversation.FileStorageService fileStorage;
     private final com.ownclaw.core.TaskCancellationService cancellationService;
+    private final com.ownclaw.core.ResultDelivery resultDelivery;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
@@ -53,7 +54,8 @@ public class CommandHandler {
                           ScheduledTaskService scheduledTaskService,
                           AuthService authService, UserRepository userRepo,
                           com.ownclaw.conversation.FileStorageService fileStorage,
-                          com.ownclaw.core.TaskCancellationService cancellationService) {
+                          com.ownclaw.core.TaskCancellationService cancellationService,
+                          com.ownclaw.core.ResultDelivery resultDelivery) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -66,6 +68,7 @@ public class CommandHandler {
         this.userRepo = userRepo;
         this.fileStorage = fileStorage;
         this.cancellationService = cancellationService;
+        this.resultDelivery = resultDelivery;
     }
 
     /**
@@ -163,7 +166,12 @@ public class CommandHandler {
             return "Usage: `/bg <task>` — runs it in the background and tells you when it is done.\n"
                     + "Use it for anything you do not want to sit and wait for.";
         }
-        taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY);
+        // The future used to be discarded, so this promise was never kept: the task ran, the
+        // answer was produced, and nothing delivered it. Only the status lines appeared.
+        taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY)
+                .thenAccept(result -> resultDelivery.deliver(
+                        userId, "Background task: "
+                                + (task.length() > 60 ? task.substring(0, 60) + "…" : task), result));
         return "Running in the background:\n> " + task
                 + "\n\nYou will get the result here when it finishes — no need to wait.";
     }

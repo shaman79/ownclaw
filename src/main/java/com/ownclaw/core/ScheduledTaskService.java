@@ -59,6 +59,7 @@ public class ScheduledTaskService {
     private final OwnClawConfig config;
     private final OllamaProvider ollama;
     private final OllamaSemaphore ollamaSemaphore;
+    private final ResultDelivery resultDelivery;
 
     // Track task submission timestamps for duration calculation
     private final Map<Long, Long> taskStartTimes = new java.util.concurrent.ConcurrentHashMap<>();
@@ -80,7 +81,8 @@ public class ScheduledTaskService {
     public ScheduledTaskService(JdbcTemplate jdbc, TaskQueue taskQueue,
                                 ChatStatusEmitter statusEmitter, EventLogService eventLog,
                                 ConversationService conversationService, OwnClawConfig config,
-                                OllamaProvider ollama, OllamaSemaphore ollamaSemaphore) {
+                                OllamaProvider ollama, OllamaSemaphore ollamaSemaphore,
+                                ResultDelivery resultDelivery) {
         this.jdbc = jdbc;
         this.taskQueue = taskQueue;
         this.statusEmitter = statusEmitter;
@@ -89,6 +91,7 @@ public class ScheduledTaskService {
         this.config = config;
         this.ollama = ollama;
         this.ollamaSemaphore = ollamaSemaphore;
+        this.resultDelivery = resultDelivery;
     }
 
     @PostConstruct
@@ -600,6 +603,11 @@ public class ScheduledTaskService {
                                  String description, String response) {
         int newRunCount = incrementRunCount(taskId);
 
+        // Deliver the output, not just a note that output happened. Until this line the result
+        // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
+        // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
+        resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60), response);
+
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null, newRunCount);
 
@@ -659,6 +667,12 @@ public class ScheduledTaskService {
     private void onTaskFailed(long taskId, String userId, String taskType,
                               String description, String error) {
         int newRunCount = incrementRunCount(taskId);
+
+        // A failed scheduled run is worth as much of the user's attention as a successful one —
+        // arguably more, since a silent failure is how a job stops working without anyone
+        // noticing. The status emissions below say a run failed; this says what it said.
+        resultDelivery.deliver(userId,
+                "Scheduled task did not finish: " + truncate(description, 60), error);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "failed", null, error, newRunCount);
