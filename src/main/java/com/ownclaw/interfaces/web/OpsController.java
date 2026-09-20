@@ -142,6 +142,12 @@ public class OpsController {
      * GET /api/ops/skills/consolidate — tool sequences that keep succeeding together.
      * Detection only; nothing is created.
      */
+    /** GET /api/ops/skills/duplicates — registered skills that look like the same capability. */
+    @GetMapping("/skills/duplicates")
+    public ResponseEntity<?> duplicates(@RequestParam(defaultValue = "0.6") double threshold) {
+        return ResponseEntity.ok(ops.duplicateSkills(Math.min(1.0, Math.max(0.3, threshold))));
+    }
+
     @GetMapping("/skills/consolidate")
     public ResponseEntity<?> consolidate(@RequestParam(defaultValue = "2") int minLength,
                                          @RequestParam(defaultValue = "3") int minTasks) {

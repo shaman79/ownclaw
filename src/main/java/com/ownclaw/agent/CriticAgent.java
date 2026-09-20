@@ -277,7 +277,7 @@ public class CriticAgent {
     }
 
     /** Jaccard similarity over underscore-separated name tokens. */
-    static double tokenOverlap(String a, String b) {
+    public static double tokenOverlap(String a, String b) {
         java.util.Set<String> ta = new java.util.HashSet<>(java.util.Arrays.asList(a.split("_")));
         java.util.Set<String> tb = new java.util.HashSet<>(java.util.Arrays.asList(b.split("_")));
         ta.remove(""); tb.remove("");

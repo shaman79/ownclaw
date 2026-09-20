@@ -951,6 +951,68 @@ public class OpsService {
         return out;
     }
 
+    /**
+     * Registered skills that look like duplicates of one another.
+     * <p>
+     * The gate in CriticAgent stops NEW duplicates being created. It does nothing about the
+     * ones already there — eight IMAP skills, four network scanners, two left-over _debug
+     * artifacts — because a gate is a flow control and this is a stock problem.
+     * <p>
+     * Reports clusters, and only clusters. Merging is not something to do automatically: two
+     * skills that look alike by name can differ in ways only their code shows, and collapsing
+     * them on a name comparison would quietly delete behaviour something depends on. The point
+     * is to make the pile visible so it can be dealt with deliberately.
+     * <p>
+     * Same two tests the creation gate uses, so what it reports and what it would block are the
+     * same judgement: a prefix-sibling relationship, or Jaccard overlap of the name tokens.
+     */
+    public Map<String, Object> duplicateSkills(double threshold) {
+        List<String> names = new ArrayList<>(toolRegistry.names());
+        Collections.sort(names);
+
+        // Union-find, so a chain of pairwise similarities becomes one group rather than three.
+        Map<String, String> parent = new LinkedHashMap<>();
+        for (String n : names) parent.put(n, n);
+        java.util.function.Function<String, String> find = new java.util.function.Function<>() {
+            @Override public String apply(String x) {
+                while (!parent.get(x).equals(x)) { parent.put(x, parent.get(parent.get(x))); x = parent.get(x); }
+                return x;
+            }
+        };
+        for (int i = 0; i < names.size(); i++) {
+            for (int j = i + 1; j < names.size(); j++) {
+                String a = names.get(i).toLowerCase(), b = names.get(j).toLowerCase();
+                boolean sibling = a.startsWith(b + "_") || b.startsWith(a + "_");
+                if (sibling || com.ownclaw.agent.CriticAgent.tokenOverlap(a, b) >= threshold) {
+                    parent.put(find.apply(names.get(i)), find.apply(names.get(j)));
+                }
+            }
+        }
+        Map<String, List<String>> groups = new LinkedHashMap<>();
+        for (String n : names) groups.computeIfAbsent(find.apply(n), k -> new ArrayList<>()).add(n);
+
+        var clusters = new ArrayList<Map<String, Object>>();
+        for (var e : groups.entrySet()) {
+            if (e.getValue().size() < 2) continue;
+            clusters.add(new LinkedHashMap<>(Map.of(
+                    "size", e.getValue().size(),
+                    "skills", e.getValue())));
+        }
+        clusters.sort((a, b) -> ((Integer) b.get("size")) - ((Integer) a.get("size")));
+
+        var out = new LinkedHashMap<String, Object>();
+        out.put("threshold", threshold);
+        out.put("totalSkills", names.size());
+        out.put("clusters", clusters);
+        out.put("redundant", clusters.stream().mapToInt(c -> ((Integer) c.get("size")) - 1).sum());
+        out.put("note", clusters.isEmpty()
+                ? "No name-similar clusters."
+                : "Each cluster is probably one capability built more than once. Detection only — "
+                  + "check what the code actually does before collapsing any of them, because "
+                  + "names that look alike can hide behaviour that is not.");
+        return out;
+    }
+
     private String deployedCommit() {
         Path p = deployMarkerPath();
         if (p != null) {
