@@ -255,13 +255,23 @@ public class OpsController {
         }
     }
 
-    /** Request cancellation of whatever that user is running. Checked between steps only. */
+    /**
+     * Request cancellation. With no taskId this stops everything that user is running;
+     * with one, only that task.
+     */
     @PostMapping("/agent/cancel/{userId}")
-    public ResponseEntity<?> cancel(@PathVariable String userId) {
-        cancellation.request(userId);
+    public ResponseEntity<?> cancel(@PathVariable String userId,
+                                    @RequestParam(required = false) String taskId) {
+        if (taskId != null && !taskId.isBlank()) {
+            cancellation.request(userId, taskId);
+        } else {
+            cancellation.requestAll(userId);
+        }
         return ResponseEntity.ok(Map.of("cancelRequested", true, "userId", userId,
-                "caveat", "Cancellation is observed between steps; a running tool or "
-                        + "delegation is not interrupted."));
+                "scope", taskId != null && !taskId.isBlank() ? taskId : "all tasks for this user",
+                "caveat", "Cancellation is now observed inside a step as well as between them — "
+                        + "a running tool or local call polls it — but a request already in "
+                        + "flight to a provider still has to return before it is noticed."));
     }
 
     /** Re-read the generated skills directory from disk. */

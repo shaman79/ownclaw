@@ -85,6 +85,17 @@ public class ChatStatusEmitter {
         emit(userId, new StatusMessage(type, text, data));
     }
 
+    /** Emit attributed to a specific task. Use this from anywhere inside a running task. */
+    public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text) {
+        emit(userId, new StatusMessage(type, text, null, taskId));
+    }
+
+    /** Emit attributed to a specific task, with structured data. */
+    public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text,
+                            Map<String, Object> data) {
+        emit(userId, new StatusMessage(type, text, data, taskId));
+    }
+
     /**
      * A structured status message sent to the user's chat.
      *
@@ -92,11 +103,25 @@ public class ChatStatusEmitter {
      * @param text human-readable text
      * @param data optional structured data (token counts, provider info, etc.)
      */
-    public record StatusMessage(Type type, String text, Map<String, Object> data) {
+    public record StatusMessage(Type type, String text, Map<String, Object> data, String taskId) {
+
+        /**
+         * Without a task id.
+         * <p>
+         * Kept because most status comes from places that have no task — a connection notice, a
+         * setup step. Those are unambiguous precisely because there is only ever one of them.
+         * Anything emitted from inside a running task should carry its id: with one worker
+         * thread two tasks cannot overlap, so a missing id is invisible today, and the moment a
+         * second lane exists their step streams interleave into one channel the UI cannot
+         * separate.
+         */
+        public StatusMessage(Type type, String text, Map<String, Object> data) {
+            this(type, text, data, null);
+        }
 
         /** Construct without data. */
         public StatusMessage(Type type, String text) {
-            this(type, text, null);
+            this(type, text, null, null);
         }
 
         public enum Type {

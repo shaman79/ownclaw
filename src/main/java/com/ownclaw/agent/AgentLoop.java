@@ -195,13 +195,13 @@ public class AgentLoop {
         }
 
         // Clear any stale cancel flag from a previous task
-        cancellationService.clear(userId);
+        cancellationService.clear(userId, taskId);
 
         // Point the context at the authoritative cancel source. Without this, every
         // context.isCancelled() check inside a step — LocalExecutor's per-step poll and the
         // supplier handed to every tool — reads a flag nothing ever sets, so Stop could only
         // take effect between steps. A step here can be a 60-133 s local call.
-        context.setExternalCancel(() -> cancellationService.isCancelled(userId));
+        context.setExternalCancel(() -> cancellationService.isCancelled(userId, taskId));
 
         AgentResult result = runLoop(context);
         emitResult(context, result);
@@ -328,7 +328,8 @@ public class AgentLoop {
 
         for (int step = 0; step < maxSteps; step++) {
             // Check cancellation — both local flag and service flag from WebSocket cancel button
-            if (context.isCancelled() || cancellationService.isCancelled(context.userId())) {
+            if (context.isCancelled()
+                    || cancellationService.isCancelled(context.userId(), context.taskId())) {
                 log.info("Task {} cancelled by user", context.taskId());
                 // Clean up any long-running task tracking
                 if (longRunningTaskManager.isActive(context.taskId())) {
@@ -375,7 +376,7 @@ public class AgentLoop {
                 log.info("Task {} step 1: deterministic skill_create from CapabilityResolver → '{}'",
                         context.taskId(), hint.suggestedName());
 
-                statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                         "Creating skill '" + hint.suggestedName() + "' (auto-detected)...");
 
                 // Build skill_create params directly from the hint
@@ -439,7 +440,7 @@ public class AgentLoop {
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
             String providerLabel = local ? "local" : provider.name();
-            statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+            statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Step " + (step + 1) + " · " + providerLabel,
                     tokenData(context));
 
@@ -474,7 +475,7 @@ public class AgentLoop {
             }
 
             // Emit running token totals so the frontend can update the live counter
-            statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
+            statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
                     action.tool() + " (" + String.format("%,d", thinkResult.totalTokens()) + " tok)",
                     tokenData(context));
 
@@ -639,7 +640,7 @@ public class AgentLoop {
                     continue;
                 }
 
-                statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
 
                 // Generate skill code exclusively with cloud LLM — never use local model for code gen
@@ -846,7 +847,7 @@ public class AgentLoop {
 
             // === ACT ===
             emitActDetail(context.userId(), action, step + 1);
-            statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+            statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Running " + action.tool() + "...");
             ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context.userId(),
                     "Running " + action.tool());
@@ -890,11 +891,11 @@ public class AgentLoop {
                     observation.success() ? null : observation.output());
 
             if (observation.success()) {
-                statusEmitter.emit(context.userId(), StatusMessage.Type.PROGRESS,
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
                         action.tool() + " ✓ " + formatDurationMs(observation.durationMs()),
                         tokenData(context));
             } else {
-                statusEmitter.emit(context.userId(), StatusMessage.Type.WARNING,
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.WARNING,
                         action.tool() + " ✗ " + truncate(observation.output(), 100));
             }
 
@@ -1605,7 +1606,7 @@ public class AgentLoop {
         }
 
         String providerLabel = usingLocalFallback ? "local (degraded)" : "cloud";
-        statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+        statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     oldCode != null ? "Fixing skill code · " + providerLabel : "Generating skill code · " + providerLabel,
                     tokenData(context));
         try {
@@ -1666,7 +1667,7 @@ public class AgentLoop {
                 String syntaxError = skillManager.checkPythonSyntax(cloudCode);
                 for (int repair = 0; repair < 3 && syntaxError != null; repair++) {
                     log.warn("Skill '{}' syntax error (repair attempt {}/3): {}", name, repair + 1, syntaxError);
-                    statusEmitter.emit(context.userId(), StatusMessage.Type.STEP,
+                    statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                             "Repairing syntax error · " + providerLabel + " (attempt " + (repair + 1) + "/3)",
                             tokenData(context));
 

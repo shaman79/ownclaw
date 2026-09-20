@@ -229,7 +229,8 @@ public class TelegramBotService {
 
         // ── /cancel — stop the running task ──
         if (text.strip().equalsIgnoreCase("/cancel")) {
-            cancellationService.request(userId);
+            // Stop with no task named means "whatever is running, stop it".
+            cancellationService.requestAll(userId);
             interactionHandler.cancelPending(userId);
             sendMessage(chatId, "⏹ Cancellation requested.");
             return;

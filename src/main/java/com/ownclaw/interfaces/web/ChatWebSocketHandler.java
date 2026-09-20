@@ -224,7 +224,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Cancel: user requested task interruption
         if ("cancel".equals(messageType)) {
-            cancellationService.request(userId);
+            // Stop with no task named means "whatever is running, stop it".
+            cancellationService.requestAll(userId);
             interactionHandler.cancelPending(userId);
             sendToSession(session, "system", "⏹ Cancellation requested.");
             return;
@@ -407,6 +408,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             payload.put("type", "status");
             payload.put("content", msg.formatted());
             payload.put("status", msg.type().name().toLowerCase());
+            // Carried so the client can attribute a step to a task once more than one can run.
+            if (msg.taskId() != null) payload.put("taskId", msg.taskId());
             if (msg.data() != null && !msg.data().isEmpty()) {
                 payload.put("data", msg.data());
             }
