@@ -73,6 +73,14 @@ ownclaw:
     cloud-concurrency: 3
     sandbox-concurrency: 3
     max-queued-tasks: 50
+    # Give background work (priority 2 — the scheduler) its own worker thread, so a task
+    # that runs for minutes stops blocking an interactive chat behind it.
+    #
+    # OFF by default on purpose. It is the first time two agent tasks can run at once, and
+    # everything that made that unsafe has been fixed first — cancellation is per task and a
+    # Stop is bounded in time, status carries a task id — but the flag exists so the change
+    # can be turned on deliberately, and off again in one edit if something surfaces.
+    separate-background-lane: false
 
   tasks:
     # No wall-clock timeout — tasks run until done.

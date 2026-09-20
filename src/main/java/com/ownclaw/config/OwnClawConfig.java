@@ -106,6 +106,8 @@ public class OwnClawConfig {
         private int cloudConcurrency = 3;
         private int sandboxConcurrency = 3;
         private int maxQueuedTasks = 50;
+        /** Run background work on its own thread. Off = today's single worker. */
+        private boolean separateBackgroundLane = false;
 
         public int getMaxConcurrentTasks() { return maxConcurrentTasks; }
         public void setMaxConcurrentTasks(int v) { this.maxConcurrentTasks = v; }
@@ -116,6 +118,8 @@ public class OwnClawConfig {
         public int getSandboxConcurrency() { return sandboxConcurrency; }
         public void setSandboxConcurrency(int v) { this.sandboxConcurrency = v; }
         public int getMaxQueuedTasks() { return maxQueuedTasks; }
+        public boolean isSeparateBackgroundLane() { return separateBackgroundLane; }
+        public void setSeparateBackgroundLane(boolean v) { this.separateBackgroundLane = v; }
         public void setMaxQueuedTasks(int v) { this.maxQueuedTasks = v; }
     }
 

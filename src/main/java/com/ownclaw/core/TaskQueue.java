@@ -12,7 +12,6 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -29,9 +28,18 @@ public class TaskQueue {
     private final ChatStatusEmitter statusEmitter;
     private final int maxQueuedTasks;
 
-    private final PriorityBlockingQueue<QueuedTask> queue = new PriorityBlockingQueue<>();
+    /** Priority 2 and above is background work — the scheduler submits at 2. */
+    static final int BACKGROUND_PRIORITY = 2;
+
+    /** Interactive work. When lanes are off, everything goes here and nothing changes. */
+    private final PriorityBlockingQueue<QueuedTask> interactiveQueue = new PriorityBlockingQueue<>();
+    /** Background work, drained by its own thread only when lanes are enabled. */
+    private final PriorityBlockingQueue<QueuedTask> backgroundQueue = new PriorityBlockingQueue<>();
+
     private final AtomicInteger queueSize = new AtomicInteger(0);
-    private final AtomicBoolean processing = new AtomicBoolean(false);
+    /** Count, not a flag: with two lanes there can be two tasks in flight. */
+    private final AtomicInteger running = new AtomicInteger(0);
+    private final boolean separateBackgroundLane;
     private ExecutorService workerPool;
 
     public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
@@ -40,20 +48,33 @@ public class TaskQueue {
         this.eventLog = eventLog;
         this.statusEmitter = statusEmitter;
         this.maxQueuedTasks = config.getQueue().getMaxQueuedTasks();
+        this.separateBackgroundLane = config.getQueue().isSeparateBackgroundLane();
     }
 
     @PostConstruct
     public void start() {
-        // Single worker thread — tasks are serialized (Ollama is the bottleneck).
-        // LLM calls within AgentLoop run on the calling thread (blocking OK here).
-        workerPool = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "task-queue-worker");
+        // One thread per lane. The original comment here said tasks are serialized because
+        // "Ollama is the bottleneck" — that stopped being true when routing moved to
+        // cloud-first, and the cost of keeping it was that a background task running for
+        // minutes blocked every interactive message behind it on the same thread.
+        //
+        // Ollama really is still serialized, but by OllamaSemaphore rather than by starving
+        // the whole system of workers: two lanes can both reach it, and the second waits.
+        int threads = separateBackgroundLane ? 2 : 1;
+        var counter = new AtomicInteger();
+        workerPool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "task-queue-worker-" + counter.incrementAndGet());
             t.setDaemon(true);
             return t;
         });
 
-        workerPool.submit(this::processLoop);
-        log.info("Task queue started");
+        workerPool.submit(() -> processLoop(interactiveQueue, "interactive"));
+        if (separateBackgroundLane) {
+            workerPool.submit(() -> processLoop(backgroundQueue, "background"));
+            log.info("Task queue started with separate interactive and background lanes");
+        } else {
+            log.info("Task queue started (single lane)");
+        }
     }
 
     @PreDestroy
@@ -79,7 +100,10 @@ public class TaskQueue {
 
         CompletableFuture<String> future = new CompletableFuture<>();
         QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future);
-        queue.add(task);
+        // With lanes off, background work stays in the interactive queue and the behaviour is
+        // byte-for-byte what it was: one queue, one thread, priority order within it.
+        boolean background = separateBackgroundLane && priority >= BACKGROUND_PRIORITY;
+        (background ? backgroundQueue : interactiveQueue).add(task);
         int pos = queueSize.incrementAndGet();
 
         if (pos > 1) {
@@ -103,24 +127,25 @@ public class TaskQueue {
      * Used by the deploy script to avoid restarting during active work.
      */
     public boolean isBusy() {
-        return processing.get() || queueSize.get() > 0;
+        return running.get() > 0 || queueSize.get() > 0;
     }
 
-    private void processLoop() {
+    private void processLoop(PriorityBlockingQueue<QueuedTask> lane, String laneName) {
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                QueuedTask task = queue.take();
+                QueuedTask task = lane.take();
                 queueSize.decrementAndGet();
-                processing.set(true);
+                running.incrementAndGet();
 
                 try {
                     String response = agentLoop.execute(task.userId(), task.message());
                     task.future().complete(response);
                 } catch (Exception e) {
-                    log.error("Task processing failed for user {}: {}", task.userId(), e.getMessage(), e);
+                    log.error("Task processing failed on the {} lane for user {}: {}",
+                            laneName, task.userId(), e.getMessage(), e);
                     task.future().complete("Internal error: " + e.getMessage());
                 } finally {
-                    processing.set(false);
+                    running.decrementAndGet();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
