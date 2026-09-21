@@ -83,6 +83,19 @@ public class TaskCancellationService {
     }
 
     /**
+     * When this user last pressed Stop, or null if they never have.
+     * <p>
+     * Exposed so the queue can drop work that was already waiting when Stop was pressed.
+     * {@link #isCancelled} cannot answer that: it compares against when a task STARTED, and a
+     * queued task starts after the Stop, so it looks like new work and runs. From the user's
+     * side it is not new work — they queued it, then changed their mind, and watched it start
+     * anyway.
+     */
+    public Long stoppedAt(String userId) {
+        return userId == null ? null : stoppedAt.get(userId);
+    }
+
+    /**
      * Clear this task's own cancellation flag at the start of a task, so a stale per-task
      * cancellation cannot kill the work that follows it.
      * <p>

@@ -56,8 +56,8 @@ public final class RateLimitBackoff {
             try {
                 return call.get();
             } catch (LlmException e) {
-                if (!e.isRateLimit()) {
-                    throw e;   // non-429 errors propagate immediately
+                if (!e.isRetryable()) {
+                    throw e;   // a malformed request or bad key fails identically on every try
                 }
 
                 attempt++;
@@ -70,7 +70,9 @@ public final class RateLimitBackoff {
                 long jitter = (long) (waitMs * JITTER_FACTOR * (Math.random() * 2 - 1));
                 long actualWait = waitMs + jitter;
 
-                log.warn("Rate limit hit on {} (attempt {}/{}). Backing off {}s before retry...",
+                log.warn("{} on {} (attempt {}/{}). Backing off {}s before retry...",
+                        e.isRateLimit() ? "Rate limit" : e.isOverloaded() ? "Provider overloaded"
+                                : "Provider error " + e.getHttpStatus(),
                         providerName, attempt, MAX_RETRIES, actualWait / 1000);
 
                 try {

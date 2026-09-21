@@ -28,6 +28,7 @@ public class TaskQueue {
     private final AgentLoop agentLoop;
     private final EventLogService eventLog;
     private final ChatStatusEmitter statusEmitter;
+    private final TaskCancellationService cancellationService;
     private final int maxQueuedTasks;
 
     /** Priority 2 and above is background work — the scheduler and /bg submit at 2. */
@@ -45,10 +46,12 @@ public class TaskQueue {
     private ExecutorService workerPool;
 
     public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
-                     ChatStatusEmitter statusEmitter, OwnClawConfig config) {
+                     ChatStatusEmitter statusEmitter, OwnClawConfig config,
+                     TaskCancellationService cancellationService) {
         this.agentLoop = agentLoop;
         this.eventLog = eventLog;
         this.statusEmitter = statusEmitter;
+        this.cancellationService = cancellationService;
         this.maxQueuedTasks = config.getQueue().getMaxQueuedTasks();
         this.separateBackgroundLane = config.getQueue().isSeparateBackgroundLane();
     }
@@ -144,6 +147,22 @@ public class TaskQueue {
                 running.incrementAndGet();
 
                 try {
+                    // Drop work that was already waiting when the user pressed Stop.
+                    //
+                    // isCancelled() compares against when a task STARTED, and a queued task
+                    // starts after the Stop, so it reads as new work and runs. The user does not
+                    // see it that way: they queued it, changed their mind, pressed Stop, and
+                    // watched it start regardless.
+                    Long stoppedAt = cancellationService.stoppedAt(task.userId());
+                    if (stoppedAt != null && task.enqueuedAt() <= stoppedAt) {
+                        log.info("Dropping queued task for {} — it was waiting when Stop was pressed",
+                                task.userId());
+                        task.future().complete(AgentResult.cancelled(
+                                "Cancelled before it started — it was still queued when you "
+                                        + "pressed Stop.", new AgentTrajectory(), 0));
+                        continue;
+                    }
+
                     // Priority is the origin signal: the scheduler and /bg submit at 2,
                     // a chat message at 1. Nobody is waiting on the former.
                     boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
