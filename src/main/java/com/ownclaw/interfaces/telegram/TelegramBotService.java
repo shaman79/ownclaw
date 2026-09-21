@@ -283,26 +283,53 @@ public class TelegramBotService {
         });
     }
 
+    /**
+     * Send to Telegram, falling back to plain text if Markdown will not parse.
+     * <p>
+     * Telegram rejects the whole request with HTTP 400 when the Markdown is malformed, and this
+     * text is agent output: skill names like {@code web_search_bikes} and
+     * {@code summarize_web_content} carry underscores, file paths and code carry asterisks, and
+     * an odd count of either is enough. The old code logged the 400 and returned, so the user
+     * simply never received the answer — the task had succeeded and its result vanished. That is
+     * the worst failure shape available: silent, and indistinguishable from the agent ignoring
+     * you.
+     * <p>
+     * Formatting is a nicety; delivery is not. On a parse failure the same text goes out
+     * unformatted.
+     */
     private void sendMessage(long chatId, String text) {
+        if (!sendMessage(chatId, text, "Markdown")) {
+            log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
+            sendMessage(chatId, text, null);
+        }
+    }
+
+    /** @return true if Telegram accepted it. */
+    private boolean sendMessage(long chatId, String text, String parseMode) {
         try {
-            String json = mapper.writeValueAsString(java.util.Map.of(
-                    "chat_id", chatId,
-                    "text", text,
-                    "parse_mode", "Markdown"
-            ));
+            var payload = new java.util.LinkedHashMap<String, Object>();
+            payload.put("chat_id", chatId);
+            payload.put("text", text);
+            if (parseMode != null) payload.put("parse_mode", parseMode);
 
             Request request = new Request.Builder()
                     .url(apiUrl("sendMessage"))
-                    .post(RequestBody.create(json, MediaType.get("application/json")))
+                    .post(RequestBody.create(mapper.writeValueAsString(payload),
+                            MediaType.get("application/json")))
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
+                if (response.isSuccessful()) return true;
+                // 400 is the Markdown parse error; anything else is not worth retrying unformatted.
+                if (response.code() != 400) {
                     log.warn("Telegram sendMessage failed: HTTP {}", response.code());
+                    return true;
                 }
+                return false;
             }
         } catch (Exception e) {
             log.warn("Failed to send Telegram message: {}", e.getMessage());
+            return true;   // a transport failure is not something plain text will fix
         }
     }
 

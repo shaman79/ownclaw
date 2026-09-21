@@ -240,7 +240,32 @@ public class ConversationService {
               AND s.archived = 0
             ORDER BY fts.rank
             LIMIT 30
-            """, query, userId);
+            """, ftsQuery(query), userId);
+    }
+
+    /**
+     * Turn what someone typed into a safe FTS5 MATCH expression.
+     * <p>
+     * The raw string was passed straight through, and MATCH is an expression language: a bare
+     * {@code .}, {@code '} or {@code -} is a syntax error, and SQLite answers with an exception
+     * rather than with no results. The sidebar search fires on every keystroke, so typing an
+     * ordinary thing -- {@code claw.avercode.com}, {@code don't}, or the name of a skill such as
+     * {@code web_search_bikes} -- produced a 500 partway through the word. Searching for this
+     * system's own vocabulary was reliably broken.
+     * <p>
+     * Every term is quoted, which makes it a literal rather than syntax, and embedded quotes are
+     * doubled. Terms are ANDed so a multi-word search narrows, which is what people expect.
+     */
+    static String ftsQuery(String raw) {
+        if (raw == null || raw.isBlank()) return "\"\"";
+        var terms = new java.util.ArrayList<String>();
+        for (String term : raw.trim().split("\\s+")) {
+            // Keep only what FTS5 tokenises; a term of pure punctuation matches nothing anyway.
+            String cleaned = term.replaceAll("[^\\p{L}\\p{N}_'-]", " ").trim();
+            if (cleaned.isEmpty()) continue;
+            terms.add('"' + cleaned.replace("\"", "\"\"") + '"');
+        }
+        return terms.isEmpty() ? "\"\"" : String.join(" AND ", terms);
     }
 
     /**
