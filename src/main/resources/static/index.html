@@ -5,10 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OwnClaw</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
-          integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous" referrerpolicy="no-referrer">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
-            integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"
             integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <style>
@@ -2303,6 +2299,15 @@
             #sidebar { display: none }
             #sidebar.mobile-open { display: flex; position: fixed; inset: 0; z-index: 100; width: 100% }
             #sidebar-toggle { display: flex }
+            /* The header is 63px too wide at 390px, which pushes "Sign out" off-screen and
+               squeezes the gear/skills/tasks buttons to 18px. The connection pill is the
+               widest thing on it and is redundant on a phone: #conn-banner already announces
+               a dropped connection. */
+            #conn-pill { display: none }
+            /* The token counter is nowrap, so it reserved its full width and crushed the
+               activity label to 64px across seven wrapped lines -- the one line that says what
+               the agent is doing right now. The same numbers appear in #activity-stats. */
+            #activity-tokens { display: none }
         }
 
     </style>
@@ -2430,7 +2435,7 @@
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
-    <div class="input-hint">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -2524,7 +2529,12 @@
     var searchDebounce = null;
     var needsInitialLoad = false;
 
-    marked.setOptions({ breaks: true, gfm: true });
+    // Guarded: a blocked or slow CDN made this throw a ReferenceError at load, which aborted
+    // the rest of the inline script -- so checkAuth() never ran and the app sat on
+    // "Checking session..." for ever with nothing on screen explaining why. renderMarkdown's
+    // existing try/catch then degrades every message to escaped plain text, which is a readable
+    // chat rather than no chat.
+    if (window.marked) marked.setOptions({ breaks: true, gfm: true });
 
     //  Sidebar interactions
     sidebarToggle.addEventListener('click', function() {
@@ -4376,13 +4386,20 @@
         activityLabel.textContent = text;
         if (activityStepList.length > 0) {
             var last = activityStepList[activityStepList.length - 1];
-            var span = last.querySelector('span:last-child');
+            // '.step-dot + span' is the label. 'span:last-child' was the LAST span in the card,
+        // which once a step is expanded is its detail body -- so a progress tick silently
+        // replaced the reasoning or output the owner had opened the step to read.
+        var span = last.querySelector('.step-dot + span');
             if (span) span.textContent = text;
         }
     }
 
     /** Update the live token counter in the activity header. */
     function updateTokens(data) {
+        // Think/Act detail frames carry no running totals, and treating that as zero blanked
+        // the header counter for the whole of a tool call -- which is most of a task -- while
+        // the stats row below went on showing the real figures. Absent means "no news".
+        if (data && data.cloudTokens == null && data.localTokens == null) return;
         if (!data) return;
         var cloud = data.cloudTokens || 0;
         var local = data.localTokens || 0;
@@ -4806,6 +4823,7 @@
     }
 
     function setThinking(on) {
+        if (!on) stopPressed = false;
         if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
         if (on) {
             thinkingEl.classList.add('active');
@@ -5187,8 +5205,13 @@
         inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
     });
 
+    // A phone's Return key fires this same event and a soft keyboard has no Shift+Enter, so on
+    // a touch device Enter has to make a newline and Send is the only way to submit. Computed
+    // once rather than per keystroke.
+    var hardKeyboard = !window.matchMedia || !matchMedia('(pointer: coarse)').matches;
+
     inputEl.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) {
             e.preventDefault();
             // Respect the same state as the Send button. `busy` was set and cleared but never
             // read, so Enter submitted regardless while Send sat disabled — two controls for
@@ -5205,13 +5228,37 @@
 
     sendBtn.addEventListener('click', send);
 
+    /** Set when Stop has been pressed once and we are waiting for the task to notice. */
+    var stopPressed = false;
+
     stopBtn.addEventListener('click', function() {
+        // A second press means "I don't believe you" — clear locally, as this always did.
+        if (stopPressed) {
+            stopPressed = false;
+            setThinking(false);
+            doneActivity();
+            return;
+        }
         if (ws && ws.readyState === 1) {
             ws.send(JSON.stringify({ type: 'cancel' }));
         }
-        setThinking(false);
-        doneActivity();
+        // Do NOT clear the working state here.
+        //
+        // Cancellation is cooperative: the task checks a flag at its next checkpoint, and a tool
+        // call or a local model call already in flight has to return first, which can be a
+        // minute or more. Clearing immediately told the owner it had stopped when it had not --
+        // so he retyped the request, it was accepted because `busy` was false, and it queued
+        // behind the task still running. The real terminal status arrives when it actually
+        // stops and clears this properly.
+        stopPressed = true;
+        showActivity('Stopping — waiting for the current step to finish…', null);
     });
+
+    // Tell the truth about the keys this device actually has.
+    if (!hardKeyboard) {
+        var hintKeys = document.getElementById('hint-keys');
+        if (hintKeys) hintKeys.textContent = 'Return for a new line \u00b7 tap Send to send';
+    }
 
     checkAuth();
 })();
