@@ -209,6 +209,59 @@ class SkillMaintenanceTest {
     }
 
     @Test
+    @DisplayName("a rewritten skill does not inherit the dead one's record")
+    void usageIsScopedToTheCurrentIncarnation() {
+        // skill_usage is keyed on the name alone, so without this a retired skill that the agent
+        // writes again inherits the old failures AND the old idleness, and is retired again at
+        // once — a write-and-retire loop that never settles.
+        java.time.Instant now = java.time.Instant.now();
+        java.time.Instant longAgo = now.minus(java.time.Duration.ofDays(180));
+
+        List<java.util.Map<String, Object>> oldFailures = List.of(
+                usageRow(longAgo, false), usageRow(longAgo, false));
+
+        // Same name, files written just now: the old record is not evidence about this version.
+        SkillFacts rewritten = SkillMaintenanceService.factsFor("ssh_update_plex", now, oldFailures);
+        assertEquals(0, rewritten.runs(), "the previous incarnation's attempts must not count");
+        assertEquals(0, rewritten.idleDays(), "and it must be treated as new, not 180 days idle");
+        assertTrue(SkillMaintenanceService.decide(List.of(rewritten), Set.of()).isEmpty(),
+                "a freshly rewritten skill must survive the very next maintenance pass");
+
+        // Untouched since those runs: the record stands.
+        SkillFacts untouched = SkillMaintenanceService.factsFor(
+                "ssh_update_plex", longAgo.minus(java.time.Duration.ofDays(1)), oldFailures);
+        assertEquals(2, untouched.runs(), "history after the files were written still counts");
+        assertEquals(0, untouched.successes());
+        assertEquals(1, SkillMaintenanceService.decide(List.of(untouched), Set.of()).size(),
+                "and it is retired on that record");
+    }
+
+    @Test
+    @DisplayName("repairing a skill clears the failures that prompted the repair")
+    void repairResetsTheRecord() {
+        // tesseract_local_installer in production: its files were written 34 seconds AFTER its
+        // last run, i.e. it failed, was rewritten, and was never tried again. Judging the repair
+        // on the failures it was meant to fix would be judging the wrong version.
+        java.time.Instant lastRun = java.time.Instant.now().minus(java.time.Duration.ofDays(179));
+        java.time.Instant repairedAt = lastRun.plusSeconds(34);
+        SkillFacts f = SkillMaintenanceService.factsFor("tesseract_local_installer", repairedAt,
+                List.of(usageRow(lastRun, false), usageRow(lastRun, false)));
+
+        assertEquals(0, f.runs(), "the pre-repair failures belong to the version that was replaced");
+        // 178, not 179: the repair happened 34 seconds AFTER the run, so a whole 179th day has
+        // not elapsed and Duration.toDays() truncates. Ages are counted in completed days.
+        assertEquals(178, f.idleDays(), "the repair itself is ~179 days old and was never tried");
+        assertEquals(1, SkillMaintenanceService.decide(List.of(f), Set.of()).size(),
+                "so it is still retired — for never having been used, which is the honest reason");
+    }
+
+    private static java.util.Map<String, Object> usageRow(java.time.Instant at, boolean ok) {
+        // SQLite's datetime('now') format, which is what the column actually holds.
+        String text = at.toString().replace('T', ' ').substring(0, 19);
+        return java.util.Map.of("created_at", text, "success", ok ? 1 : 0);
+    }
+
+    @Test
     @DisplayName("the reliability boundary is exact and does not turn on rounding")
     void reliabilityBoundary() {
         // MIN_SUCCESS_IN = 4: one in four is enough, one in five is not.

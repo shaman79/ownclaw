@@ -138,7 +138,7 @@ public class SkillMaintenanceService {
      * which nothing has ever succeeded, and reading it that way would quarantine everything.
      */
     public List<SkillFacts> facts() {
-        Map<String, Map<String, Object>> usage = new LinkedHashMap<>();
+        Map<String, List<Map<String, Object>>> usage = new LinkedHashMap<>();
         try {
             Map<String, Object> span = jdbc.queryForMap(
                     "SELECT COUNT(*) c, "
@@ -151,12 +151,12 @@ public class SkillMaintenanceService {
                         + "{} days); retiring nothing.", rows, spanDays);
                 return List.of();
             }
+            // Raw rows, not an aggregate: each one has to be compared against the skill's own
+            // birth date before it counts, and an aggregate has already thrown that away.
             for (Map<String, Object> row : jdbc.queryForList(
-                    "SELECT tool_name, COUNT(*) runs, "
-                            + "SUM(CASE WHEN success THEN 1 ELSE 0 END) successes, "
-                            + "CAST(julianday('now') - julianday(MAX(created_at)) AS INTEGER) idle_days "
-                            + "FROM skill_usage GROUP BY tool_name")) {
-                usage.put(String.valueOf(row.get("tool_name")), row);
+                    "SELECT tool_name, created_at, success FROM skill_usage")) {
+                usage.computeIfAbsent(String.valueOf(row.get("tool_name")),
+                        k -> new ArrayList<>()).add(row);
             }
         } catch (Exception e) {
             log.warn("Skill maintenance cannot read usage history ({}); no skill will be retired.",
@@ -166,22 +166,62 @@ public class SkillMaintenanceService {
 
         List<SkillFacts> out = new ArrayList<>();
         for (DynamicSkill skill : registry.allDynamic()) {
-            Map<String, Object> row = usage.get(skill.name());
-            if (row == null) {
-                // Never invoked. That is NOT the same fact as "ancient": creating a skill writes
-                // no usage row at all, because skill_create bypasses the executeTool path that
-                // calls recordUsage. So a skill written an hour ago arrives here looking exactly
-                // like one abandoned last spring. Treating that as infinitely idle let it skip
-                // the 90-day gate entirely, and quarantined the agent's own fresh work before it
-                // could be used once. The files' own age is the only honest clock available.
-                out.add(new SkillFacts(skill.name(), 0, 0, ageDays(skill.skillDir())));
-            } else {
-                out.add(new SkillFacts(skill.name(),
-                        num(row.get("runs")), num(row.get("successes")), num(row.get("idle_days"))));
-            }
+            out.add(factsFor(skill, usage.getOrDefault(skill.name(), List.of())));
         }
         out.sort(Comparator.comparing(SkillFacts::name));
         return out;
+    }
+
+    /**
+     * Count only the history that belongs to the skill as it exists now.
+     * <p>
+     * {@code skill_usage} is keyed on the tool's name and nothing else, so a name carries its
+     * record across rewrites. That matters in two ways that both end badly. A skill the agent
+     * repairs inherits the failures of the version it just replaced, and is retired for them
+     * before the repair can be tried once. And a skill retired here and then written again from
+     * scratch inherits the dead one's record <em>and</em> its months of idleness, so it is
+     * retired again immediately — a write-and-retire loop that would never settle.
+     * <p>
+     * The skill's own files say when this version began. Usage older than that belongs to a
+     * previous incarnation of the name and is not evidence about this one. A rewritten or
+     * repaired skill therefore starts with a clean record and the full grace period, which is
+     * also the right answer for repair: fixing something is precisely the claim that its past
+     * failures no longer apply.
+     */
+    private static SkillFacts factsFor(DynamicSkill skill, List<Map<String, Object>> rows) {
+        return factsFor(skill.name(), newestFileAt(skill.skillDir()), rows);
+    }
+
+    /** The counting itself, separated from the filesystem so it can be tested directly. */
+    static SkillFacts factsFor(String name, Instant writtenAt, List<Map<String, Object>> rows) {
+        int runs = 0, successes = 0;
+        Instant lastUse = null;
+        for (Map<String, Object> row : rows) {
+            Instant at = parseInstant(String.valueOf(row.get("created_at")));
+            if (at == null || at.isBefore(writtenAt)) continue;   // a previous incarnation's record
+            runs++;
+            if (num(row.get("success")) != 0) successes++;
+            if (lastUse == null || at.isAfter(lastUse)) lastUse = at;
+        }
+        int idleDays = lastUse != null
+                ? (int) Math.max(0, Duration.between(lastUse, Instant.now()).toDays())
+                : (int) Math.max(0, Duration.between(writtenAt, Instant.now()).toDays());
+        return new SkillFacts(name, runs, successes, idleDays);
+    }
+
+    /**
+     * SQLite writes {@code datetime('now')} as "YYYY-MM-DD HH:MM:SS" in UTC. An unparseable value
+     * returns null and the row is skipped, which counts it against nothing — the safe direction,
+     * since the alternative is inventing evidence.
+     */
+    private static Instant parseInstant(String text) {
+        if (text == null || text.isBlank() || "null".equals(text)) return null;
+        try {
+            return Instant.parse(text.trim().replace(' ', 'T')
+                    + (text.contains("Z") || text.contains("+") ? "" : "Z"));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -194,6 +234,21 @@ public class SkillMaintenanceService {
      * is exactly what updating a skill does. If the age cannot be read at all the answer is 0:
      * unknown age means too new to judge, the direction every other uncertainty here fails in.
      */
+    /** When anything in the directory was last written; the epoch if it cannot be read. */
+    private static Instant newestFileAt(Path dir) {
+        try (Stream<Path> children = Files.list(dir)) {
+            long newest = children.map(SkillMaintenanceService::modifiedMillis)
+                    .reduce(modifiedMillis(dir), Math::max);
+            return Instant.ofEpochMilli(newest);
+        } catch (Exception e) {
+            // Unknown birth date -> treat the skill as brand new, so its whole history is
+            // discounted and the grace period protects it. Same direction as ageDays.
+            log.warn("Cannot read the age of {} ({}); treating it as newly written.",
+                    dir, e.getMessage());
+            return Instant.now();
+        }
+    }
+
     static int ageDays(Path dir) {
         try (Stream<Path> children = Files.list(dir)) {
             long newest = children.map(SkillMaintenanceService::modifiedMillis)
