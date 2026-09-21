@@ -20,6 +20,8 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.io.File;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -1097,9 +1099,14 @@ public class OpsService {
             // it started; if the file has changed since, the running code is not what is on disk,
             // whatever any marker says. It needs no cooperation from the deploy script, which is
             // the point -- every previous version of this check trusted something deploy.sh wrote.
-            Instant jarAt = artifactModifiedAt();
+            Path jar = launchedJar();
+            Instant jarAt = jar == null ? null : Files.getLastModifiedTime(jar).toInstant();
             boolean jarNewer = jarAt != null && jarAt.isAfter(startedAt);
-            if (jarAt != null) out.put("artifactModifiedAt", jarAt.toString());
+            // Say when this check could not run. Omitting the field is what hid the fact that it
+            // was doing nothing at all in production.
+            out.put("artifactModifiedAt", jarAt != null ? jarAt.toString()
+                    : "unavailable — no launched JAR found (exploded classpath?), so this check "
+                      + "is NOT protecting you and only the marker comparison applies");
 
             boolean stale = markerNewer || jarNewer;
             out.put("running", !stale);
@@ -1122,21 +1129,54 @@ public class OpsService {
     }
 
     /**
-     * When the artifact this JVM was launched from was last written, or null if it cannot be
-     * determined (an exploded classpath in development, or a security manager in the way).
+     * The JAR this JVM was launched from, or null when there is not one (an exploded classpath
+     * in development).
+     * <p>
+     * The first version of this asked the protection domain for its code source and called
+     * {@code Path.of(uri)} on it. Under {@code java -jar} — which is how this actually runs —
+     * Spring Boot's launcher reports {@code jar:file:/opt/ownclaw/ownclaw.jar!/BOOT-INF/classes!/},
+     * whose scheme is {@code jar}, not {@code file}. {@code Path.of} throws on it, the catch
+     * returned null, the caller omitted the field, and the freshness check silently degraded to
+     * the marker-only behaviour it was written to replace. It shipped looking correct and did
+     * nothing for a day. Hence two strategies and, above all, no silent null.
      */
-    private Instant artifactModifiedAt() {
+    private Path launchedJar() {
+        // 1. Under `java -jar x.jar` the class path is exactly that one jar. This is the normal
+        //    production case and needs no URI parsing at all.
+        String cp = System.getProperty("java.class.path", "");
+        if (!cp.isBlank() && !cp.contains(File.pathSeparator) && cp.endsWith(".jar")) {
+            Path p = Path.of(cp).toAbsolutePath();
+            if (Files.isRegularFile(p)) return p;
+        }
+        // 2. Otherwise read the code source, tolerating a nested "jar:file:...!/..." URL by
+        //    taking the part before the first "!/" separator.
         try {
             var src = OpsService.class.getProtectionDomain().getCodeSource();
             if (src == null || src.getLocation() == null) return null;
-            Path path = Path.of(src.getLocation().toURI());
-            // Spring Boot's launcher reports a nested path inside the fat jar; walk up to the
-            // file that actually exists on disk.
-            while (path != null && !Files.exists(path)) path = path.getParent();
-            if (path == null || Files.isDirectory(path)) return null;   // exploded build: no artifact
-            return Files.getLastModifiedTime(path).toInstant();
+            String url = fileUrlOfContainingArchive(src.getLocation().toString());
+            if (url == null) return null;
+            Path p = Path.of(URI.create(url));
+            return Files.isRegularFile(p) ? p : null;   // a directory means an exploded build
         } catch (Exception e) {
+            log.debug("Could not locate the launched artifact: {}", e.toString());
             return null;
         }
+    }
+
+    /**
+     * Reduce a code-source URL to the {@code file:} URL of the archive that contains it, or null
+     * if it does not name one.
+     * <p>
+     * Package-private and separate so it can be tested, because this is the exact step that
+     * failed: Spring Boot's nested launcher reports
+     * {@code jar:file:/opt/ownclaw/ownclaw.jar!/BOOT-INF/classes!/}, and feeding that straight to
+     * {@code Path.of} throws, which the caller turned into a silent null.
+     */
+    static String fileUrlOfContainingArchive(String url) {
+        if (url == null) return null;
+        if (url.startsWith("jar:")) url = url.substring(4);
+        int bang = url.indexOf("!/");
+        if (bang >= 0) url = url.substring(0, bang);
+        return url.startsWith("file:") ? url : null;
     }
 }
