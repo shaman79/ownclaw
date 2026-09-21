@@ -251,8 +251,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Handle new session creation via WebSocket
         if ("new_session".equals(messageType)) {
             String title = (userMessage != null && !userMessage.isBlank()) ? userMessage : "New Chat";
-            conversationService.createSession(userId, title);
+            String created = conversationService.createSession(userId, title);
             sendActiveSessionInfo(session, userId);
+            // Creating a chat changes the ACCOUNT's active session, so the other windows are now
+            // pointing at a chat the user has left -- and did not even have the new one in their
+            // sidebar. Announcing it lets them follow, the same as an explicit switch.
+            sendToUser(userId, "session_updated", created != null ? created : title);
             return;
         }
 
@@ -524,10 +528,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         try {
             String sessionId = conversationService.getCurrentSession(userId);
             var sessions = conversationService.listSessions(userId, false);
+            // taskRunning: a reconnecting browser cannot otherwise know work is in flight.
+            // Status messages are live-only and never replayed, so reloading during a long task
+            // produced a completely idle chat with an enabled Send button -- which reads as "the
+            // request was lost", and the obvious response is to send it again.
             String json = mapper.writeValueAsString(Map.of(
                     "type", "session_info",
                     "activeSessionId", sessionId,
-                    "sessions", sessions
+                    "sessions", sessions,
+                    "taskRunning", taskQueue.isBusyFor(userId)
             ));
             session.sendMessage(new TextMessage(json));
         } catch (Exception e) {

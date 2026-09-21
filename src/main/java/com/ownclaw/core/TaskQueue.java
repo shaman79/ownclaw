@@ -135,6 +135,28 @@ public class TaskQueue {
      * Returns true if a task is currently being processed or waiting in the queue.
      * Used by the deploy script to avoid restarting during active work.
      */
+    /**
+     * Whether this user has work running or waiting.
+     * <p>
+     * Needed because a browser that reconnects mid-task has no way to know one is in flight:
+     * status messages are live-only and are not replayed, so a reload during a six-minute task
+     * showed a completely idle chat with an enabled Send button, and the obvious conclusion was
+     * that the request had been lost.
+     */
+    public boolean isBusyFor(String userId) {
+        if (userId == null) return false;
+        for (var q : java.util.List.of(interactiveQueue, backgroundQueue)) {
+            for (QueuedTask t : q) {
+                if (userId.equals(t.userId())) return true;
+            }
+        }
+        return runningUsers.contains(userId);
+    }
+
+    /** Users whose tasks are executing right now. */
+    private final java.util.Set<String> runningUsers =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     public boolean isBusy() {
         return running.get() > 0 || queueSize.get() > 0;
     }
@@ -145,6 +167,7 @@ public class TaskQueue {
                 QueuedTask task = lane.take();
                 queueSize.decrementAndGet();
                 running.incrementAndGet();
+                runningUsers.add(task.userId());
 
                 try {
                     // Drop work that was already waiting when the user pressed Stop.
@@ -182,6 +205,7 @@ public class TaskQueue {
                             "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
                 } finally {
                     running.decrementAndGet();
+                    runningUsers.remove(task.userId());
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

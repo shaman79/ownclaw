@@ -4178,7 +4178,15 @@
 
     function deleteSession(sessionId) {
         if (!authToken) return;
-        var wasActive = (sessionId === activeSessionId);
+        // "Is this the chat on screen", not "is this the account's active chat".
+        //
+        // activeSessionId tracks what the SERVER considers active, which another window can
+        // change at any time. Deleting a different chat then wiped the pane the owner was
+        // reading, and deleting the one he WAS reading left it on screen -- both decided by a
+        // window he was not looking at. It also has to be the chat view at all: deleting from
+        // Settings used to clear the settings form and replace it with an empty transcript the
+        // composer is hidden for, leaving the app unreachable by its own buttons.
+        var wasActive = (currentView === 'chat' && sessionId === activeSessionId);
 
         // Optimistic UI: immediately mark the item as deleting, then fade out
         var itemEl = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
@@ -4683,9 +4691,34 @@
                         loadSessionMessages(data.activeSessionId);
                         needsInitialLoad = false;
                     }
+                    // Restore the working state after a reload or reconnect. Status messages are
+                    // live-only and are never replayed, so a reload during a six-minute task
+                    // showed an idle chat with an enabled Send button -- which reads as "the
+                    // request was lost", and the natural response is to send it again and run
+                    // the whole thing twice.
+                    if (data.taskRunning) {
+                        setThinking(true);
+                        showActivity('Working — reconnected to a task already running', null);
+                    }
                 } else if (type === 'session_updated') {
-                    // A session was updated (new message, title change) — refresh sidebar
+                    // The id is the point, and it used to be discarded.
+                    //
+                    // The active session belongs to the ACCOUNT, not to a window. When another
+                    // tab (or the phone) switches or creates a chat, the server now tells every
+                    // window -- but this branch only refreshed the sidebar, so the highlight
+                    // moved while the transcript stayed on the old chat. Anything typed here was
+                    // then saved into the chat the server considers active, i.e. not the one on
+                    // screen. Following the switch is the only reading that is not a lie.
                     refreshSessionList();
+                    if (content && content !== activeSessionId && currentView === 'chat') {
+                        activeSessionId = content;
+                        updateSidebarActive(content);
+                        // Keep anything half-typed: it belongs to the person, not the chat.
+                        loadSessionMessages(content);
+                    } else if (content) {
+                        activeSessionId = content;
+                        updateSidebarActive(content);
+                    }
                 } else if (type === 'status') {
                     var sub = data.status || '';
                     var detail = data.data && data.data.category ? data.data : null;
