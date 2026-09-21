@@ -2208,12 +2208,27 @@ public class AgentLoop {
      * @param description what's happening (e.g. "Generating code")
      * @return a ScheduledFuture to cancel when the LLM call completes
      */
+    /**
+     * One scheduler for every heartbeat in the process.
+     * <p>
+     * This used to be created per call, and only the ScheduledFuture was returned. Cancelling a
+     * future does not shut down the executor that owns it, so each LLM call and each tool call
+     * left a live {@code llm-heartbeat} thread parked forever. On a server that runs two
+     * scheduled tasks a day plus interactive chat, at up to twenty steps a task, that is
+     * thousands of threads and their stacks — an ordinary day's work would eventually exhaust
+     * the process. Nothing surfaced it because the threads are daemons and idle.
+     * <p>
+     * A shared pool makes cancel() sufficient: the future stops, the threads stay and are reused.
+     */
+    private static final ScheduledExecutorService HEARTBEAT_SCHEDULER =
+            Executors.newScheduledThreadPool(2, r -> {
+                Thread t = new Thread(r, "llm-heartbeat");
+                t.setDaemon(true);
+                return t;
+            });
+
     private ScheduledFuture<?> startLlmHeartbeat(String userId, String description) {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "llm-heartbeat");
-            t.setDaemon(true);
-            return t;
-        });
+        ScheduledExecutorService scheduler = HEARTBEAT_SCHEDULER;
         long[] startMs = { System.currentTimeMillis() };
         return scheduler.scheduleAtFixedRate(() -> {
             long elapsed = (System.currentTimeMillis() - startMs[0]) / 1000;

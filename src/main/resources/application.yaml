@@ -3,16 +3,31 @@ spring:
     name: ownclaw
 
   datasource:
-    url: jdbc:sqlite:${ownclaw.database.path:./data/ownclaw.db}
+    # Pragmas belong in the URL, not in connection-init-sql.
+    #
+    # connection-init-sql is handed to a single Statement.execute(), and the SQLite driver runs
+    # only the FIRST statement in it. Everything after the first semicolon was silently discarded
+    # on every connection this application has ever opened. Production showed the signature
+    # plainly: /api/ops/health reported journalMode=wal (the first pragma) next to foreignKeys=0
+    # (the last), so foreign keys were never enforced despite being asked for.
+    #
+    # Measured against sqlite-jdbc 3.47.2 before changing this, because the obvious repair --
+    # putting the pragmas on one line -- fails in exactly the same way:
+    #   one execute() with all four  -> foreign_keys=0  synchronous=2     cache_size=-2000
+    #   one execute() per pragma     -> foreign_keys=1  synchronous=1     cache_size=-8000
+    #   as URL parameters            -> foreign_keys=1  synchronous=1     cache_size=-8000  wal
+    # Only the URL form applies all of them, and it applies to every pooled connection.
+    #
+    # Enabling foreign keys changes behaviour on a database that has run for months without them,
+    # so production was checked for violations first: every table carrying a reference -- and both
+    # non-user references, active_session.session_id and message_attachments -- reported zero
+    # orphans. Nothing writes a synthetic id into a referencing table either; skill.retired events
+    # use user_id='system' and the events table has no foreign key.
+    url: "jdbc:sqlite:${ownclaw.database.path:./data/ownclaw.db}?journal_mode=WAL&busy_timeout=5000&synchronous=NORMAL&cache_size=-8000&foreign_keys=true"
     driver-class-name: org.sqlite.JDBC
     hikari:
       maximum-pool-size: 4  # WAL mode allows concurrent readers + 1 writer
-      connection-init-sql: |
-        PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
-        PRAGMA synchronous=NORMAL;
-        PRAGMA cache_size=-8000;
-        PRAGMA foreign_keys=ON;
+
 
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.yaml
