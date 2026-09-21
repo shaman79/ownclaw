@@ -143,6 +143,8 @@ public class ThinkingEngine {
                     && !response.truncated()) {
                 AgentAction parsed = tryParseAction(response.content());
                 if (parsed != null) {
+                    log.info("protocol=native-but-text — the model ignored the tools array and "
+                            + "emitted a text action; parsed it rather than delivering JSON.");
                     log.debug("Native tools were offered but the model replied with a text "
                             + "action; parsed it rather than delivering the JSON as an answer.");
                     return new ThinkResult(parsed, messages, response.content(),
@@ -150,6 +152,8 @@ public class ThinkingEngine {
                             response.completionTokens(), response.cacheCreationTokens(),
                             response.cacheReadTokens(), provider.model());
                 }
+                log.info("protocol=native — answered directly with no tool call, provider={}",
+                        provider.name());
                 AgentAction answer = new AgentAction(AgentAction.RESPOND,
                         Map.of("message", response.content()),
                         // Deliberately NOT one of the strings AgentLoop treats as a fallback:
@@ -164,6 +168,14 @@ public class ThinkingEngine {
             // A native tool call is unambiguous: no parsing, so no parse failure.
             if (nativeTools && response.hasToolCalls()) {
                 var call = response.toolCalls().get(0);
+                // Logged at INFO because otherwise there is no way to tell from outside which
+                // protocol a step used: a correct answer looks identical either way, and the
+                // token counts do not distinguish them. Without this the flag cannot be
+                // verified in production at all, only assumed.
+                log.info("Native tool call: {} ({} args) — protocol=native, provider={}",
+                        call.name(),
+                        call.arguments() == null ? 0 : call.arguments().size(),
+                        provider.name());
                 AgentAction action = new AgentAction(call.name(),
                         call.arguments() == null ? Map.of() : call.arguments(),
                         response.content() == null ? "" : response.content());
