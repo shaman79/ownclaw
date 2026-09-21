@@ -136,25 +136,34 @@ public class SkillManager {
             Path skillDir = Path.of(config.getSkills().getGeneratedPath()).resolve(name);
             Files.createDirectories(skillDir);
 
-            Files.writeString(skillDir.resolve("SKILL.yaml"),
+            // Snapshot EVERY authored file before touching any of them.
+            //
+            // Only skill.py used to be kept, so a failed update restored the code and left the
+            // new SKILL.yaml and the new (or deleted) requirements.txt in place. The result was
+            // a skill whose code was the working version while its declared parameters,
+            // credentials and dependencies were the broken one's -- so the old code ran with a
+            // parameter it did not accept, or without the credentials it needed, and the failure
+            // looked like the restored version being broken rather than a half-applied update.
+            Path codeFile = skillDir.resolve("skill.py");
+            Path yamlFile = skillDir.resolve("SKILL.yaml");
+            Path reqFile = skillDir.resolve("requirements.txt");
+            String previousCode = Files.exists(codeFile)
+                    ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
+            String previousYaml = Files.exists(yamlFile)
+                    ? Files.readString(yamlFile, StandardCharsets.UTF_8) : null;
+            String previousRequirements = Files.exists(reqFile)
+                    ? Files.readString(reqFile, StandardCharsets.UTF_8) : null;
+
+            Files.writeString(yamlFile,
                     buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
                             timeout, credentials, systemPackagesStr, containerImage),
                     StandardCharsets.UTF_8);
-            // Keep whatever was there before. An update overwrites in place, so without this a
-            // broken regeneration destroys a skill that worked -- the failure mode where a model
-            // "fixes" an edge case at 2am and replaces six months of working code with something
-            // that cannot even import.
-            Path codeFile = skillDir.resolve("skill.py");
-            String previousCode = Files.exists(codeFile)
-                    ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
-
             Files.writeString(codeFile, code, StandardCharsets.UTF_8);
             if (requirements != null && !requirements.isBlank()) {
-                Files.writeString(skillDir.resolve("requirements.txt"),
-                        requirements.strip() + "\n", StandardCharsets.UTF_8);
+                Files.writeString(reqFile, requirements.strip() + "\n", StandardCharsets.UTF_8);
             } else {
                 // Remove stale requirements.txt so the old venv isn't used
-                Files.deleteIfExists(skillDir.resolve("requirements.txt"));
+                Files.deleteIfExists(reqFile);
             }
 
             // Does it actually load? py_compile above proves the file parses, which is a much
@@ -164,12 +173,28 @@ public class SkillManager {
             String loadError = verifyLoads(skillDir, name);
             if (loadError != null) {
                 if (previousCode != null) {
+                    // Put the whole previous version back, not just its code.
                     Files.writeString(codeFile, previousCode, StandardCharsets.UTF_8);
-                    log.warn("Skill '{}' failed to load; restored the previous version", name);
+                    if (previousYaml != null) {
+                        Files.writeString(yamlFile, previousYaml, StandardCharsets.UTF_8);
+                    }
+                    if (previousRequirements != null) {
+                        Files.writeString(reqFile, previousRequirements, StandardCharsets.UTF_8);
+                    } else {
+                        Files.deleteIfExists(reqFile);
+                    }
+                    log.warn("Skill '{}' failed to load; restored the previous version in full", name);
                     return "ERROR: the new code for '" + name + "' does not load, so the previous "
                             + "working version was kept. Fix and retry with the SAME name.\n" + loadError;
                 }
+                // A brand-new skill that will not import must not be left lying in generated/.
+                // Nothing deleted it, and startup registers every directory it finds there -- so
+                // the next deploy silently registered a skill that had already been rejected, and
+                // the agent would pick it from the manifest and fail on first use, with the
+                // context that produced it long gone. Quarantine keeps the code recoverable.
                 log.warn("New skill '{}' failed to load: {}", name, loadError.replace('\n', ' '));
+                dynamicSkillRegistry.quarantineUnregistered(skillDir,
+                        "Rejected at creation: it does not import.\n" + loadError);
                 return "ERROR: '" + name + "' was written but does not load, so it was not "
                         + "registered. Fix and retry with the SAME name.\n" + loadError;
             }

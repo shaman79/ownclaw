@@ -243,6 +243,22 @@ public class DynamicSkillRegistry {
         }
     }
 
+    /**
+     * Quarantine a directory that was never registered — a skill rejected at creation.
+     * <p>
+     * It cannot go through {@link #retire}, which looks the skill up in the registry and finds
+     * nothing. Left alone, the directory stays in {@code generated/} and {@link #init} registers
+     * it on the next restart, so a skill that was explicitly rejected for not importing comes
+     * back silently and fails on first use.
+     */
+    public Optional<Path> quarantineUnregistered(Path skillDir, String reason) {
+        return moveToQuarantine(skillDir,
+                "Quarantined at creation.\n"
+                        + "Reason: " + reason + "\n\n"
+                        + "This skill was written but never registered. Fix the code and move the\n"
+                        + "directory back into generated/ if it is worth keeping.\n");
+    }
+
     /** Move a skill directory into the quarantine sibling, leaving a note saying why. */
     private Optional<Path> moveToQuarantine(Path skillDir, String reasonText) {
         try {
