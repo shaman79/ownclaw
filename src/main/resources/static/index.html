@@ -2592,7 +2592,14 @@
             searchResults.classList.add('visible');
         })
         .catch(function(e) {
+            // Say it failed. Leaving the previous query's hits on screen under the new words is
+            // worse than showing nothing: they look like results for what was just typed.
             console.error('Search failed:', e);
+            if (!authToken) return;   // a 401 already ran logout(), which cleared this panel
+            searchResults.innerHTML = '<div class="search-empty">Search failed: '
+                    + escapeHtml(e && e.message ? e.message : 'the server did not respond')
+                    + '</div>';
+            searchResults.classList.add('visible');
         });
     }
 
@@ -2636,7 +2643,18 @@
             });
         })
         .catch(function(e) {
+            // Say what happened. clearMessages() alone left a blank pane, which is exactly what
+            // an empty chat looks like -- so a locked database or an expired token read as "this
+            // conversation is gone". The loader must be removed either way, or the pane sits on
+            // "Loading messages..." for ever while the global error bar auto-dismisses.
             clearMessages();
+            if (!authToken) return;          // logout already cleared the pane deliberately
+            var err = document.createElement('div');
+            err.className = 'search-empty';
+            err.textContent = 'Could not load this conversation: '
+                    + (e && e.message ? e.message : 'the server did not respond')
+                    + '. Nothing is lost — try again.';
+            messagesEl.appendChild(err);
             console.error('Failed to load messages:', e);
         });
     }
@@ -4139,6 +4157,10 @@
             headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
             body: JSON.stringify({ title: newTitle })
         })
+        // okJson first: without it a 404 or 500 took the success path, so the title changed on
+        // screen and reverted a moment later when refreshSessionList returned the server's
+        // unchanged one -- a rename that looked like it worked and silently did not.
+        .then(okJson)
         .then(function() {
             if (itemEl) itemEl.classList.remove('renaming');
             refreshSessionList();
@@ -4190,6 +4212,10 @@
                 itemEl.classList.remove('deleting', 'fade-out');
             }
             refreshSessionList();
+            // The chat is still there, so put it back on screen. Without this the pane stayed
+            // empty after a failed delete of the chat being read -- the conversation looked
+            // destroyed by an operation that had in fact failed.
+            if (wasActive) loadSessionMessages(sessionId);
         });
     }
 
@@ -4602,7 +4628,22 @@
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     }
 
+    /** The pending reconnect, so logging out (or back in) can cancel it. */
+    var reconnectTimer = null;
+
     function connect() {
+        // Cancel any reconnect already queued.
+        //
+        // Closing the socket during logout fires onclose, which schedules a reconnect three
+        // seconds later. That timer outlived the logout: it fired while the owner was typing his
+        // password, the socket opened, the server rejected it, and the handlers cleared both
+        // fields under him. Clearing it here rather than in logout() is deliberate -- onclose
+        // runs AFTER logout() has returned, so a clear inside logout would be a no-op -- and it
+        // also cancels a stale backoff timer still pending when he logs back in, which otherwise
+        // opened a second socket and rendered everything twice.
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (!authToken) return;   // logged out: nothing to connect to
+
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         var tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
         ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam);
@@ -4624,7 +4665,7 @@
             var delay = Math.min(3000 * reconnectAttempt, 30000);
             setConnState(false, 'Reconnecting...');
             showConnBanner(reconnectAttempt === 1 ? 'Disconnected - reconnecting...' : 'Reconnecting... attempt ' + reconnectAttempt);
-            setTimeout(connect, delay);
+            reconnectTimer = setTimeout(connect, delay);
         };
 
         ws.onmessage = function(e) {
