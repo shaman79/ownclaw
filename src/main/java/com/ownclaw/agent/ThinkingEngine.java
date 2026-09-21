@@ -251,7 +251,11 @@ public class ThinkingEngine {
 
         // Multi-turn: each action/observation becomes assistant/user message pair.
         // Last 2 turns get full output detail; older turns are compressed.
-        int fullDetailFrom = Math.max(0, effectiveTurns.size() - 2);
+        // Same budget policy as the OpenAI path, rather than a hardcoded "last two turns".
+        // Keeping a fixed count made "read three pages and compare them" impossible: the first
+        // page was a 300-character stub by the time the third arrived.
+        int fullDetailFrom = AgentTrajectory.firstTurnKeptInFull(
+                effectiveTurns, AgentTrajectory.FULL_OUTPUT_BUDGET_CHARS);
         for (int i = 0; i < effectiveTurns.size(); i++) {
             var turn = effectiveTurns.get(i);
             boolean isFull = i >= fullDetailFrom;

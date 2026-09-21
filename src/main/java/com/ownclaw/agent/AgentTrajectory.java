@@ -103,13 +103,52 @@ public class AgentTrajectory {
     }
 
     /**
+     * How much of the prompt may be spent on tool output kept in full.
+     * <p>
+     * Roughly 15k tokens. Big enough to hold several pages at once, small enough that it cannot
+     * be the thing that overflows a context window on its own.
+     */
+    static final int FULL_OUTPUT_BUDGET_CHARS = 60_000;
+
+    /**
+     * The oldest turn that still gets its output in full, deciding by BUDGET rather than count.
+     * <p>
+     * This used to be {@code turns.size() - 2}: the last two turns in full, everything older
+     * crushed to 150 characters of head and 150 of tail. That makes a whole class of task
+     * impossible rather than merely lossy -- "read these three pages and compare them" cannot
+     * work, because by the time the third arrives the first is a 300-character stub, and the
+     * model is left comparing summaries it was never given. It was also wasteful in the other
+     * direction: two turns of a 200 KB page each are re-sent in full on every step.
+     * <p>
+     * Walking newest-first and spending a budget fixes both ends. Three pages of 10k fit; twenty
+     * do not, and the oldest are the ones that get stubbed -- which is the right order to lose
+     * them in, because the newest output is what the current step is reasoning about.
+     * <p>
+     * At least one turn is always kept in full, however large: a model that cannot see the
+     * result of the step it just took cannot take the next one.
+     */
+    static int firstTurnKeptInFull(List<Turn> turns, int budgetChars) {
+        int spent = 0;
+        int first = turns.size() - 1;
+        for (int i = turns.size() - 1; i >= 0; i--) {
+            var obs = turns.get(i).observation();
+            int cost = obs == null || obs.output() == null ? 0 : obs.output().length();
+            // The newest turn is kept whatever it costs; after that, stop at the budget.
+            if (i < turns.size() - 1 && spent + cost > budgetChars) break;
+            spent += cost;
+            first = i;
+        }
+        return first;
+    }
+
+    /**
      * Configurable version for testing/tuning the truncation threshold.
      */
     public String toPromptSummary(int maxOlderOutputChars) {
         if (turns.isEmpty()) return "";
 
         var sb = new StringBuilder();
-        int fullDetailFrom = Math.max(0, turns.size() - 2); // last 2 turns get full output
+        int fullDetailFrom = firstTurnKeptInFull(turns, FULL_OUTPUT_BUDGET_CHARS);
 
         // Collapse consecutive _thinking failures into a count
         int thinkingFailStreak = 0;
