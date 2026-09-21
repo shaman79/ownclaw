@@ -69,6 +69,7 @@ public class OpsController {
                         "GET  /api/ops/users",
                         "GET  /api/ops/forensics/{userId}?limit=200",
                         "GET  /api/ops/skills[?name=x]",
+                    "GET  /api/ops/skills/quarantine",
                         "GET  /api/ops/ollama",
                         "GET  /api/ops/tasks?limit=50",
                         "GET  /api/ops/tasks/{taskId}"),
@@ -200,6 +201,46 @@ public class OpsController {
                   + "move one back into generated/ and restart to undo."
                 : "Nothing was changed. Re-send with ?apply=true to carry this out.");
         return ResponseEntity.ok(out);
+    }
+
+    /** What is sitting in quarantine, recoverable. */
+    @GetMapping("/skills/quarantine")
+    public ResponseEntity<?> quarantine() {
+        var entries = skillRegistry.quarantined();
+        return ResponseEntity.ok(Map.of(
+                "count", entries.size(),
+                "entries", entries,
+                "restore", "POST /api/ops/skills/quarantine/restore  "
+                        + "{\"entries\":[...]} or {\"all\":true}"));
+    }
+
+    /**
+     * Move quarantined skills back and register them again. Names come from
+     * {@code GET /api/ops/skills/quarantine}; {@code {"all": true}} restores everything.
+     */
+    @PostMapping("/skills/quarantine/restore")
+    public ResponseEntity<?> restoreQuarantined(@RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> in = body == null ? Map.of() : body;
+        List<String> wanted;
+        if (Boolean.TRUE.equals(in.get("all"))) {
+            wanted = skillRegistry.quarantined();
+        } else if (in.get("entries") instanceof List<?> list) {
+            wanted = list.stream().map(String::valueOf).toList();
+        } else {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Pass {\"entries\":[\"name-timestamp\", ...]} or {\"all\":true}."));
+        }
+        var restored = new java.util.ArrayList<String>();
+        var failed = new java.util.ArrayList<String>();
+        for (String entry : wanted) {
+            skillRegistry.restoreFromQuarantine(entry)
+                    .ifPresentOrElse(restored::add, () -> failed.add(entry));
+        }
+        return ResponseEntity.ok(Map.of(
+                "restored", restored, "restoredCount", restored.size(),
+                "failed", failed,
+                "note", failed.isEmpty() ? "All requested skills are live again."
+                        : "Failures are logged; a skill whose name already exists is skipped."));
     }
 
     @PostMapping("/selftest")

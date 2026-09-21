@@ -22,7 +22,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.stream.Stream;
 
 /**
  * Retires generated skills that have stopped earning their place.
@@ -90,12 +89,15 @@ public class SkillMaintenanceService {
     private final DynamicSkillRegistry registry;
     private final JdbcTemplate jdbc;
     private final EventLogService eventLog;
+    private final com.ownclaw.config.OwnClawConfig config;
 
     public SkillMaintenanceService(DynamicSkillRegistry registry, JdbcTemplate jdbc,
-                                   EventLogService eventLog) {
+                                   EventLogService eventLog,
+                                   com.ownclaw.config.OwnClawConfig config) {
         this.registry = registry;
         this.jdbc = jdbc;
         this.eventLog = eventLog;
+        this.config = config;
     }
 
     // ── facts ────────────────────────────────────────────────────────────────
@@ -234,37 +236,50 @@ public class SkillMaintenanceService {
      * is exactly what updating a skill does. If the age cannot be read at all the answer is 0:
      * unknown age means too new to judge, the direction every other uncertainty here fails in.
      */
-    /** When anything in the directory was last written; the epoch if it cannot be read. */
+    /**
+     * The files {@code skill_create} authors. Nothing else in the directory says when the skill
+     * was written.
+     * <p>
+     * This list is the whole fix for the incident this class caused. The previous version took
+     * the newest mtime across the entire skill directory, on the reasoning that rewriting
+     * skill.py in place should count. But a skill directory is also a <em>working</em> directory:
+     * DynamicSkill writes a {@code _runner_<id>.py} into it on every execution, and the virtualenv
+     * lives there too. So the newest file tracked when the skill last <em>ran</em>, not when it
+     * was last written — which put the supposed birth date after every usage row, discarded all
+     * of them, and reported skills with perfect records as "never invoked once". Twenty-one of
+     * thirty-one skills were retired on that reading.
+     */
+    private static final List<String> AUTHORED_FILES =
+            List.of("skill.py", "SKILL.yaml", "requirements.txt");
+
+    /**
+     * When this version of the skill was authored: the newest of its source files.
+     * <p>
+     * Returns now (i.e. "brand new, judge nothing") if none of them can be read, which is the
+     * direction every uncertainty in this class fails in.
+     */
     private static Instant newestFileAt(Path dir) {
-        try (Stream<Path> children = Files.list(dir)) {
-            long newest = children.map(SkillMaintenanceService::modifiedMillis)
-                    .reduce(modifiedMillis(dir), Math::max);
-            return Instant.ofEpochMilli(newest);
-        } catch (Exception e) {
-            // Unknown birth date -> treat the skill as brand new, so its whole history is
-            // discounted and the grace period protects it. Same direction as ageDays.
-            log.warn("Cannot read the age of {} ({}); treating it as newly written.",
-                    dir, e.getMessage());
+        long newest = 0L;
+        for (String name : AUTHORED_FILES) {
+            newest = Math.max(newest, modifiedMillis(dir.resolve(name)));
+        }
+        if (newest == 0L) {
+            log.warn("No authored files readable under {}; treating the skill as newly written.", dir);
             return Instant.now();
         }
+        return Instant.ofEpochMilli(newest);
     }
 
     static int ageDays(Path dir) {
-        try (Stream<Path> children = Files.list(dir)) {
-            long newest = children.map(SkillMaintenanceService::modifiedMillis)
-                    .reduce(modifiedMillis(dir), Math::max);
-            long days = Duration.between(Instant.ofEpochMilli(newest), Instant.now()).toDays();
-            return (int) Math.max(0, Math.min(Integer.MAX_VALUE, days));
-        } catch (Exception e) {
-            log.warn("Cannot read the age of {} ({}); treating it as newly written.",
-                    dir, e.getMessage());
-            return 0;
-        }
+        Instant at = newestFileAt(dir);
+        long days = Duration.between(at, Instant.now()).toDays();
+        return (int) Math.max(0, Math.min(Integer.MAX_VALUE, days));
     }
 
+    /** 0 when the file does not exist or cannot be read — it then contributes nothing to the max. */
     private static long modifiedMillis(Path p) {
         try {
-            return Files.getLastModifiedTime(p).toMillis();
+            return Files.exists(p) ? Files.getLastModifiedTime(p).toMillis() : 0L;
         } catch (IOException e) {
             return 0L;
         }
@@ -448,6 +463,16 @@ public class SkillMaintenanceService {
     @Scheduled(initialDelay = 3_600_000L, fixedDelay = 86_400_000L)
     public void scheduledPass() {
         try {
+            if (!config.getSkills().isAutoRetire()) {
+                List<Retirement> would = plan();
+                if (!would.isEmpty()) {
+                    log.info("Skill maintenance is not enabled (ownclaw.skills.auto-retire). It "
+                                    + "would retire {}: {}. Review with POST /api/ops/skills/"
+                                    + "maintenance, then enable it.",
+                            would.size(), would.stream().map(Retirement::skill).toList());
+                }
+                return;
+            }
             run(false);
         } catch (Exception e) {
             // Never let maintenance take the scheduler's thread down with it.

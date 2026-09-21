@@ -212,8 +212,22 @@ public class OwnClawConfig {
     public static class Skills {
         private String generatedPath = "./skills/generated";
 
+        /**
+         * Whether the daily pass may retire skills by itself. OFF until a dry run has been
+         * inspected on the library it will act on.
+         * <p>
+         * Default false because the first version of this shipped enabled and retired 21 of 31
+         * skills in one pass, including capabilities with perfect records, on a clock bug. The
+         * rules were sound; the evidence feeding them was not. An automated action that removes
+         * capability has to be switched on deliberately, after someone has read what it intends
+         * to do -- POST /api/ops/skills/maintenance shows exactly that and changes nothing.
+         */
+        private boolean autoRetire = false;
+
         public String getGeneratedPath() { return generatedPath; }
         public void setGeneratedPath(String v) { this.generatedPath = v; }
+        public boolean isAutoRetire() { return autoRetire; }
+        public void setAutoRetire(boolean v) { this.autoRetire = v; }
     }
 
     public static class Database {

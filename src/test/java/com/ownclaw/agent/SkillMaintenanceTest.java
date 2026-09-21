@@ -200,6 +200,47 @@ class SkillMaintenanceTest {
     }
 
     @Test
+    @DisplayName("running a skill does not make it look newly written")
+    void runtimeArtifactsDoNotResetTheClock(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws Exception {
+        // The incident. A skill directory is also a WORKING directory: DynamicSkill writes a
+        // _runner_<id>.py into it on every execution and the virtualenv lives there. Taking the
+        // newest mtime across the whole directory therefore tracked when the skill last RAN, not
+        // when it was written -- so its birth date landed after all of its usage rows, every row
+        // was discarded as "a previous incarnation's", and skills with perfect records were
+        // reported as "never invoked once". 21 of 31 skills were retired on that reading.
+        java.nio.file.Path dir = java.nio.file.Files.createDirectory(tmp.resolve("imap_move_to_trash_by_sender"));
+        java.time.Instant authored = java.time.Instant.now().minus(java.time.Duration.ofDays(195));
+        for (String f : List.of("skill.py", "SKILL.yaml")) {
+            java.nio.file.Path w = java.nio.file.Files.writeString(dir.resolve(f), "x");
+            java.nio.file.Files.setLastModifiedTime(w,
+                    java.nio.file.attribute.FileTime.from(authored));
+        }
+        // An artifact left behind by a run a day later, and a venv touched yesterday.
+        java.nio.file.Path runner = java.nio.file.Files.writeString(dir.resolve("_runner_abc123.py"), "y");
+        java.nio.file.Files.setLastModifiedTime(runner, java.nio.file.attribute.FileTime.from(
+                java.time.Instant.now().minus(java.time.Duration.ofDays(194))));
+        java.nio.file.Files.createDirectory(dir.resolve(".venv"));
+
+        assertEquals(195, SkillMaintenanceService.ageDays(dir),
+                "age must come from the authored files, not from anything a run left behind");
+
+        // And the history must survive: 18 successful runs the day after it was written.
+        java.time.Instant ranAt = authored.plus(java.time.Duration.ofDays(1));
+        List<java.util.Map<String, Object>> runs = new ArrayList<>();
+        for (int i = 0; i < 18; i++) runs.add(usageRow(ranAt, true));
+
+        SkillFacts f = SkillMaintenanceService.factsFor("imap_move_to_trash_by_sender",
+                java.time.Instant.ofEpochMilli(
+                        java.nio.file.Files.getLastModifiedTime(dir.resolve("skill.py")).toMillis()),
+                runs);
+        assertEquals(18, f.runs(), "the runs happened after it was authored and must count");
+        assertEquals(18, f.successes());
+        assertTrue(SkillMaintenanceService.decide(List.of(f), Set.of()).isEmpty(),
+                "a skill that succeeded 18 times out of 18 must never be retired");
+    }
+
+    @Test
     @DisplayName("an unreadable directory is treated as new, never as ancient")
     void unreadableAgeFailsSafe() {
         assertEquals(0, SkillMaintenanceService.ageDays(

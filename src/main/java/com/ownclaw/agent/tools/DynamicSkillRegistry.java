@@ -16,6 +16,8 @@ import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
+import java.util.List;
+import java.util.Comparator;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -160,10 +162,80 @@ public class DynamicSkillRegistry {
         return dest;
     }
 
+    /** The quarantine directory, a sibling of generated/. */
+    private Path quarantineDir() {
+        return Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath()
+                .resolveSibling("quarantine");
+    }
+
+    /**
+     * Quarantined directories, newest first, as {@code <name>-<timestamp>}.
+     * <p>
+     * Exposed because quarantine was write-only: things went in and nothing could see them or
+     * bring them back without a shell on the host. That was tolerable while the only way in was
+     * a skill that would not load, and untenable once an automated pass could put a working
+     * skill there — recovery has to be reachable by whoever discovers the mistake.
+     */
+    public List<String> quarantined() {
+        Path dir = quarantineDir();
+        if (!Files.isDirectory(dir)) return List.of();
+        try (Stream<Path> entries = Files.list(dir)) {
+            return entries.filter(Files::isDirectory)
+                    .map(p -> p.getFileName().toString())
+                    .sorted(Comparator.reverseOrder())
+                    .toList();
+        } catch (IOException e) {
+            log.warn("Could not list quarantine at {}: {}", dir, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Move a quarantined directory back and register it again.
+     *
+     * @param entry the directory name exactly as {@link #quarantined()} reports it
+     * @return the skill's name once live again, or empty with the reason logged
+     */
+    public Optional<String> restoreFromQuarantine(String entry) {
+        if (entry == null || entry.isBlank() || entry.contains("/") || entry.contains("..")) {
+            log.warn("Refusing to restore a suspicious quarantine entry: {}", entry);
+            return Optional.empty();
+        }
+        Path source = quarantineDir().resolve(entry);
+        if (!Files.isDirectory(source)) {
+            log.warn("No quarantined directory named {}", entry);
+            return Optional.empty();
+        }
+        // "<name>-<ISO timestamp>" -- the timestamp starts at the last '-' followed by a digit
+        // sequence that parses as a date, but the name itself may contain '-', so cut at the
+        // first '-' that begins a 4-digit year.
+        String name = entry.replaceFirst("-\\d{4}-\\d{2}-\\d{2}T.*$", "");
+        Path dest = Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath().resolve(name);
+        if (Files.exists(dest)) {
+            log.warn("Not restoring {}: a skill directory named '{}' already exists.", entry, name);
+            return Optional.empty();
+        }
+        try {
+            Files.move(source, dest);
+            Files.deleteIfExists(dest.resolve("QUARANTINE-REASON.txt"));
+            DynamicSkill skill = loadSkill(dest);
+            if (skill == null) {
+                log.error("Restored {} to {} but it would not load; it stays on disk.", entry, dest);
+                return Optional.empty();
+            }
+            register(skill);
+            log.warn("Restored quarantined skill '{}' from {}", name, entry);
+            return Optional.of(skill.name());
+        } catch (Exception e) {
+            log.error("Could not restore {}: {}", entry, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     /** Move a skill directory into the quarantine sibling, leaving a note saying why. */
     private Optional<Path> moveToQuarantine(Path skillDir, String reasonText) {
         try {
-            Path quarantineDir = skillDir.getParent().resolveSibling("quarantine");
+            Path quarantineDir = quarantineDir();
             Files.createDirectories(quarantineDir);
             String stamp = java.time.Instant.now().toString().replace(':', '-');
             Path dest = quarantineDir.resolve(skillDir.getFileName() + "-" + stamp);
