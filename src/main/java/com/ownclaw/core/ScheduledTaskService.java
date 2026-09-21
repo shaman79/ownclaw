@@ -126,12 +126,10 @@ public class ScheduledTaskService {
     public long scheduleDeferred(String userId, String description, Instant runAt) {
         enforceLimit(userId);
 
-        jdbc.update("""
-            INSERT INTO scheduled_tasks (user_id, task_type, description, next_run_at, status)
-            VALUES (?, 'deferred', ?, ?, 'active')
-            """, userId, description, runAt.toString());
-
-        long taskId = jdbc.queryForObject("SELECT last_insert_rowid()", Long.class);
+        long taskId = insertReturningId(
+                "INSERT INTO scheduled_tasks (user_id, task_type, description, next_run_at, status) "
+                        + "VALUES (?, 'deferred', ?, ?, 'active')",
+                userId, description, runAt.toString());
 
         eventLog.info(userId, null, "scheduled.created",
                 "Deferred task #" + taskId + " scheduled for " + formatTime(runAt));
@@ -163,13 +161,10 @@ public class ScheduledTaskService {
         }
         Instant nextRunInstant = nextRun.atZone(ZoneId.systemDefault()).toInstant();
 
-        jdbc.update("""
-            INSERT INTO scheduled_tasks (user_id, task_type, description, cron_expression,
-                                         next_run_at, max_runs, status)
-            VALUES (?, 'recurring', ?, ?, ?, ?, 'active')
-            """, userId, description, cronExpression, nextRunInstant.toString(), maxRuns);
-
-        long taskId = jdbc.queryForObject("SELECT last_insert_rowid()", Long.class);
+        long taskId = insertReturningId(
+                "INSERT INTO scheduled_tasks (user_id, task_type, description, cron_expression, "
+                        + "next_run_at, max_runs, status) VALUES (?, 'recurring', ?, ?, ?, ?, 'active')",
+                userId, description, cronExpression, nextRunInstant.toString(), maxRuns);
 
         eventLog.info(userId, null, "scheduled.created",
                 "Recurring task #" + taskId + " [" + cronExpression + "], next run: " + formatTime(nextRunInstant));
@@ -823,6 +818,33 @@ public class ScheduledTaskService {
     /**
      * Record a task execution run in the scheduled_task_runs history table.
      */
+    /**
+     * Insert a row and return its id, on the connection that did the insert.
+     * <p>
+     * This used to be an INSERT followed by a separate {@code SELECT last_insert_rowid()}. That
+     * is two calls through a pooled DataSource, and last_insert_rowid() is per-connection state:
+     * with four connections shared by the scheduler poll, the compressor and the agent loop,
+     * the second call can land on a different connection and return another statement's id, or
+     * zero on a connection that has inserted nothing. The scheduler would then confirm
+     * "Task #N scheduled" for an N belonging to someone else's row, and cancel or pause that id
+     * later.
+     * <p>
+     * Generated keys come back from the same statement, so there is no window.
+     */
+    private long insertReturningId(String sql, Object... args) {
+        var keyHolder = new org.springframework.jdbc.support.GeneratedKeyHolder();
+        jdbc.update(con -> {
+            var ps = con.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS);
+            for (int i = 0; i < args.length; i++) ps.setObject(i + 1, args[i]);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        if (key == null) {
+            throw new IllegalStateException("Insert returned no generated key: " + sql);
+        }
+        return key.longValue();
+    }
+
     private void recordRun(long taskId, String userId, String description, String taskType,
                            String status, String result, String error, int runNumber,
                            String skillsUsed) {

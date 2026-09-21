@@ -298,10 +298,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String userId = (String) session.getAttributes().get("userId");
         if (userId != null) {
-            sessions.remove(userId);
+            // Two-argument remove: only drop the entry if it is still THIS socket.
+            //
+            // sessions is keyed by user, so a second tab overwrites the first. The old
+            // remove(userId) then deleted whatever was there, which meant closing a STALE tab
+            // tore down the LIVE one's delivery path: the running task kept going and its answer
+            // was posted into a socket that no longer existed. The status stream survived that
+            // already, because ChatStatusEmitter is keyed by subscriber, but this map was not.
+            boolean wasCurrent = sessions.remove(userId, session);
             statusEmitter.unsubscribe(userId, session);
-            interactionHandler.cancelPending(userId);
-            log.info("WebSocket disconnected: user={}", userId);
+            // Pending input belongs to whoever is actually still connected. Cancelling it from a
+            // closing stale tab would kill a prompt the live tab is waiting on.
+            if (wasCurrent) {
+                interactionHandler.cancelPending(userId);
+            }
+            log.info("WebSocket disconnected: user={} (was the active socket: {})",
+                    userId, wasCurrent);
         }
     }
 
