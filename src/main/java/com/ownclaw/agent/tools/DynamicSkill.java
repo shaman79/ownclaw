@@ -83,6 +83,23 @@ public class DynamicSkill implements Tool {
     private final ContainerSandbox containerSandbox;
     private final com.ownclaw.conversation.FileStorageService fileStorage;
 
+    /**
+     * How many invocations of this skill are running right now.
+     * <p>
+     * Read before retiring a skill. Retirement moves the skill's directory, and a running
+     * invocation is reading {@code skill.py}, its virtualenv and its own {@code _runner_} harness
+     * out of that directory the whole time it executes -- some of them for minutes. Moving it
+     * mid-run does not fail cleanly: the interpreter is already started, so what the user gets is
+     * a Python error about a path that existed a moment ago.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger inFlight =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Invocations currently executing. Zero means the directory is safe to move. */
+    public int inFlight() {
+        return inFlight.get();
+    }
+
     public DynamicSkill(String name, String description, Map<String, ToolParam> parameters,
                         Path skillDir, boolean requiresNetwork, boolean hasSideEffects,
                         int timeoutSec, SandboxManager sandbox, PythonEnvironmentService pythonEnv,
@@ -247,6 +264,7 @@ public class DynamicSkill implements Tool {
         }
 
         Path runnerScript = null;
+        inFlight.incrementAndGet();
         try {
             // Resolve Python (creates venv + installs requirements if needed)
             var resolution = pythonEnv.resolveExecution(skillDir, name);
@@ -411,6 +429,7 @@ public class DynamicSkill implements Tool {
             log.error("Dynamic skill '{}' execution failed: {}", name, e.getMessage());
             return ToolResult.failure("Execution error: " + e.getMessage());
         } finally {
+            inFlight.decrementAndGet();
             // Clean up the temp runner script
             if (runnerScript != null) {
                 try { Files.deleteIfExists(runnerScript); } catch (IOException ignored) {}

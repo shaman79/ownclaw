@@ -142,6 +142,17 @@ public class DynamicSkillRegistry {
             log.warn("Cannot retire '{}': no such dynamic skill", name);
             return Optional.empty();
         }
+        // Never move a directory out from under a running invocation. The skill's interpreter is
+        // already started and reads skill.py, its virtualenv and its own _runner_ harness from
+        // that directory for the whole run -- which for a slow skill is minutes. The failure
+        // would not be clean: the user gets a Python error about a path that existed a moment
+        // ago. Retirement is never urgent, so the right answer is to skip and try next time.
+        int running = skill.inFlight();
+        if (running > 0) {
+            log.info("Not retiring '{}': {} invocation(s) still running. It will be reconsidered "
+                    + "on the next pass.", name, running);
+            return Optional.empty();
+        }
         // Move FIRST, unregister only on success. Unregistering first left a half-state when the
         // move failed -- the skill gone from the manifest but still on disk, so it silently came
         // back at the next restart and nothing recorded that anything had been attempted. Doing

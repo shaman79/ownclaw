@@ -75,7 +75,8 @@ public class OpsController {
                         "GET  /api/ops/tasks/{taskId}"),
                 "actions", List.of(
                         "POST /api/ops/selftest",
-                        "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\"}",
+                        "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\",\"async\":true}",
+                    "GET  /api/ops/agent/run/{runId}   (collect an async run)",
                         "POST /api/ops/agent/cancel/{userId}",
                         "POST /api/ops/skills/reload",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)"),
@@ -279,9 +280,30 @@ public class OpsController {
         log.info("Ops agent run as user={}: {}", userId,
                 message.length() > 200 ? message.substring(0, 200) + "..." : message);
 
+        // Long work -- a delegation to the local model runs minutes -- outlives the reverse
+        // proxy in front of this service, which closes the connection after about two minutes and
+        // leaves the caller with an empty body while the run continues invisibly on the server.
+        // Asking for it asynchronously returns a handle immediately and the result is collected
+        // by polling, so the answer survives the proxy.
+        if (Boolean.TRUE.equals(body.get("async"))) {
+            return ResponseEntity.accepted().body(startAsyncRun(userId, message));
+        }
+
         long t0 = System.currentTimeMillis();
         try {
             AgentResult result = agentLoop.executeFull(userId, message);
+            return ResponseEntity.ok(describeRun(userId, result, t0));
+        } catch (Exception e) {
+            log.error("Ops agent run failed: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "error", e.getClass().getSimpleName() + ": " + e.getMessage(),
+                    "durationMs", System.currentTimeMillis() - t0));
+        }
+    }
+
+    /** Everything the caller is told about a finished run. Shared by the sync and async paths. */
+    private Map<String, Object> describeRun(String userId, AgentResult result, long t0) {
+        {
             String taskId = ops.latestTaskId(userId);
 
             var steps = new java.util.ArrayList<Map<String, Object>>();
@@ -323,13 +345,88 @@ public class OpsController {
                       + "failure and not delivered work; the response field holds the question."
                     : "success=false means the task did not finish: terminationReason says which "
                       + "ending it was.");
-            return ResponseEntity.ok(out);
-        } catch (Exception e) {
-            log.error("Ops agent run failed: {}", e.getMessage(), e);
-            return ResponseEntity.internalServerError().body(Map.of(
-                    "error", e.getClass().getSimpleName() + ": " + e.getMessage(),
-                    "durationMs", System.currentTimeMillis() - t0));
+            return out;
         }
+    }
+
+    // ── asynchronous runs ────────────────────────────────────────────────────
+
+    /** A run started with {"async": true}, kept until it is collected or evicted. */
+    private static final class AsyncRun {
+        final String userId;
+        final long startedAt = System.currentTimeMillis();
+        volatile Map<String, Object> result;   // null while still running
+        volatile String error;
+        AsyncRun(String userId) { this.userId = userId; }
+    }
+
+    /**
+     * The most recent async runs, oldest evicted first.
+     * <p>
+     * Bounded because this is a diagnostic surface, not a job store: an unbounded map here would
+     * hold every trajectory ever run in memory. Sixteen is enough to collect what you started.
+     */
+    private final Map<String, AsyncRun> asyncRuns = java.util.Collections.synchronizedMap(
+            new java.util.LinkedHashMap<>(32, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(Map.Entry<String, AsyncRun> e) {
+                    return size() > 16;
+                }
+            });
+
+    /** One thread: ops runs are for diagnosis, and serialising them keeps them out of each other's way. */
+    private final java.util.concurrent.ExecutorService asyncExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "ops-agent-run");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private Map<String, Object> startAsyncRun(String userId, String message) {
+        String runId = java.util.UUID.randomUUID().toString().substring(0, 8);
+        AsyncRun run = new AsyncRun(userId);
+        asyncRuns.put(runId, run);
+        asyncExecutor.submit(() -> {
+            long t0 = System.currentTimeMillis();
+            try {
+                run.result = describeRun(userId, agentLoop.executeFull(userId, message), t0);
+            } catch (Exception e) {
+                log.error("Async ops agent run {} failed: {}", runId, e.getMessage(), e);
+                run.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+        });
+        return Map.of(
+                "runId", runId,
+                "status", "running",
+                "poll", "GET /api/ops/agent/run/" + runId,
+                "note", "The run continues on the server regardless of this connection. Poll "
+                        + "until status is 'done'; a local delegation can take several minutes.");
+    }
+
+    /** Collect an async run. */
+    @GetMapping("/agent/run/{runId}")
+    public ResponseEntity<?> asyncRunResult(@PathVariable String runId) {
+        AsyncRun run = asyncRuns.get(runId);
+        if (run == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "error", "No such run. Only the 16 most recent are kept, and they do not "
+                            + "survive a restart."));
+        }
+        if (run.error != null) {
+            return ResponseEntity.ok(Map.of("runId", runId, "status", "failed",
+                    "error", run.error,
+                    "elapsedMs", System.currentTimeMillis() - run.startedAt));
+        }
+        if (run.result == null) {
+            return ResponseEntity.ok(Map.of("runId", runId, "status", "running",
+                    "userId", run.userId,
+                    "elapsedMs", System.currentTimeMillis() - run.startedAt,
+                    "hint", "GET /api/ops/logs?grep=Delegation shows local execution as it happens."));
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("runId", runId);
+        out.put("status", "done");
+        out.putAll(run.result);
+        return ResponseEntity.ok(out);
     }
 
     /**
