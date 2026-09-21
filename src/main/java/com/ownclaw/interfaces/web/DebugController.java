@@ -346,8 +346,13 @@ public class DebugController {
     // ────────────────────────────────────────────────────────────────
 
     /**
-     * TEMPORARY DEBUG ENDPOINT — reads SKILL.yaml, skill.py, and requirements.txt for a skill.
-     * TODO: REMOVE THIS once credential issues are resolved.
+     * Reads SKILL.yaml, skill.py and requirements.txt for a skill.
+     * <p>
+     * The TODO that used to sit here said to remove this "once credential issues are resolved".
+     * Those were resolved on 2026-09-17 when GET /api/debug/credentials was deleted, and this
+     * endpoint was never part of that problem: it returns skill source, is gated on the owner,
+     * and is the only way to read what a generated skill actually does without shell access on
+     * the host. It is kept deliberately, and is no longer labelled temporary.
      */
     @GetMapping("/skill/{name}")
     public ResponseEntity<?> readSkill(@PathVariable String name,
