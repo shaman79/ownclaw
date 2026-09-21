@@ -4656,6 +4656,17 @@
                             doneActivity();
                             activeTaskId = null;
                         }
+                    } else if (sub === 'scheduled' || sub === 'warning') {
+                        // Notices, not evidence that work is in flight. The scheduler emits
+                        // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
+                        // has already delivered its result, and budget warnings arrive whenever a
+                        // threshold is crossed. Both fell into the catch-all below, which calls
+                        // setThinking(true) -- so the spinner restarted with nothing left to stop
+                        // it and Send stayed disabled for the full 15-minute safety timeout, while
+                        // Enter (which gates on `busy`, never set on this path) still worked. Two
+                        // controls disagreeing, after every single recurring task.
+                        resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
+                        showActivity(content, detail);
                     } else if (sub === 'progress') {
                         // PROGRESS updates the last step in-place (no new entry)
                         setThinking(true);
@@ -4678,7 +4689,15 @@
                 } else if (type === 'pong' || type === 'ping') {
                     // heartbeat
                 } else {
-                    if (type === 'response') { setThinking(false); doneActivity(); }
+                    // 'system' is how a slash-command result comes back. send() sets busy and
+                    // starts the spinner for every message including commands, and nothing here
+                    // cleared it: /help answered instantly and then left the composer dead for
+                    // fifteen minutes -- Send greyed out while Enter, which gates on `busy`,
+                    // still worked.
+                    if (type === 'response' || type === 'system') {
+                        setThinking(false);
+                        doneActivity();
+                    }
                     addMsg(type, content);
                 }
             } catch(ex) {

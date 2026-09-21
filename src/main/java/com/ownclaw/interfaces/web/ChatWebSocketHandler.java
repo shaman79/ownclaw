@@ -25,6 +25,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -56,7 +57,21 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper mapper;
 
     /** Active WebSocket sessions by user ID. */
-    private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+    /**
+     * Every open socket per user, not one.
+     *
+     * This was Map&lt;String, WebSocketSession&gt;, so opening a second tab overwrote the first and
+     * only the most recently connected window was reachable. Everything delivered
+     * asynchronously went through that single handle: the finished answer, session_updated,
+     * setup-wizard prompts. The status stream never had the problem, because ChatStatusEmitter
+     * is keyed per subscriber and fans out — so the visible symptom was a tab that showed the
+     * whole trace and the COMPLETED line, and then never received the answer, which had gone to
+     * a phone the owner had glanced at an hour earlier.
+     *
+     * It also made "tell every connection" impossible to write correctly, which is why the
+     * session_updated broadcast added earlier today could not work.
+     */
+    private final Map<String, Set<WebSocketSession>> sessions = new ConcurrentHashMap<>();
 
     /** Prevents spamming the chat with repeated welcome messages on reconnect loops. */
     private final Map<String, Long> lastWelcomeAtMs = new ConcurrentHashMap<>();
@@ -108,7 +123,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         session.getAttributes().put("userId", userId);
-        sessions.put(userId, session);
+        sessions.computeIfAbsent(userId, u -> ConcurrentHashMap.newKeySet()).add(session);
 
         // Subscribe to status messages
         // Keyed on this session: a second tab adds a listener rather than replacing this
@@ -313,15 +328,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // tore down the LIVE one's delivery path: the running task kept going and its answer
             // was posted into a socket that no longer existed. The status stream survived that
             // already, because ChatStatusEmitter is keyed by subscriber, but this map was not.
-            boolean wasCurrent = sessions.remove(userId, session);
+            Set<WebSocketSession> open = sessions.get(userId);
+            boolean wasCurrent = open != null && open.remove(session);
+            if (open != null && open.isEmpty()) sessions.remove(userId);
             statusEmitter.unsubscribe(userId, session);
             // Pending input belongs to whoever is actually still connected. Cancelling it from a
             // closing stale tab would kill a prompt the live tab is waiting on.
-            if (wasCurrent) {
+            if (wasCurrent && (open == null || open.isEmpty())) {
                 interactionHandler.cancelPending(userId);
             }
-            log.info("WebSocket disconnected: user={} (was the active socket: {})",
-                    userId, wasCurrent);
+            // Pending input is only cancelled when the LAST window goes away; a stale tab
+            // closing must not kill a prompt another window is answering.
+            log.info("WebSocket disconnected: user={} ({} still open)",
+                    userId, open == null ? 0 : open.size());
         }
     }
 
@@ -343,7 +362,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } else if (cmdLower.equals("/status")) {
             // Shared status + Web-specific info
             response = commandHandler.handle(userId, cmd).orElse("")
-                    + " | Connected sessions: " + sessions.size();
+                    + " | Connected sockets: " + sessions.values().stream().mapToInt(java.util.Set::size).sum();
         } else {
             // Delegate to shared CommandHandler
             var result = commandHandler.handle(userId, cmd);
@@ -424,10 +443,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String sessionId = conversationService.getCurrentSession(userId);
         conversationService.saveMessage(userId, sessionId, "system", message);
 
-        WebSocketSession ws = sessions.get(userId);
-        if (ws != null && ws.isOpen()) {
-            sendToSession(ws, "system", message);
-        }
+        sendToUser(userId, "system", message);
     }
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
@@ -457,12 +473,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * client reloads history on connect.
      */
     private void sendToUser(String userId, String type, String content) {
-        WebSocketSession live = sessions.get(userId);
-        if (live == null || !live.isOpen()) {
+        Set<WebSocketSession> open = sessions.get(userId);
+        if (open == null || open.isEmpty()) {
             log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
             return;
         }
-        sendToSession(live, type, content);
+        // Every window, not the newest one. A message that matters to the user matters in
+        // whichever window they are actually looking at, and we cannot know which that is.
+        int sent = 0;
+        for (WebSocketSession live : open) {
+            if (live.isOpen()) {
+                sendToSession(live, type, content);
+                sent++;
+            }
+        }
+        if (sent == 0) {
+            log.debug("All sockets for {} are closed; '{}' was persisted but not pushed", userId, type);
+        }
     }
 
     private void sendToSession(WebSocketSession session, String type, String content) {
