@@ -4639,10 +4639,23 @@
                     if (data.data) updateTokens(data.data);
                     // Update stats bar whenever data.data carries stats fields
                     if (data.data && data.data.totalSteps != null) updateStats(data.data);
+                    // Claim this window's working state for the first task we hear from.
+                    if (data.taskId && !activeTaskId
+                            && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
+                        activeTaskId = data.taskId;
+                    }
                     if (sub === 'completed' || sub === 'failed' || sub === 'rollback') {
-                        showActivity(content, null);
-                        setThinking(false);
-                        doneActivity();
+                        // Only the task we are actually following may end the working state.
+                        // When either side has no id, behave as before rather than risk a
+                        // spinner that never stops.
+                        if (data.taskId && activeTaskId && data.taskId !== activeTaskId) {
+                            showActivity(content, null);   // note it, but keep working
+                        } else {
+                            showActivity(content, null);
+                            setThinking(false);
+                            doneActivity();
+                            activeTaskId = null;
+                        }
                     } else if (sub === 'progress') {
                         // PROGRESS updates the last step in-place (no new entry)
                         setThinking(true);
@@ -4737,6 +4750,17 @@
     }
 
     //  Message rendering 
+    /**
+     * The task whose progress this window's working state is showing, once known.
+     *
+     * Terminal statuses used to clear the spinner and close the activity strip whatever task
+     * they came from. With a background lane enabled that is the wrong task more often than not:
+     * a scheduled digest finishing forty seconds into a six-minute question would tell the user
+     * their question was answered, stop the spinner, and leave the real work running invisibly.
+     * The server attributes every status to its task; this is the other half.
+     */
+    var activeTaskId = null;
+
     function addMsg(type, text) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
@@ -5009,6 +5033,8 @@
         pendingFiles = [];
         fileChips.innerHTML = '';
         busy = true;
+        // This message's task has no id yet; the first status carrying one claims it.
+        activeTaskId = null;
         resetActivity();
         setThinking(true);
     }
