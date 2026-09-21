@@ -479,13 +479,20 @@ public class AgentLoop {
             context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
 
-            // Track token usage per provider
+            // Track token usage per provider.
+            //
+            // billedTokens(), not totalTokens(): the latter is prompt + completion as reported,
+            // and Anthropic reports cache reads and writes separately and additionally. With the
+            // static system prompt cached -- which is the whole point of keeping it static -- the
+            // cached prefix is most of the input, so every figure derived from totalTokens was a
+            // fraction of what was actually billed: the live counter, token_usage, and every
+            // budget ceiling that is supposed to stop a runaway task.
             if (local) {
-                context.addLocalTokens(thinkResult.totalTokens());
+                context.addLocalTokens(thinkResult.billedTokens());
             } else {
-                context.addCloudTokens(thinkResult.totalTokens());
+                context.addCloudTokens(thinkResult.billedTokens());
                 // Persist cloud usage for budget tracking
-                if (thinkResult.totalTokens() > 0) {
+                if (thinkResult.billedTokens() > 0) {
                     // Priced from the component breakdown, not the total: cache reads cost about
                     // a tenth of base input and cache writes about a quarter more, so a single
                     // summed figure cannot be costed. This was hardcoded 0.0, which left
@@ -494,13 +501,13 @@ public class AgentLoop {
                             thinkResult.promptTokens(), thinkResult.completionTokens(),
                             thinkResult.cacheWriteTokens(), thinkResult.cacheReadTokens());
                     budgetTracker.recordUsage(context.userId(), provider.name(),
-                            thinkResult.totalTokens(), cost);
+                            thinkResult.billedTokens(), cost);
                 }
             }
 
             // Emit running token totals so the frontend can update the live counter
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
-                    action.tool() + " (" + String.format("%,d", thinkResult.totalTokens()) + " tok)",
+                    action.tool() + " (" + String.format("%,d", thinkResult.billedTokens()) + " tok)",
                     tokenData(context));
 
             // Emit thinking detail: user prompt (skip system — it repeats), reasoning, chosen tool

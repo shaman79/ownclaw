@@ -701,11 +701,25 @@ public class ContainerSandbox {
         cmd.add("-e");
         cmd.add("LD_LIBRARY_PATH=/usr/local/lib");
 
-        // Inject environment variables
+        // Inject environment variables.
+        //
+        // PATH and PYTHONPATH are deliberately NOT forwarded. They are resolved against the HOST
+        // filesystem -- PythonEnvironmentService sets PATH to the host virtualenv's bin directory
+        // -- and that path does not exist inside the container. Passing it replaced the image's
+        // own PATH with a directory that is not there, so the interpreter the container was built
+        // around became unreachable and the run failed with "python3: not found" before the skill
+        // ran a line. It only happened to skills that declare BOTH system_packages (which selects
+        // the container) and requirements.txt (which creates the host venv) -- exactly the
+        // combination the built-in capability patterns prescribe for system and network work.
         if (envVars != null) {
             for (var entry : envVars.entrySet()) {
+                String key = entry.getKey();
+                if ("PATH".equals(key) || "PYTHONPATH".equals(key)) {
+                    log.debug("Not forwarding host {} into the container; it names host paths.", key);
+                    continue;
+                }
                 cmd.add("-e");
-                cmd.add(entry.getKey() + "=" + entry.getValue());
+                cmd.add(key + "=" + entry.getValue());
             }
         }
 
