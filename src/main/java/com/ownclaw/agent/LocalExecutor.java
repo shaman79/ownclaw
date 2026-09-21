@@ -79,8 +79,10 @@ public class LocalExecutor {
         // System prompt with plan and tools
         messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext)));
 
-        // Initial instruction
-        messages.add(LlmMessage.user("Begin executing the plan. Start with step 1."));
+        // Initial instruction. "Start with step 1" makes no sense without a step list.
+        messages.add(LlmMessage.user(plan.steps().isEmpty()
+                ? "Begin. Make the first tool call that moves toward the goal."
+                : "Begin executing the plan. Start with step 1."));
 
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
                 "Delegating to local LLM: " + truncate(plan.goal(), 100));
@@ -224,7 +226,20 @@ public class LocalExecutor {
     private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context) {
         var sb = new StringBuilder(4096);
 
-        sb.append("TASK EXECUTOR. Follow the plan exactly. Chain results between steps. No planning authority.\n\n");
+        // The header used to say "Follow the plan exactly. No planning authority." unconditionally,
+        // which is incoherent when no steps were supplied — now the normal case, because the
+        // orchestrator usually cannot know a step's params before the previous step has run. Say
+        // which mode this is, so the model either follows a plan or works one out, and never sits
+        // waiting for a plan that is not coming.
+        if (plan.steps().isEmpty()) {
+            sb.append("TASK EXECUTOR. You have a goal and the tools to reach it. Work out the steps\n");
+            sb.append("yourself, one tool call at a time, using each result to decide the next.\n");
+            sb.append("You are running on the target machine: local files, the LAN and the servers\n");
+            sb.append("here are reachable, and the credentials listed below are already loaded.\n\n");
+        } else {
+            sb.append("TASK EXECUTOR. Follow the plan below. Chain results between steps.\n");
+            sb.append("The steps are the order to work in; adapt params to what earlier steps returned.\n\n");
+        }
         sb.append("## Output\n");
         sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
         sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
@@ -271,10 +286,15 @@ public class LocalExecutor {
         }
 
         sb.append("\n## Rules\n");
-        sb.append("- Execute steps in order. On failure, note error and continue.\n");
-        sb.append("- Chain previous results into subsequent steps.\n");
+        if (plan.steps().isEmpty()) {
+            sb.append("- Take one step at a time and let each result inform the next.\n");
+            sb.append("- Stop as soon as the goal is met; do not pad the work.\n");
+        } else {
+            sb.append("- Execute steps in order. On failure, note error and continue.\n");
+            sb.append("- Chain previous results into subsequent steps.\n");
+        }
         sb.append("- Final summary must contain ALL collected data.\n");
-        sb.append("- No skill_create. No questions. Just execute.\n");
+        sb.append("- No skill_create. Nobody is available to answer questions — decide and proceed.\n");
 
         return sb.toString();
     }

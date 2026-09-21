@@ -583,10 +583,21 @@ public class ThinkingEngine {
         sb.append("  description: task message | time: natural language | schedule: natural language or Spring cron\n");
         sb.append("  max_runs | task_id (for cancel/pause/resume)\n\n");
 
-        sb.append("delegate: Execute multi-tool plan via FREE local LLM. Zero cloud cost.\n");
-        sb.append("  MUST USE for 2+ sequential calls not needing judgment between steps.\n");
-        sb.append("  NOT for: skill creation, complex reasoning, judgment-dependent steps.\n");
-        sb.append("  goal* | steps*: [{description, tool, params}] | checkpoints | max_steps (default 10)\n\n");
+        // 'steps' was advertised as required, which is why this was never once used in seven
+        // months of production. Pre-specifying every tool AND its params demands foreknowledge
+        // the orchestrator almost never has, because each step's params come from the previous
+        // step's output. The executor never needed it: it runs its own think-act-observe loop
+        // with the whole tool manifest. So it takes a goal, and steps are a hint.
+        sb.append("delegate: hand a sub-goal to the local model. It runs its own loop on this\n");
+        sb.append("  machine with the full tool set and your credentials, and costs nothing.\n");
+        sb.append("  Best for: work on the local machine, LAN, servers and files, and long\n");
+        sb.append("  mechanical sequences. Nothing leaves the host, so prefer it for private data.\n");
+        sb.append("  Trade-off: roughly a minute per step, so prefer it when nobody is waiting;\n");
+        sb.append("  do it yourself when the user is sitting in the chat expecting an answer.\n");
+        sb.append("  goal* — what to achieve, stated fully; the local model works out the steps.\n");
+        sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
+        sb.append("    and you already know it. Omit it rather than guess at params.\n");
+        sb.append("  checkpoints | max_steps (default 10)\n\n");
 
         // Credential rules
         sb.append("## Credentials\n");
@@ -612,7 +623,7 @@ public class ThinkingEngine {
         sb.append("- No tools needed → respond directly. Never fabricate outputs.\n");
         sb.append("- On failure: diagnose WHY, then try fundamentally different approach. Never repeat failed actions.\n");
         sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
-        sb.append("- 2+ sequential calls → ALWAYS delegate (free). After creating/fixing skill → delegate batch.\n");
+        sb.append("- Local/LAN/server work, or a long mechanical sequence nobody is waiting on → delegate it (free, stays on the host).\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");
         sb.append("- Respond in user's language. Search/selectors in content's language.\n");
@@ -734,7 +745,10 @@ public class ThinkingEngine {
         sb.append("credential_manage(action=list|check, [key])\n");
         sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
         sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-        sb.append("delegate(goal, steps[{description,tool,params}], [checkpoints], [max_steps]) — FREE local LLM. MUST USE for 2+ sequential calls.\n\n");
+        sb.append("delegate(goal, [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
+        sb.append("  It runs its own loop with the full tool set and your credentials, on this machine.\n");
+        sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
+        sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
 
         // Problem-solving nudge (compact version of the full prompt's ## Problem Solving)
         sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n");
