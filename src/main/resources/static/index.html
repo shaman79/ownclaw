@@ -886,17 +886,6 @@
             background: rgba(91,95,199,.08);
         }
 
-        /*  Responsive  */
-        @media (max-width: 600px) {
-            #messages { padding: 16px 10px 12px }
-            #input-area { padding: 8px 10px 14px }
-            .msg.user .bubble { max-width: 88% }
-            .msg-body { padding: 10px 12px }
-            #header { padding: 0 12px }
-            #sidebar { display: none }
-            #sidebar.mobile-open { display: flex; position: fixed; inset: 0; z-index: 100; width: 100% }
-            #sidebar-toggle { display: flex }
-        }
 
         /*  Layout: sidebar + main  */
         #app-layout {
@@ -2292,6 +2281,30 @@
         .skills-empty-icon { font-size: 36px; margin-bottom: 12px }
         .skills-empty-text { font-size: 14px }
         .skills-empty-sub { font-size: 12px; margin-top: 6px; opacity: .7 }
+        /*  Responsive — LAST ON PURPOSE.
+
+            This block used to sit near the top of the stylesheet, above the base rules it is
+            meant to override. `#sidebar { display: none }` inside the media query and
+            `#sidebar { width: 280px }` below it have identical specificity, so the later one
+            won and the entire mobile layout was dead: at 390px the sidebar kept its 280px, the
+            message column was left a ~110px ribbon and the composer about 32px wide. The
+            `#sidebar-toggle` and `#sidebar-close` buttons existed and did nothing, because the
+            thing they open was never hidden.
+
+            Keeping it at the very end means any future rule for #sidebar, #header or #messages
+            cannot silently re-break it the same way. No !important, no new rules — only order. */
+        /*  Responsive  */
+        @media (max-width: 600px) {
+            #messages { padding: 16px 10px 12px }
+            #input-area { padding: 8px 10px 14px }
+            .msg.user .bubble { max-width: 88% }
+            .msg-body { padding: 10px 12px }
+            #header { padding: 0 12px }
+            #sidebar { display: none }
+            #sidebar.mobile-open { display: flex; position: fixed; inset: 0; z-index: 100; width: 100% }
+            #sidebar-toggle { display: flex }
+        }
+
     </style>
 </head>
 <body>
@@ -4644,7 +4657,8 @@
                             && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
                         activeTaskId = data.taskId;
                     }
-                    if (sub === 'completed' || sub === 'failed' || sub === 'rollback') {
+                    if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
+                            || sub === 'need_input') {
                         // Only the task we are actually following may end the working state.
                         // When either side has no id, behave as before rather than risk a
                         // spinner that never stops.
@@ -4681,7 +4695,11 @@
                     // A skill is blocked waiting for an answer. Clear the working state: it
                     // disables the send button, so until now the only way to reply was the
                     // Enter handler, which happens not to check it. Clicking Send did nothing.
+                    // doneActivity() as well as setThinking(false): without it the activity
+                    // strip kept a spinner turning above a task that had already stopped and was
+                    // waiting on the user, which reads as "still working, do not touch it".
                     setThinking(false);
+                    doneActivity();
                     addMsg('input_request', content);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
@@ -4694,6 +4712,11 @@
                     // cleared it: /help answered instantly and then left the composer dead for
                     // fifteen minutes -- Send greyed out while Enter, which gates on `busy`,
                     // still worked.
+                    // 'result' is the output of work nobody was waiting for -- a scheduled run
+                    // or /bg. It must read as an assistant message but must NOT end whatever the
+                    // user is currently watching, so it is deliberately absent from the list
+                    // below and rendered with the same styling as a response.
+                    if (type === 'result') { addMsg('response', content); return; }
                     if (type === 'response' || type === 'system') {
                         setThinking(false);
                         doneActivity();
@@ -4827,14 +4850,23 @@
     // allowlist: any element not on the list is unwrapped (its text is kept), every attribute not
     // on that element's list is dropped, and every URL must pass MD_SAFE_URL. An allowlist is used
     // rather than a denylist so that a tag or attribute nobody thought of is refused by default.
-    var MD_ALLOWED = {
+    // Object.create(null): a plain object literal inherits constructor, toString, valueOf and
+    // the rest, so MD_ALLOWED['constructor'] returned a Function rather than undefined. The
+    // sanitizer treats a truthy lookup as "allowed, here are its attributes" and then called
+    // .indexOf on it -- which a Function does not have -- so a single tag named <constructor>
+    // threw. HTML cannot produce such a tag, but SVG and MathML can, and the agent summarises
+    // scraped pages into the chat. renderMarkdown's catch then returned escaped plain text, so
+    // the throw did not just drop that message: mdSanitize is called for every message on load,
+    // so one poisoned message left the whole conversation rendering as raw source, permanently,
+    // on every open. A prototype-less map makes every non-allowlisted name simply undefined.
+    var MD_ALLOWED = Object.assign(Object.create(null), {
         P: [], BR: [], HR: [], STRONG: [], EM: [], B: [], I: [], U: [], S: [], DEL: [], INS: [],
         H1: [], H2: [], H3: [], H4: [], H5: [], H6: [], BLOCKQUOTE: [], UL: [], OL: ['start'],
         LI: [], DL: [], DT: [], DD: [], MARK: [], SUP: [], SUB: [], SMALL: [],
         CODE: ['class'], PRE: ['class'], SPAN: ['class'], DIV: ['class'],
         A: ['href', 'title'], IMG: ['src', 'alt', 'title'],
         TABLE: [], THEAD: [], TBODY: [], TFOOT: [], TR: [], TH: ['align'], TD: ['align']
-    };
+    });
     // Relative and anchor links are fine; everything else must be an explicit safe scheme.
     var MD_SAFE_URL = /^(https?:\/\/|mailto:|#|\/|\.\/|[^:]*$)/i;
 

@@ -136,8 +136,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // The output of background work is a message, not a status. Rendered as a status
                 // it would land in the collapsed activity strip, which is exactly how a finished
                 // scheduled task managed to produce a full digest that nobody ever saw.
-                sendToSession(session, "response", msg.text());
-            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT) {
+                // Sent as its own type, not as "response". The client stops the spinner on a
+                // plain response, so a background digest landing during a six-minute question
+                // ended that question's working state -- the same confusion the taskId fix
+                // removed for statuses. "result" renders identically and touches nothing.
+                sendToSession(session, "result", msg.text());
+            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT
+                    && msg.taskId() == null) {
+                // Only a LIVE prompt becomes a question bubble.
+                //
+                // Two different things emit NEED_INPUT. A skill blocking on an answer emits it
+                // with no task id, and that genuinely is a question. The agent loop's closing
+                // summary for a task that ended NEEDS_INPUT also emits it, attributed to the
+                // task, and that is telemetry -- so the user was shown a second question-styled
+                // bubble reading "waiting for your answer - 12,483 cloud tokens" underneath the
+                // real question. The id is what tells them apart: a summary always has one, a
+                // live prompt never does.
+
                 // A question is not a status. Routed as a status it became one grey line in the
                 // activity strip — which is collapsed by default and scrolls — while a skill
                 // sat blocked behind a silent two-minute fuse. The client already renders an
