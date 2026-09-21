@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.*;
 import org.slf4j.Logger;
@@ -97,15 +98,26 @@ public class ThinkingEngine {
      * for debug/observability use.
      */
     public ThinkResult decideNextActionFull(AgentContext context, LlmProvider provider) {
-        List<LlmMessage> messages = buildMessages(context, provider.name());
+        // One decision, in one place. Everything downstream still receives an AgentAction, so
+        // AgentLoop, AgentTrajectory and the eight special-action branches are untouched.
+        boolean nativeTools = config.getMentor().isNativeTools() && provider.supportsTools();
+
+        List<LlmMessage> messages = buildMessages(context, provider.name(), nativeTools);
 
         LlmRequestConfig requestConfig = new LlmRequestConfig(
                 null,   // use provider default model
                 null,   // use provider default temperature
                 8192,   // enough for structured action with long response messages
-                true,   // JSON mode for structured output
+                // JSON mode is for the TEXT protocol. With native tools it is actively harmful:
+                // it pushes the model to put JSON in the text body instead of emitting a
+                // tool_use block, which is the one thing this change exists to stop.
+                !nativeTools,
                 null    // use provider default read timeout
         );
+        if (nativeTools) {
+            requestConfig = requestConfig.withTools(ToolSchemas.build(
+                    SpecialActionSchemas.ALL, toolRegistry.all(), context.credentialKeys()));
+        }
 
         try {
             LlmResponse response = provider.chat(messages, requestConfig);
@@ -117,6 +129,51 @@ public class ThinkingEngine {
             // prompt, which produced an identically truncated reply, until the run gave up and
             // threw away prose the model really had written. Say which it is, so the retry
             // carries information instead of repeating itself.
+            // No tool call came back, but tools were offered.
+            //
+            // On Anthropic that means the model chose to answer in prose, and treating it as a
+            // final answer is right. On a local model it does NOT: Ollama reports a "tools"
+            // capability per model, and a model that advertises it may still ignore the tools
+            // array and emit the old JSON envelope as text. Mapping that straight to RESPOND
+            // would deliver the raw JSON to the user as the answer. So parse first, and only
+            // treat it as prose when it genuinely is not an action -- which costs one cheap
+            // parse attempt and removes a whole class of local-tier regression.
+            if (nativeTools && !response.hasToolCalls()
+                    && response.content() != null && !response.content().isBlank()
+                    && !response.truncated()) {
+                AgentAction parsed = tryParseAction(response.content());
+                if (parsed != null) {
+                    log.debug("Native tools were offered but the model replied with a text "
+                            + "action; parsed it rather than delivering the JSON as an answer.");
+                    return new ThinkResult(parsed, messages, response.content(),
+                            response.totalTokens(), response.promptTokens(),
+                            response.completionTokens(), response.cacheCreationTokens(),
+                            response.cacheReadTokens(), provider.model());
+                }
+                AgentAction answer = new AgentAction(AgentAction.RESPOND,
+                        Map.of("message", response.content()),
+                        // Deliberately NOT one of the strings AgentLoop treats as a fallback:
+                        // choosing to answer is not a reasoning failure.
+                        "Answered directly without calling a tool");
+                return new ThinkResult(answer, messages, response.content(),
+                        response.totalTokens(), response.promptTokens(),
+                        response.completionTokens(), response.cacheCreationTokens(),
+                        response.cacheReadTokens(), provider.model());
+            }
+
+            // A native tool call is unambiguous: no parsing, so no parse failure.
+            if (nativeTools && response.hasToolCalls()) {
+                var call = response.toolCalls().get(0);
+                AgentAction action = new AgentAction(call.name(),
+                        call.arguments() == null ? Map.of() : call.arguments(),
+                        response.content() == null ? "" : response.content());
+                return new ThinkResult(action, messages,
+                        renderToolCallForDebug(response), response.totalTokens(),
+                        response.promptTokens(), response.completionTokens(),
+                        response.cacheCreationTokens(), response.cacheReadTokens(),
+                        provider.model());
+            }
+
             if (response.truncated()) {
                 log.warn("Model hit its output cap ({} completion tokens) and was cut off "
                         + "mid-answer. The action JSON is incomplete by construction.",
@@ -179,8 +236,13 @@ public class ThinkingEngine {
      * Build the full message list for the LLM.
      */
     private List<LlmMessage> buildMessages(AgentContext context, String providerName) {
+        return buildMessages(context, providerName, false);
+    }
+
+    private List<LlmMessage> buildMessages(AgentContext context, String providerName,
+                                           boolean nativeTools) {
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName)));
+        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName, nativeTools)));
 
         if ("anthropic".equals(providerName)) {
             // Anthropic: multi-turn trajectory for prefix caching.
@@ -316,6 +378,25 @@ public class ThinkingEngine {
                 : obs);
         correction.append("\n\n---\n").append(buildDynamicContext(context));
         messages.add(LlmMessage.user(correction.toString()));
+    }
+
+    /** What the debug panel shows for a native call, where there is no raw JSON to display. */
+    private String renderToolCallForDebug(com.ownclaw.llm.LlmResponse response) {
+        try {
+            var out = new LinkedHashMap<String, Object>();
+            if (response.content() != null && !response.content().isBlank()) {
+                out.put("reasoning", response.content());
+            }
+            var calls = new java.util.ArrayList<Map<String, Object>>();
+            for (var c : response.toolCalls()) {
+                calls.add(Map.of("tool", String.valueOf(c.name()),
+                        "params", c.arguments() == null ? Map.of() : c.arguments()));
+            }
+            out.put("toolCalls", calls);
+            return mapper.writeValueAsString(out);
+        } catch (Exception e) {
+            return String.valueOf(response.content());
+        }
     }
 
     /**
@@ -617,6 +698,16 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content.
      */
     private String buildSystemPrompt(AgentContext context, String providerName) {
+        return buildSystemPrompt(context, providerName, false);
+    }
+
+    /**
+     * @param nativeTools when true, the sections describing the action list and the required JSON
+     *                    envelope are omitted: the tools array carries both, and describing every
+     *                    action twice would make this change cost tokens instead of saving them.
+     */
+    private String buildSystemPrompt(AgentContext context, String providerName,
+                                     boolean nativeTools) {
         // Anthropic: always use the full prompt — the static section is cached by
         // Anthropic's prompt caching (9200 tokens cached, read at 10% cost = ~920
         // effective tokens). The compact prompt broke caching: different prefix meant
@@ -938,6 +1029,24 @@ public class ThinkingEngine {
      * Parse the LLM's JSON response into an AgentAction.
      * Handles common LLM output quirks (code fences, comments, extra text, etc.).
      */
+    /**
+     * Parse text as an action, or return null if it plainly is not one.
+     * <p>
+     * {@link #parseAction} can never say "this is not an action" — it falls back to RESPOND with
+     * the raw text, which is the right answer for the text protocol and the wrong one when tools
+     * were offered. There, prose means the model chose to answer, but a JSON envelope means a
+     * local model ignored the tools array, and handing that envelope to the user as their answer
+     * would be worse than either. This distinguishes the two.
+     */
+    AgentAction tryParseAction(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        Map<String, Object> parsed = tryParseJsonObject(LlmOutputUtils.stripCodeFences(raw.strip()));
+        if (parsed == null) return null;
+        Object tool = parsed.get("tool");
+        if (tool == null || String.valueOf(tool).isBlank()) return null;
+        return parseAction(raw);
+    }
+
     AgentAction parseAction(String raw) {
         if (raw == null || raw.isBlank()) {
             return fallbackResponse("Empty response from reasoning engine.");

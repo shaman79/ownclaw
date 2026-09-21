@@ -1,5 +1,6 @@
 package com.ownclaw.llm;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -150,6 +152,35 @@ public class AnthropicProvider implements LlmProvider {
             setMessageCacheBreakpoint(msgs, msgs.size() - 2);
         }
 
+        // Native tools.
+        //
+        // Placed BEFORE the messages in the cached prefix, which is why this is cheaper rather
+        // than dearer: the manifest currently lives in the dynamic block attached to the newest
+        // message, deliberately outside the cache breakpoints, so several thousand tokens are
+        // re-billed at full rate on every step. As a tools array with cache_control on the last
+        // entry it is billed once and then read at a tenth.
+        //
+        // disable_parallel_tool_use: the loop executes exactly one action per step and records
+        // one observation. Accepting two calls would mean either dropping one -- silently losing
+        // work the model asked for -- or restructuring the trajectory. That is a later stage,
+        // not a side effect of this one.
+        if (reqConfig.hasTools()) {
+            ArrayNode toolsArray = body.putArray("tools");
+            for (ToolSpec spec : reqConfig.tools()) {
+                ObjectNode t = toolsArray.addObject();
+                t.put("name", spec.name());
+                t.put("description", spec.description() == null ? "" : spec.description());
+                t.set("input_schema", mapper.valueToTree(spec.inputSchema()));
+            }
+            if (toolsArray.size() > 0) {
+                ((ObjectNode) toolsArray.get(toolsArray.size() - 1))
+                        .putObject("cache_control").put("type", "ephemeral");
+            }
+            ObjectNode choice = body.putObject("tool_choice");
+            choice.put("type", "auto");
+            choice.put("disable_parallel_tool_use", true);
+        }
+
         // Claude doesn't have a response_format: json_object option.
         // JSON mode is enforced via prompt engineering (ThinkingEngine already says
         // "respond with valid JSON"). Assistant prefill is NOT used because some
@@ -188,6 +219,20 @@ public class AnthropicProvider implements LlmProvider {
             }
             String content = contentBuilder.toString();
 
+            // tool_use blocks sit alongside the text blocks in the same content array; the text
+            // is the model's reasoning and is kept as such.
+            var toolCalls = new java.util.ArrayList<ToolCall>();
+            if (contentArray.isArray()) {
+                for (JsonNode block : contentArray) {
+                    if (!"tool_use".equals(block.path("type").asText())) continue;
+                    Map<String, Object> args = mapper.convertValue(
+                            block.path("input"), new TypeReference<Map<String, Object>>() {});
+                    toolCalls.add(new ToolCall(block.path("id").asText(null),
+                            block.path("name").asText(null),
+                            args == null ? Map.of() : args));
+                }
+            }
+
             int promptTokens = json.path("usage").path("input_tokens").asInt(0);
             int completionTokens = json.path("usage").path("output_tokens").asInt(0);
             int cacheCreation = json.path("usage").path("cache_creation_input_tokens").asInt(0);
@@ -209,7 +254,7 @@ public class AnthropicProvider implements LlmProvider {
                         + "Downstream parsing will fail on the truncated JSON.", model, maxTokens);
             }
             return new LlmResponse(content, promptTokens, completionTokens,
-                    cacheCreation, cacheRead, stopReason);
+                    cacheCreation, cacheRead, stopReason, toolCalls);
 
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
@@ -282,6 +327,10 @@ public class AnthropicProvider implements LlmProvider {
     }
 
     @Override
+    public boolean supportsTools() {
+        return true;
+    }
+
     public String name() {
         return "anthropic";
     }

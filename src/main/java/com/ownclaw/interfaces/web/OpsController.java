@@ -39,16 +39,19 @@ public class OpsController {
     private final DynamicSkillRegistry skillRegistry;
     private final TaskCancellationService cancellation;
     private final com.ownclaw.agent.SkillMaintenanceService skillMaintenance;
+    private final com.ownclaw.config.OwnClawConfig config;
 
     public OpsController(OpsService ops, AgentLoop agentLoop, AuthService authService,
                          DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
-                         com.ownclaw.agent.SkillMaintenanceService skillMaintenance) {
+                         com.ownclaw.agent.SkillMaintenanceService skillMaintenance,
+                         com.ownclaw.config.OwnClawConfig config) {
         this.ops = ops;
         this.agentLoop = agentLoop;
         this.authService = authService;
         this.skillRegistry = skillRegistry;
         this.cancellation = cancellation;
         this.skillMaintenance = skillMaintenance;
+        this.config = config;
     }
 
     // ── discovery ──
@@ -79,6 +82,7 @@ public class OpsController {
                     "GET  /api/ops/agent/run/{runId}   (collect an async run)",
                         "POST /api/ops/agent/cancel/{userId}",
                         "POST /api/ops/skills/reload",
+                    "POST /api/ops/config/native-tools?enabled=true|false",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)"),
                 "notProvided", List.of(
                         "credential values", "arbitrary shell", "deploy", "restart"),
@@ -242,6 +246,27 @@ public class OpsController {
                 "failed", failed,
                 "note", failed.isEmpty() ? "All requested skills are live again."
                         : "Failures are logged; a skill whose name already exists is skipped."));
+    }
+
+    /**
+     * Turn native tool calling on or off without a restart.
+     * <p>
+     * Exists so the flag can be verified in production the moment it ships, rather than sitting
+     * off until someone remembers it. A flag that is never turned on is code that rots -- this
+     * codebase already has several examples -- and an env var that needs a redeploy makes both
+     * the enabling and the rollback slow enough to postpone. This is the kill switch too:
+     * flipping it back takes effect on the next step of the next task.
+     */
+    @PostMapping("/config/native-tools")
+    public ResponseEntity<?> nativeTools(@RequestParam boolean enabled) {
+        boolean before = config.getMentor().isNativeTools();
+        config.getMentor().setNativeTools(enabled);
+        log.warn("Native tool calling {} at runtime (was {})", enabled ? "ENABLED" : "DISABLED", before);
+        return ResponseEntity.ok(Map.of(
+                "nativeTools", enabled,
+                "previous", before,
+                "note", "Applies from the next reasoning step. Not persisted: a restart returns "
+                        + "to ownclaw.mentor.native-tools in configuration."));
     }
 
     @PostMapping("/selftest")

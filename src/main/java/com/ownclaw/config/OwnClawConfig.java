@@ -73,6 +73,11 @@ public class OwnClawConfig {
         private int localToolSelectionCandidateLimit = 120;
 
         /** Cap the number of omitted tool names listed after the manifest ("Also:"). Prevents huge name lists. */
+        private boolean nativeTools = false;
+
+        public boolean isNativeTools() { return nativeTools; }
+        public void setNativeTools(boolean v) { this.nativeTools = v; }
+
         private int toolNamePreviewLimit = 50;
 
         public String getProvider() { return provider; }
