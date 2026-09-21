@@ -1539,7 +1539,14 @@ public class AgentLoop {
         StatusMessage.Type type = result.awaitingUser() ? StatusMessage.Type.NEED_INPUT
                 : result.success() ? StatusMessage.Type.COMPLETED
                 : StatusMessage.Type.FAILED;
-        statusEmitter.emit(userId, type, summary.toString(), tokenData(context));
+        // Attributed to the task. A terminal status with no id is indistinguishable from any
+        // other task's, and the frontend treats one as "the work is finished" -- so a background
+        // digest completing would stop the spinner and close out the activity strip of an
+        // interactive task still running, telling the user their question was done when it was
+        // not. Everything else emitted from inside a task already carries the id; this, the one
+        // that ends the UI's story, did not.
+        statusEmitter.emitForTask(userId, context.taskId(), type, summary.toString(),
+                tokenData(context));
 
         // Persist token usage to the events table for auditing
         try {
@@ -1742,13 +1749,21 @@ public class AgentLoop {
                                 : response.content().substring(0, Math.min(500, response.content().length())));
             }
 
-            // Track cloud tokens for skill code generation
-            if (!usingLocalFallback) {
-                context.addCloudTokens(response.totalTokens());
+            // Track tokens for skill code generation against the tier that actually did it.
+            //
+            // The context counter already excluded the local fallback, but the budget did not:
+            // when the cloud provider was unavailable and Ollama generated the code, those free
+            // local tokens were still recorded against the cloud budget. So an outage that
+            // forced everything local consumed the daily cloud allowance fastest, and could
+            // exhaust a ceiling without a single cloud call having been made.
+            if (usingLocalFallback) {
+                context.addLocalTokens(response.billedInputTokens() + response.completionTokens());
+            } else {
+                context.addCloudTokens(response.billedInputTokens() + response.completionTokens());
             }
-            if (response.totalTokens() > 0) {
+            if (response.totalTokens() > 0 && !usingLocalFallback) {
                 budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
-                        response.totalTokens(),
+                        response.billedInputTokens() + response.completionTokens(),
                         ModelPricing.costUsd(codeGenProvider.model(), response));
             }
 

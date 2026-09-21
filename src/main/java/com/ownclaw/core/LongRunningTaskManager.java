@@ -124,11 +124,20 @@ public class LongRunningTaskManager {
             hb.lastHeartbeatMs = System.currentTimeMillis();
         }
 
-        // Persist to DB
+        // Persist to DB. Progress from a task marked 'stalled' REVIVES it.
+        //
+        // "Stalled" is a guess made from silence, and a long sweep that reports once and then
+        // works quietly for a quarter of an hour trips it legitimately. The guard used to be
+        // status='running', so once the guess was made the row could never move again: later
+        // progress updated nothing, the heartbeat entry had been dropped so isActive() was
+        // false, and the call site therefore skipped completion. A task that recovered and
+        // finished successfully stayed 'stalled' forever.
         jdbc.update("""
             UPDATE long_running_tasks
-            SET progress_msg = ?, progress_pct = ?, heartbeat_at = datetime('now')
-            WHERE task_id = ? AND status = 'running'
+            SET progress_msg = ?, progress_pct = ?, heartbeat_at = datetime('now'),
+                status = 'running',
+                error_message = CASE WHEN status = 'stalled' THEN NULL ELSE error_message END
+            WHERE task_id = ? AND status IN ('running', 'stalled')
             """, message, percent, taskId);
 
         // Emit to user chat
@@ -152,8 +161,8 @@ public class LongRunningTaskManager {
         }
         jdbc.update("""
             UPDATE long_running_tasks
-            SET heartbeat_at = datetime('now')
-            WHERE task_id = ? AND status = 'running'
+            SET heartbeat_at = datetime('now'), status = 'running'
+            WHERE task_id = ? AND status IN ('running', 'stalled')
             """, taskId);
     }
 
@@ -161,6 +170,12 @@ public class LongRunningTaskManager {
 
     /**
      * Mark a task as successfully completed.
+     */
+    /**
+     * Mark a task finished, whatever state it was left in.
+     * <p>
+     * Deliberately unguarded on status: a task that was wrongly declared stalled and then
+     * finished must be able to say so.
      */
     public void complete(String taskId, String resultSummary) {
         jdbc.update("""

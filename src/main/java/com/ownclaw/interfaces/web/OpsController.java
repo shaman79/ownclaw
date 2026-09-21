@@ -448,12 +448,23 @@ public class OpsController {
                         + "flight to a provider still has to return before it is noticed."));
     }
 
-    /** Re-read the generated skills directory from disk. */
+    /**
+     * Re-read the generated skills directory from disk.
+     * <p>
+     * reload(), not init(). init() only scans and adds, so a skill removed from the directory --
+     * exactly what the quarantine note tells you to do to undo a restore -- stayed registered
+     * and invocable with no files behind it, until someone restarted the service. Reload
+     * unregisters everything first, so the registry ends up matching what is actually on disk.
+     */
     @PostMapping("/skills/reload")
     public ResponseEntity<?> reloadSkills() {
-        skillRegistry.init();
+        int before = skillRegistry.allDynamic().size();
+        skillRegistry.reload();
+        int after = skillRegistry.allDynamic().size();
         return ResponseEntity.ok(Map.of(
                 "reloaded", true,
-                "dynamicSkills", skillRegistry.allDynamic().size()));
+                "dynamicSkills", after,
+                "changed", after - before,
+                "note", "The registry now matches the generated/ directory, including removals."));
     }
 }
