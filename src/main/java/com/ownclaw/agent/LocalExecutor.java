@@ -103,8 +103,25 @@ public class LocalExecutor {
                 response = localProvider.chat(messages,
                         new LlmRequestConfig(null, null, null, true, null));
             } catch (Exception e) {
-                log.error("Local LLM call failed during delegation step {}", step + 1, e);
-                return buildPartialResult("Local LLM call failed: " + e.getMessage(), stepResults);
+                // Name the two failures that actually happen, because the orchestrator reads this
+                // string and guesses otherwise -- it reported "local LLM token limits" when the
+                // real answer was a context window one step too small, which points at the model
+                // instead of at one config line.
+                String msg = String.valueOf(e.getMessage());
+                String hint = "";
+                if (msg.contains("exceed_context_size") || msg.contains("exceeds the available context")) {
+                    hint = " The local context window is too small for this delegation prompt"
+                            + " (tool manifest plus results so far). Raise"
+                            + " ownclaw.executor.context-window / OWNCLAW_EXECUTOR_CONTEXT."
+                            + " This is a configuration limit, not a fault in the model or the goal.";
+                } else if (msg.contains("whole output budget on reasoning")) {
+                    hint = " The prompt nearly filled the context window, so almost nothing was"
+                            + " left to answer with and the model spent it reasoning. Same fix:"
+                            + " raise the local context window.";
+                }
+                log.error("Local LLM call failed during delegation step {}: {}{}",
+                        step + 1, msg, hint, e);
+                return buildPartialResult("Local LLM call failed: " + msg + hint, stepResults);
             }
 
             parentContext.addLocalTokens(response.totalTokens());

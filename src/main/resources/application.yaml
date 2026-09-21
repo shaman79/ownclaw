@@ -30,7 +30,25 @@ ownclaw:
     url: ${OWNCLAW_EXECUTOR_URL:http://localhost:11434}
     model: ${OWNCLAW_EXECUTOR_MODEL:qwen2.5:14b}
     temperature: 0.3
-    context-window: 16384
+
+    # Context window for local calls (Ollama num_ctx).
+    #
+    # 16384 was too small for the job the local tier actually does. A delegation prompt carries
+    # the whole tool manifest plus the results accumulated so far, and production measured it at
+    # 17226 tokens -- 5% over -- so Ollama returned
+    #   HTTP 400 exceed_context_size_error: request (17226 tokens) exceeds the available
+    #   context size (16384 tokens)
+    # and both scheduled tasks fell back to the cloud on 2026-09-21. The near-misses were worse
+    # than the outright failures: when the prompt fits with only a couple of hundred tokens to
+    # spare, a thinking model spends every one of them reasoning and returns an empty answer
+    # (done_reason=length), which looks like a broken model rather than a full window.
+    #
+    # 24576 gives ~40% headroom over the measured prompt. It is not set higher because the KV
+    # cache grows with it and VRAM on that host is the binding constraint -- raising this too far
+    # pushes layers onto the CPU and makes every local call far slower, which is a worse failure
+    # than an occasional overflow because it is silent. Raise it with OWNCLAW_EXECUTOR_CONTEXT
+    # after checking headroom on the box.
+    context-window: ${OWNCLAW_EXECUTOR_CONTEXT:24576}
 
   mentor:
     provider: ${OWNCLAW_MENTOR_PROVIDER:openai}
