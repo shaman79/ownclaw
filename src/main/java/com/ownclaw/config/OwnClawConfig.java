@@ -27,7 +27,6 @@ public class OwnClawConfig {
     private Budgets budgets = new Budgets();
     private Feedback feedback = new Feedback();
     private PlanCache planCache = new PlanCache();
-    private Mcp mcp = new Mcp();
 
     // --- Nested classes ---
 
@@ -301,19 +300,6 @@ public class OwnClawConfig {
         public void setTtlHours(int v) { this.ttlHours = v; }
     }
 
-    public static class Mcp {
-        private boolean enabled = false;
-        private int timeoutSec = 30;
-        private java.util.List<com.ownclaw.mcp.McpServer> servers = new java.util.ArrayList<>();
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean enabled) { this.enabled = enabled; }
-        public int getTimeoutSec() { return timeoutSec; }
-        public void setTimeoutSec(int timeoutSec) { this.timeoutSec = timeoutSec; }
-        public java.util.List<com.ownclaw.mcp.McpServer> getServers() { return servers; }
-        public void setServers(java.util.List<com.ownclaw.mcp.McpServer> servers) { this.servers = servers; }
-    }
-
     // --- Root getters/setters ---
 
     public Executor getExecutor() { return executor; }
@@ -348,7 +334,4 @@ public class OwnClawConfig {
     public void setFeedback(Feedback v) { this.feedback = v; }
     public PlanCache getPlanCache() { return planCache; }
     public void setPlanCache(PlanCache v) { this.planCache = v; }
-
-    public Mcp getMcp() { return mcp; }
-    public void setMcp(Mcp v) { this.mcp = v; }
 }
