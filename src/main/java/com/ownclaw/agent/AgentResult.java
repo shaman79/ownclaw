@@ -16,8 +16,15 @@ public record AgentResult(
         AgentTrajectory trajectory,
         int totalSteps,
         long totalDurationMs,
-        TerminationReason terminationReason
+        TerminationReason terminationReason,
+        String taskId
 ) {
+    /** Without an id — every factory below builds this shape and the loop stamps it after. */
+    public AgentResult(boolean success, String response, AgentTrajectory trajectory,
+                       int totalSteps, long totalDurationMs, TerminationReason terminationReason) {
+        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, null);
+    }
+
     public enum TerminationReason {
         /** Agent determined the task is complete and responded. */
         COMPLETED,
@@ -80,6 +87,23 @@ public record AgentResult(
      */
     public static AgentResult needsInput(String question, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, question, trajectory, trajectory.size(), durationMs, TerminationReason.NEEDS_INPUT);
+    }
+
+    /**
+     * Which task produced this result, once stamped by the loop; null before that.
+     * <p>
+     * The result travelled without its own identity, so anything downstream that needed to look
+     * up what the task had done could only ask "the most recent for this user" — which is a
+     * different task as soon as two can overlap. Carrying the id removes the guess.
+     */
+    public String taskId() {
+        return taskId;
+    }
+
+    /** Stamp the id of the task that produced this. */
+    public AgentResult withTaskId(String taskId) {
+        return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
+                terminationReason, taskId);
     }
 
     /** Whether the task stopped to ask the user something, rather than succeeding or failing. */

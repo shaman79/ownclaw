@@ -134,7 +134,11 @@ public class TokenBudgetTracker {
             long prevUsed = used - justUsed;
             double prevRatio = (double) prevUsed / limit;
             if (prevRatio < warningThreshold) {
-                log.info("Token budget warning for user {}: {:.0f}% used", userId, ratio * 100);
+                // SLF4J placeholders are {} and nothing else -- "{:.0f}" is printf syntax and
+                // is printed literally, so the one record of a budget crossing read
+                // "Token budget warning for user petr: {:.0f}% used" with the number missing.
+                log.info("Token budget warning for user {}: {}% used", userId,
+                        String.format("%.0f", ratio * 100));
                 statusEmitter.emit(userId, StatusMessage.Type.WARNING,
                         String.format("Cloud token usage at %.0f%% of daily budget (%,d / %,d)",
                                 ratio * 100, used, limit));

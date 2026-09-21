@@ -117,9 +117,19 @@ public class OpenAiProvider implements LlmProvider {
                     .path("message").path("content").asText("");
             int promptTokens = json.path("usage").path("prompt_tokens").asInt(0);
             int completionTokens = json.path("usage").path("completion_tokens").asInt(0);
+            // OpenAI reports cached prompt tokens INSIDE prompt_tokens and breaks them out under
+            // prompt_tokens_details.cached_tokens. They were priced at the full input rate, which
+            // on a long conversation is the dominant term and about ten times what it costs. The
+            // cached portion is split out so ModelPricing can charge it as a cache read; the sum
+            // still equals prompt_tokens, so no token is counted twice.
+            int cachedPromptTokens = json.path("usage").path("prompt_tokens_details")
+                    .path("cached_tokens").asInt(0);
+            int uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
 
-            log.debug("OpenAI [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
-            return new LlmResponse(content, promptTokens, completionTokens, 0, 0,
+            log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
+                    model, promptTokens, cachedPromptTokens, completionTokens);
+            return new LlmResponse(content, uncachedPromptTokens, completionTokens,
+                    0, cachedPromptTokens,
                     json.path("choices").path(0).path("finish_reason").asText(null));
 
         } catch (IOException e) {

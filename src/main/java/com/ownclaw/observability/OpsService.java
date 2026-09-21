@@ -616,10 +616,14 @@ public class OpsService {
 
         out.put("conversations", jdbc.queryForList(
                 "SELECT timestamp, session_id, role, substr(content,1,600) AS content, tokens_used "
-                        + "FROM conversations WHERE user_id = ? ORDER BY timestamp LIMIT " + cap, userId));
+                        // DESC: this is an incident tool, and ORDER BY timestamp ASC with a LIMIT
+                        // returned a user's OLDEST messages -- so the events, tool calls and memory
+                        // blocks showed today while the conversation block showed their first ever
+                        // exchanges, which reads as a conversation that stopped months ago.
+                        + "FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));
         out.put("sessions", jdbc.queryForList(
                 "SELECT id, title, substr(preview,1,200) AS preview, created_at, updated_at, archived "
-                        + "FROM chat_sessions WHERE user_id = ? ORDER BY created_at LIMIT " + cap, userId));
+                        + "FROM chat_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
         out.put("events", jdbc.queryForList(
                 "SELECT timestamp, event_type, severity, task_id, summary, details, tokens_used "
                         + "FROM events WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));

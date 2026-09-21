@@ -249,8 +249,13 @@ public class SkillMaintenanceService {
      * of them, and reported skills with perfect records as "never invoked once". Twenty-one of
      * thirty-one skills were retired on that reading.
      */
-    private static final List<String> AUTHORED_FILES =
-            List.of("skill.py", "SKILL.yaml", "requirements.txt");
+    private static final List<String> AUTHORED_FILES = List.of("skill.py", "SKILL.yaml");
+    // requirements.txt is deliberately absent. It looks authored, and skill_create does write it,
+    // but it is ALSO rewritten at runtime: the sandbox's self-heal appends a missing package and
+    // retries when a skill dies on ModuleNotFoundError. A failing skill therefore touches it on
+    // the way to failing, which would move this clock forward, discard the usage history that
+    // proves it is failing, and make it look newly written and unjudgeable -- protecting exactly
+    // the skills this pass exists to retire.
 
     /**
      * When this version of the skill was authored: the newest of its source files.

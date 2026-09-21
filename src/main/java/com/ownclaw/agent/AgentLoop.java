@@ -225,7 +225,7 @@ public class AgentLoop {
         context.setExternalCancel(
                 () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
 
-        AgentResult result = runLoop(context);
+        AgentResult result = runLoop(context).withTaskId(taskId);
         emitResult(context, result);
 
         // Store this execution as an episodic memory

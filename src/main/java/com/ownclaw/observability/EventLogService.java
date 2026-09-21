@@ -110,8 +110,29 @@ public class EventLogService {
      * Returns a two-element array [cloudTokens, localTokens], or [0, 0] if not found.
      */
     public long[] lastCompletedTaskTokens(String userId) {
+        return completedTaskTokens(userId, null);
+    }
+
+    /**
+     * Token usage for one task, or for whatever this user finished last if no id is given.
+     * <p>
+     * The id matters. Without it this returns the newest task_completed row for the user, which
+     * is a different task as soon as two can overlap — a scheduled digest finishing while a chat
+     * message is also running would record the chat's token counts against the digest's run.
+     * Even single-threaded it was wrong whenever delivery of one result took long enough for the
+     * next task to finish first.
+     */
+    public long[] completedTaskTokens(String userId, String taskId) {
         try {
-            var row = jdbc.queryForMap("""
+            var row = taskId != null
+                    ? jdbc.queryForMap("""
+                SELECT COALESCE(json_extract(details, '$.cloudTokens'), 0) AS cloud,
+                       COALESCE(json_extract(details, '$.localTokens'), 0) AS local
+                FROM events
+                WHERE user_id = ? AND event_type = 'task_completed' AND task_id = ?
+                ORDER BY id DESC LIMIT 1
+                """, userId, taskId)
+                    : jdbc.queryForMap("""
                 SELECT COALESCE(json_extract(details, '$.cloudTokens'), 0) AS cloud,
                        COALESCE(json_extract(details, '$.localTokens'), 0) AS local
                 FROM events

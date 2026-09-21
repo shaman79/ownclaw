@@ -561,16 +561,17 @@ public class ScheduledTaskService {
                         // right thing, including keeping a recurring task alive to retry; it was
                         // simply unreachable.
                         String used = skillsUsed(result);
+                        String agentTaskId = result.taskId();
                         if (result.success()) {
                             onTaskCompleted(taskId, userId, taskType, description,
-                                    result.response(), used);
+                                    result.response(), used, agentTaskId);
                         } else {
                             onTaskFailed(taskId, userId, taskType, description,
-                                    describeFailure(result), used);
+                                    describeFailure(result), used, agentTaskId);
                         }
                     })
                     .exceptionally(ex -> {
-                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null);
+                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null, null);
                         return null;
                     });
         }
@@ -617,8 +618,23 @@ public class ScheduledTaskService {
      * Called when a scheduled task completes successfully.
      */
     private void onTaskCompleted(long taskId, String userId, String taskType,
-                                 String description, String response, String skillsUsed) {
-        int newRunCount = incrementRunCount(taskId);
+                                 String description, String response, String skillsUsed,
+                                 String agentTaskId) {
+        // Bookkeeping must not be able to rewrite the outcome. This method used to run
+        // unguarded inside the completion callback, so anything that threw here -- most easily
+        // incrementRunCount finding no row, because the owner deleted the schedule while it was
+        // running -- propagated into the future's exceptionally() branch and reported a run that
+        // had SUCCEEDED as failed, after which the result itself was dropped. The work is done
+        // by the time we are called; the worst a bookkeeping error may cost is a log line.
+        int newRunCount;
+        try {
+            newRunCount = incrementRunCount(taskId);
+        } catch (Exception e) {
+            log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
+                    + "Delivering the result anyway.", taskId, e.getMessage());
+            resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60), response);
+            return;
+        }
 
         // Deliver the output, not just a note that output happened. Until this line the result
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
@@ -627,7 +643,7 @@ public class ScheduledTaskService {
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,
-                newRunCount, skillsUsed);
+                newRunCount, skillsUsed, agentTaskId);
 
         if (taskType.equals("recurring")) {
             // Check if max runs reached
@@ -683,7 +699,8 @@ public class ScheduledTaskService {
      * Called when a scheduled task fails.
      */
     private void onTaskFailed(long taskId, String userId, String taskType,
-                              String description, String error, String skillsUsed) {
+                              String description, String error, String skillsUsed,
+                              String agentTaskId) {
         int newRunCount = incrementRunCount(taskId);
 
         // A failed scheduled run is worth as much of the user's attention as a successful one —
@@ -694,7 +711,7 @@ public class ScheduledTaskService {
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "failed", null, error,
-                newRunCount, skillsUsed);
+                newRunCount, skillsUsed, agentTaskId);
 
         if (taskType.equals("recurring")) {
             // For recurring tasks, try to schedule next run despite the failure
@@ -847,12 +864,16 @@ public class ScheduledTaskService {
 
     private void recordRun(long taskId, String userId, String description, String taskType,
                            String status, String result, String error, int runNumber,
-                           String skillsUsed) {
+                           String skillsUsed, String agentTaskId) {
         Long startTime = taskStartTimes.remove(taskId);
         Long durationMs = (startTime != null) ? System.currentTimeMillis() - startTime : null;
 
         // Retrieve token usage from the most recent task_completed event
-        long[] tokens = eventLog.lastCompletedTaskTokens(userId);
+        // Attributed to THIS run. Asking for "the user's most recent task_completed" recorded
+        // whichever task happened to finish last, which is a different one as soon as two can
+        // overlap -- or simply whenever delivering one result took long enough for the next to
+        // finish first.
+        long[] tokens = eventLog.completedTaskTokens(userId, agentTaskId);
 
         try {
             jdbc.update("""
