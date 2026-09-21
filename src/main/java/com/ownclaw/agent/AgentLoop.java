@@ -20,6 +20,7 @@ import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import com.ownclaw.llm.*;
@@ -225,7 +226,13 @@ public class AgentLoop {
         context.setExternalCancel(
                 () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
 
-        AgentResult result = runLoop(context).withTaskId(taskId);
+        AgentResult result;
+        inFlight.put(taskId, context);
+        try {
+            result = runLoop(context).withTaskId(taskId);
+        } finally {
+            inFlight.remove(taskId);
+        }
         emitResult(context, result);
 
         // Store this execution as an episodic memory
@@ -366,7 +373,12 @@ public class AgentLoop {
                 );
             }
 
-            // Check stall — no forward progress for stall-timeout seconds
+            // Backstop only. This cannot realistically fire: markProgress() runs at the end of
+            // every branch below, so by the time execution returns here the reading is
+            // microseconds old -- and a task that HANGS hangs inside a step, never reaching this
+            // line at all. cancelStalledTasks() on the scheduler is what actually notices, and
+            // its cancellation surfaces through the isCancelled() check just above. This stays
+            // because it costs nothing and correctly reports a stall that somehow arrives here.
             if (context.msSinceLastProgress() > stallTimeoutMs) {
                 long stallSec = context.msSinceLastProgress() / 1000;
                 long elapsedSec = context.elapsedMs() / 1000;
@@ -2240,6 +2252,65 @@ public class AgentLoop {
      * @param description what's happening (e.g. "Generating code")
      * @return a ScheduledFuture to cancel when the LLM call completes
      */
+    /**
+     * Tasks currently inside the loop, so a watchdog can see them.
+     * <p>
+     * The in-loop stall check cannot fire. It runs at the top of the iteration and
+     * {@code markProgress()} is called at the end of every branch below it, so
+     * {@code msSinceLastProgress()} is a few microseconds old by the time it is read. Worse,
+     * that is the wrong place entirely: a task that hangs is hanging INSIDE a step -- in a tool
+     * call, or a local model call that never returns -- and while it does, the loop never
+     * reaches the top of the next iteration to check anything at all. A check on the stuck
+     * thread can only run when the thread is not stuck.
+     */
+    private final Map<String, AgentContext> inFlight = new ConcurrentHashMap<>();
+
+    /**
+     * Cancel tasks that have stopped making progress.
+     *
+     * <p>Runs on the scheduler, not on the task's own thread, which is the whole point. When a
+     * task has not marked progress for longer than the stall timeout it is asked to cancel
+     * through the ordinary mechanism -- the same flag the Stop button sets -- so it unwinds the
+     * way any cancelled task does, emits a proper outcome and releases its permits.
+     *
+     * <p>Honest about its limits: cancellation is cooperative. A task blocked in a socket read
+     * cannot notice until that read returns, so this bounds a stall by the stall timeout PLUS
+     * whatever the in-flight call takes to give up -- for Ollama, up to its 600 s read timeout.
+     * That is a real improvement on never noticing, and it is not a kill switch. Making it one
+     * would mean interrupting threads mid-call, which risks leaving a half-written skill
+     * directory or a dangling sandbox process behind.
+     */
+    /**
+     * Whether a task has stalled long enough to be cancelled.
+     *
+     * @param alreadyAsked a second request would only re-log; the task has not noticed the first
+     *                     yet, and asking again does not make it notice sooner
+     */
+    static boolean shouldCancelForStall(long idleMs, long stallTimeoutMs, boolean alreadyAsked) {
+        if (alreadyAsked) return false;
+        if (stallTimeoutMs <= 0) return false;   // disabled
+        return idleMs > stallTimeoutMs;
+    }
+
+    @Scheduled(fixedDelay = 30_000L)
+    public void cancelStalledTasks() {
+        long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
+        for (var entry : inFlight.entrySet()) {
+            AgentContext ctx = entry.getValue();
+            long idle = ctx.msSinceLastProgress();
+            boolean asked = cancellationService.isCancelled(
+                    ctx.userId(), entry.getKey(), ctx.startTimeMs());
+            if (!shouldCancelForStall(idle, stallTimeoutMs, asked)) continue;
+            log.warn("Task {} has made no progress for {}s (limit {}s) — requesting cancellation. "
+                            + "It will stop at its next checkpoint; a call already in flight has "
+                            + "to return first.",
+                    entry.getKey(), idle / 1000, stallTimeoutMs / 1000);
+            cancellationService.request(ctx.userId(), entry.getKey());
+            statusEmitter.emitForTask(ctx.userId(), entry.getKey(), StatusMessage.Type.WARNING,
+                    "No progress for " + (idle / 1000) + "s — stopping this task.");
+        }
+    }
+
     /**
      * One scheduler for every heartbeat in the process.
      * <p>
