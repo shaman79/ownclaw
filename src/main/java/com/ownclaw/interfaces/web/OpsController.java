@@ -38,14 +38,17 @@ public class OpsController {
     private final AuthService authService;
     private final DynamicSkillRegistry skillRegistry;
     private final TaskCancellationService cancellation;
+    private final com.ownclaw.agent.SkillMaintenanceService skillMaintenance;
 
     public OpsController(OpsService ops, AgentLoop agentLoop, AuthService authService,
-                         DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation) {
+                         DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
+                         com.ownclaw.agent.SkillMaintenanceService skillMaintenance) {
         this.ops = ops;
         this.agentLoop = agentLoop;
         this.authService = authService;
         this.skillRegistry = skillRegistry;
         this.cancellation = cancellation;
+        this.skillMaintenance = skillMaintenance;
     }
 
     // ── discovery ──
@@ -73,7 +76,8 @@ public class OpsController {
                         "POST /api/ops/selftest",
                         "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\"}",
                         "POST /api/ops/agent/cancel/{userId}",
-                        "POST /api/ops/skills/reload"),
+                        "POST /api/ops/skills/reload",
+                    "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)"),
                 "notProvided", List.of(
                         "credential values", "arbitrary shell", "deploy", "restart"),
                 "notes", List.of(
@@ -176,6 +180,27 @@ public class OpsController {
     }
 
     // ── actions ──
+
+    /**
+     * Skill maintenance. A dry run by default: {@code POST /api/ops/skills/maintenance} shows
+     * what it would retire and why, and only {@code ?apply=true} moves anything.
+     */
+    @PostMapping("/skills/maintenance")
+    public ResponseEntity<?> skillMaintenance(
+            @RequestParam(required = false, defaultValue = "false") boolean apply) {
+        var actions = skillMaintenance.run(!apply);
+        var out = new LinkedHashMap<String, Object>();
+        out.put("dryRun", !apply);
+        out.put("count", actions.size());
+        out.put("retirements", actions.stream().map(r -> Map.of(
+                "skill", r.skill(), "rule", r.rule(),
+                "reason", r.reason(), "performed", r.performed())).toList());
+        out.put("note", apply
+                ? "Retired skills were moved to the quarantine/ directory with a REASON file; "
+                  + "move one back into generated/ and restart to undo."
+                : "Nothing was changed. Re-send with ?apply=true to carry this out.");
+        return ResponseEntity.ok(out);
+    }
 
     @PostMapping("/selftest")
     public ResponseEntity<?> selftest() {

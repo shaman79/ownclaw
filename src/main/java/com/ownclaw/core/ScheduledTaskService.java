@@ -565,18 +565,40 @@ public class ScheduledTaskService {
                         // stored as that run's result. onTaskFailed already knew how to do the
                         // right thing, including keeping a recurring task alive to retry; it was
                         // simply unreachable.
+                        String used = skillsUsed(result);
                         if (result.success()) {
-                            onTaskCompleted(taskId, userId, taskType, description, result.response());
+                            onTaskCompleted(taskId, userId, taskType, description,
+                                    result.response(), used);
                         } else {
                             onTaskFailed(taskId, userId, taskType, description,
-                                    describeFailure(result));
+                                    describeFailure(result), used);
                         }
                     })
                     .exceptionally(ex -> {
-                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage());
+                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null);
                         return null;
                     });
         }
+    }
+
+    /**
+     * Which skills a run actually invoked, comma-separated, or null if none.
+     * <p>
+     * The {@code skills_used} column has existed all along and was never written — it was absent
+     * from the INSERT, so every row held null. That made it impossible to answer "what does this
+     * scheduled task depend on" from the data, which matters now that skill maintenance retires
+     * unused skills: without it, the only evidence linking a task to its skills is whether the
+     * owner happened to name them in the task description.
+     */
+    private static String skillsUsed(com.ownclaw.agent.AgentResult result) {
+        if (result == null || result.trajectory() == null) return null;
+        List<String> names = result.trajectory().turns().stream()
+                .map(t -> t.action() == null ? null : t.action().tool())
+                .filter(n -> n != null && !n.isBlank()
+                        && !com.ownclaw.agent.AgentAction.RESPOND.equals(n))
+                .distinct()
+                .toList();
+        return names.isEmpty() ? null : String.join(",", names);
     }
 
     /**
@@ -600,7 +622,7 @@ public class ScheduledTaskService {
      * Called when a scheduled task completes successfully.
      */
     private void onTaskCompleted(long taskId, String userId, String taskType,
-                                 String description, String response) {
+                                 String description, String response, String skillsUsed) {
         int newRunCount = incrementRunCount(taskId);
 
         // Deliver the output, not just a note that output happened. Until this line the result
@@ -609,7 +631,8 @@ public class ScheduledTaskService {
         resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60), response);
 
         // Record full execution history
-        recordRun(taskId, userId, description, taskType, "completed", response, null, newRunCount);
+        recordRun(taskId, userId, description, taskType, "completed", response, null,
+                newRunCount, skillsUsed);
 
         if (taskType.equals("recurring")) {
             // Check if max runs reached
@@ -665,7 +688,7 @@ public class ScheduledTaskService {
      * Called when a scheduled task fails.
      */
     private void onTaskFailed(long taskId, String userId, String taskType,
-                              String description, String error) {
+                              String description, String error, String skillsUsed) {
         int newRunCount = incrementRunCount(taskId);
 
         // A failed scheduled run is worth as much of the user's attention as a successful one —
@@ -675,7 +698,8 @@ public class ScheduledTaskService {
                 "Scheduled task did not finish: " + truncate(description, 60), error);
 
         // Record full execution history
-        recordRun(taskId, userId, description, taskType, "failed", null, error, newRunCount);
+        recordRun(taskId, userId, description, taskType, "failed", null, error,
+                newRunCount, skillsUsed);
 
         if (taskType.equals("recurring")) {
             // For recurring tasks, try to schedule next run despite the failure
@@ -800,7 +824,8 @@ public class ScheduledTaskService {
      * Record a task execution run in the scheduled_task_runs history table.
      */
     private void recordRun(long taskId, String userId, String description, String taskType,
-                           String status, String result, String error, int runNumber) {
+                           String status, String result, String error, int runNumber,
+                           String skillsUsed) {
         Long startTime = taskStartTimes.remove(taskId);
         Long durationMs = (startTime != null) ? System.currentTimeMillis() - startTime : null;
 
@@ -811,12 +836,12 @@ public class ScheduledTaskService {
             jdbc.update("""
                 INSERT INTO scheduled_task_runs
                     (task_id, user_id, description, task_type, status, result, error,
-                     duration_ms, run_number, executed_at, cloud_tokens, local_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
+                     duration_ms, run_number, executed_at, cloud_tokens, local_tokens, skills_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
                 """,
                 taskId, userId, description, taskType, status,
                 result, error, durationMs, runNumber,
-                tokens[0], tokens[1]);
+                tokens[0], tokens[1], skillsUsed);
         } catch (Exception e) {
             log.error("Failed to record task run for task #{}: {}", taskId, e.getMessage());
         }

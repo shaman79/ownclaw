@@ -115,6 +115,53 @@ public class DynamicSkillRegistry {
      * warning on every startup is a far better outcome than one that is gone.
      */
     private void quarantine(Path skillDir, Exception cause) {
+        moveToQuarantine(skillDir,
+                "Quarantined because it could not be loaded.\n"
+                        + "Cause: " + cause.getClass().getSimpleName() + ": " + cause.getMessage() + "\n\n"
+                        + "The code is intact. Fix SKILL.yaml and move the directory back into\n"
+                        + "generated/ to restore the skill.\n");
+    }
+
+    /**
+     * Retire a registered skill: unregister it and move its directory aside, reversibly.
+     * <p>
+     * The same mechanism as an unloadable skill, exposed for maintenance. It is deliberately a
+     * move and not a delete. Generated skills are written by the agent at runtime, live outside
+     * the repository, and are therefore in no backup git provides — so a wrong automated decision
+     * has to stay undoable, and "undo" has to mean moving one directory back. A retirement that
+     * cannot be reversed would make any automatic pruning rule too dangerous to enable.
+     *
+     * @param reason why, in a sentence, written into the directory for whoever finds it later
+     * @return where it went, or empty if the skill was unknown or could not be moved
+     */
+    public Optional<Path> retire(String name, String reason) {
+        DynamicSkill skill = dynamicSkills.get(name);
+        if (skill == null) {
+            log.warn("Cannot retire '{}': no such dynamic skill", name);
+            return Optional.empty();
+        }
+        // Move FIRST, unregister only on success. Unregistering first left a half-state when the
+        // move failed -- the skill gone from the manifest but still on disk, so it silently came
+        // back at the next restart and nothing recorded that anything had been attempted. Doing
+        // the fallible half first means a failure changes nothing at all: the skill stays
+        // registered and usable, and the next pass will simply try again.
+        Optional<Path> dest = moveToQuarantine(skill.skillDir(),
+                "Retired automatically by skill maintenance.\n"
+                        + "Reason: " + reason + "\n\n"
+                        + "Nothing is necessarily wrong with this code; it was judged no longer\n"
+                        + "earning its place. To bring it back, move this directory into\n"
+                        + "generated/ (drop the timestamp suffix) and restart.\n");
+        if (dest.isEmpty()) {
+            log.error("Could not retire '{}': its files could not be moved, so it stays registered "
+                    + "and usable. Nothing has changed.", name);
+            return dest;
+        }
+        unregister(name);
+        return dest;
+    }
+
+    /** Move a skill directory into the quarantine sibling, leaving a note saying why. */
+    private Optional<Path> moveToQuarantine(Path skillDir, String reasonText) {
         try {
             Path quarantineDir = skillDir.getParent().resolveSibling("quarantine");
             Files.createDirectories(quarantineDir);
@@ -122,17 +169,13 @@ public class DynamicSkillRegistry {
             Path dest = quarantineDir.resolve(skillDir.getFileName() + "-" + stamp);
             Files.move(skillDir, dest);
             Files.writeString(dest.resolve("QUARANTINE-REASON.txt"),
-                    "Quarantined because it could not be loaded.\n"
-                            + "When:  " + java.time.Instant.now() + "\n"
-                            + "Cause: " + cause.getClass().getSimpleName() + ": " + cause.getMessage() + "\n\n"
-                            + "The code is intact. Fix SKILL.yaml and move the directory back into\n"
-                            + "generated/ to restore the skill.\n");
-            log.warn("Quarantined unloadable skill '{}' to {} — its code is intact and recoverable",
+                    reasonText + "\nWhen: " + java.time.Instant.now() + "\n");
+            log.warn("Quarantined skill '{}' to {} — its code is intact and recoverable",
                     skillDir.getFileName(), dest);
+            return Optional.of(dest);
         } catch (Exception moveEx) {
-            log.error("Could not quarantine broken skill {} ({}). Leaving it in place — it will be "
-                            + "skipped on every startup until SKILL.yaml is fixed.",
-                    skillDir, moveEx.getMessage());
+            log.error("Could not quarantine {} ({}). Leaving it in place.", skillDir, moveEx.getMessage());
+            return Optional.empty();
         }
     }
 

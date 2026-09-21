@@ -1,0 +1,406 @@
+package com.ownclaw.agent;
+
+import com.ownclaw.agent.tools.DynamicSkill;
+import com.ownclaw.agent.tools.DynamicSkillRegistry;
+import com.ownclaw.observability.EventLogService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Stream;
+
+/**
+ * Retires generated skills that have stopped earning their place.
+ *
+ * <p>The library grows by design — the agent writes a new skill whenever nothing fits — but
+ * nothing ever shrank it, so process residue accumulated: variants that never worked, debug
+ * copies made while chasing a bug, one-shot installers, and narrower forms of a skill that
+ * already did the job. That costs more than disk. Every registered skill is a line in the tool
+ * manifest the model reads before each decision, and a near-duplicate of a working tool is an
+ * invitation to pick the wrong one.
+ *
+ * <h2>Why "unused" is never the reason</h2>
+ * The tempting rule — retire anything idle for months — is wrong here, and the production data
+ * says so plainly: {@code web_fetch_and_parse} (36 runs, 32 successes) and
+ * {@code imap_move_to_trash_by_sender} (18 for 18) had both been idle over six months. They are
+ * not dead, they are capabilities waiting to be needed. Retiring them would force the agent to
+ * write them again, which is exactly what the owner asked to prevent. Idleness therefore only
+ * makes a skill <em>eligible to be examined</em>; the reason to retire it must be evidence about
+ * the skill itself. Two such reasons exist, and no others:
+ * <ol>
+ *   <li>it has not earned its place — almost nothing it ever did worked;</li>
+ *   <li>it is a narrower form of a skill that is still here and does the job better.</li>
+ * </ol>
+ *
+ * <h2>What it will not touch</h2>
+ * A skill used recently is kept. A skill any live scheduled task refers to is kept however old
+ * its usage looks, because a task that fires monthly can be months idle and still essential. And
+ * if the usage history is too thin to judge anything — an empty or freshly restored table — the
+ * pass does nothing at all, because "no history" and "no successes" are indistinguishable from
+ * the counters alone, and reading the first as the second would retire the entire library in one
+ * go.
+ *
+ * <h2>Reversibility carries the risk</h2>
+ * Retirement moves the directory to {@code quarantine/} with a note, and nothing is deleted.
+ * That is what makes an automatic rule acceptable. But it is worth being precise about what
+ * reversibility buys: the <em>bytes</em> are recoverable by moving a directory back, while the
+ * agent's knowledge that the capability existed is not — nothing offers {@code quarantine/} back
+ * to it, so a wrongly retired skill is eventually rewritten from scratch. A wrong retirement is
+ * repaired by the owner, not by the system, which is precisely why the rules below demand
+ * positive evidence against a skill rather than an absence of evidence for it.
+ */
+@Service
+public class SkillMaintenanceService {
+
+    private static final Logger log = LoggerFactory.getLogger(SkillMaintenanceService.class);
+
+    /** Below this, a skill is in active service and is never examined. */
+    static final int IDLE_DAYS_BEFORE_ELIGIBLE = 90;
+
+    /**
+     * How reliable a skill must be to count as a working capability, as a reciprocal: at least
+     * one attempt in {@value} has to have succeeded.
+     * <p>
+     * There is deliberately no minimum number of attempts. An earlier version required two
+     * before "it has never worked" counted as evidence, which exempted the single commonest
+     * piece of residue in the real library — written once, failed once, abandoned — and so
+     * spared whatever had been given up on fastest. One failed attempt with no successes is the
+     * same evidence as five; the count changes the confidence, not the direction.
+     */
+    static final int MIN_SUCCESS_IN = 4;
+
+    /** The actor recorded against automated retirements. {@code events.user_id} is NOT NULL. */
+    private static final String SYSTEM_ACTOR = "system";
+
+    private final DynamicSkillRegistry registry;
+    private final JdbcTemplate jdbc;
+    private final EventLogService eventLog;
+
+    public SkillMaintenanceService(DynamicSkillRegistry registry, JdbcTemplate jdbc,
+                                   EventLogService eventLog) {
+        this.registry = registry;
+        this.jdbc = jdbc;
+        this.eventLog = eventLog;
+    }
+
+    // ── facts ────────────────────────────────────────────────────────────────
+
+    /**
+     * What is known about one registered skill.
+     *
+     * @param runs      recorded invocations, ever
+     * @param successes how many of them worked
+     * @param idleDays  days since the last invocation — or, for a skill never invoked, days since
+     *                  its files were last written
+     */
+    public record SkillFacts(String name, int runs, int successes, int idleDays) {
+        public boolean everRan()    { return runs > 0; }
+        public boolean everWorked() { return successes > 0; }
+
+        /** Success rate in parts per thousand, so comparisons never turn on float rounding. */
+        public int successRatePermille() {
+            return runs == 0 ? 0 : (int) Math.round(1000.0 * successes / runs);
+        }
+
+        /**
+         * Whether this skill has shown that it works. Integer arithmetic on purpose: at the
+         * boundary, a floating comparison would make a 1-in-4 skill's fate depend on rounding.
+         */
+        public boolean earnedItsPlace() {
+            return successes > 0 && successes * MIN_SUCCESS_IN >= runs;
+        }
+    }
+
+    /** A proposed or performed retirement. */
+    public record Retirement(String skill, String rule, String reason, boolean performed) {}
+
+    /**
+     * Usage facts for every registered skill.
+     * <p>
+     * Returns empty — meaning "retire nothing" — whenever the history cannot be trusted. That
+     * covers a failed query and, just as importantly, a history too short to contain the idleness
+     * these rules reason about: a fresh or restored database looks exactly like a library in
+     * which nothing has ever succeeded, and reading it that way would quarantine everything.
+     */
+    public List<SkillFacts> facts() {
+        Map<String, Map<String, Object>> usage = new LinkedHashMap<>();
+        try {
+            Map<String, Object> span = jdbc.queryForMap(
+                    "SELECT COUNT(*) c, "
+                            + "CAST(julianday('now') - julianday(MIN(created_at)) AS INTEGER) span "
+                            + "FROM skill_usage");
+            int rows = num(span.get("c"));
+            int spanDays = num(span.get("span"));
+            if (rows == 0 || spanDays < IDLE_DAYS_BEFORE_ELIGIBLE) {
+                log.info("Skill maintenance: usage history is too thin to judge ({} rows spanning "
+                        + "{} days); retiring nothing.", rows, spanDays);
+                return List.of();
+            }
+            for (Map<String, Object> row : jdbc.queryForList(
+                    "SELECT tool_name, COUNT(*) runs, "
+                            + "SUM(CASE WHEN success THEN 1 ELSE 0 END) successes, "
+                            + "CAST(julianday('now') - julianday(MAX(created_at)) AS INTEGER) idle_days "
+                            + "FROM skill_usage GROUP BY tool_name")) {
+                usage.put(String.valueOf(row.get("tool_name")), row);
+            }
+        } catch (Exception e) {
+            log.warn("Skill maintenance cannot read usage history ({}); no skill will be retired.",
+                    e.getMessage());
+            return List.of();
+        }
+
+        List<SkillFacts> out = new ArrayList<>();
+        for (DynamicSkill skill : registry.allDynamic()) {
+            Map<String, Object> row = usage.get(skill.name());
+            if (row == null) {
+                // Never invoked. That is NOT the same fact as "ancient": creating a skill writes
+                // no usage row at all, because skill_create bypasses the executeTool path that
+                // calls recordUsage. So a skill written an hour ago arrives here looking exactly
+                // like one abandoned last spring. Treating that as infinitely idle let it skip
+                // the 90-day gate entirely, and quarantined the agent's own fresh work before it
+                // could be used once. The files' own age is the only honest clock available.
+                out.add(new SkillFacts(skill.name(), 0, 0, ageDays(skill.skillDir())));
+            } else {
+                out.add(new SkillFacts(skill.name(),
+                        num(row.get("runs")), num(row.get("successes")), num(row.get("idle_days"))));
+            }
+        }
+        out.sort(Comparator.comparing(SkillFacts::name));
+        return out;
+    }
+
+    /**
+     * Days since anything in the skill's directory was last written.
+     * <p>
+     * The newest file wins, so a skill repaired yesterday reads as one day old however long ago
+     * it was first created — a skill the agent has just fixed is not residue. The children are
+     * listed rather than the directory stat'ed because on POSIX a directory's mtime tracks
+     * entries added and removed, not a file rewritten in place, and rewriting skill.py in place
+     * is exactly what updating a skill does. If the age cannot be read at all the answer is 0:
+     * unknown age means too new to judge, the direction every other uncertainty here fails in.
+     */
+    static int ageDays(Path dir) {
+        try (Stream<Path> children = Files.list(dir)) {
+            long newest = children.map(SkillMaintenanceService::modifiedMillis)
+                    .reduce(modifiedMillis(dir), Math::max);
+            long days = Duration.between(Instant.ofEpochMilli(newest), Instant.now()).toDays();
+            return (int) Math.max(0, Math.min(Integer.MAX_VALUE, days));
+        } catch (Exception e) {
+            log.warn("Cannot read the age of {} ({}); treating it as newly written.",
+                    dir, e.getMessage());
+            return 0;
+        }
+    }
+
+    private static long modifiedMillis(Path p) {
+        try {
+            return Files.getLastModifiedTime(p).toMillis();
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    /**
+     * Skills that must never be retired because something still points at them.
+     * <p>
+     * Scheduled tasks name their skills in free text ("Fetch daily news digest using
+     * daily_news_digest skill"), so this matches the description as well as the {@code
+     * skills_used} recorded against past runs. It reads every task that is not cancelled — a
+     * paused task is one the owner intends to resume.
+     */
+    public Set<String> protectedByScheduler() {
+        Set<String> names = new TreeSet<>();
+        Set<String> registered = new TreeSet<>();
+        registry.allDynamic().forEach(s -> registered.add(s.name()));
+        try {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT COALESCE(description,'') d FROM scheduled_tasks "
+                            + "WHERE status <> 'cancelled' "
+                            + "UNION ALL "
+                            + "SELECT COALESCE(skills_used,'') d FROM scheduled_task_runs "
+                            + "WHERE executed_at > datetime('now', '-365 day')");
+            for (Map<String, Object> row : rows) {
+                String text = String.valueOf(row.get("d")).toLowerCase(Locale.ROOT);
+                for (String name : registered) {
+                    if (text.contains(name.toLowerCase(Locale.ROOT))) names.add(name);
+                }
+            }
+        } catch (Exception e) {
+            // Cannot tell what the scheduler needs -> protect everything.
+            log.warn("Skill maintenance cannot read scheduled tasks ({}); protecting all skills.",
+                    e.getMessage());
+            return registered;
+        }
+        return names;
+    }
+
+    // ── the decision ─────────────────────────────────────────────────────────
+
+    /** Decide what should be retired, without touching anything. */
+    public List<Retirement> plan() {
+        List<SkillFacts> all = facts();
+        if (all.isEmpty()) return List.of();
+        return decide(all, protectedByScheduler());
+    }
+
+    /**
+     * The rules themselves, as a pure function of the facts.
+     * <p>
+     * Separated from the database so they can be replayed against the real library exactly as it
+     * stood, with no mocks: a retirement rule is only trustworthy if you can see what it does to
+     * skills that actually exist.
+     */
+    static List<Retirement> decide(List<SkillFacts> all, Set<String> protectedNames) {
+        Map<String, SkillFacts> byName = new LinkedHashMap<>();
+        all.forEach(f -> byName.put(f.name(), f));
+
+        List<Retirement> out = new ArrayList<>();
+        for (SkillFacts f : all) {
+            if (f.idleDays() < IDLE_DAYS_BEFORE_ELIGIBLE) continue;
+            if (protectedNames.contains(f.name())) continue;
+
+            // 1. It has not earned its place: nothing it ever did worked, or so little of it that
+            //    offering it to the model mostly wastes a step. One clause covers what used to be
+            //    two separate rules — a skill never invoked has no successes either — and the
+            //    reason text keeps the shapes distinguishable for whoever reads the note later.
+            if (!f.earnedItsPlace()) {
+                out.add(new Retirement(f.name(), "unproven", unprovenReason(f), false));
+                continue;
+            }
+
+            // 2. A narrower form of a skill that is still here and does the job at least as well.
+            //    This is the shape the owner named: a specialisation sitting beside the general
+            //    tool, competing with it in the manifest for no benefit.
+            String general = supersededBy(f, byName);
+            if (general != null) {
+                SkillFacts g = byName.get(general);
+                out.add(new Retirement(f.name(), "superseded",
+                        "a narrower form of '" + general + "', which succeeds "
+                                + pct(g) + " of the time against this one's " + pct(f), false));
+            }
+        }
+        out.sort(Comparator.comparing(Retirement::skill));
+        return out;
+    }
+
+    private static String unprovenReason(SkillFacts f) {
+        if (!f.everRan()) {
+            return "written " + f.idleDays() + " days ago and never invoked once";
+        }
+        if (!f.everWorked()) {
+            return f.runs() == 1 ? "tried once, and it failed"
+                    : f.runs() + " attempts, none successful";
+        }
+        return "only " + f.successes() + " of " + f.runs() + " attempts succeeded (" + pct(f) + ")";
+    }
+
+    /**
+     * The registered skill this one is a strict specialisation of, or null.
+     * <p>
+     * Purely a name relationship: {@code imap_move_to_trash_by_sender_imaplib} extends
+     * {@code imap_move_to_trash_by_sender}. The agent is instructed to name skills after what
+     * they do, so a name that is another name plus a qualifier is a specialisation by
+     * construction. The general one must itself work and be at least as reliable, so a working
+     * narrow skill is never dropped in favour of a broad one that does not deliver.
+     */
+    private static String supersededBy(SkillFacts f, Map<String, SkillFacts> byName) {
+        String best = null;
+        for (SkillFacts other : byName.values()) {
+            if (other.name().equals(f.name())) continue;
+            if (!f.name().startsWith(other.name() + "_")) continue;
+            // Redundant today — a general skill with no successes has rate 0, and the rate test
+            // below already rejects it, while rule 1 has retired it before this runs. Kept because
+            // it states the intent directly: never hand a skill's job to one that has never done it.
+            if (!other.everWorked()) continue;
+            if (other.successRatePermille() < f.successRatePermille()) continue;
+            // Prefer the longest matching general name, i.e. the nearest ancestor.
+            if (best == null || other.name().length() > best.length()) best = other.name();
+        }
+        return best;
+    }
+
+    private static String pct(SkillFacts f) {
+        return Math.round(f.successRatePermille() / 10.0) + "%";
+    }
+
+    // ── acting on it ─────────────────────────────────────────────────────────
+
+    /**
+     * Carry out the plan.
+     *
+     * @param dryRun when true nothing is moved and the same list comes back with
+     *               {@code performed=false} — how the ops endpoint shows its working before
+     *               anything changes
+     */
+    public List<Retirement> run(boolean dryRun) {
+        List<Retirement> plan = plan();
+        if (plan.isEmpty()) {
+            log.info("Skill maintenance: nothing to retire.");
+            return plan;
+        }
+        if (dryRun) {
+            log.info("Skill maintenance (dry run) would retire {}: {}", plan.size(),
+                    plan.stream().map(Retirement::skill).toList());
+            return plan;
+        }
+
+        List<Retirement> done = new ArrayList<>();
+        for (Retirement r : plan) {
+            boolean ok = registry.retire(r.skill(), r.rule() + " — " + r.reason()).isPresent();
+            done.add(new Retirement(r.skill(), r.rule(), r.reason(), ok));
+            try {
+                // A non-null actor: events.user_id is NOT NULL, so passing null threw and the
+                // catch below swallowed it, leaving every retirement with no audit trail at all.
+                eventLog.log(SYSTEM_ACTOR, null, "skill.retired", ok ? "info" : "warn",
+                        r.skill() + " — " + r.reason(),
+                        "{\"rule\":\"" + r.rule() + "\",\"moved\":" + ok + "}", 0);
+            } catch (Exception e) {
+                log.warn("Could not record the retirement of {}: {}", r.skill(), e.getMessage());
+            }
+        }
+        log.warn("Skill maintenance retired {} skill(s): {}", done.size(),
+                done.stream().map(Retirement::skill).toList());
+        return done;
+    }
+
+    /**
+     * The automatic pass, daily.
+     * <p>
+     * Daily rather than hourly because nothing it acts on changes quickly: every input is a
+     * 90-day-old fact. Running it more often would only add chances to get it wrong. It starts an
+     * hour after boot so a restart never coincides with a retirement, which keeps the two easy to
+     * tell apart in the log when something does go wrong.
+     * <p>
+     * It acts rather than only reporting, because a maintenance pass that needs a human to press
+     * a button is not maintenance. Its safety comes from the rules demanding evidence and from
+     * every retirement being a reversible move, not from asking first.
+     */
+    @Scheduled(initialDelay = 3_600_000L, fixedDelay = 86_400_000L)
+    public void scheduledPass() {
+        try {
+            run(false);
+        } catch (Exception e) {
+            // Never let maintenance take the scheduler's thread down with it.
+            log.error("Skill maintenance pass failed: {}", e.getMessage(), e);
+        }
+    }
+
+    private static int num(Object o) {
+        return o instanceof Number n ? n.intValue() : 0;
+    }
+}
