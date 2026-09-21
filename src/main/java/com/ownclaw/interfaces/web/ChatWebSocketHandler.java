@@ -205,6 +205,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             String targetSession = userMessage;
             if (targetSession != null && !targetSession.isBlank()) {
                 conversationService.setActiveSession(userId, targetSession);
+                // Tell EVERY connection, not just the one that switched.
+                //
+                // The active session is per USER, not per connection, so switching in one tab
+                // silently moved every other tab too -- they kept showing the old conversation
+                // while anything typed into them was saved into the new one. The user then had a
+                // message filed under a chat they were not looking at, with no indication it had
+                // moved. Announcing it lets the other tabs follow.
+                sendToUser(userId, "session_updated", targetSession);
                 sendActiveSessionInfo(session, userId);
             }
             return;

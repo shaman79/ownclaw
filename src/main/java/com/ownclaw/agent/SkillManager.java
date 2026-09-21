@@ -548,8 +548,38 @@ public class SkillManager {
         if (raw == null) return null;
 
         // Already a Map (Jackson deserialized it from nested JSON object)
-        if (raw instanceof Map) {
-            return (Map<String, Object>) raw;
+        if (raw instanceof Map<?, ?> map) {
+            // Normalise the shorthand the model very often emits: {"url": "string"} instead of
+            // {"url": {"type": "string"}}. Passed through unchanged, that reached the YAML writer
+            // as a String where a parameter definition was expected, the entry was dropped, and
+            // the skill registered with NO input schema. The agent was then told the skill takes
+            // no arguments, called it with none, and the Python died on a missing key -- while
+            // skill_create had reported success. Nothing in the loop could work out why, because
+            // the manifest it reads and the code on disk disagreed.
+            Map<String, Object> normalised = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                String key = String.valueOf(e.getKey());
+                Object def = e.getValue();
+                if (def instanceof Map) {
+                    normalised.put(key, def);
+                } else if (def == null) {
+                    normalised.put(key, new LinkedHashMap<>(Map.of("type", "string")));
+                } else {
+                    // "string" / "int" / a one-line description -- treat it as the type when it
+                    // looks like one, otherwise as the description. Either way the parameter
+                    // survives, which is the point.
+                    String text = String.valueOf(def).trim();
+                    var d = new LinkedHashMap<String, Object>();
+                    if (text.matches("(?i)string|str|int|integer|number|float|bool|boolean|array|list|object")) {
+                        d.put("type", text.toLowerCase(java.util.Locale.ROOT));
+                    } else {
+                        d.put("type", "string");
+                        d.put("description", text);
+                    }
+                    normalised.put(key, d);
+                }
+            }
+            return normalised;
         }
 
         // List/Array format: [{"name": "url", "type": "string", ...}, ...]

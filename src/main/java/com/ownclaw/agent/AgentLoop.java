@@ -1423,9 +1423,19 @@ public class AgentLoop {
                     + "or simplify the task. If truly stuck, respond with what you have.";
         }
 
-        // Record reflection as a synthetic observation so the ThinkingEngine sees it
+        // Record reflection so the ThinkingEngine sees it -- as a FAILURE, not a success.
+        //
+        // The agent did not do anything here; this is the harness telling it that what it has
+        // been doing is not working. Recording it as a successful step put a clean turn at the
+        // tail of the trajectory, and every safeguard that looks backwards from the tail reads
+        // that as recovery: consecutiveFailures() resets, consecutiveHollowResults() resets, and
+        // the repeated-action check counts zero identical trailing actions. So injecting the
+        // "stop repeating yourself" hint was itself what cleared the evidence of repetition, and
+        // a skill failing deterministically could alternate fail / reflect / fail / reflect
+        // indefinitely without ever tripping the failure limit -- the hint fired over and over
+        // while the counters it depends on never got above one.
         AgentAction reflectionAction = new AgentAction("_reflection", Map.of(), "System-injected reflection");
-        AgentObservation reflectionObs = AgentObservation.success("_reflection", reflectionHint, Map.of(), 0);
+        AgentObservation reflectionObs = AgentObservation.failure("_reflection", reflectionHint, 0);
         context.trajectory().record(reflectionAction, reflectionObs);
     }
 

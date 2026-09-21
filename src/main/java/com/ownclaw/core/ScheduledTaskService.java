@@ -537,10 +537,24 @@ public class ScheduledTaskService {
                     truncate(description, 50));
 
             // Mark as running to prevent re-pickup
-            jdbc.update("""
+            // Claim the task, and skip it if the claim fails.
+            //
+            // The return value was ignored. The poller SELECTs due tasks and then updates them,
+            // and between those two statements the owner can cancel: the cancel matches
+            // status IN ('active','paused'), succeeds, and reports "Task cancelled". This UPDATE
+            // then matched nothing -- but the code carried on, ran the task anyway, and on
+            // completion rescheduled it to 'active' with a fresh next_run_at. A recurring task
+            // cancelled at the moment it fired therefore came back to life and kept running,
+            // with no way to stop it except catching it outside that window.
+            int claimed = jdbc.update("""
                 UPDATE scheduled_tasks SET status = 'running', updated_at = datetime('now')
                 WHERE id = ? AND status = 'active'
                 """, taskId);
+            if (claimed == 0) {
+                log.info("Scheduled task #{} was not claimed (cancelled or already running); "
+                        + "skipping this firing.", taskId);
+                continue;
+            }
 
             // Notify user
             statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,

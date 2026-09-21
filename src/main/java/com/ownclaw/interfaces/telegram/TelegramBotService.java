@@ -52,6 +52,7 @@ public class TelegramBotService {
 
     /** Maps Telegram chatId → userId for users that have interacted. */
     private final Map<String, Long> userChatIds = new ConcurrentHashMap<>();
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @SuppressWarnings("unused") // setupWizard injected to guarantee applyOverrides() runs first
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
@@ -62,7 +63,9 @@ public class TelegramBotService {
                               SetupWizardService setupWizard,
                               CommandHandler commandHandler,
                               TaskCancellationService cancellationService,
-                              DebugSessionService debugService) {
+                              DebugSessionService debugService,
+                              org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
         this.userRepo = userRepo;
@@ -85,6 +88,8 @@ public class TelegramBotService {
             log.info("Telegram bot disabled in config");
             return;
         }
+
+        restoreKnownChats();
         String token = config.getBotToken();
         if (token == null || token.isBlank()) {
             log.warn("Telegram bot token not configured — bot disabled");
@@ -203,8 +208,8 @@ public class TelegramBotService {
         }
         String userId = linkedUser.get();
 
-        // Track chatId for this user
-        userChatIds.put(userId, chatId);
+        // Track chatId for this user, and remember it across restarts.
+        rememberChat(userId, chatId);
 
         // Subscribe to status messages for this user → send to Telegram with stats
         statusEmitter.subscribe(userId, this, msg -> {
@@ -224,7 +229,11 @@ public class TelegramBotService {
                     sb.append("_");
                 }
             }
-            sendMessage(chatId, sb.toString());
+            // Resolve the chat at DELIVERY time, not from whichever message happened to create
+            // this subscription. The lambda used to capture that message's chatId, so once a
+            // user had written from a second chat everything kept going to the first.
+            Long target = userChatIds.get(userId);
+            if (target != null) sendMessage(target, sb.toString());
         });
 
         // ── /cancel — stop the running task ──
@@ -297,6 +306,49 @@ public class TelegramBotService {
      * Formatting is a nicety; delivery is not. On a parse failure the same text goes out
      * unformatted.
      */
+    /**
+     * Record a user's Telegram chat, in memory and on disk.
+     * <p>
+     * The mapping only existed once a message had arrived in this process. This service deploys
+     * on every push and therefore restarts often, so after a restart a scheduled result had
+     * nowhere to go: ResultDelivery emitted it, no Telegram subscription existed yet, and the
+     * message was simply lost until the owner happened to write to the bot. Persisting the chat
+     * lets the subscription be restored at startup.
+     */
+    private void rememberChat(String userId, long chatId) {
+        Long previous = userChatIds.put(userId, chatId);
+        if (previous != null && previous == chatId) return;
+        try {
+            jdbc.update("INSERT INTO system_settings (key, value) VALUES (?, ?) "
+                            + "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    "telegram.chat." + userId, String.valueOf(chatId));
+        } catch (Exception e) {
+            log.debug("Could not persist the Telegram chat for {}: {}", userId, e.getMessage());
+        }
+    }
+
+    /**
+     * Restore known chats at startup so unattended results can be delivered before the user
+     * writes anything.
+     */
+    private void restoreKnownChats() {
+        try {
+            for (var row : jdbc.queryForList(
+                    "SELECT key, value FROM system_settings WHERE key LIKE 'telegram.chat.%'")) {
+                String userId = String.valueOf(row.get("key")).substring("telegram.chat.".length());
+                try {
+                    userChatIds.put(userId, Long.parseLong(String.valueOf(row.get("value"))));
+                } catch (NumberFormatException ignored) { /* a corrupt row is not worth failing on */ }
+            }
+            if (!userChatIds.isEmpty()) {
+                log.info("Restored {} Telegram chat(s); unattended results can be delivered "
+                        + "without waiting for an inbound message.", userChatIds.size());
+            }
+        } catch (Exception e) {
+            log.debug("Could not restore Telegram chats: {}", e.getMessage());
+        }
+    }
+
     private void sendMessage(long chatId, String text) {
         if (!sendMessage(chatId, text, "Markdown")) {
             log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
