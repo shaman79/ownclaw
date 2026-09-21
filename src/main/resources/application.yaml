@@ -95,6 +95,20 @@ ownclaw:
     local-tool-selection-candidate-limit: 120
     tool-name-preview-limit: 50
 
+    # Offer tools natively instead of asking for a JSON envelope in the prompt.
+    #
+    # Verified in production before this was turned on: both a registry skill (shell_exec) and a
+    # special action (respond) came back as tool_use blocks on claude-opus-5, the loop consumed
+    # them, and the following step reported "cache: 0 created, 26505 read" -- a pure cache read,
+    # so the tools array did not destabilise the cached prefix. Zero parse failures.
+    #
+    # It should also be cheaper: the prose manifest lives in the dynamic block attached to the
+    # newest message, deliberately outside the cache breakpoints, so it was re-billed at full
+    # rate every step. In the tools array it sits in the cached prefix.
+    #
+    # Off instantly and without a restart: POST /api/ops/config/native-tools?enabled=false
+    native-tools: ${OWNCLAW_NATIVE_TOOLS:true}
+
   budgets:
     daily-cloud-tokens: 0
     per-task-cloud-tokens: 0
