@@ -2658,8 +2658,12 @@
         loadSessionMessages(sessionId);
     }
 
+    /** The conversation whose transcript is actually on screen. */
+    var displayedSessionId = null;
+
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
+        displayedSessionId = sessionId;
         // Show loading spinner in messages area
         clearMessages();
         var loader = document.createElement('div');
@@ -4858,6 +4862,20 @@
                     // or /bg. It must read as an assistant message but must NOT end whatever the
                     // user is currently watching, so it is deliberately absent from the list
                     // below and rendered with the same styling as a response.
+                    // Do not append a message that belongs to another conversation.
+                    //
+                    // An answer is saved into the chat it was asked from and pushed to every
+                    // window. A window showing a different chat appended it anyway, so the reply
+                    // turned up under an unrelated conversation -- and replying there filed the
+                    // follow-up in a third place. Say it arrived instead of rendering it into
+                    // the wrong transcript, and do not drop it silently: the owner waited
+                    // minutes for it.
+                    if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
+                        showConnBanner('An answer arrived in another chat — open it to read it.');
+                        refreshSessionList();
+                        if (type === 'response' || type === 'result') { setThinking(false); doneActivity(); }
+                        return;
+                    }
                     if (type === 'result') { addMsg('response', content); return; }
                     if (type === 'response' || type === 'system') {
                         setThinking(false);

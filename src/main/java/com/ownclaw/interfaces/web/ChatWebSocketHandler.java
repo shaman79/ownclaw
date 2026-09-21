@@ -337,7 +337,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     conversationService.saveMessage(userId, currentSessionId, "assistant", response);
                     // A question is routed as a question, so the client can offer a reply box
                     // instead of presenting it as the finished answer.
-                    sendToUser(userId, result.awaitingUser() ? "input_request" : "response", response);
+                    sendToUser(userId, result.awaitingUser() ? "input_request" : "response", response,
+                                currentSessionId);
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToUser(userId, "session_updated", currentSessionId);
                 })
@@ -504,6 +505,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * client reloads history on connect.
      */
     private void sendToUser(String userId, String type, String content) {
+        sendToUser(userId, type, content, null);
+    }
+
+    private void sendToUser(String userId, String type, String content, String sessionId) {
         Set<WebSocketSession> open = sessions.get(userId);
         if (open == null || open.isEmpty()) {
             log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
@@ -514,7 +519,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         int sent = 0;
         for (WebSocketSession live : open) {
             if (live.isOpen()) {
-                sendToSession(live, type, content);
+                sendToSession(live, type, content, sessionId);
                 sent++;
             }
         }
@@ -524,10 +529,26 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void sendToSession(WebSocketSession session, String type, String content) {
+        sendToSession(session, type, content, null);
+    }
+
+    /**
+     * @param sessionId the conversation this belongs to, when it matters
+     *
+     * An answer is saved into the chat it was asked from, and pushed to every window. A window
+     * showing a different chat appended it anyway, so the reply appeared under a conversation it
+     * has nothing to do with -- and replying there filed the follow-up in a third place. The
+     * client can only avoid that if it is told which chat the message is for.
+     */
+    private void sendToSession(WebSocketSession session, String type, String content,
+                               String sessionId) {
         if (!session.isOpen()) return;
         try {
-            String json = mapper.writeValueAsString(Map.of("type", type, "content", content));
-            session.sendMessage(new TextMessage(json));
+            var payload = new LinkedHashMap<String, Object>();
+            payload.put("type", type);
+            payload.put("content", content);
+            if (sessionId != null) payload.put("sessionId", sessionId);
+            session.sendMessage(new TextMessage(mapper.writeValueAsString(payload)));
         } catch (IOException e) {
             log.warn("Failed to send WS message: {}", e.getMessage());
         }
