@@ -26,6 +26,15 @@ public interface LlmProvider {
     /**
      * Human-readable name for logging (e.g. "ollama", "openai").
      */
+    /**
+     * Whether this provider can be offered tools natively on the CURRENT model.
+     * <p>
+     * Defaults to false so a provider that has not been taught the protocol keeps the text
+     * protocol rather than silently sending a field the API ignores. Per-model rather than
+     * per-provider, because Ollama's answer depends on which model is loaded.
+     */
+    default boolean supportsTools() { return false; }
+
     String name();
 
     /**

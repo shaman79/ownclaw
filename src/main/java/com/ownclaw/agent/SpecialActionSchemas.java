@@ -1,0 +1,114 @@
+package com.ownclaw.agent;
+
+import com.ownclaw.agent.tools.ToolParam;
+import com.ownclaw.agent.tools.ToolSchemas;
+import com.ownclaw.llm.ToolSpec;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * The actions the loop handles itself, described so a provider can offer them natively.
+ *
+ * <p>These are not {@link com.ownclaw.agent.tools.Tool} beans and never will be: the owner
+ * removed built-in Java tools by decree, and every real capability is a Python skill the agent
+ * writes at runtime. But {@link AgentLoop} branches on these eight names before it ever consults
+ * the registry, so a model offered only registry tools could not answer, ask a question or write
+ * a skill. They are declared here purely so the provider knows they exist.
+ *
+ * <p>The descriptions are the prose already in the system prompt, restated as structure. When
+ * native tools are on, that prose is omitted from the prompt — otherwise every action is
+ * described twice and the change costs tokens instead of saving them.
+ */
+public final class SpecialActionSchemas {
+
+    private SpecialActionSchemas() { /* static only */ }
+
+    private static ToolSpec spec(String name, String description, Map<String, ToolParam> params) {
+        return new ToolSpec(name, description, ToolSchemas.toJsonSchema(params));
+    }
+
+    private static Map<String, ToolParam> params(Object... pairs) {
+        var m = new LinkedHashMap<String, ToolParam>();
+        for (int i = 0; i < pairs.length; i += 2) {
+            m.put((String) pairs[i], (ToolParam) pairs[i + 1]);
+        }
+        return m;
+    }
+
+    /** Every action {@link AgentLoop} handles before consulting the tool registry. */
+    public static final List<ToolSpec> ALL = List.of(
+
+            spec(AgentAction.RESPOND,
+                    "Deliver the final answer to the user and end the task. Put the whole answer "
+                            + "in 'message' — it is what the user reads.",
+                    params("message", ToolParam.required("string", "The complete answer."))),
+
+            spec(AgentAction.ASK_USER,
+                    "Ask the user one question and stop until they answer. Only when you genuinely "
+                            + "cannot proceed: on unattended work nobody is there to reply, so "
+                            + "prefer deciding and stating the assumption.",
+                    params("message", ToolParam.required("string", "The question to ask."))),
+
+            spec(AgentAction.SKILL_CREATE,
+                    "Write or replace a Python skill, which then becomes a tool. Use the SAME name "
+                            + "to fix an existing skill; never _v2 or _fixed.",
+                    params(
+                            "name", ToolParam.required("string", "Skill name: lowercase, underscores."),
+                            "description", ToolParam.required("string", "What it does, for the tool list."),
+                            "code", ToolParam.required("string", "Python module defining run(...)."),
+                            // A JSON *string*, not a nested object: SkillManager.createSkill parses
+                            // it that way, and changing that is a different change wearing this
+                            // one's clothes.
+                            "parameters", ToolParam.optional("string",
+                                    "JSON object of parameter definitions, as a string."),
+                            "requirements", ToolParam.optional("string", "pip requirements, one per line."),
+                            "credentials", ToolParam.optional("string", "Comma-separated vault key names."),
+                            "system_packages", ToolParam.optional("string", "Comma-separated OS packages."),
+                            "requires_network", ToolParam.optional("boolean", "Does it reach the network?"),
+                            "has_side_effects", ToolParam.optional("boolean", "Does it change anything?"),
+                            "timeout", ToolParam.optional("integer", "Seconds before it is killed."))),
+
+            spec(AgentAction.SKILL_MANAGE,
+                    "Inspect or remove skills: list them, read one's source, or delete one.",
+                    params(
+                            "action", ToolParam.required("string", "list | read | delete"),
+                            "name", ToolParam.optional("string", "Skill name, for read and delete."))),
+
+            spec(AgentAction.CREDENTIAL_MANAGE,
+                    "List or check stored credentials. Never carries a secret VALUE: to store one, "
+                            + "tell the user to type '/cred set KEY value', which writes straight "
+                            + "to the vault without the secret passing through you.",
+                    params(
+                            "action", ToolParam.required("string", "list | check"),
+                            "key", ToolParam.optional("string", "Vault key name, for check."))),
+
+            spec(AgentAction.MEMORY_MANAGE,
+                    "Store, list or delete facts that should survive this conversation.",
+                    params(
+                            "action", ToolParam.required("string", "store | list | delete"),
+                            "key", ToolParam.optional("string", "Identifier for the fact."),
+                            "content", ToolParam.optional("string", "The fact, for store."))),
+
+            spec(AgentAction.SCHEDULE_MANAGE,
+                    "Schedule work for later, or manage what is already scheduled.",
+                    params(
+                            "action", ToolParam.required("string",
+                                    "schedule_once | schedule_recurring | list | cancel | pause | resume"),
+                            "description", ToolParam.optional("string", "The task to run, as a message."),
+                            "time", ToolParam.optional("string", "When, in natural language."),
+                            "schedule", ToolParam.optional("string", "Recurrence, natural language or cron."),
+                            "max_runs", ToolParam.optional("integer", "Stop after this many runs."),
+                            "task_id", ToolParam.optional("integer", "Which task, for cancel/pause/resume."))),
+
+            spec(AgentAction.DELEGATE,
+                    "Hand a sub-goal to the local model, which runs it on this machine with the "
+                            + "full tool set and your credentials, and costs nothing. Best for work "
+                            + "on this machine, the LAN, servers and private data. About a minute "
+                            + "per step, so prefer it when nobody is waiting. Give it a goal; it "
+                            + "works out the steps.",
+                    params(
+                            "goal", ToolParam.required("string", "What to achieve, stated fully."),
+                            "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
+}

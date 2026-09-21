@@ -15,8 +15,21 @@ public record LlmResponse(
     int completionTokens,
     int cacheCreationTokens,
     int cacheReadTokens,
-    String stopReason
+    String stopReason,
+    java.util.List<ToolCall> toolCalls
 ) {
+    /** Without native tool calls — every provider path that does not offer tools. */
+    public LlmResponse(String content, int promptTokens, int completionTokens,
+                       int cacheCreationTokens, int cacheReadTokens, String stopReason) {
+        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens,
+                stopReason, java.util.List.of());
+    }
+
+    /** Whether the model asked to call a tool. */
+    public boolean hasToolCalls() {
+        return toolCalls != null && !toolCalls.isEmpty();
+    }
+
     /** For providers with no prompt cache, or calls that did not touch one. */
     public LlmResponse(String content, int promptTokens, int completionTokens) {
         this(content, promptTokens, completionTokens, 0, 0, null);
