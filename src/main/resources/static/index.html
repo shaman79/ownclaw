@@ -2614,8 +2614,35 @@
     }
 
     //  Session management
+    /**
+     * Bring the chat view back without reloading history.
+     *
+     * A question from a skill, or any message, that arrives while Settings, Skills or Tasks is
+     * open was appended to a #messages element that is not on screen, and the composer is hidden
+     * in those views -- so the owner saw nothing to answer and the message was then destroyed by
+     * the next clearMessages(). Deliberately does NOT reload the transcript: that is what would
+     * wipe the message we are trying to show.
+     */
+    function ensureChatView() {
+        if (currentView === 'chat') return;
+        currentView = 'chat';
+        document.getElementById('input-area').style.display = '';
+        activityWrap.style.display = '';
+        settingsBtn.classList.remove('active');
+        skillsBtn.classList.remove('active');
+        tasksBtn.classList.remove('active');
+        messagesEl.querySelectorAll('.settings-view, .skills-view, .task-history, .task-history-loading')
+                .forEach(function(v) { v.remove(); });
+    }
+
     function switchToSession(sessionId) {
-        if (!ws || ws.readyState !== 1) return;
+        if (!ws || ws.readyState !== 1) {
+            // Was a silent return. Clicking a chat during a reconnect did nothing at all, so the
+            // obvious conclusion is that the click was missed -- and clicking harder does not
+            // help. Say why.
+            showConnBanner('Not connected — this chat will open once the connection is back.');
+            return;
+        }
         currentView = 'chat';
         // Show chat UI elements, hide task history/settings/skills
         document.getElementById('input-area').style.display = '';
@@ -4383,6 +4410,16 @@
 
     /** PROGRESS updates: overwrite the last step's text + label instead of adding a new step. */
     function updateActivity(text) {
+        // A task that only reports progress -- a long scrape ticking "page 40 of 500" once a
+        // minute -- emits no STEP, so after a reload or a trip to Settings there is no step list
+        // and the strip is still display:none. The text went into a hidden element and the owner
+        // got bouncing dots with nothing beside them for twenty minutes. Make a step instead,
+        // which is what unhides the strip.
+        if (activityStepList.length === 0) {
+            showActivity(text, null);
+            return;
+        }
+        activityWrap.style.display = 'block';
         activityLabel.textContent = text;
         if (activityStepList.length > 0) {
             var last = activityStepList[activityStepList.length - 1];
@@ -4446,6 +4483,11 @@
         statCloud.textContent = '0';
         statLocal.textContent = '0';
         stopElapsedTimer();
+        // A chat switch mid-task must not lose the clock. resetActivity() is called on every
+        // switch, and stopElapsedTimer() nulls the start time -- so the elapsed counter stayed
+        // blank for the rest of a task that was still running. The task is not over; only
+        // setThinking(false) decides that. Keep the real start time and restart the tick.
+        if (thinkingStartedAt) startElapsedTimer();
     }
 
 
@@ -4565,7 +4607,7 @@
      */
     function okJson(r) {
         if (r.status === 401) {
-            logout();
+            logout('Your session expired — please sign in again. Nothing was lost.');
             throw new Error('Session expired — please log in again.');
         }
         if (!r.ok) {
@@ -4599,7 +4641,14 @@
         bar._t = setTimeout(function() { if (bar.parentNode) bar.remove(); }, 8000);
     });
 
-    function logout() {
+    /**
+     * @param reason optional, shown on the login box.
+     *
+     * Being returned to a login screen with no explanation reads as the app having crashed or
+     * lost the conversation. The usual cause is a token past its 30-day life, and the owner has
+     * no way to tell that from a fault.
+     */
+    function logout(reason) {
         authToken = null;
         localStorage.removeItem('ownclaw_token');
         if (ws) { ws.close(); ws = null; }
@@ -4621,6 +4670,7 @@
         authPassword.value = '';
         authSubmit.disabled = false;
         switchToLogin();
+        if (reason) showAuthError(reason);
     }
 
     authSubmit.addEventListener('click', doAuth);
@@ -4791,6 +4841,7 @@
                     // waiting on the user, which reads as "still working, do not touch it".
                     setThinking(false);
                     doneActivity();
+                    ensureChatView();   // unanswerable, then deleted, if Settings is open
                     addMsg('input_request', content);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
@@ -5152,6 +5203,14 @@
         // having frozen.
         if (!ws || ws.readyState !== 1) {
             showConnBanner('Not connected — your message was not sent. Reconnecting...');
+            return;
+        }
+        // An upload still in flight has a chip but no id yet, and send() clears pendingFiles
+        // unconditionally -- so the attachment was dropped from THIS message and silently rode
+        // along with the next, unrelated one. The agent answered "which document?" now and
+        // referred to a forgotten PDF an hour later.
+        if (fileChips.querySelector('.file-chip.uploading')) {
+            showConnBanner('Still uploading — send again in a moment.');
             return;
         }
 

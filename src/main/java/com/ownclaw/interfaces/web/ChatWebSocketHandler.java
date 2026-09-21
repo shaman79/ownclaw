@@ -278,20 +278,32 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // Interactive skill input: if a skill is waiting for user input, treat this as the response.
-        // (Commands still work while waiting.)
-        if (!userMessage.startsWith("/") && interactionHandler.hasPending(userId)) {
+        // Interactive skill input: if a skill is waiting, this is the answer.
+        //
+        // The old order asked "does it start with /" first, so an answer that happens to be an
+        // absolute path -- /home/shaman/Photos, exactly what a skill asking "which folder?"
+        // expects -- came back as "Unknown command: /home/shaman/Photos. Try /help", every time,
+        // until the skill's two-minute fuse expired and the task failed.
+        //
+        // Telegram already had the right order: try the command, and if it is not a recognised
+        // one and a skill is waiting, treat it as the answer. That keeps real commands working
+        // while a skill waits (the point of the original check) without deciding by punctuation
+        // what the user meant.
+        boolean waiting = interactionHandler.hasPending(userId);
+        if (userMessage.startsWith("/")) {
+            String sessionId = conversationService.getCurrentSession(userId);
+            var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
+            if (handledAsCommand.isPresent() || !waiting) {
+                handleCommand(userId, sessionId, userMessage, session);
+                return;
+            }
+            // Not a command, and something is waiting for an answer: it is the answer.
+        }
+        if (waiting) {
             boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
             if (!handled) {
                 sendToSession(session, "system", "No pending input request.");
             }
-            return;
-        }
-
-        // Handle commands
-        if (userMessage.startsWith("/")) {
-            String sessionId = conversationService.getCurrentSession(userId);
-            handleCommand(userId, sessionId, userMessage, session);
             return;
         }
 
