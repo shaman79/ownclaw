@@ -1298,9 +1298,12 @@ public class AgentLoop {
     /**
      * Detect repetitive tool calls and inject a delegation nudge into context metadata.
      *
-     * When the cloud LLM has made 2+ consecutive calls to the same registered skill
-     * (non-special tool), this strongly suggests routine execution that should be
-     * delegated to the local LLM to save cloud tokens.
+     * When the cloud LLM has made 2+ consecutive calls to registered skills (non-special
+     * tools), this suggests routine execution that the local model could carry instead.
+     * <p>
+     * Only on unattended work. The argument for delegating is entirely about cloud tokens, and
+     * it ignores the minute per step the local model costs — which is free when nobody is
+     * waiting and unacceptable when someone is.
      *
      * The nudge is picked up by ThinkingEngine's buildDynamicContext() and rendered
      * as a cost warning in the prompt.
@@ -1308,6 +1311,16 @@ public class AgentLoop {
     private void injectDelegationNudge(AgentContext context) {
         // Only nudge if local LLM is available (otherwise delegation would fail)
         if (!llmRouter.local().isAvailable()) {
+            context.metadata().remove("delegationNudge");
+            return;
+        }
+
+        // Never while someone is waiting. The nudge counts only cloud tokens, and on that axis
+        // delegation is always the right answer -- but a local step costs about a minute, so
+        // taking this advice in a live chat trades seconds of cloud time for minutes of silence.
+        // It also flatly contradicts what the prompt now tells an attended run to do, and a
+        // prompt that argues with itself is worse than one that says nothing.
+        if (!context.isUnattended()) {
             context.metadata().remove("delegationNudge");
             return;
         }
@@ -1343,15 +1356,17 @@ public class AgentLoop {
         String nudge;
         if (recentSkills.size() == 1) {
             nudge = String.format(
-                "You've called '%s' %d times in a row. This is EXACTLY what 'delegate' is for! "
-                + "Bundle remaining calls into a single delegate action to save cloud tokens. "
-                + "Each step you take costs expensive cloud LLM tokens — delegate costs ZERO.",
+                "You've called '%s' %d times in a row, which is what 'delegate' is for. "
+                + "Bundle the remaining calls into one delegate action. Nobody is waiting for "
+                + "this task, so the local model's minute-per-step costs you nothing and the "
+                + "cloud tokens it saves are real.",
                 repeatedTool, consecutive);
         } else {
             nudge = String.format(
-                "You've made %d consecutive skill calls (%s) without needing reasoning between them. "
-                + "Use 'delegate' to batch remaining tool calls to the FREE local LLM. "
-                + "Each step you take costs expensive cloud tokens — delegate costs ZERO.",
+                "You've made %d consecutive skill calls (%s) without needing reasoning between "
+                + "them. Hand the rest to 'delegate'. Nobody is waiting for this task, so the "
+                + "local model's minute-per-step costs you nothing and the cloud tokens it "
+                + "saves are real.",
                 consecutive, toolNames);
         }
 
