@@ -46,10 +46,11 @@ public class ThinkingEngine {
      * saves. The point is only that there IS a ceiling.
      *
      * A local summary would be strictly better than head-and-tail here: it preserves meaning
-     * rather than discarding the middle, and local tokens are free. It is not wired in because
-     * it costs 60-133 seconds on this hardware, which is unacceptable while a user is waiting.
-     * LocalExecutor.summarizeIfLong already exists, unused, for exactly this job — it belongs
-     * here once work can be classified as unattended.
+     * rather than discarding the middle, and local tokens are free. It costs 60-133 seconds on
+     * this hardware, which is unacceptable while a user is waiting — but work can now be
+     * classified, and {@link AgentLoop#compressIfUnattended} uses LocalExecutor.summarizeIfLong
+     * on exactly the runs where those seconds are free. This constant remains the ceiling for
+     * the attended case, where there is no time to do better.
      */
     private static final int FULL_DETAIL_MAX_CHARS = 12_000;
 
@@ -266,7 +267,31 @@ public class ThinkingEngine {
         sb.append("- Platform: ").append(detectPlatform()).append("\n");
         sb.append("- DateTime: ").append(LocalDateTime.now()
                 .truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
-                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
+                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n");
+
+        // Whether anyone is waiting for this answer.
+        //
+        // The agent was asked to weigh latency against cost -- delegate to the free local model
+        // when nobody is waiting, do it yourself when someone is -- and given no way to tell the
+        // two apart, so it had to guess. It is not a guess: the origin of the task settles it.
+        // The scheduler and /bg submit at background priority, a chat message does not, and
+        // TaskQueue has already recorded which this is.
+        //
+        // Stating it plainly is what makes the trade-off actionable, and it is the whole reason
+        // the local tier can carry real work without anyone noticing the latency.
+        if (context.isUnattended()) {
+            sb.append("- Attendance: NOBODY IS WAITING. This was started by the scheduler or sent "
+                    + "to the background; the answer is delivered to the chat whenever it is "
+                    + "ready. Minutes are free here. Prefer 'delegate' for anything the local "
+                    + "model can do, especially work on this machine, the LAN or private data, "
+                    + "and never stop to ask a question -- decide, and say which assumption you "
+                    + "made.\n\n");
+        } else {
+            sb.append("- Attendance: THE USER IS WAITING in the chat right now. Favour the "
+                    + "shortest path to a correct answer; a local delegation costs about a "
+                    + "minute per step, so use it only when it genuinely saves more than it "
+                    + "costs.\n\n");
+        }
 
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
             sb.append("## Preferences\n");
