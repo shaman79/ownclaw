@@ -210,22 +210,39 @@ public class ThinkingEngine {
      * Dynamic content (datetime, tools, user prefs) is appended to the last user
      * message, keeping the system prompt 100% static for reliable caching.
      */
-    private void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context) {
+    /** Package-private so the parse-failure replay can be tested without a Spring context. */
+    void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context) {
         messages.add(LlmMessage.user(buildUserMessage(context)));
 
         AgentTrajectory trajectory = context.trajectory();
 
-        // Filter out _thinking parse failures — they add noise without useful info
+        // Separate the parse-failure turns from the real ones.
+        //
+        // These used to be dropped outright, as "noise without useful info". They are the
+        // opposite: they carry the only correction the model ever gets. When it answers in prose
+        // instead of the action JSON, AgentLoop records the raw output plus the required format
+        // as a _thinking failure and retries — and on Anthropic, which is what production runs,
+        // that feedback reached the model nowhere else. The system prompt is static by design,
+        // the user message holds only the task, and the dynamic block never reads the
+        // trajectory. So every retry sent a byte-identical prompt, drew the identical reply, and
+        // the run aborted at three with "3 consecutive reasoning failures" — for a question the
+        // model had answered correctly three times. Four of those are in this deployment's chat
+        // history. The OpenAI path was unaffected because toPromptSummary keeps the last two
+        // turns in full.
         List<AgentTrajectory.Turn> effectiveTurns = new ArrayList<>();
+        AgentTrajectory.Turn lastParseFailure = null;
+        int olderParseFailures = 0;
         for (var turn : trajectory.turns()) {
             if (!turn.observation().success() && "_thinking".equals(turn.observation().tool())) {
+                if (lastParseFailure != null) olderParseFailures++;
+                lastParseFailure = turn;
                 continue;
             }
             effectiveTurns.add(turn);
         }
 
-        if (effectiveTurns.isEmpty()) {
-            // Step 0 or all-failures: append dynamic context to the user message
+        if (effectiveTurns.isEmpty() && lastParseFailure == null) {
+            // Genuine step 0: append dynamic context to the user message.
             LlmMessage lastMsg = messages.get(messages.size() - 1);
             messages.set(messages.size() - 1, LlmMessage.user(
                     lastMsg.content() + "\n\n---\n" + buildDynamicContext(context)));
@@ -238,7 +255,8 @@ public class ThinkingEngine {
         for (int i = 0; i < effectiveTurns.size(); i++) {
             var turn = effectiveTurns.get(i);
             boolean isFull = i >= fullDetailFrom;
-            boolean isLast = i == effectiveTurns.size() - 1;
+            // Not necessarily the last message any more — a parse failure may follow.
+            boolean isLast = i == effectiveTurns.size() - 1 && lastParseFailure == null;
 
             // Assistant turn: reconstructed action JSON (what the LLM "said")
             messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action(), isFull)));
@@ -253,6 +271,47 @@ public class ThinkingEngine {
             }
             messages.add(LlmMessage.user(obsText));
         }
+
+        if (lastParseFailure != null) {
+            appendParseFailure(messages, context, lastParseFailure, olderParseFailures);
+        }
+    }
+
+    /**
+     * Replay the most recent parse failure as the exchange it actually was.
+     * <p>
+     * Deliberately NOT routed through {@link #formatActionForMultiTurn}. That would serialise the
+     * fabricated fallback action the parser invented — a perfectly well-formed
+     * {@code {"tool":"respond","params":{"message":"<the prose>"}}} — and present it to the model
+     * as its own previous output, immediately followed by a user turn complaining that the output
+     * could not be parsed. Showing a model a valid action and calling it invalid is worse than
+     * showing it nothing: it teaches exactly the habit being corrected.
+     * <p>
+     * So the assistant turn is the raw text the model really produced, and the user turn is the
+     * correction verbatim. Two messages, because the Messages API expects the roles to alternate.
+     */
+    private void appendParseFailure(List<LlmMessage> messages, AgentContext context,
+                                    AgentTrajectory.Turn failure, int olderFailures) {
+        String raw = null;
+        var params = failure.action() == null ? null : failure.action().params();
+        if (params != null && params.get("message") != null) {
+            raw = String.valueOf(params.get("message"));
+        }
+        messages.add(LlmMessage.assistant(
+                raw == null || raw.isBlank() ? "(no parseable action was produced)" : raw));
+
+        StringBuilder correction = new StringBuilder();
+        if (olderFailures > 0) {
+            correction.append("(plus ").append(olderFailures)
+                    .append(" earlier parse failure").append(olderFailures == 1 ? "" : "s")
+                    .append(" on this task)\n\n");
+        }
+        String obs = failure.observation() == null ? null : failure.observation().output();
+        correction.append(obs == null || obs.isBlank()
+                ? "Your previous output could not be parsed as an action."
+                : obs);
+        correction.append("\n\n---\n").append(buildDynamicContext(context));
+        messages.add(LlmMessage.user(correction.toString()));
     }
 
     /**
