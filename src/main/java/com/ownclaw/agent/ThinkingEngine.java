@@ -154,11 +154,20 @@ public class ThinkingEngine {
                 }
                 log.info("protocol=native — answered directly with no tool call, provider={}",
                         provider.name());
+                // ...except when the registry is withheld and nothing has run yet. Then a prose
+                // reply is a plan ("I'll fetch today's news digest first"), not an answer, and
+                // delivering it as the final answer is how this change would quietly break the
+                // owner's morning email: task COMPLETED, nothing done.
+                boolean nothingRanYet = mode.localFirst()
+                        && context.trajectory().turns().stream()
+                                .noneMatch(t -> t.observation() != null && t.observation().success());
                 AgentAction answer = new AgentAction(AgentAction.RESPOND,
                         Map.of("message", response.content()),
-                        // Deliberately NOT one of the strings AgentLoop treats as a fallback:
-                        // choosing to answer is not a reasoning failure.
-                        "Answered directly without calling a tool");
+                        nothingRanYet
+                                ? AgentLoop.ANSWERED_WITHOUT_WORKING
+                                // Deliberately NOT one of the strings AgentLoop treats as a
+                                // fallback: choosing to answer is not a reasoning failure.
+                                : "Answered directly without calling a tool");
                 return new ThinkResult(answer, messages, response.content(),
                         response.totalTokens(), response.promptTokens(),
                         response.completionTokens(), response.cacheCreationTokens(),

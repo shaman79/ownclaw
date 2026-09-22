@@ -188,9 +188,14 @@ public class LocalExecutor {
                 log.info("Delegation completed after {} steps. Summary length: {}",
                         step + 1, action.summary != null ? action.summary.length() : 0);
                 // If summary is empty, build one from collected results
+                // The conclusion AND the rows it was drawn from. The cloud tier is kept for
+                // its judgement, and a scheduled task shaped "fetch X, decide whether Y, act"
+                // would otherwise have it judge on a small model's paraphrase of the evidence
+                // -- today it reads up to 12,000 characters of the real output.
+                String body = buildConsolidatedResult(plan.goal(), stepResults);
                 String summary = action.summary == null || action.summary.isBlank()
-                        ? buildConsolidatedResult(plan.goal(), stepResults)
-                        : action.summary;
+                        ? body
+                        : action.summary + "\n\n---\n" + body;
                 // The claim and the evidence travel together. Without the ledger the cloud reads
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.

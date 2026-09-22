@@ -349,6 +349,16 @@ public class AgentLoop {
     /**
      * The core loop implementation.
      */
+    /**
+     * A prose reply on restricted unattended work, before anything has actually run.
+     * <p>
+     * "I'll fetch today's news digest first." is a plan, not an answer, and delivering it as
+     * COMPLETED is the specific way withholding the registry breaks the owner's morning email:
+     * the model cannot call the skill, says what it would do, and the task ends successfully
+     * having done nothing.
+     */
+    static final String ANSWERED_WITHOUT_WORKING = "Answered without doing the work";
+
     private AgentResult runLoop(AgentContext context) {
         int maxSteps = config.getTasks().getMaxPlanSteps();
         long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
@@ -541,7 +551,8 @@ public class AgentLoop {
                 boolean isFallback = reasoning.equals("Fallback response")
                         || reasoning.startsWith("LLM did not produce structured output")
                         || reasoning.startsWith("Failed to parse structured output")
-                        || reasoning.startsWith("LLM call failed");
+                        || reasoning.startsWith("LLM call failed")
+                        || reasoning.startsWith(ANSWERED_WITHOUT_WORKING);
 
                 if (isFallback) {
                     consecutiveFallbacks++;
@@ -585,10 +596,21 @@ public class AgentLoop {
                         // Build feedback that shows the LLM WHAT it did wrong
                         String rawOutput = thinkResult.rawLlmOutput();
                         StringBuilder feedback = new StringBuilder();
+                        if (reasoning.startsWith(ANSWERED_WITHOUT_WORKING)) {
+                            // Not a parse failure, and saying so would teach the text envelope
+                            // to a model that is holding a tools array.
+                            feedback.append("You described what you were going to do instead of "
+                                    + "doing it, and nothing has run yet:\n");
+                            feedback.append(truncate(rawOutput, 500));
+                            feedback.append("\n\nNobody is waiting for this, so the work runs on "
+                                    + "the local model. Call 'delegate' with the goal stated in "
+                                    + "full. Answer only once there is a result to report.");
+                        } else {
                         feedback.append("PARSE ERROR. Your output:\n");
                         feedback.append(truncate(rawOutput, 500));
                         feedback.append("\n\nRequired format: {\"tool\": \"name\", \"params\": {...}, \"reasoning\": \"...\"}\n");
                         feedback.append("To respond: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}, \"reasoning\": \"...\"}");
+                        }
 
                         if (consecutiveFallbacks >= 2) {
                             feedback.append("\n\nWARNING: This is your ").append(consecutiveFallbacks)
@@ -2155,6 +2177,13 @@ public class AgentLoop {
      */
     private AgentObservation compressIfUnattended(AgentContext context, AgentObservation obs) {
         if (!context.isUnattended() || obs == null) return obs;
+        // A delegation that failed keeps its full text. Its output carries the verbatim
+        // traceback of whatever threw, and rewriting a skill from its stack trace is the
+        // self-learning loop this project exists for -- it cannot run on a paraphrase of a
+        // paraphrase by the same small model that already summarised it once. A delegation
+        // that SUCCEEDED is compressed like anything else: there the summary is the point, and
+        // a large one costs the cloud exactly what a large tool result would.
+        if (AgentAction.DELEGATE.equals(obs.tool()) && !obs.success()) return obs;
         String output = obs.output();
         if (output == null || output.length() < LOCAL_COMPRESSION_THRESHOLD) return obs;
         try {
