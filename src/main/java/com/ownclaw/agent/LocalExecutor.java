@@ -234,29 +234,15 @@ public class LocalExecutor {
             // whole premise. An unsure model that re-sends smtp_send_email would send the
             // owner ten copies of the same email. Re-sending an identical side-effecting call
             // is never what was wanted, so hand back what it already returned instead.
-            String repeated = repeatedSideEffect(action,
-                    substituteRefs(action.params, stepResults), stepResults);
-            if (repeated != null) {
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("You already called " + action.tool
-                        + " with exactly these arguments, and it returned:\n"
-                        + truncate(repeated, 4000)
-                        + "\n\nUse that result. Do not call it again — it changes something, "
-                        + "so a second identical call does it twice. Move to the next step, or "
-                        + "finish."));
-                continue;
-            }
-
-            // ACT: execute the tool
-            statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
-                    "Delegate: running " + action.tool + "...");
-
-            // Pass an earlier result by reference, not by retyping it. See substituteRefs.
+            //
+            // One resolution of the arguments first, used by every check below and by the call
+            // itself. It was being computed twice, which is how a guard and the thing it
+            // guards drift apart.
             Map<String, Object> params = substituteRefs(action.params, stepResults);
 
-            // ...and if it retyped one anyway, do not let the truncation reach a file, an email
-            // or anything else. This is cheap, deterministic, and catches the exact failure
-            // observed: the excerpt copied verbatim into the next call.
+            // If the model retyped an excerpt instead of referencing it, refuse before anything
+            // is written or sent -- and before the status line claims the tool is running.
+            // Cheap, deterministic, and it catches the exact failure observed in production.
             String retyped = retypedExcerpt(params);
             if (retyped != null) {
                 log.warn("Delegation step {}: '{}' was retyped from an excerpt — refused.",
@@ -270,6 +256,30 @@ public class LocalExecutor {
                         + "text before or after it."));
                 continue;
             }
+
+            // (The repeat check the comment above describes.)
+            String repeated = repeatedSideEffect(action, params, stepResults);
+            if (repeated != null) {
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("You already called " + action.tool
+                        + " with exactly these arguments, and it returned:\n"
+                        + truncate(repeated, 4000)
+                        + "\n\nUse that result. Do not call it again — it changes something, "
+                        + "so a second identical call does it twice. Move to the next step, or "
+                        + "finish."));
+                continue;
+            }
+
+            // One thing neither guard catches: a value the model WROTE ITSELF, that is neither
+            // a reference nor a quoted excerpt -- its own paraphrase of a result, sent as if it
+            // were the result. There is no honest test for that (composing text is often
+            // exactly the job), so this does not block it. It leaves evidence, which is the
+            // difference between a quality regression someone can find and one nobody can.
+            warnIfComposed(action.tool, params, stepResults);
+
+            // ACT: execute the tool
+            statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
+                    "Delegate: running " + action.tool + "...");
 
             long toolStartMs = System.currentTimeMillis();
             String toolResult = executeToolDirect(action.tool, params, parentContext);
@@ -633,6 +643,35 @@ public class LocalExecutor {
      * ran.
      */
     static final String OMISSION_MARKER = "⟦middle omitted — pass it on with $";
+
+    /** Text long enough that writing it by hand means reproducing something. */
+    private static final int COMPOSED_WARN_CHARS = 600;
+
+    /**
+     * Note a large text argument the model typed out itself on a tool that changes something.
+     * <p>
+     * Deliberately a warning and not a refusal. Writing prose into an email is a legitimate
+     * thing for a delegation to do, and a rule that guessed at the difference would block real
+     * work — the owner's standing objection to lists of do's and don'ts. But when the owner's
+     * digest arrives paraphrased instead of forwarded, this line is what makes the cause
+     * findable in a log rather than a mystery.
+     */
+    private void warnIfComposed(String tool, Map<String, Object> params,
+                                List<StepResult> done) {
+        if (params == null || done.isEmpty()) return;
+        var t = toolRegistry.find(tool).orElse(null);
+        if (t == null || !t.hasSideEffects()) return;
+        for (var e : params.entrySet()) {
+            if (!(e.getValue() instanceof String v) || v.length() < COMPOSED_WARN_CHARS) continue;
+            boolean isAPriorResult = done.stream().anyMatch(r -> v.equals(r.output));
+            if (!isAPriorResult) {
+                log.warn("Delegation: '{}' was given {} characters in '{}' that the model wrote "
+                                + "itself — not $N, and not equal to any step's output. If this "
+                                + "was meant to forward a result, it is a paraphrase of one.",
+                        tool, v.length(), e.getKey());
+            }
+        }
+    }
 
     /** The parameter that is quoting an excerpt back at us, or null when none is. */
     static String retypedExcerpt(Map<String, Object> params) {
