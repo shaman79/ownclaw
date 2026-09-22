@@ -69,11 +69,14 @@ public class LocalExecutor {
      * for the end, and a model that gets the second shape wrong burns every remaining step.
      */
     private static final ToolSpec DONE = new ToolSpec("done",
-            "Call this when the goal is reached. The summary is the whole answer the "
-                    + "orchestrator receives, so put every piece of collected data in it — "
-                    + "nothing else from this delegation is passed on.",
+            "Call this when the goal is reached. Say what you DID and what each step returned "
+                    + "in outline — do not retype the data. Every tool result is passed on "
+                    + "underneath your summary, verbatim and in full, so copying it gains "
+                    + "nothing and retyping a date, a number or a name from memory introduces "
+                    + "an error that was not in the data.",
             ToolSchemas.toJsonSchema(Map.of("summary",
-                    ToolParam.required("string", "The consolidated result, in full."))));
+                    ToolParam.required("string",
+                            "What you did, and what came back, in outline. Not a copy of it."))));
 
     /** What the local model may call: the registry, minus skill_create, plus {@link #DONE}. */
     private List<ToolSpec> executorTools(AgentContext context) {
@@ -277,8 +280,9 @@ public class LocalExecutor {
                     truncate(toolResult, 30_000) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
                     (nativeTools
-                            ? "call done with the consolidated results."
-                            : "output {\"done\": true, \"summary\": \"consolidated results\"}.")));
+                            ? "call done and say what you did — the result above is passed on "
+                                    + "verbatim, so do not retype it."
+                            : "output {\"done\": true, \"summary\": \"what you did\"}.")));
         }
 
         // Hit max steps without "done"
@@ -417,7 +421,15 @@ public class LocalExecutor {
             sb.append("- Execute steps in order. On failure, note error and continue.\n");
             sb.append("- Chain previous results into subsequent steps.\n");
         }
-        sb.append("- Final summary must contain ALL collected data.\n");
+        // It used to say "the final summary must contain ALL collected data", which asked a
+        // small model to retype everything it had just read. The first delegated news digest
+        // came back headed 2025-07-10 for a run on 2026-09-22 -- the skill had returned the
+        // right date, and the summary invented a wrong one. The results are now carried out
+        // verbatim underneath the summary, so there is nothing to gain by copying them and a
+        // whole class of fabrication to lose.
+        sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
+        sb.append("  underneath it, so never retype data — a date or number written from\n");
+        sb.append("  memory is an error that was not in the data.\n");
         sb.append("- No skill_create. Nobody is available to answer questions — decide and proceed.\n");
 
         return sb.toString();
