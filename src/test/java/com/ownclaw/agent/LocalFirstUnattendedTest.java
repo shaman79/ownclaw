@@ -20,11 +20,12 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * What the cloud model may call on unattended work, and whether the prompt agrees with it.
  * <p>
- * The owner's architecture is "cloud orchestrates, local executes", and for seven months the
- * local tier executed nothing. Three prompt formulations failed, because a scheduled task names
- * the exact skills and order — "using daily_news_digest skill, then ... Use smtp_send_email" —
- * and a specific instruction beats a general preference every time. So on unattended work the
- * registry is withheld: the cloud can orchestrate and cannot execute.
+ * The owner's architecture is "cloud orchestrates, local executes", and not one delegation has
+ * ever succeeded on a scheduled run that chose it by itself. It was chosen on 19, 20 and 21
+ * September and failed every time on a context window one step too small; the window was raised,
+ * and the next day it stopped being chosen at all. Rewriting the task descriptions is not the
+ * fix: an unattended task naming no skills, pure local work, was still done by the cloud. So on
+ * unattended work the registry is withheld: the cloud can orchestrate and cannot execute.
  * <p>
  * The first version of this test only exercised {@link ToolSchemas#build}, and would have passed
  * unchanged with the restriction wide open — the prompt still listed every withheld skill and

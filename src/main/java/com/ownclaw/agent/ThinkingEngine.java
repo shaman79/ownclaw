@@ -407,28 +407,6 @@ public class ThinkingEngine {
         messages.add(LlmMessage.user(correction.toString()));
     }
 
-    /**
-     * The tools the CLOUD model may call on this step.
-     *
-     * <p>On unattended work the registry is withheld, so the cloud can orchestrate but cannot
-     * execute. That is the architecture the owner asked for — "cloud orchestrates, local
-     * executes" — made structural instead of advisory.
-     *
-     * <p>It is structural because advice demonstrably does not work. Three successive prompt
-     * formulations over seven months failed to get a single delegation chosen, and the reason is
-     * visible in the tasks themselves: a scheduled description names the exact skills and the
-     * exact order ("using daily_news_digest skill, then ... Use smtp_send_email"), so a specific
-     * instruction outcompetes a general preference every time. Today both scheduled runs spent a
-     * quarter of a million cloud tokens each on work with no judgement in it at all.
-     *
-     * <p>Only when the local model is actually reachable and advertises tool use. If it is down,
-     * the cloud keeps the full set and the task runs exactly as it does today: a local tier that
-     * is not answering must not become a reason for scheduled work to stop.
-     *
-     * <p>Attended chat is untouched. There the user IS waiting, a local step costs about a
-     * minute, and the owner has been explicit that latency matters there and does not matter for
-     * scheduled work.
-     */
     /** Every skill by name and one line each: what exists, without the ability to call it. */
     private String skillCatalogue() {
         return toolRegistry.all().stream()
@@ -501,6 +479,37 @@ public class ThinkingEngine {
         return new StepMode(nativeTools, localFirst);
     }
 
+    /**
+     * The tools the CLOUD model may call on this step.
+     *
+     * <p>On unattended work the registry is withheld, so the cloud can orchestrate but cannot
+     * execute. That is the architecture the owner asked for — "cloud orchestrates, local
+     * executes" — made structural instead of advisory.
+     *
+     * <p>It is structural because advice demonstrably does not work, though not in the way the
+     * first version of this comment claimed. The orchestrator HAS been choosing delegation: the
+     * scheduled runs on 19, 20 and 21 September each picked it at step one. Every one of them
+     * failed, on a context window one step too small, after 107 to 325 seconds of trying. The
+     * window was raised on the 21st, and on the 22nd — the first day native tool calling was
+     * live — delegation was not chosen at all, and both runs spent a quarter of a million cloud
+     * tokens each on work with no judgement in it.
+     *
+     * <p>So the record is: not one delegation has ever succeeded on a run that chose it by
+     * itself. First it was chosen and broke; then it stopped being chosen. Meanwhile the task
+     * descriptions name the exact skills and the exact order ("using daily_news_digest skill,
+     * then ... Use smtp_send_email"), and a specific instruction outcompetes a general
+     * preference. Rewriting them is not the fix either: an unattended task naming no skills at
+     * all, pure local work, was still done by the cloud — skill_create, then shell_exec, no
+     * delegation.
+     *
+     * <p>Only when the local model is genuinely usable and advertises tool use. If it is not,
+     * the cloud keeps the full set and the task runs exactly as it does today: a local tier that
+     * is not answering must not become a reason for scheduled work to stop.
+     *
+     * <p>Attended chat is untouched. There the user IS waiting, a local step costs about a
+     * minute, and the owner has been explicit that latency matters there and does not matter for
+     * scheduled work.
+     */
     private List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
