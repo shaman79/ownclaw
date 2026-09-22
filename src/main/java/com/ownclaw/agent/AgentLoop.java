@@ -885,12 +885,28 @@ public class AgentLoop {
                         context.taskId(), step + 1, truncate(plan.goal(), 100),
                         plan.steps().size(), plan.maxSteps());
 
-                String result = localExecutor.execute(plan, context);
+                LocalExecutor.Outcome outcome = localExecutor.execute(plan, context);
                 long durationMs = System.currentTimeMillis() - startMs;
-                boolean ok = !result.startsWith("ERROR") && !result.startsWith("Delegation incomplete");
+                String result = outcome.text();
+                // Zero tools ran is not a success, whatever the summary says. A local model that
+                // fetched nothing and called done with a confident paragraph used to produce a
+                // successful step, a successful task, and a scheduled run recorded as delivered
+                // -- and with the registry withheld the cloud has no way to check it. Failing
+                // here also trips the valve in ThinkingEngine, so the registry comes back and
+                // the cloud can finish the job itself rather than delegating into a wall.
+                boolean ok = outcome.ok();
+                if (!ok && outcome.stepCount() == 0 && !result.startsWith("ERROR")) {
+                    log.warn("Task {} step {}: delegation claimed completion with no tool call.",
+                            context.taskId(), step + 1);
+                }
+                // Which skills really ran, so curation and scheduled_task_runs.skills_used see
+                // the work instead of a single 'delegate' entry.
+                Map<String, Object> structured = outcome.toolsRun().isEmpty()
+                        ? Map.of()
+                        : Map.of("delegatedTools", outcome.toolsRun());
                 AgentObservation obs = ok
-                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
-                        : AgentObservation.failure(action.tool(), result, durationMs);
+                        ? AgentObservation.success(action.tool(), result, structured, durationMs)
+                        : AgentObservation.failure(action.tool(), result, structured, durationMs);
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
@@ -1010,6 +1026,22 @@ public class AgentLoop {
      * Execute a tool and wrap the result in an AgentObservation.
      */
     private AgentObservation executeTool(AgentAction action, AgentContext context) {
+        // The restriction, made structural. ThinkingEngine can withhold a skill from the tools
+        // array, but withholding is not enforcement: the text protocol is still parsed, the
+        // parser accepts any name, and this method resolves against the whole registry. Without
+        // this check the model can talk its way back onto the path it was taken off -- and it
+        // would, because on the step where it resists it emits the old text envelope.
+        var offered = context.offeredTools();
+        if (offered != null && !offered.contains(action.tool())) {
+            log.info("Task {}: refused '{}' — it was not offered on this step.",
+                    context.taskId(), action.tool());
+            return AgentObservation.failure(action.tool(),
+                    "'" + action.tool() + "' is not available to you on this task. Nobody is "
+                            + "waiting for it, so the work runs on the local model: call "
+                            + "'delegate' with the goal stated in full — including anything you "
+                            + "have already worked out — and it picks the tools itself.", 0);
+        }
+
         var toolOpt = toolRegistry.find(action.tool());
         if (toolOpt.isEmpty()) {
             String available = String.join(", ", toolRegistry.names());

@@ -39,6 +39,9 @@ public class AgentContext {
     /** Credential keys available in the vault for this user (loaded once at task start). */
     private List<String> credentialKeys = List.of();
 
+    /** Null until a step restricts the set; see {@link #offeredTools()}. */
+    private volatile java.util.Set<String> offeredTools;
+
     // Per-task token usage counters
     private int localTokens;
     private int cloudTokens;
@@ -117,6 +120,18 @@ public class AgentContext {
     public void setCapabilityHint(CapabilityResolver.CapabilityHint hint) { this.capabilityHint = hint; }
 
     // ── Credential keys ──
+
+    /**
+     * The tool names offered to the model on the current step, or null for "no restriction".
+     * <p>
+     * Set by {@link ThinkingEngine} each step and read by {@link AgentLoop} before a registry
+     * tool runs. It exists because withholding a tool from the provider's tools array is not
+     * enforcement: the text protocol is still parsed, {@code tryParseAction} accepts any name,
+     * and the loop resolves it straight off the full registry. This is the one place the
+     * restriction becomes structural rather than advisory.
+     */
+    public java.util.Set<String> offeredTools() { return offeredTools; }
+    public void setOfferedTools(java.util.Set<String> names) { this.offeredTools = names; }
 
     public List<String> credentialKeys() { return credentialKeys; }
     public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }

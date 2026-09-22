@@ -51,13 +51,23 @@ public final class SpecialActionSchemas {
                             + "prefer deciding and stating the assumption.",
                     params("message", ToolParam.required("string", "The question to ask."))),
 
+            // No 'code' parameter, deliberately. AgentLoop calls generateSkillCodeWithCloud
+            // before SkillManager ever sees these params and injects the code it produced, so
+            // anything the model writes here is discarded -- it was being asked to generate a
+            // whole Python module on every skill_create for nothing. The description is the
+            // specification; that is the thing to spend output tokens on.
             spec(AgentAction.SKILL_CREATE,
-                    "Write or replace a Python skill, which then becomes a tool. Use the SAME name "
-                            + "to fix an existing skill; never _v2 or _fixed.",
+                    "Create or replace a Python skill, which then becomes a tool you can call. "
+                            + "You do NOT write the code: describe the behaviour and it is "
+                            + "generated. Specify WHAT, not HOW, and think about edge cases, "
+                            + "output format and failure modes first — rework is expensive. Reuse "
+                            + "the SAME name to fix an existing skill; never _v2, _fixed or _new. "
+                            + "Any OS package or library is installable, so never claim something "
+                            + "is unavailable.",
                     params(
                             "name", ToolParam.required("string", "Skill name: lowercase, underscores."),
-                            "description", ToolParam.required("string", "What it does, for the tool list."),
-                            "code", ToolParam.required("string", "Python module defining run(...)."),
+                            "description", ToolParam.required("string",
+                                    "The behaviour spec: what it does, edge cases, output format."),
                             // A JSON *string*, not a nested object: SkillManager.createSkill parses
                             // it that way, and changing that is a different change wearing this
                             // one's clothes.
@@ -65,7 +75,10 @@ public final class SpecialActionSchemas {
                                     "JSON object of parameter definitions, as a string."),
                             "requirements", ToolParam.optional("string", "pip requirements, one per line."),
                             "credentials", ToolParam.optional("string", "Comma-separated vault key names."),
-                            "system_packages", ToolParam.optional("string", "Comma-separated OS packages."),
+                            "system_packages", ToolParam.optional("string",
+                                    "Space-separated apt packages, installed into the container."),
+                            "container_image", ToolParam.optional("string",
+                                    "Docker base image. Omit unless a specific one is needed."),
                             "requires_network", ToolParam.optional("boolean", "Does it reach the network?"),
                             "has_side_effects", ToolParam.optional("boolean", "Does it change anything?"),
                             "timeout", ToolParam.optional("integer", "Seconds before it is killed."))),

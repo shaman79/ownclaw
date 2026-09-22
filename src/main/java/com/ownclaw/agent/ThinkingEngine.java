@@ -100,9 +100,10 @@ public class ThinkingEngine {
     public ThinkResult decideNextActionFull(AgentContext context, LlmProvider provider) {
         // One decision, in one place. Everything downstream still receives an AgentAction, so
         // AgentLoop, AgentTrajectory and the eight special-action branches are untouched.
-        boolean nativeTools = config.getMentor().isNativeTools() && provider.supportsTools();
+        StepMode mode = stepMode(context, provider);
+        boolean nativeTools = mode.nativeTools();
 
-        List<LlmMessage> messages = buildMessages(context, provider.name(), nativeTools);
+        List<LlmMessage> messages = buildMessages(context, provider.name(), mode);
 
         LlmRequestConfig requestConfig = new LlmRequestConfig(
                 null,   // use provider default model
@@ -115,7 +116,7 @@ public class ThinkingEngine {
                 null    // use provider default read timeout
         );
         if (nativeTools) {
-            requestConfig = requestConfig.withTools(toolsFor(context, provider));
+            requestConfig = requestConfig.withTools(toolsFor(context, mode));
         }
 
         try {
@@ -247,19 +248,20 @@ public class ThinkingEngine {
      * Build the full message list for the LLM.
      */
     private List<LlmMessage> buildMessages(AgentContext context, String providerName) {
-        return buildMessages(context, providerName, false);
+        return buildMessages(context, providerName, new StepMode(false, false));
     }
 
-    private List<LlmMessage> buildMessages(AgentContext context, String providerName,
-                                           boolean nativeTools) {
+    /** Package-private: the whole prompt, so a test can assert what the model is actually told. */
+    List<LlmMessage> buildMessages(AgentContext context, String providerName,
+                                   StepMode mode) {
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName, nativeTools)));
+        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName, mode)));
 
         if ("anthropic".equals(providerName)) {
             // Anthropic: multi-turn trajectory for prefix caching.
             // System prompt is static-only; dynamic context (datetime, tools) goes
             // in conversation messages so the system prompt never changes.
-            buildAnthropicMessages(messages, context);
+            buildAnthropicMessages(messages, context, mode);
         } else {
             // OpenAI / other: single trajectory message, dynamic content in system prompt
             messages.add(LlmMessage.user(buildUserMessage(context)));
@@ -285,6 +287,10 @@ public class ThinkingEngine {
      */
     /** Package-private so the parse-failure replay can be tested without a Spring context. */
     void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context) {
+        buildAnthropicMessages(messages, context, new StepMode(false, false));
+    }
+
+    void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context, StepMode mode) {
         messages.add(LlmMessage.user(buildUserMessage(context)));
 
         AgentTrajectory trajectory = context.trajectory();
@@ -318,7 +324,7 @@ public class ThinkingEngine {
             // Genuine step 0: append dynamic context to the user message.
             LlmMessage lastMsg = messages.get(messages.size() - 1);
             messages.set(messages.size() - 1, LlmMessage.user(
-                    lastMsg.content() + "\n\n---\n" + buildDynamicContext(context)));
+                    lastMsg.content() + "\n\n---\n" + buildDynamicContext(context, mode)));
             return;
         }
 
@@ -344,13 +350,13 @@ public class ThinkingEngine {
             // Append dynamic context to the LAST observation only —
             // this keeps it out of the cached prefix while providing current info.
             if (isLast) {
-                obsText += "\n\n---\n" + buildDynamicContext(context);
+                obsText += "\n\n---\n" + buildDynamicContext(context, mode);
             }
             messages.add(LlmMessage.user(obsText));
         }
 
         if (lastParseFailure != null) {
-            appendParseFailure(messages, context, lastParseFailure, olderParseFailures);
+            appendParseFailure(messages, context, lastParseFailure, olderParseFailures, mode);
         }
     }
 
@@ -368,7 +374,8 @@ public class ThinkingEngine {
      * correction verbatim. Two messages, because the Messages API expects the roles to alternate.
      */
     private void appendParseFailure(List<LlmMessage> messages, AgentContext context,
-                                    AgentTrajectory.Turn failure, int olderFailures) {
+                                    AgentTrajectory.Turn failure, int olderFailures,
+                                    StepMode mode) {
         String raw = null;
         var params = failure.action() == null ? null : failure.action().params();
         if (params != null && params.get("message") != null) {
@@ -387,7 +394,7 @@ public class ThinkingEngine {
         correction.append(obs == null || obs.isBlank()
                 ? "Your previous output could not be parsed as an action."
                 : obs);
-        correction.append("\n\n---\n").append(buildDynamicContext(context));
+        correction.append("\n\n---\n").append(buildDynamicContext(context, mode));
         messages.add(LlmMessage.user(correction.toString()));
     }
 
@@ -413,30 +420,55 @@ public class ThinkingEngine {
      * minute, and the owner has been explicit that latency matters there and does not matter for
      * scheduled work.
      */
-    private List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, LlmProvider provider) {
-        boolean localFirst = config.getMentor().isLocalFirstUnattended()
+    /** Every skill by name and one line each: what exists, without the ability to call it. */
+    private String skillCatalogue() {
+        return toolRegistry.all().stream()
+                .filter(t -> t != null && t.name() != null)
+                .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
+                .map(t -> "- " + t.name() + ": " + truncate(t.description(), 110))
+                .collect(java.util.stream.Collectors.joining("\n"));
+    }
+
+    /**
+     * What this step offers the model. Decided once and handed to every builder, because the
+     * tools array and the prompt disagreeing is worse than either choice alone: the model is
+     * told in prose that it owns a skill while the API says it does not, and which half wins
+     * decides the run.
+     */
+    record StepMode(boolean nativeTools, boolean localFirst) {}
+
+    StepMode stepMode(AgentContext context, LlmProvider provider) {
+        boolean nativeTools = config.getMentor().isNativeTools() && provider.supportsTools();
+
+        // Gated on nativeTools, because withholding tools from an array nobody is reading
+        // restricts nothing -- on the text protocol the manifest is the channel.
+        boolean localFirst = nativeTools
+                && config.getMentor().isLocalFirstUnattended()
                 && context.isUnattended()
                 && llmRouter.local().isAvailable()
-                && llmRouter.local().supportsTools();
+                && llmRouter.local().supportsTools()
+                // The valve. If a delegation has already failed, the local tier has had its
+                // turn and the registry comes back for the rest of the task. Without this, a
+                // local model that cannot manage the work leaves the orchestrator re-delegating
+                // into the step limit and the owner's morning email simply never arrives --
+                // trading a token saving for a silently broken task.
+                && !delegationFailed(context);
 
-        // The valve. If a delegation has already failed, the local tier has had its turn and
-        // the registry comes back for the rest of the task. Without this, a local model that
-        // cannot manage the work leaves the orchestrator re-delegating into the step limit and
-        // the owner's morning email simply never arrives -- trading a token saving for a
-        // silently broken task, which is not a trade worth making.
-        if (localFirst && delegationFailed(context)) {
-            log.info("Unattended task {}: a delegation failed, so the registry is restored for "
-                    + "the rest of this task.", context.taskId());
-            localFirst = false;
-        }
+        return new StepMode(nativeTools, localFirst);
+    }
 
-        if (!localFirst) {
+    private List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
+        if (!mode.localFirst()) {
+            context.setOfferedTools(null);
             return ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(),
                     context.credentialKeys());
         }
         log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
                 context.taskId());
+        context.setOfferedTools(SpecialActionSchemas.ALL.stream()
+                .map(com.ownclaw.llm.ToolSpec::name)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet()));
 
         // The cloud cannot CALL the skills, but it still has to know they exist, or it will
         // write a goal that asks for something already built -- or reach for skill_create to
@@ -444,11 +476,7 @@ public class ThinkingEngine {
         // which is knowledge without capability.
         var specs = new ArrayList<>(ToolSchemas.build(
                 SpecialActionSchemas.ALL, List.of(), context.credentialKeys()));
-        String catalogue = toolRegistry.all().stream()
-                .filter(t -> t != null && t.name() != null)
-                .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
-                .map(t -> "- " + t.name() + ": " + truncate(t.description(), 110))
-                .collect(java.util.stream.Collectors.joining("\n"));
+        String catalogue = skillCatalogue();
         specs.replaceAll(spec -> {
             if (!AgentAction.DELEGATE.equals(spec.name())) return spec;
             return new com.ownclaw.llm.ToolSpec(spec.name(),
@@ -493,7 +521,7 @@ public class ThinkingEngine {
      * For Anthropic, this goes in conversation messages instead of the system prompt
      * to keep the system prompt 100% static for caching.
      */
-    private String buildDynamicContext(AgentContext context) {
+    private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
 
         sb.append("## Environment\n");
@@ -552,16 +580,33 @@ public class ThinkingEngine {
         // costs far more than describing it. If the cost ever bites, the fix is to consolidate
         // the library rather than to hide it again — a manifest too big to send is a signal
         // that the library needs curating.
-        ToolSelector.Selection selection = selectToolsForPrompt(context);
-        sb.append("## Tools\n");
-        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-        sb.append(manifest).append("\n");
-        if (!selection.otherNames().isEmpty()) {
-            sb.append("\nAlso available, names only: ")
-              .append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()))
-              .append("\n");
-        }
-        if (manifest.isBlank()) {
+        // ...unless the tools array already carries it. Then this block is the same information
+        // a second time, and the worse copy: the array is inside the Anthropic cache prefix and
+        // is read at a tenth of the price, while this hangs off the newest message and is paid
+        // in full on every single step. Sending both was costing the manifest twice per step.
+        if (mode.localFirst()) {
+            // Knowledge without capability. The cloud still needs to know a skill exists --
+            // otherwise it reaches for skill_create to rebuild one it already owns -- but it is
+            // no longer told it can call it, which is what made the prompt argue with the array.
+            sb.append("## Skills on this machine\n");
+            String catalogue = skillCatalogue();
+            sb.append(catalogue.isBlank() ? "(none yet — use skill_create)\n" : catalogue + "\n");
+            sb.append("You cannot call these yourself on this task. 'delegate' reaches all of "
+                    + "them: state the goal in full and the local model picks the tools.\n");
+        } else if (!mode.nativeTools()) {
+            ToolSelector.Selection selection = selectToolsForPrompt(context);
+            sb.append("## Tools\n");
+            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+            sb.append(manifest).append("\n");
+            if (!selection.otherNames().isEmpty()) {
+                sb.append("\nAlso available, names only: ")
+                  .append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()))
+                  .append("\n");
+            }
+            if (manifest.isBlank()) {
+                sb.append("No tools yet — use skill_create.\n");
+            }
+        } else if (toolRegistry.all().isEmpty()) {
             sb.append("No tools yet — use skill_create.\n");
         }
 
@@ -787,16 +832,20 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content.
      */
     private String buildSystemPrompt(AgentContext context, String providerName) {
-        return buildSystemPrompt(context, providerName, false);
+        return buildSystemPrompt(context, providerName, new StepMode(false, false));
     }
 
     /**
-     * @param nativeTools when true, the sections describing the action list and the required JSON
-     *                    envelope are omitted: the tools array carries both, and describing every
-     *                    action twice would make this change cost tokens instead of saving them.
+     * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
+     *             instruction are omitted. The tools array carries both, and this claim used to
+     *             be false: the parameter was accepted and never read, so every native step also
+     *             carried "Single JSON: {reasoning, tool, params}" -- an instruction to use the
+     *             one protocol the tools array exists to replace, which is the mechanism by
+     *             which a model talks its way back onto the text path.
      */
     private String buildSystemPrompt(AgentContext context, String providerName,
-                                     boolean nativeTools) {
+                                     StepMode mode) {
+        boolean nativeTools = mode.nativeTools();
         // Anthropic: always use the full prompt — the static section is cached by
         // Anthropic's prompt caching (9200 tokens cached, read at 10% cost = ~920
         // effective tokens). The compact prompt broke caching: different prefix meant
@@ -827,7 +876,13 @@ public class ThinkingEngine {
         // skill_create action without any LLM call. By the time the ThinkingEngine runs
         // (step 1+), the skill is already created and visible in the trajectory.
 
-        // Special actions (static — tool descriptions never change)
+        // Special actions (static — tool descriptions never change).
+        //
+        // Under native tools this whole block is SpecialActionSchemas restated as prose. Sending
+        // both describes every action twice, and the two copies then have to be kept in step by
+        // hand -- which they already were not: the prose said skill_create's code is generated
+        // for you, the schema demanded you write it.
+        if (!nativeTools) {
         sb.append("## Actions\n\n");
         sb.append("respond(message): Final answer.\n\n");
         sb.append("ask_user(message): Ask ONLY when info is missing. Never ask permission — just act.\n\n");
@@ -866,6 +921,7 @@ public class ThinkingEngine {
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
         sb.append("  checkpoints | max_steps (default 10)\n\n");
+        }
 
         // Credential rules
         sb.append("## Credentials\n");
@@ -882,9 +938,15 @@ public class ThinkingEngine {
 
         // Output format
         sb.append("## Output\n");
-        sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
-        sb.append("CRITICAL: Keep 'reasoning' to 1-2 sentences. Long reasoning wastes tokens and risks truncation.\n");
-        sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
+        if (nativeTools) {
+            sb.append("Call exactly one tool per step. Keep any text alongside it to a sentence "
+                    + "or two — it is reasoning, not the answer.\n");
+            sb.append("For respond: put the whole answer in the message argument.\n\n");
+        } else {
+            sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+            sb.append("CRITICAL: Keep 'reasoning' to 1-2 sentences. Long reasoning wastes tokens and risks truncation.\n");
+            sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
+        }
 
         // Behavioral guidelines + cost + self-improvement combined
         sb.append("## Rules\n");

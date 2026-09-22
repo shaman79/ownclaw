@@ -52,11 +52,14 @@ public class LocalExecutor {
     private final LlmRouter llmRouter;
     private final ToolRegistry toolRegistry;
     private final ChatStatusEmitter statusEmitter;
+    private final SkillCuratorService curatorService;
 
-    public LocalExecutor(LlmRouter llmRouter, ToolRegistry toolRegistry, ChatStatusEmitter statusEmitter) {
+    public LocalExecutor(LlmRouter llmRouter, ToolRegistry toolRegistry,
+                         ChatStatusEmitter statusEmitter, SkillCuratorService curatorService) {
         this.llmRouter = llmRouter;
         this.toolRegistry = toolRegistry;
         this.statusEmitter = statusEmitter;
+        this.curatorService = curatorService;
     }
 
     /**
@@ -89,10 +92,11 @@ public class LocalExecutor {
      * @param parentContext the parent agent context (for userId, taskId, cancellation)
      * @return consolidated result string (success or error description)
      */
-    public String execute(DelegationPlan plan, AgentContext parentContext) {
+    public Outcome execute(DelegationPlan plan, AgentContext parentContext) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
-            return "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.";
+            return Outcome.failed(
+                    "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.");
         }
 
         // The tool manifest is the largest thing in this prompt and num_ctx is the binding
@@ -120,7 +124,10 @@ public class LocalExecutor {
 
         for (int step = 0; step < maxSteps; step++) {
             if (parentContext.isCancelled()) {
-                return "ERROR: Task cancelled during delegation.";
+                // Partial work is not worthless: it is the only record of what the local model
+                // managed before the plug was pulled, and throwing it away is why a timed-out
+                // delegation used to leave nothing behind at all.
+                return partial("Task cancelled during delegation.", stepResults);
             }
 
             // THINK: ask local LLM for next action
@@ -154,7 +161,7 @@ public class LocalExecutor {
                 }
                 log.error("Local LLM call failed during delegation step {}: {}{}",
                         step + 1, msg, hint, e);
-                return buildPartialResult("Local LLM call failed: " + msg + hint, stepResults);
+                return partial("Local LLM call failed: " + msg + hint, stepResults);
             }
 
             parentContext.addLocalTokens(response.totalTokens());
@@ -170,7 +177,7 @@ public class LocalExecutor {
                 raw = renderCall(call);
             } else {
                 if (raw == null || raw.isBlank()) {
-                    return buildPartialResult("Local LLM returned empty response", stepResults);
+                    return partial("Local LLM returned empty response", stepResults);
                 }
                 // A tools-capable model can still answer in prose; the text parser is the
                 // fallback, not dead code.
@@ -181,10 +188,13 @@ public class LocalExecutor {
                 log.info("Delegation completed after {} steps. Summary length: {}",
                         step + 1, action.summary != null ? action.summary.length() : 0);
                 // If summary is empty, build one from collected results
-                if (action.summary == null || action.summary.isBlank()) {
-                    return buildConsolidatedResult(plan.goal(), stepResults);
-                }
-                return action.summary;
+                String summary = action.summary == null || action.summary.isBlank()
+                        ? buildConsolidatedResult(plan.goal(), stepResults)
+                        : action.summary;
+                // The claim and the evidence travel together. Without the ledger the cloud reads
+                // a summary it cannot check, and scheduled_task_runs.last_result records the
+                // claim alone -- so a false success is not even auditable afterwards.
+                return completed(summary, stepResults);
             }
 
             if (action.tool == null || action.tool.isBlank()) {
@@ -208,14 +218,49 @@ public class LocalExecutor {
                 continue;
             }
 
+            // A repeat of a call that already happened, on a tool that changes something.
+            //
+            // The cloud path has CriticAgent, which blocks an identical action after three
+            // tries. Delegation runs before the critic and never reaches it, so the only bound
+            // here is max_steps -- and the model doing the work is the weaker one, which is the
+            // whole premise. An unsure model that re-sends smtp_send_email would send the
+            // owner ten copies of the same email. Re-sending an identical side-effecting call
+            // is never what was wanted, so hand back what it already returned instead.
+            String repeated = repeatedSideEffect(action, stepResults);
+            if (repeated != null) {
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("You already called " + action.tool
+                        + " with exactly these arguments, and it returned:\n"
+                        + truncate(repeated, 4000)
+                        + "\n\nUse that result. Do not call it again — it changes something, "
+                        + "so a second identical call does it twice. Move to the next step, or "
+                        + "finish."));
+                continue;
+            }
+
             // ACT: execute the tool
             statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                     "Delegate: running " + action.tool + "...");
 
+            long toolStartMs = System.currentTimeMillis();
             String toolResult = executeToolDirect(action.tool, action.params, parentContext);
+            long toolMs = System.currentTimeMillis() - toolStartMs;
             boolean toolOk = !toolResult.startsWith("ERROR");
 
+            // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
+            // here, a skill used every single morning looks untouched to maintenance -- which
+            // retires skills for being unused. The telemetry has to follow the work.
+            curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
+                    toolOk, toolMs, toolOk ? null : action.params, toolOk ? null : toolResult);
+
             stepResults.add(new StepResult(action.tool, action.params, toolResult, toolOk));
+
+            // The stall watchdog measures time since the last progress, and a delegation used to
+            // report none until it finished. At roughly a minute a local step, a ten-step
+            // delegation reaches the 600-second timeout and is killed for stalling while it is
+            // working normally. A completed tool call IS progress; say so, and the watchdog
+            // goes back to measuring what it was built to measure.
+            parentContext.markProgress();
 
             log.info("Delegation step {} — {} {} (result: {} chars)",
                     step + 1, action.tool, toolOk ? "OK" : "FAIL", toolResult.length());
@@ -233,7 +278,7 @@ public class LocalExecutor {
 
         // Hit max steps without "done"
         log.warn("Delegation hit max steps ({}) for goal: {}", maxSteps, plan.goal());
-        return buildPartialResult("Delegation reached max steps (" + maxSteps + ")", stepResults);
+        return partial("Delegation reached max steps (" + maxSteps + ")", stepResults);
     }
 
     /**
@@ -476,6 +521,64 @@ public class LocalExecutor {
         return o == null ? "" : o.toString();
     }
 
+    /**
+     * The output of an earlier identical call to a side-effecting tool, or null if this call is
+     * new. Identical means same tool and same arguments; a read-only tool is never blocked,
+     * because calling one twice costs nothing but time and the goal may genuinely need it.
+     */
+    private String repeatedSideEffect(ExecutorAction action, List<StepResult> done) {
+        var tool = toolRegistry.find(action.tool).orElse(null);
+        if (tool == null || !tool.hasSideEffects()) return null;
+        return priorIdenticalOutput(action.tool, action.params, done);
+    }
+
+    /** The output of an earlier call with the same name and the same arguments, or null. */
+    static String priorIdenticalOutput(String tool, Map<String, Object> params,
+                                       List<StepResult> done) {
+        Map<String, Object> args = params == null ? Map.of() : params;
+        for (StepResult r : done) {
+            if (r.tool.equals(tool)
+                    && Objects.equals(r.params == null ? Map.of() : r.params, args)) {
+                return r.output;
+            }
+        }
+        return null;
+    }
+
+    private static List<String> toolNames(List<StepResult> results) {
+        return results.stream().map(r -> r.tool).distinct().toList();
+    }
+
+    /** The ledger of what ran, appended to a claim so the claim can be checked. */
+    private static String ledger(List<StepResult> results) {
+        if (results.isEmpty()) {
+            return "\n\n[No tool was executed during this delegation.]";
+        }
+        var sb = new StringBuilder("\n\n[Tools run: ");
+        for (int i = 0; i < results.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(results.get(i).tool).append(results.get(i).success ? " ok" : " FAILED");
+        }
+        return sb.append("]").toString();
+    }
+
+    /**
+     * A delegation that said it was done. Successful only if something actually ran.
+     * <p>
+     * Zero tools and a confident summary is the shape of a hallucinated success, and it used to
+     * produce a successful step, a successful task and a scheduled run recorded as delivered —
+     * with the registry withheld, the cloud has no instrument to check it with.
+     */
+    static Outcome completed(String summary, List<StepResult> results) {
+        return new Outcome(summary + ledger(results), toolNames(results),
+                results.size(), !results.isEmpty());
+    }
+
+    private Outcome partial(String reason, List<StepResult> results) {
+        return new Outcome(buildPartialResult(reason, results), toolNames(results),
+                results.size(), false);
+    }
+
     private String buildPartialResult(String reason, List<StepResult> results) {
         var sb = new StringBuilder();
         sb.append("Delegation incomplete: ").append(reason).append("\n\n");
@@ -556,6 +659,25 @@ public class LocalExecutor {
 
     // ── Inner types ──
 
+    /**
+     * What a delegation actually did, not just what it says it did.
+     * <p>
+     * This used to be a String, and AgentLoop decided success by checking whether that string
+     * started with "ERROR". So a local model that fetched nothing and called done with a
+     * confident summary produced a successful step, a successful task and a scheduled run
+     * recorded as delivered. The cloud could not check it either -- with the registry withheld
+     * it has no instrument but another delegation. Carrying the ledger out makes the claim
+     * auditable and makes "zero tools ran" a fact rather than an inference.
+     *
+     * @param text      the summary, or the error, as before
+     * @param toolsRun  which registry tools actually executed, in order, with repeats collapsed
+     * @param stepCount how many tool calls ran
+     * @param ok        whether this counts as a successful delegation
+     */
+    public record Outcome(String text, List<String> toolsRun, int stepCount, boolean ok) {
+        static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false); }
+    }
+
     /** Parsed action from the local executor LLM. */
     private record ExecutorAction(boolean done, String summary, String tool, Map<String, Object> params) {
         static ExecutorAction done(String summary) {
@@ -567,5 +689,5 @@ public class LocalExecutor {
     }
 
     /** Result of a single tool execution within a delegation. */
-    private record StepResult(String tool, Map<String, Object> params, String output, boolean success) {}
+    record StepResult(String tool, Map<String, Object> params, String output, boolean success) {}
 }

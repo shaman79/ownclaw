@@ -602,12 +602,27 @@ public class ScheduledTaskService {
      */
     private static String skillsUsed(com.ownclaw.agent.AgentResult result) {
         if (result == null || result.trajectory() == null) return null;
-        List<String> names = result.trajectory().turns().stream()
-                .map(t -> t.action() == null ? null : t.action().tool())
-                .filter(n -> n != null && !n.isBlank()
-                        && !com.ownclaw.agent.AgentAction.RESPOND.equals(n))
-                .distinct()
-                .toList();
+        var names = new java.util.LinkedHashSet<String>();
+        for (var t : result.trajectory().turns()) {
+            String tool = t.action() == null ? null : t.action().tool();
+            if (tool == null || tool.isBlank()
+                    || com.ownclaw.agent.AgentAction.RESPOND.equals(tool)) {
+                continue;
+            }
+            names.add(tool);
+            // A delegated step shows up here as one 'delegate' entry, and the skills that
+            // actually ran are inside it. Recording only 'delegate' is how a skill used every
+            // morning comes to look untouched -- which matters, because that is the evidence
+            // maintenance uses to decide a skill is dead.
+            if (com.ownclaw.agent.AgentAction.DELEGATE.equals(tool)
+                    && t.observation() != null && t.observation().structured() != null
+                    && t.observation().structured().get("delegatedTools") instanceof List<?> run) {
+                run.stream().filter(java.util.Objects::nonNull)
+                        .map(Object::toString)
+                        .filter(n -> !n.isBlank())
+                        .forEach(names::add);
+            }
+        }
         return names.isEmpty() ? null : String.join(",", names);
     }
 
