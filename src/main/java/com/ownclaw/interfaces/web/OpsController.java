@@ -78,7 +78,7 @@ public class OpsController {
                         "GET  /api/ops/tasks/{taskId}"),
                 "actions", List.of(
                         "POST /api/ops/selftest",
-                        "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\",\"async\":true}",
+                        "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\",\"async\":true,\"unattended\":true}",
                     "GET  /api/ops/agent/run/{runId}   (collect an async run)",
                         "POST /api/ops/agent/cancel/{userId}",
                         "POST /api/ops/skills/reload",
@@ -326,13 +326,19 @@ public class OpsController {
         // leaves the caller with an empty body while the run continues invisibly on the server.
         // Asking for it asynchronously returns a handle immediately and the result is collected
         // by polling, so the answer survives the proxy.
+        // Scheduled work behaves differently from chat -- it delegates, it nudges, it is allowed
+        // to take minutes -- and none of that is reachable from here without saying so. Without
+        // this flag the only way to observe unattended behaviour is to wait for a cron slot,
+        // which makes verifying a change a next-morning affair.
+        boolean unattended = Boolean.TRUE.equals(body.get("unattended"));
+
         if (Boolean.TRUE.equals(body.get("async"))) {
-            return ResponseEntity.accepted().body(startAsyncRun(userId, message));
+            return ResponseEntity.accepted().body(startAsyncRun(userId, message, unattended));
         }
 
         long t0 = System.currentTimeMillis();
         try {
-            AgentResult result = agentLoop.executeFull(userId, message);
+            AgentResult result = agentLoop.executeFull(userId, message, unattended);
             return ResponseEntity.ok(describeRun(userId, result, t0));
         } catch (Exception e) {
             log.error("Ops agent run failed: {}", e.getMessage(), e);
@@ -422,14 +428,15 @@ public class OpsController {
                 return t;
             });
 
-    private Map<String, Object> startAsyncRun(String userId, String message) {
+    private Map<String, Object> startAsyncRun(String userId, String message, boolean unattended) {
         String runId = java.util.UUID.randomUUID().toString().substring(0, 8);
         AsyncRun run = new AsyncRun(userId);
         asyncRuns.put(runId, run);
         asyncExecutor.submit(() -> {
             long t0 = System.currentTimeMillis();
             try {
-                run.result = describeRun(userId, agentLoop.executeFull(userId, message), t0);
+                run.result = describeRun(userId,
+                        agentLoop.executeFull(userId, message, unattended), t0);
             } catch (Exception e) {
                 log.error("Async ops agent run {} failed: {}", runId, e.getMessage(), e);
                 run.error = e.getClass().getSimpleName() + ": " + e.getMessage();
