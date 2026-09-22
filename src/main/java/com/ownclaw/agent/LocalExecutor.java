@@ -187,6 +187,16 @@ public class LocalExecutor {
                 action = parseExecutorAction(raw);
             }
 
+            // Finishing is finishing, whichever shape it arrives in.
+            //
+            // When `done` became a tool, the native path learned to recognise it and the text
+            // parser did not -- it only ever knew {"done": true}. So a model that wrote
+            // {"tool": "done", ...} as text had its finish looked up in the registry, where
+            // there is no such tool, and got "Tool 'done' not found". A real delegation did
+            // this three times in a row and then died on max steps, having completed the work.
+            // It had finished; there was no way to say so.
+            action = normalizeDone(action);
+
             if (action.done) {
                 log.info("Delegation completed after {} steps. Summary length: {}",
                         step + 1, action.summary != null ? action.summary.length() : 0);
@@ -546,7 +556,8 @@ public class LocalExecutor {
                 return ExecutorAction.done(summary);
             }
 
-            // Parse tool call
+            // Parse tool call. A 'done' here is normalised by the caller, which keeps the
+            // two protocols agreeing on what finishing looks like.
             String tool = getStr(parsed, "tool");
             if (tool == null) tool = getStr(parsed, "action");
             if (tool == null) tool = getStr(parsed, "name");
@@ -643,6 +654,22 @@ public class LocalExecutor {
      * ran.
      */
     static final String OMISSION_MARKER = "⟦middle omitted — pass it on with $";
+
+    /**
+     * Treat {@code {"tool": "done"}} as the finish it obviously is.
+     * <p>
+     * The summary may arrive under {@code summary}, or as {@code message}/{@code result} from a
+     * model improvising the shape. Any of them beats failing to finish; an empty one is still
+     * a finish, and {@link #buildConsolidatedResult} supplies the body.
+     */
+    static ExecutorAction normalizeDone(ExecutorAction action) {
+        if (action == null || action.done || !"done".equals(action.tool)) return action;
+        Map<String, Object> p = action.params == null ? Map.of() : action.params;
+        Object summary = p.get("summary");
+        if (summary == null) summary = p.get("message");
+        if (summary == null) summary = p.get("result");
+        return ExecutorAction.done(str(summary));
+    }
 
     /** Text long enough that writing it by hand means reproducing something. */
     private static final int COMPOSED_WARN_CHARS = 600;
@@ -895,7 +922,7 @@ public class LocalExecutor {
     }
 
     /** Parsed action from the local executor LLM. */
-    private record ExecutorAction(boolean done, String summary, String tool, Map<String, Object> params) {
+    record ExecutorAction(boolean done, String summary, String tool, Map<String, Object> params) {
         static ExecutorAction done(String summary) {
             return new ExecutorAction(true, summary, null, Map.of());
         }

@@ -224,6 +224,41 @@ class DelegationSafetyTest {
         assertEquals(big, LocalExecutor.substituteRefs(Map.of("body", "$3"), done).get("body"));
     }
 
+    // ── finishing has to work in both protocols ──
+
+    @Test
+    @DisplayName("a text action naming the done tool is a finish, not a tool call")
+    void textDoneIsAFinish() {
+        // Exactly what a real delegation emitted, three times, before dying on max steps with
+        // the work already complete: "Tool 'done' not found".
+        var action = LocalExecutor.normalizeDone(new LocalExecutor.ExecutorAction(
+                false, null, "done", Map.of("summary", "Digest written to the file.")));
+
+        assertTrue(action.done(), "it said it was finished; nothing else was going to happen");
+        assertEquals("Digest written to the file.", action.summary());
+    }
+
+    @Test
+    @DisplayName("a summary under another name still finishes")
+    void improvisedSummaryKeysAreAccepted() {
+        assertEquals("all done", LocalExecutor.normalizeDone(new LocalExecutor.ExecutorAction(
+                false, null, "done", Map.of("message", "all done"))).summary());
+        assertEquals("all done", LocalExecutor.normalizeDone(new LocalExecutor.ExecutorAction(
+                false, null, "done", Map.of("result", "all done"))).summary());
+        assertTrue(LocalExecutor.normalizeDone(new LocalExecutor.ExecutorAction(
+                        false, null, "done", Map.of())).done(),
+                "an empty summary is still a finish — the ledger supplies the body");
+    }
+
+    @Test
+    @DisplayName("a real tool call is left alone")
+    void ordinaryActionsAreUntouched() {
+        var call = new LocalExecutor.ExecutorAction(
+                false, null, "smtp_send_email", Map.of("to", "petr@example.com"));
+        assertSame(call, LocalExecutor.normalizeDone(call));
+        assertNull(LocalExecutor.normalizeDone(null));
+    }
+
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
