@@ -74,6 +74,18 @@ public class OwnClawConfig {
         /** Cap the number of omitted tool names listed after the manifest ("Also:"). Prevents huge name lists. */
         private boolean nativeTools = true;
 
+        /**
+         * On unattended work, withhold the registry from the cloud so it must delegate.
+         *
+         * Separate from nativeTools because it is a different claim: that one is about the
+         * protocol, this one is about which tier does the work. Off until verified, and
+         * switchable at runtime like its neighbour.
+         */
+        private boolean localFirstUnattended = false;
+
+        public boolean isLocalFirstUnattended() { return localFirstUnattended; }
+        public void setLocalFirstUnattended(boolean v) { this.localFirstUnattended = v; }
+
         public boolean isNativeTools() { return nativeTools; }
         public void setNativeTools(boolean v) { this.nativeTools = v; }
 

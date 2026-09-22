@@ -83,6 +83,7 @@ public class OpsController {
                         "POST /api/ops/agent/cancel/{userId}",
                         "POST /api/ops/skills/reload",
                     "POST /api/ops/config/native-tools?enabled=true|false",
+                    "POST /api/ops/config/local-first?enabled=true|false",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)"),
                 "notProvided", List.of(
                         "credential values", "arbitrary shell", "deploy", "restart"),
@@ -267,6 +268,21 @@ public class OpsController {
                 "previous", before,
                 "note", "Applies from the next reasoning step. Not persisted: a restart returns "
                         + "to ownclaw.mentor.native-tools in configuration."));
+    }
+
+    /** Withhold the registry from the cloud on unattended work, so it must delegate. */
+    @PostMapping("/config/local-first")
+    public ResponseEntity<?> localFirst(@RequestParam boolean enabled) {
+        boolean before = config.getMentor().isLocalFirstUnattended();
+        config.getMentor().setLocalFirstUnattended(enabled);
+        log.warn("Local-first unattended execution {} at runtime (was {})",
+                enabled ? "ENABLED" : "DISABLED", before);
+        return ResponseEntity.ok(Map.of(
+                "localFirstUnattended", enabled,
+                "previous", before,
+                "note", "Applies to the next unattended task. Attended chat is never affected. "
+                        + "Falls back to the full tool set whenever the local model is "
+                        + "unreachable or does not advertise tool use."));
     }
 
     @PostMapping("/selftest")

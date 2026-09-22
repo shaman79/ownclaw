@@ -115,8 +115,7 @@ public class ThinkingEngine {
                 null    // use provider default read timeout
         );
         if (nativeTools) {
-            requestConfig = requestConfig.withTools(ToolSchemas.build(
-                    SpecialActionSchemas.ALL, toolRegistry.all(), context.credentialKeys()));
+            requestConfig = requestConfig.withTools(toolsFor(context, provider));
         }
 
         try {
@@ -390,6 +389,84 @@ public class ThinkingEngine {
                 : obs);
         correction.append("\n\n---\n").append(buildDynamicContext(context));
         messages.add(LlmMessage.user(correction.toString()));
+    }
+
+    /**
+     * The tools the CLOUD model may call on this step.
+     *
+     * <p>On unattended work the registry is withheld, so the cloud can orchestrate but cannot
+     * execute. That is the architecture the owner asked for — "cloud orchestrates, local
+     * executes" — made structural instead of advisory.
+     *
+     * <p>It is structural because advice demonstrably does not work. Three successive prompt
+     * formulations over seven months failed to get a single delegation chosen, and the reason is
+     * visible in the tasks themselves: a scheduled description names the exact skills and the
+     * exact order ("using daily_news_digest skill, then ... Use smtp_send_email"), so a specific
+     * instruction outcompetes a general preference every time. Today both scheduled runs spent a
+     * quarter of a million cloud tokens each on work with no judgement in it at all.
+     *
+     * <p>Only when the local model is actually reachable and advertises tool use. If it is down,
+     * the cloud keeps the full set and the task runs exactly as it does today: a local tier that
+     * is not answering must not become a reason for scheduled work to stop.
+     *
+     * <p>Attended chat is untouched. There the user IS waiting, a local step costs about a
+     * minute, and the owner has been explicit that latency matters there and does not matter for
+     * scheduled work.
+     */
+    private List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, LlmProvider provider) {
+        boolean localFirst = config.getMentor().isLocalFirstUnattended()
+                && context.isUnattended()
+                && llmRouter.local().isAvailable()
+                && llmRouter.local().supportsTools();
+
+        // The valve. If a delegation has already failed, the local tier has had its turn and
+        // the registry comes back for the rest of the task. Without this, a local model that
+        // cannot manage the work leaves the orchestrator re-delegating into the step limit and
+        // the owner's morning email simply never arrives -- trading a token saving for a
+        // silently broken task, which is not a trade worth making.
+        if (localFirst && delegationFailed(context)) {
+            log.info("Unattended task {}: a delegation failed, so the registry is restored for "
+                    + "the rest of this task.", context.taskId());
+            localFirst = false;
+        }
+
+        if (!localFirst) {
+            return ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(),
+                    context.credentialKeys());
+        }
+        log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
+                        + "withheld, so mechanical work must be delegated to the local model.",
+                context.taskId());
+
+        // The cloud cannot CALL the skills, but it still has to know they exist, or it will
+        // write a goal that asks for something already built -- or reach for skill_create to
+        // rebuild it. So delegate's description carries a catalogue: names and one line each,
+        // which is knowledge without capability.
+        var specs = new ArrayList<>(ToolSchemas.build(
+                SpecialActionSchemas.ALL, List.of(), context.credentialKeys()));
+        String catalogue = toolRegistry.all().stream()
+                .filter(t -> t != null && t.name() != null)
+                .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
+                .map(t -> "- " + t.name() + ": " + truncate(t.description(), 110))
+                .collect(java.util.stream.Collectors.joining("\n"));
+        specs.replaceAll(spec -> {
+            if (!AgentAction.DELEGATE.equals(spec.name())) return spec;
+            return new com.ownclaw.llm.ToolSpec(spec.name(),
+                    spec.description()
+                            + "\n\nYou are orchestrating unattended work, so you cannot run "
+                            + "skills yourself — this is how the work gets done. State the goal "
+                            + "fully; the local model picks the tools. Skills available to it:\n"
+                            + (catalogue.isBlank() ? "(none yet — use skill_create first)" : catalogue),
+                    spec.inputSchema());
+        });
+        return specs;
+    }
+
+    /** Whether the local tier has already been given this task and could not finish a step. */
+    private static boolean delegationFailed(AgentContext context) {
+        return context.trajectory().turns().stream().anyMatch(t ->
+                t.action() != null && AgentAction.DELEGATE.equals(t.action().tool())
+                        && t.observation() != null && !t.observation().success());
     }
 
     /** What the debug panel shows for a native call, where there is no raw JSON to display. */

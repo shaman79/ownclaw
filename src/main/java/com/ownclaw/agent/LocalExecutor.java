@@ -60,6 +60,29 @@ public class LocalExecutor {
     }
 
     /**
+     * Finishing is a tool call like any other, so the model has one output format, not two.
+     * <p>
+     * On the text protocol it had to emit {@code {"tool":...}} for work and {@code {"done":...}}
+     * for the end, and a model that gets the second shape wrong burns every remaining step.
+     */
+    private static final ToolSpec DONE = new ToolSpec("done",
+            "Call this when the goal is reached. The summary is the whole answer the "
+                    + "orchestrator receives, so put every piece of collected data in it — "
+                    + "nothing else from this delegation is passed on.",
+            ToolSchemas.toJsonSchema(Map.of("summary",
+                    ToolParam.required("string", "The consolidated result, in full."))));
+
+    /** What the local model may call: the registry, minus skill_create, plus {@link #DONE}. */
+    private List<ToolSpec> executorTools(AgentContext context) {
+        var tools = toolRegistry.all().stream()
+                .filter(t -> t != null && !"skill_create".equals(t.name()))
+                .collect(Collectors.toList());
+        var specs = new ArrayList<>(ToolSchemas.build(List.of(DONE), tools,
+                context.credentialKeys()));
+        return specs;
+    }
+
+    /**
      * Execute a delegation plan using the local LLM.
      *
      * @param plan          the structured plan from the cloud LLM
@@ -72,12 +95,20 @@ public class LocalExecutor {
             return "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.";
         }
 
+        // The tool manifest is the largest thing in this prompt and num_ctx is the binding
+        // constraint on this hardware, so when the model can take tools as structure, send them
+        // as structure and drop the prose copy.
+        boolean nativeTools = localProvider.supportsTools();
+        List<ToolSpec> specs = nativeTools ? executorTools(parentContext) : null;
+        log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
+                specs == null ? toolRegistry.all().size() : specs.size());
+
         int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
         List<StepResult> stepResults = new ArrayList<>();
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
-        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext)));
+        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext, nativeTools)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
         messages.add(LlmMessage.user(plan.steps().isEmpty()
@@ -100,8 +131,10 @@ public class LocalExecutor {
                 // the context window fills. The real bounds are num_ctx and the 600 s read timeout. Capping output
                 // here used to starve thinking models, which spend part of the budget reasoning before they
                 // answer.
+                // format:json and tools are mutually exclusive in Ollama, so JSON mode is
+                // only asked for on the text protocol, where it is what holds the output shape.
                 response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, null, true, null));
+                        new LlmRequestConfig(null, null, null, !nativeTools, null, specs));
             } catch (Exception e) {
                 // Name the two failures that actually happen, because the orchestrator reads this
                 // string and guesses otherwise -- it reported "local LLM token limits" when the
@@ -127,12 +160,22 @@ public class LocalExecutor {
             parentContext.addLocalTokens(response.totalTokens());
             String raw = response.content();
 
-            if (raw == null || raw.isBlank()) {
-                return buildPartialResult("Local LLM returned empty response", stepResults);
+            // A native tool call is the answer; content is then usually empty and that is fine.
+            ExecutorAction action;
+            if (response.hasToolCalls()) {
+                ToolCall call = response.toolCalls().get(0);
+                action = "done".equals(call.name())
+                        ? ExecutorAction.done(str(call.arguments().get("summary")))
+                        : new ExecutorAction(false, null, call.name(), call.arguments());
+                raw = renderCall(call);
+            } else {
+                if (raw == null || raw.isBlank()) {
+                    return buildPartialResult("Local LLM returned empty response", stepResults);
+                }
+                // A tools-capable model can still answer in prose; the text parser is the
+                // fallback, not dead code.
+                action = parseExecutorAction(raw);
             }
-
-            // Parse executor action
-            ExecutorAction action = parseExecutorAction(raw);
 
             if (action.done) {
                 log.info("Delegation completed after {} steps. Summary length: {}",
@@ -147,10 +190,12 @@ public class LocalExecutor {
             if (action.tool == null || action.tool.isBlank()) {
                 // Local LLM produced something unparseable — try to recover
                 messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user(
-                        "Invalid output. You must respond with JSON: " +
-                        "{\"tool\": \"name\", \"params\": {...}} to execute a tool, " +
-                        "or {\"done\": true, \"summary\": \"...\"} when finished."));
+                messages.add(LlmMessage.user(nativeTools
+                        ? "That was not a tool call. Call a tool to do the work, or call done "
+                                + "with the summary if the goal is already reached."
+                        : "Invalid output. You must respond with JSON: "
+                                + "{\"tool\": \"name\", \"params\": {...}} to execute a tool, "
+                                + "or {\"done\": true, \"summary\": \"...\"} when finished."));
                 continue;
             }
 
@@ -181,7 +226,9 @@ public class LocalExecutor {
                     "Tool result [" + action.tool + "] " + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
                     truncate(toolResult, 30_000) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
-                    "output {\"done\": true, \"summary\": \"consolidated results\"}."));
+                    (nativeTools
+                            ? "call done with the consolidated results."
+                            : "output {\"done\": true, \"summary\": \"consolidated results\"}.")));
         }
 
         // Hit max steps without "done"
@@ -240,7 +287,8 @@ public class LocalExecutor {
      * Build the system prompt for the local executor.
      * Includes the plan, available tools, and constrained output format.
      */
-    private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context) {
+    private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context,
+                                             boolean nativeTools) {
         var sb = new StringBuilder(4096);
 
         // The header used to say "Follow the plan exactly. No planning authority." unconditionally,
@@ -258,9 +306,15 @@ public class LocalExecutor {
             sb.append("The steps are the order to work in; adapt params to what earlier steps returned.\n\n");
         }
         sb.append("## Output\n");
-        sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
-        sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
-        sb.append("ONE JSON object only. No extra text.\n\n");
+        if (nativeTools) {
+            sb.append("Call one tool per turn. When the goal is reached, call **done** with the\n");
+            sb.append("full summary. Do not answer in prose — an answer nobody asked for ends\n");
+            sb.append("nothing, and only **done** returns the work.\n\n");
+        } else {
+            sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
+            sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
+            sb.append("ONE JSON object only. No extra text.\n\n");
+        }
 
         // The plan
         sb.append("## Plan\n");
@@ -290,16 +344,19 @@ public class LocalExecutor {
             sb.append("\n");
         }
 
-        // Available tools (all except skill_create)
-        sb.append("## Available Tools\n");
-        Collection<Tool> availableTools = toolRegistry.all().stream()
-                .filter(t -> !"skill_create".equals(t.name()))
-                .collect(Collectors.toList());
-        if (!availableTools.isEmpty()) {
-            String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
-            sb.append(manifest).append("\n");
-        } else {
-            sb.append("No tools available.\n");
+        // The tool list. On the native protocol the provider already has it as schema, and
+        // repeating it here would cost the context window twice for the same information.
+        if (!nativeTools) {
+            sb.append("## Available Tools\n");
+            Collection<Tool> availableTools = toolRegistry.all().stream()
+                    .filter(t -> !"skill_create".equals(t.name()))
+                    .collect(Collectors.toList());
+            if (!availableTools.isEmpty()) {
+                String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
+                sb.append(manifest).append("\n");
+            } else {
+                sb.append("No tools available.\n");
+            }
         }
 
         sb.append("\n## Rules\n");
@@ -403,6 +460,20 @@ public class LocalExecutor {
             log.warn("LocalExecutor: failed to parse local LLM JSON: {}", e.getMessage());
             return ExecutorAction.invalid();
         }
+    }
+
+    /** The model's own tool call, written back into the history it will read next turn. */
+    private String renderCall(ToolCall call) {
+        try {
+            return mapper.writeValueAsString(Map.of(
+                    "tool", call.name(), "params", call.arguments()));
+        } catch (Exception e) {
+            return "{\"tool\": \"" + call.name() + "\"}";
+        }
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : o.toString();
     }
 
     private String buildPartialResult(String reason, List<StepResult> results) {
