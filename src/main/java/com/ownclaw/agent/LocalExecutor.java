@@ -254,6 +254,23 @@ public class LocalExecutor {
             // Pass an earlier result by reference, not by retyping it. See substituteRefs.
             Map<String, Object> params = substituteRefs(action.params, stepResults);
 
+            // ...and if it retyped one anyway, do not let the truncation reach a file, an email
+            // or anything else. This is cheap, deterministic, and catches the exact failure
+            // observed: the excerpt copied verbatim into the next call.
+            String retyped = retypedExcerpt(params);
+            if (retyped != null) {
+                log.warn("Delegation step {}: '{}' was retyped from an excerpt — refused.",
+                        stepResults.size() + 1, retyped);
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("STOP. The '" + retyped + "' value you just wrote "
+                        + "contains the marker saying the middle was omitted, which means you "
+                        + "copied what was shown to you instead of the real text — most of it is "
+                        + "missing. Make the WHOLE value of '" + retyped + "' the reference $N "
+                        + "for the step that produced it. Nothing else, no quotes around it, no "
+                        + "text before or after it."));
+                continue;
+            }
+
             long toolStartMs = System.currentTimeMillis();
             String toolResult = executeToolDirect(action.tool, params, parentContext);
             long toolMs = System.currentTimeMillis() - toolStartMs;
@@ -590,16 +607,42 @@ public class LocalExecutor {
     static String feedback(String result, int stepNumber) {
         if (result == null) return "";
         if (result.length() <= FEEDBACK_FULL_CHARS) return result;
-        int head = (FEEDBACK_FULL_CHARS * 3) / 4;
-        int tail = FEEDBACK_FULL_CHARS - head;
+        // Small enough to say what came back, too small to be worth copying. The first version
+        // showed 1,500 characters and asked the model not to retype them; it retyped them --
+        // annotation and all -- straight into the next tool call, and the file it wrote was
+        // half a digest with this sentence in the middle of it. Telling a model not to do
+        // something it can do is the whole mistake this change exists to stop making.
+        int head = 400;
+        int tail = 150;
         return result.substring(0, head)
-                + "\n\n...[" + result.length() + " chars in total; the middle is omitted HERE "
-                + "only — nothing has been lost]...\n\n"
+                + "\n\n" + OMISSION_MARKER + stepNumber + "⟧\n\n"
                 + result.substring(result.length() - tail)
-                + "\n\n[The complete, exact text is $" + stepNumber + ". To pass it to another "
-                + "tool, make $" + stepNumber + " the WHOLE value of the parameter — it is "
-                + "substituted verbatim. Do not retype it: you have not been shown all of it, "
-                + "and it is far longer than it is worth writing out.]";
+                + "\n\n[That is the beginning and the end of " + result.length() + " characters. "
+                + "The complete, exact text is $" + stepNumber + ": make $" + stepNumber
+                + " the WHOLE value of a parameter and it is substituted verbatim. You have not "
+                + "been shown the middle, so anything you type yourself will be missing it.]";
+    }
+
+    /**
+     * The canary. Its presence in a tool argument proves the model is retyping an excerpt.
+     * <p>
+     * Structural, because the instruction was not enough: a delegation wrote this very sentence
+     * into a file as though it were part of the digest, and reported success. Silent truncation
+     * of the owner's morning email is a worse failure than the crash it replaced, and it is the
+     * one failure the cloud cannot catch — the summary looks right and the ledger says the tool
+     * ran.
+     */
+    static final String OMISSION_MARKER = "⟦middle omitted — pass it on with $";
+
+    /** The parameter that is quoting an excerpt back at us, or null when none is. */
+    static String retypedExcerpt(Map<String, Object> params) {
+        if (params == null) return null;
+        for (var e : params.entrySet()) {
+            if (e.getValue() instanceof String v && v.contains(OMISSION_MARKER)) {
+                return e.getKey();
+            }
+        }
+        return null;
     }
 
     /**

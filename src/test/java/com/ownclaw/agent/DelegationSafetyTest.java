@@ -177,9 +177,40 @@ class DelegationSafetyTest {
         assertTrue(shown.endsWith("]"), "and how to move it");
         assertTrue(shown.contains("-TAIL"), "the tail says whether the result was complete");
         assertTrue(shown.contains("$1"), "the reference is the whole point");
-        assertTrue(shown.contains("nothing has been lost"),
-                "a model that thinks the data is gone will try to reconstruct it, which is the "
-                        + "failure this is preventing");
+        assertTrue(shown.contains(LocalExecutor.OMISSION_MARKER),
+                "the marker is what makes a retyped excerpt detectable rather than silent");
+    }
+
+    @Test
+    @DisplayName("a retyped excerpt is caught by its marker")
+    void retypedExcerptIsDetected() {
+        String shown = LocalExecutor.feedback("HEAD" + "x".repeat(4000) + "TAIL", 1);
+        // Exactly what a real delegation did: copied what it was shown into the next call.
+        var params = Map.<String, Object>of("path", "/tmp/out.txt", "content", shown);
+
+        assertEquals("content", LocalExecutor.retypedExcerpt(params),
+                "this reached a file as though it were the digest, and the delegation reported "
+                        + "success — silent truncation is the one failure the cloud cannot see");
+    }
+
+    @Test
+    @DisplayName("ordinary arguments are not mistaken for a retyped excerpt")
+    void normalParamsAreNotFlagged() {
+        assertNull(LocalExecutor.retypedExcerpt(
+                Map.of("body", "Here is the digest, see attached.", "to", "petr@example.com")));
+        assertNull(LocalExecutor.retypedExcerpt(Map.of("body", "$1")));
+        assertNull(LocalExecutor.retypedExcerpt(Map.of()));
+        assertNull(LocalExecutor.retypedExcerpt(null));
+    }
+
+    @Test
+    @DisplayName("the excerpt is too small to be worth copying")
+    void excerptIsSmall() {
+        String shown = LocalExecutor.feedback("z".repeat(9000), 1);
+        assertTrue(shown.length() < 1200,
+                "1,500 characters was small enough to fail on context and large enough to be "
+                        + "retyped — the worst of both");
+        assertTrue(shown.contains("9000 characters"), "it still says how much there really is");
     }
 
     @Test
