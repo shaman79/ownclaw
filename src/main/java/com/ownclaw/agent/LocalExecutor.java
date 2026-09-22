@@ -570,8 +570,33 @@ public class LocalExecutor {
      * with the registry withheld, the cloud has no instrument to check it with.
      */
     static Outcome completed(String summary, List<StepResult> results) {
-        return new Outcome(summary + ledger(results), toolNames(results),
-                results.size(), !results.isEmpty());
+        boolean anyFailed = results.stream().anyMatch(r -> !r.success);
+        return new Outcome(summary + ledger(results) + verbatimFailures(results),
+                toolNames(results), results.size(),
+                // A step that threw means the cloud should have the registry back: rewriting a
+                // skill from its traceback is the self-learning loop this project exists for,
+                // and it cannot run through a paraphrase. Marking the delegation failed is what
+                // restores the registry and engages the repair path.
+                !results.isEmpty() && !anyFailed);
+    }
+
+    /**
+     * Failed steps at full length, appended after the summary.
+     * <p>
+     * A traceback is the whole evidence and it is short. Leaving it to the local model to copy
+     * into its summary means the cloud is asked to rewrite Python from a small model's
+     * description of a stack trace — on the one path where verbatim error text is worth more
+     * than any summary.
+     */
+    private static String verbatimFailures(List<StepResult> results) {
+        var failed = results.stream().filter(r -> !r.success).toList();
+        if (failed.isEmpty()) return "";
+        var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");
+        for (StepResult r : failed) {
+            sb.append("\n[").append(r.tool).append("] ").append(r.params).append("\n")
+              .append(truncate(r.output, 20_000));
+        }
+        return sb.toString();
     }
 
     private Outcome partial(String reason, List<StepResult> results) {
@@ -588,7 +613,9 @@ public class LocalExecutor {
                 var r = results.get(i);
                 sb.append(i + 1).append(". [").append(r.tool).append("] ")
                         .append(r.success ? "OK" : "FAIL").append(": ")
-                        .append(truncate(r.output, 2000)).append("\n");
+                        // Failures keep far more: a truncated traceback is a traceback that
+                        // cannot be acted on, and this is the only copy that reaches the cloud.
+                        .append(truncate(r.output, r.success ? 2000 : 20_000)).append("\n");
             }
         }
         return sb.toString();

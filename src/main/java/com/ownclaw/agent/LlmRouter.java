@@ -2,6 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.LlmProvider;
+import com.ownclaw.llm.LocalModelCheck;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -34,6 +35,7 @@ public class LlmRouter {
     private final LlmProvider openAiProvider;
     private final LlmProvider anthropicProvider;
     private final OwnClawConfig config;
+    private final LocalModelCheck localModelCheck;
 
     /** The currently active cloud provider (resolved from config). */
     private volatile LlmProvider cloudProvider;
@@ -42,12 +44,14 @@ public class LlmRouter {
             @Qualifier("ollamaProvider") LlmProvider localProvider,
             @Qualifier("openAiProvider") LlmProvider openAiProvider,
             @Qualifier("anthropicProvider") LlmProvider anthropicProvider,
-            OwnClawConfig config
+            OwnClawConfig config,
+            LocalModelCheck localModelCheck
     ) {
         this.localProvider = localProvider;
         this.openAiProvider = openAiProvider;
         this.anthropicProvider = anthropicProvider;
         this.config = config;
+        this.localModelCheck = localModelCheck;
     }
 
     @PostConstruct
@@ -99,6 +103,18 @@ public class LlmRouter {
     /**
      * Get the local provider directly (for non-critical, high-volume operations).
      */
+    /**
+     * Whether the local tier is genuinely usable right now — configured model installed and
+     * drivable through /api/chat, not merely a server that answers /api/tags.
+     * <p>
+     * Reachability was never the question: through the months the local tier was broken, Ollama
+     * answered, the model was installed, and every reply was unrelated because the server could
+     * not render a chat template for that architecture.
+     */
+    public LocalModelCheck.LocalStatus localStatus() {
+        return localModelCheck.status();
+    }
+
     public LlmProvider local() {
         return localProvider;
     }

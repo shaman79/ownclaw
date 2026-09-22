@@ -1360,8 +1360,10 @@ public class AgentLoop {
      * as a cost warning in the prompt.
      */
     private void injectDelegationNudge(AgentContext context) {
-        // Only nudge if local LLM is available (otherwise delegation would fail)
-        if (!llmRouter.local().isAvailable()) {
+        // Only nudge if the local tier can actually take the work -- the same question the tools
+        // decision asks, so it reuses the same per-task answer rather than opening its own HTTP
+        // round trip on every step.
+        if (!thinkingEngine.localTierReady(context)) {
             context.metadata().remove("delegationNudge");
             return;
         }

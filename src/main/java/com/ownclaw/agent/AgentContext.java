@@ -42,6 +42,9 @@ public class AgentContext {
     /** Null until a step restricts the set; see {@link #offeredTools()}. */
     private volatile java.util.Set<String> offeredTools;
 
+    /** Null until the local tier is checked; see {@link #localTierReady()}. */
+    private volatile Boolean localTierReady;
+
     // Per-task token usage counters
     private int localTokens;
     private int cloudTokens;
@@ -130,6 +133,23 @@ public class AgentContext {
      * and the loop resolves it straight off the full registry. This is the one place the
      * restriction becomes structural rather than advisory.
      */
+    /**
+     * Whether the local tier is usable, decided once for this task, or null if not yet asked.
+     * <p>
+     * A fact settled at task origin, like {@link #isUnattended()} and {@link #credentialKeys()}.
+     * It was being re-probed on every reasoning step, which is a synchronous HTTP round trip on
+     * the hot path — and worse, the answer feeds the tools array, which sits inside the
+     * Anthropic cache prefix. One blipped probe mid-task would change the array, invalidate the
+     * whole prefix and re-bill six figures of cached tokens at full rate, while handing the
+     * cloud the registry for one step and taking it away the next.
+     * <p>
+     * Nothing is lost by deciding once. A local tier that dies mid-task fails its next
+     * delegation, and that failed turn is exactly what restores the registry for the rest of
+     * the task.
+     */
+    public Boolean localTierReady() { return localTierReady; }
+    public void setLocalTierReady(boolean ready) { this.localTierReady = ready; }
+
     public java.util.Set<String> offeredTools() { return offeredTools; }
     public void setOfferedTools(java.util.Set<String> names) { this.offeredTools = names; }
 

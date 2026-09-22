@@ -437,6 +437,42 @@ public class ThinkingEngine {
      */
     record StepMode(boolean nativeTools, boolean localFirst) {}
 
+    /**
+     * Can the local tier be handed real work — asked once per task, then remembered.
+     * <p>
+     * Two conditions, deliberately evaluated together and in this order. {@code isAvailable()}
+     * only proves the server answers {@code /api/tags}, and through the months the local tier
+     * was broken it answered fine while every reply came back unrelated, because the model
+     * could not be driven through {@code /api/chat} — so the first question is whether the
+     * configured model is genuinely drivable. The second is whether it takes native tool calls,
+     * because that is what makes a delegation reliable enough to be the only path; on the text
+     * protocol it stays a preference, as it has been all along.
+     * <p>
+     * The order is not incidental: {@code status()} re-reads the model's capabilities and
+     * refreshes the flag {@code supportsTools()} returns, which would otherwise still be
+     * whatever was true at boot — and on this host an Ollama upgrade swaps the loaded model
+     * often enough for that to matter.
+     */
+    boolean localTierReady(AgentContext context) {
+        Boolean known = context.localTierReady();
+        if (known != null) return known;
+        boolean ready;
+        try {
+            var status = llmRouter.localStatus();
+            ready = status.ok() && llmRouter.local().supportsTools();
+            if (!ready) {
+                log.info("Local tier cannot take delegated work ({}, tools={}); this task runs "
+                                + "entirely on the cloud.",
+                        status.detail(), llmRouter.local().supportsTools());
+            }
+        } catch (Exception e) {
+            log.warn("Local tier health check failed: {}", e.toString());
+            ready = false;
+        }
+        context.setLocalTierReady(ready);
+        return ready;
+    }
+
     StepMode stepMode(AgentContext context, LlmProvider provider) {
         boolean nativeTools = config.getMentor().isNativeTools() && provider.supportsTools();
 
@@ -445,8 +481,7 @@ public class ThinkingEngine {
         boolean localFirst = nativeTools
                 && config.getMentor().isLocalFirstUnattended()
                 && context.isUnattended()
-                && llmRouter.local().isAvailable()
-                && llmRouter.local().supportsTools()
+                && localTierReady(context)
                 // The valve. If a delegation has already failed, the local tier has had its
                 // turn and the registry comes back for the rest of the task. Without this, a
                 // local model that cannot manage the work leaves the orchestrator re-delegating

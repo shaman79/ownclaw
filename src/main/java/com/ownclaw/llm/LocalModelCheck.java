@@ -280,6 +280,10 @@ public class LocalModelCheck {
                         + "architecture, so prompts are discarded and answers are unrelated. "
                         + "capabilities=" + capabilities + ". Upgrading Ollama often fixes this.");
             }
+            // Refresh it here rather than leaving it set at boot. A model swap -- which happens
+            // on this host every time an Ollama upgrade clobbers the unit file -- would
+            // otherwise leave the protocol choice keyed to whatever was loaded at startup.
+            toolsCapable = capabilities.contains("tools");
             String from = substitutedFrom;
             return new LocalStatus(true, model, true, true, true,
                     from == null
