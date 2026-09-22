@@ -53,6 +53,23 @@ public class LocalModelCheck {
      */
     private volatile String substitutedFrom;
 
+    /**
+     * Whether the model actually in use advertises tool calling.
+     * <p>
+     * Recorded as state by the startup check rather than probed per request: {@code /api/show}
+     * is a network round trip, and this is read on the hot path of every reasoning step. It
+     * reflects the model AFTER any substitution, which is the one that will really be called.
+     * <p>
+     * Volatile and defaulting to false, so a process that has not finished its check yet uses
+     * the text protocol rather than offering tools to a model that may not understand them.
+     */
+    private volatile boolean toolsCapable = false;
+
+    /** Whether the configured (or substituted) local model advertises tool calling. */
+    public boolean toolsCapable() {
+        return toolsCapable;
+    }
+
     public LocalModelCheck(OwnClawConfig config, ObjectMapper mapper) {
         this.config = config;
         this.mapper = mapper;
@@ -125,6 +142,7 @@ public class LocalModelCheck {
                 return;
             }
 
+            toolsCapable = capabilities.contains("tools");
             if (capabilities.contains("thinking")) {
                 log.info("Local model '{}' ready on {} (capabilities={}) — a thinking model, so its "
                         + "reasoning shares the output budget with the answer; local calls need enough "
@@ -192,6 +210,7 @@ public class LocalModelCheck {
 
         config.getExecutor().setModel(chosen.name());
         substitutedFrom = configured;
+        toolsCapable = chosen.capabilities().contains("tools");
         log.warn("LOCAL TIER SELF-HEALED: '{}' cannot be driven, so this process is using '{}' "
                         + "instead (capabilities={}). The local tier works now. This lasts until "
                         + "restart and nothing has been written to your configuration — set "

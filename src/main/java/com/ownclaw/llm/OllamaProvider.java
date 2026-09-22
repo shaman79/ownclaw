@@ -1,5 +1,6 @@
 package com.ownclaw.llm;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -28,8 +29,11 @@ public class OllamaProvider implements LlmProvider {
     private final OwnClawConfig.Executor config;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
+    private final LocalModelCheck localModelCheck;
 
-    public OllamaProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper) {
+    public OllamaProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper,
+                          @org.springframework.context.annotation.Lazy LocalModelCheck localModelCheck) {
+        this.localModelCheck = localModelCheck;
         this.config = ownClawConfig.getExecutor();
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
@@ -68,7 +72,12 @@ public class OllamaProvider implements LlmProvider {
         body.put("keep_alive", -1);
 
         // JSON mode: force structured JSON output when requested
-        if (reqConfig.jsonMode()) {
+        // NOT when tools are offered. Forcing JSON output pushes the model to put the action
+        // JSON in the message body instead of emitting tool_calls -- the exact behaviour native
+        // tools replace -- and a local model is far more suggestible about this than a frontier
+        // one, so the two settings together reliably produce the old protocol wearing the new
+        // one's clothes.
+        if (reqConfig.jsonMode() && !reqConfig.hasTools()) {
             body.put("format", "json");
         }
 
@@ -79,6 +88,16 @@ public class OllamaProvider implements LlmProvider {
         }
         if (reqConfig.maxTokens() != null) {
             options.put("num_predict", reqConfig.maxTokens());
+        }
+
+        if (reqConfig.hasTools()) {
+            ArrayNode toolsArray = body.putArray("tools");
+            for (ToolSpec spec : reqConfig.tools()) {
+                ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
+                fn.put("name", spec.name());
+                fn.put("description", spec.description() == null ? "" : spec.description());
+                fn.set("parameters", mapper.valueToTree(spec.inputSchema()));
+            }
         }
 
         ArrayNode msgs = body.putArray("messages");
@@ -139,7 +158,20 @@ public class OllamaProvider implements LlmProvider {
             if (!thinking.isBlank()) {
                 log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinking.length());
             }
-            if (content.isBlank() && !thinking.isBlank()) {
+            // Ollama returns arguments as an object, like Anthropic and unlike OpenAI.
+            var toolCalls = new java.util.ArrayList<ToolCall>();
+            for (JsonNode tc : json.path("message").path("tool_calls")) {
+                java.util.Map<String, Object> args = mapper.convertValue(
+                        tc.path("function").path("arguments"),
+                        new TypeReference<java.util.Map<String, Object>>() {});
+                toolCalls.add(new ToolCall(tc.path("id").asText(null),
+                        tc.path("function").path("name").asText(null),
+                        args == null ? java.util.Map.of() : args));
+            }
+
+            // A tool call with no prose is a perfectly good reply; only an empty answer with
+            // no tool call means the budget went entirely on reasoning.
+            if (content.isBlank() && !thinking.isBlank() && toolCalls.isEmpty()) {
                 // Fail loudly instead of returning "" — the caller can raise the budget, whereas
                 // an empty string just becomes a mystery parse failure several layers away.
                 throw new LlmException("ollama",
@@ -153,8 +185,9 @@ public class OllamaProvider implements LlmProvider {
                 log.warn("Ollama [{}]: output truncated at the token limit ({} tokens) — the answer is "
                         + "incomplete", model, completionTokens);
             }
+
             return new LlmResponse(content, promptTokens, completionTokens, 0, 0,
-                    json.path("done_reason").asText(null));
+                    json.path("done_reason").asText(null), toolCalls);
 
         } catch (IOException e) {
             throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);
@@ -171,6 +204,17 @@ public class OllamaProvider implements LlmProvider {
             return false;
         }
     }
+
+    /**
+     * Per MODEL, not per provider: Ollama serves whatever is loaded, and tool support varies
+     * between them. The answer comes from the startup check, which already reads /api/show and
+     * reflects any model substitution, rather than a network probe on the hot path.
+     */
+    @Override
+    public boolean supportsTools() {
+        return localModelCheck != null && localModelCheck.toolsCapable();
+    }
+
 
     @Override
     public String name() {

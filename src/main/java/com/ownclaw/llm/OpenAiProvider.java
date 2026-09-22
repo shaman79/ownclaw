@@ -1,6 +1,7 @@
 package com.ownclaw.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -86,7 +88,10 @@ public class OpenAiProvider implements LlmProvider {
             log.debug("OpenAI [{}]: omitting temperature, not supported by this model", model);
         }
 
-        if (reqConfig.jsonMode()) {
+        // response_format and tools are mutually exclusive in practice: asking for a JSON
+        // object pushes the model to write JSON into the message body instead of emitting
+        // tool_calls, which is the one behaviour native tools exist to replace.
+        if (reqConfig.jsonMode() && !reqConfig.hasTools()) {
             body.putObject("response_format").put("type", "json_object");
         }
 
@@ -95,6 +100,19 @@ public class OpenAiProvider implements LlmProvider {
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
             m.put("content", msg.content());
+        }
+
+        if (reqConfig.hasTools()) {
+            ArrayNode toolsArray = body.putArray("tools");
+            for (ToolSpec spec : reqConfig.tools()) {
+                ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
+                fn.put("name", spec.name());
+                fn.put("description", spec.description() == null ? "" : spec.description());
+                fn.set("parameters", mapper.valueToTree(spec.inputSchema()));
+            }
+            // One action per step, one observation recorded. Accepting two calls would mean
+            // silently dropping work the model asked for.
+            body.put("parallel_tool_calls", false);
         }
 
         Request request = new Request.Builder()
@@ -128,9 +146,29 @@ public class OpenAiProvider implements LlmProvider {
 
             log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
                     model, promptTokens, cachedPromptTokens, completionTokens);
+            // OpenAI returns arguments as a JSON STRING, unlike Anthropic and Ollama which
+            // return an object. Parsed strictly: OpenAI emits valid JSON, and quietly accepting
+            // malformed arguments would hand a skill values nothing ever checked.
+            var toolCalls = new java.util.ArrayList<ToolCall>();
+            for (JsonNode tc : json.path("choices").path(0).path("message").path("tool_calls")) {
+                String argsRaw = tc.path("function").path("arguments").asText("");
+                Map<String, Object> args = Map.of();
+                try {
+                    if (!argsRaw.isBlank()) {
+                        args = mapper.readValue(argsRaw, new TypeReference<Map<String, Object>>() {});
+                    }
+                } catch (Exception e) {
+                    log.warn("OpenAI tool call '{}' had unparseable arguments ({}); treating as "
+                                    + "empty so the step fails visibly rather than on bad values.",
+                            tc.path("function").path("name").asText("?"), e.getMessage());
+                }
+                toolCalls.add(new ToolCall(tc.path("id").asText(null),
+                        tc.path("function").path("name").asText(null), args));
+            }
+
             return new LlmResponse(content, uncachedPromptTokens, completionTokens,
                     0, cachedPromptTokens,
-                    json.path("choices").path(0).path("finish_reason").asText(null));
+                    json.path("choices").path(0).path("finish_reason").asText(null), toolCalls);
 
         } catch (IOException e) {
             throw new LlmException("openai", "Connection failed: " + e.getMessage(), 0, e);
@@ -182,6 +220,11 @@ public class OpenAiProvider implements LlmProvider {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    @Override
+    public boolean supportsTools() {
+        return true;
     }
 
     @Override
