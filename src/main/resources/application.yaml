@@ -109,6 +109,13 @@ ownclaw:
     # Off instantly and without a restart: POST /api/ops/config/native-tools?enabled=false
     native-tools: ${OWNCLAW_NATIVE_TOOLS:true}
 
+    # On unattended work only, withhold the skills from the cloud so it has to delegate --
+    # "cloud orchestrates, local executes" made structural rather than advisory. Attended chat
+    # is untouched. If the local tier cannot take the work, or a delegation fails, the cloud
+    # gets the full set straight back, so a broken local model cannot stop scheduled work.
+    # Off instantly and without a restart: POST /api/ops/config/local-first?enabled=false
+    local-first-unattended: ${OWNCLAW_LOCAL_FIRST:true}
+
   budgets:
     daily-cloud-tokens: 0
     per-task-cloud-tokens: 0

@@ -77,11 +77,17 @@ public class OwnClawConfig {
         /**
          * On unattended work, withhold the registry from the cloud so it must delegate.
          *
-         * Separate from nativeTools because it is a different claim: that one is about the
-         * protocol, this one is about which tier does the work. Off until verified, and
-         * switchable at runtime like its neighbour.
+         * <p>Separate from nativeTools because it is a different claim: that one is about the
+         * protocol, this one is about which tier does the work.
+         *
+         * <p>Verified in production on 22 September against the hardest case — a task naming
+         * both skills, in order. The cloud delegated at step one, the local model ran the skill
+         * over the native protocol and called done, and the task completed: 34,848 local tokens
+         * on a run that has recorded zero every time it chose for itself. So it is on. It is
+         * switchable at runtime like its neighbour, and a delegation that fails hands the
+         * registry straight back.
          */
-        private boolean localFirstUnattended = false;
+        private boolean localFirstUnattended = true;
 
         public boolean isLocalFirstUnattended() { return localFirstUnattended; }
         public void setLocalFirstUnattended(boolean v) { this.localFirstUnattended = v; }
