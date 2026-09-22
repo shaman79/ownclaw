@@ -470,9 +470,11 @@ public class LocalExecutor {
         // whole class of fabrication to lose.
         sb.append("- To pass an earlier step's output on unchanged, make the WHOLE value of the\n");
         sb.append("  parameter $1 for step 1's output, $2 for step 2's, and so on. It is\n");
-        sb.append("  replaced with that step's exact text. Never retype a result: retyping is\n");
-        sb.append("  where a wrong date or a dropped line comes from, and it costs you the\n");
-        sb.append("  whole output again.\n");
+        sb.append("  replaced with that step's exact text. If the result is JSON and you need\n");
+        sb.append("  one field, use $1.fieldname — e.g. $1.body_text to put the text from an\n");
+        sb.append("  envelope into an email body rather than the whole envelope.\n");
+        sb.append("  Never retype a result: retyping is where a wrong date or a dropped line\n");
+        sb.append("  comes from, and it costs you the whole output again.\n");
         sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
         sb.append("  underneath it, so never retype data — a date or number written from\n");
         sb.append("  memory is an error that was not in the data.\n");
@@ -640,8 +642,11 @@ public class LocalExecutor {
                 + result.substring(result.length() - tail)
                 + "\n\n[That is the beginning and the end of " + result.length() + " characters. "
                 + "The complete, exact text is $" + stepNumber + ": make $" + stepNumber
-                + " the WHOLE value of a parameter and it is substituted verbatim. You have not "
-                + "been shown the middle, so anything you type yourself will be missing it.]";
+                + " the WHOLE value of a parameter and it is substituted verbatim. If the result "
+                + "is JSON and you want one field of it, use $" + stepNumber + ".fieldname the "
+                + "same way — e.g. $" + stepNumber + ".body_text for the text inside an envelope. "
+                + "You have not been shown the middle, so anything you type yourself will be "
+                + "missing it.]";
     }
 
     /**
@@ -733,19 +738,56 @@ public class LocalExecutor {
         var out = new LinkedHashMap<String, Object>(params);
         for (var e : out.entrySet()) {
             if (!(e.getValue() instanceof String v)) continue;
-            String t = v.strip();
-            if (t.length() < 2 || t.charAt(0) != '$') continue;
-            int n;
-            try {
-                n = Integer.parseInt(t.substring(1));
-            } catch (NumberFormatException ex) {
-                continue;
-            }
-            if (n >= 1 && n <= done.size()) {
-                e.setValue(done.get(n - 1).output);
-            }
+            String resolved = resolveRef(v.strip(), done);
+            if (resolved != null) e.setValue(resolved);
         }
         return out;
+    }
+
+    /**
+     * {@code $1} or {@code $1.field}, resolved against a step's output, or null if this is not
+     * a reference.
+     * <p>
+     * The field form exists because whole-output substitution is all-or-nothing, and skills
+     * return JSON. {@code daily_news_digest} returns
+     * {@code {"ok":true,"date":"...","body_text":"📰 Daily News Digest — ..."}}, and the thing
+     * that belongs in an email is {@code body_text}, not the envelope around it. Without this
+     * the local model's only choices are to send the owner raw JSON or to retype the digest by
+     * hand — and retyping is the failure everything here exists to prevent.
+     * <p>
+     * One level, no path syntax, no wildcards. A nested structure is not worth a query language
+     * the model would then get wrong.
+     */
+    private static String resolveRef(String token, List<StepResult> done) {
+        if (token.length() < 2 || token.charAt(0) != '$') return null;
+        String body = token.substring(1);
+        String field = null;
+        int dot = body.indexOf('.');
+        if (dot > 0) {
+            field = body.substring(dot + 1);
+            body = body.substring(0, dot);
+            if (field.isBlank()) return null;
+        }
+        int n;
+        try {
+            n = Integer.parseInt(body);
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+        if (n < 1 || n > done.size()) return null;
+        String output = done.get(n - 1).output;
+        if (field == null) return output;
+        try {
+            var node = mapper.readTree(output);
+            var value = node.get(field);
+            // An absent field is left as the literal "$1.field". Substituting null or "" would
+            // send an empty email and call it a success; an unresolved token is at least visible
+            // in whatever it reaches.
+            if (value == null || value.isNull()) return null;
+            return value.isTextual() ? value.asText() : value.toString();
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     /** The output of an earlier call with the same name and the same arguments, or null. */

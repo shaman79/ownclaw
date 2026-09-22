@@ -122,6 +122,56 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("$1.field takes one field out of a JSON result")
+    void fieldReferenceIsResolved() {
+        // Exactly what daily_news_digest returns, and exactly what smtp_send_email needs out
+        // of it: the text, not the envelope around the text.
+        var done = List.of(step("daily_news_digest", Map.of(),
+                "{\"ok\":true,\"date\":\"2026-09-22\",\"body_text\":\"Digest line one\\nline two\"}"));
+
+        var out = LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), done);
+        assertEquals("Digest line one\nline two", out.get("body"),
+                "whole-output substitution would email the owner raw JSON, and retyping is the "
+                        + "failure everything here exists to prevent");
+
+        assertEquals("2026-09-22",
+                LocalExecutor.substituteRefs(Map.of("subject", "$1.date"), done).get("subject"));
+    }
+
+    @Test
+    @DisplayName("$1 still gives the whole output when no field is named")
+    void wholeOutputStillWorks() {
+        String json = "{\"ok\":true,\"body_text\":\"text\"}";
+        var done = List.of(step("x", Map.of(), json));
+        assertEquals(json, LocalExecutor.substituteRefs(Map.of("c", "$1"), done).get("c"));
+    }
+
+    @Test
+    @DisplayName("a non-string field is serialised rather than dropped")
+    void nonStringFieldsSurvive() {
+        var done = List.of(step("x", Map.of(), "{\"count\":7,\"items\":[1,2]}"));
+        assertEquals("7", LocalExecutor.substituteRefs(Map.of("n", "$1.count"), done).get("n"));
+        assertEquals("[1,2]",
+                LocalExecutor.substituteRefs(Map.of("n", "$1.items"), done).get("n"));
+    }
+
+    @Test
+    @DisplayName("an unresolvable field is left visible, not silently emptied")
+    void missingFieldIsLeftAsWritten() {
+        var done = List.of(step("x", Map.of(), "{\"ok\":true}"));
+        assertEquals("$1.body_text",
+                LocalExecutor.substituteRefs(Map.of("b", "$1.body_text"), done).get("b"),
+                "substituting empty would send an empty email and report success; an "
+                        + "unresolved token at least shows up in what it reaches");
+
+        var plain = List.of(step("x", Map.of(), "not json at all"));
+        assertEquals("$1.body_text",
+                LocalExecutor.substituteRefs(Map.of("b", "$1.body_text"), plain).get("b"));
+        assertEquals("$1.",
+                LocalExecutor.substituteRefs(Map.of("b", "$1."), done).get("b"));
+    }
+
+    @Test
     @DisplayName("$1 inside a larger string is left alone")
     void onlyWholeValuesAreReferences() {
         var done = List.of(step("x", Map.of(), "OUTPUT"));
