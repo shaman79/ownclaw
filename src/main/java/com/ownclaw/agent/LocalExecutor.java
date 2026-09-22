@@ -439,7 +439,12 @@ public class LocalExecutor {
                 context.userId(),
                 context.taskId(),
                 null,
-                context::isCancelled
+                context::isCancelled,
+                null,
+                // The four-argument constructor defaults these to empty, so a delegated skill
+                // could not see a file the task was given. That was survivable while delegation
+                // was the road not taken; it is not once unattended work runs through here.
+                context.attachmentIds()
         );
 
         try {
