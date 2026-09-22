@@ -79,7 +79,21 @@ public class LocalModelCheck {
                 .build();
     }
 
-    @jakarta.annotation.PostConstruct
+    /**
+     * Probe the local tier once the context is up — deliberately NOT {@code @PostConstruct}.
+     * <p>
+     * The executor URL lives in two places: the yaml default {@code http://localhost:11434} and
+     * the {@code ollama_url} row that {@link com.ownclaw.config.SetupWizardService} copies into
+     * config at its own startup. Running this probe from {@code @PostConstruct} raced that copy,
+     * and on the startups it lost it probed localhost, found nothing, and logged "Local tier
+     * unavailable" on a host whose local tier was fine — while leaving {@code toolsCapable}
+     * false. Two of this morning's restarts did exactly that.
+     * <p>
+     * {@code ApplicationReadyEvent} fires after every bean has initialised, so the setting has
+     * been applied and there is one URL rather than a race between two.
+     */
+    @org.springframework.context.event.EventListener(
+            org.springframework.boot.context.event.ApplicationReadyEvent.class)
     public void scheduleCheck() {
         Thread t = new Thread(this::check, "local-model-check");
         t.setDaemon(true);
