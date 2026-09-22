@@ -281,7 +281,7 @@ public class LocalExecutor {
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(
                     "Tool result [" + action.tool + "] " + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
-                    truncate(toolResult, 30_000) + "\n\n" +
+                    feedback(toolResult, stepResults.size()) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
                     (nativeTools
                             ? "call done and say what you did — the result above is passed on "
@@ -562,6 +562,44 @@ public class LocalExecutor {
         var tool = toolRegistry.find(action.tool).orElse(null);
         if (tool == null || !tool.hasSideEffects()) return null;
         return priorIdenticalOutput(action.tool, params, done);
+    }
+
+    /**
+     * How much of a result the model is shown before it is handed a reference instead.
+     * <p>
+     * Chosen because the failure it exists to stop is not hypothetical: a real delegation died
+     * on step 2 with {@code done_reason=length} after 23,121 characters of thinking, because
+     * step 1's 2,905-character digest had been fed back in full, and the model then had to
+     * generate the whole thing AGAIN into the next tool call. Both ends squeezed a 24,576-token
+     * window until nothing was left to answer with.
+     */
+    private static final int FEEDBACK_FULL_CHARS = 1500;
+
+    /**
+     * A tool result as the model should see it: in full when it is small, and otherwise an
+     * excerpt plus the reference that moves the real thing.
+     * <p>
+     * Capping what the model reads is only half of it. The other half is that it no longer has
+     * a reason to retype the result, because {@code $N} carries the exact bytes — so the same
+     * change relieves the context window and removes the corruption it was fabricating dates
+     * into.
+     * <p>
+     * Not applied to the local model's <em>reasoning</em>, which the owner wants unconstrained,
+     * and not a token cap. This is about what goes IN.
+     */
+    static String feedback(String result, int stepNumber) {
+        if (result == null) return "";
+        if (result.length() <= FEEDBACK_FULL_CHARS) return result;
+        int head = (FEEDBACK_FULL_CHARS * 3) / 4;
+        int tail = FEEDBACK_FULL_CHARS - head;
+        return result.substring(0, head)
+                + "\n\n...[" + result.length() + " chars in total; the middle is omitted HERE "
+                + "only — nothing has been lost]...\n\n"
+                + result.substring(result.length() - tail)
+                + "\n\n[The complete, exact text is $" + stepNumber + ". To pass it to another "
+                + "tool, make $" + stepNumber + " the WHOLE value of the parameter — it is "
+                + "substituted verbatim. Do not retype it: you have not been shown all of it, "
+                + "and it is far longer than it is worth writing out.]";
     }
 
     /**

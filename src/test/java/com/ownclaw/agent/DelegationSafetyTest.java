@@ -153,6 +153,46 @@ class DelegationSafetyTest {
         assertEquals("$", LocalExecutor.substituteRefs(Map.of("b", "$"), done).get("b"));
     }
 
+    // ── what the model is shown of a result ──
+
+    @Test
+    @DisplayName("a small result is shown in full")
+    void smallResultsAreNotTouched() {
+        String small = "Sent, message id 42";
+        assertEquals(small, LocalExecutor.feedback(small, 1),
+                "there is nothing to gain by hiding a short result, and the model reasons "
+                        + "better with it in front of it");
+    }
+
+    @Test
+    @DisplayName("a large result is excerpted and replaced with its reference")
+    void largeResultsBecomeAReference() {
+        String digest = "HEAD-" + "x".repeat(4000) + "-TAIL";
+        String shown = LocalExecutor.feedback(digest, 1);
+
+        assertTrue(shown.length() < digest.length() / 2,
+                "a real delegation died with done_reason=length because step 1's result was "
+                        + "fed back whole and the model then had to regenerate it");
+        assertTrue(shown.startsWith("HEAD-"), "it still needs to know what it got");
+        assertTrue(shown.endsWith("]"), "and how to move it");
+        assertTrue(shown.contains("-TAIL"), "the tail says whether the result was complete");
+        assertTrue(shown.contains("$1"), "the reference is the whole point");
+        assertTrue(shown.contains("nothing has been lost"),
+                "a model that thinks the data is gone will try to reconstruct it, which is the "
+                        + "failure this is preventing");
+    }
+
+    @Test
+    @DisplayName("the reference number is the step that produced it")
+    void referenceNumberMatchesTheStep() {
+        String big = "y".repeat(3000);
+        assertTrue(LocalExecutor.feedback(big, 3).contains("$3"));
+        // ...and that is the number substituteRefs resolves against the same list.
+        var done = List.of(step("a", Map.of(), "first"), step("b", Map.of(), "second"),
+                step("c", Map.of(), big));
+        assertEquals(big, LocalExecutor.substituteRefs(Map.of("body", "$3"), done).get("body"));
+    }
+
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
