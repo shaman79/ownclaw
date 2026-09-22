@@ -234,7 +234,8 @@ public class LocalExecutor {
             // whole premise. An unsure model that re-sends smtp_send_email would send the
             // owner ten copies of the same email. Re-sending an identical side-effecting call
             // is never what was wanted, so hand back what it already returned instead.
-            String repeated = repeatedSideEffect(action, stepResults);
+            String repeated = repeatedSideEffect(action,
+                    substituteRefs(action.params, stepResults), stepResults);
             if (repeated != null) {
                 messages.add(LlmMessage.assistant(raw));
                 messages.add(LlmMessage.user("You already called " + action.tool
@@ -250,8 +251,11 @@ public class LocalExecutor {
             statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                     "Delegate: running " + action.tool + "...");
 
+            // Pass an earlier result by reference, not by retyping it. See substituteRefs.
+            Map<String, Object> params = substituteRefs(action.params, stepResults);
+
             long toolStartMs = System.currentTimeMillis();
-            String toolResult = executeToolDirect(action.tool, action.params, parentContext);
+            String toolResult = executeToolDirect(action.tool, params, parentContext);
             long toolMs = System.currentTimeMillis() - toolStartMs;
             boolean toolOk = !toolResult.startsWith("ERROR");
 
@@ -259,9 +263,9 @@ public class LocalExecutor {
             // here, a skill used every single morning looks untouched to maintenance -- which
             // retires skills for being unused. The telemetry has to follow the work.
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, toolOk ? null : action.params, toolOk ? null : toolResult);
+                    toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult);
 
-            stepResults.add(new StepResult(action.tool, action.params, toolResult, toolOk));
+            stepResults.add(new StepResult(action.tool, params, toolResult, toolOk));
 
             // The stall watchdog measures time since the last progress, and a delegation used to
             // report none until it finished. At roughly a minute a local step, a ten-step
@@ -427,6 +431,11 @@ public class LocalExecutor {
         // right date, and the summary invented a wrong one. The results are now carried out
         // verbatim underneath the summary, so there is nothing to gain by copying them and a
         // whole class of fabrication to lose.
+        sb.append("- To pass an earlier step's output on unchanged, make the WHOLE value of the\n");
+        sb.append("  parameter $1 for step 1's output, $2 for step 2's, and so on. It is\n");
+        sb.append("  replaced with that step's exact text. Never retype a result: retyping is\n");
+        sb.append("  where a wrong date or a dropped line comes from, and it costs you the\n");
+        sb.append("  whole output again.\n");
         sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
         sb.append("  underneath it, so never retype data — a date or number written from\n");
         sb.append("  memory is an error that was not in the data.\n");
@@ -548,10 +557,48 @@ public class LocalExecutor {
      * new. Identical means same tool and same arguments; a read-only tool is never blocked,
      * because calling one twice costs nothing but time and the goal may genuinely need it.
      */
-    private String repeatedSideEffect(ExecutorAction action, List<StepResult> done) {
+    private String repeatedSideEffect(ExecutorAction action, Map<String, Object> params,
+                                      List<StepResult> done) {
         var tool = toolRegistry.find(action.tool).orElse(null);
         if (tool == null || !tool.hasSideEffects()) return null;
-        return priorIdenticalOutput(action.tool, action.params, done);
+        return priorIdenticalOutput(action.tool, params, done);
+    }
+
+    /**
+     * Replace a parameter whose whole value is {@code $1}, {@code $2}... with that step's exact
+     * output.
+     * <p>
+     * The scheduled digest chains {@code daily_news_digest} into {@code smtp_send_email}, so the
+     * text the owner reads passes through the model as output tokens — three thousand characters
+     * it has to retype perfectly, every morning. It does not: the first delegated digest was
+     * headed 2025-07-10 for a run made on 2026-09-22, a date the skill had returned correctly.
+     * A model cannot corrupt what it never retypes.
+     * <p>
+     * Only when the value is <em>exactly</em> the reference, never a substring. Shell commands
+     * are full of {@code $1} and rewriting one inside a script would be a far worse bug than the
+     * one this fixes.
+     */
+    static Map<String, Object> substituteRefs(Map<String, Object> params,
+                                              List<StepResult> done) {
+        if (params == null || params.isEmpty() || done.isEmpty()) {
+            return params == null ? Map.of() : params;
+        }
+        var out = new LinkedHashMap<String, Object>(params);
+        for (var e : out.entrySet()) {
+            if (!(e.getValue() instanceof String v)) continue;
+            String t = v.strip();
+            if (t.length() < 2 || t.charAt(0) != '$') continue;
+            int n;
+            try {
+                n = Integer.parseInt(t.substring(1));
+            } catch (NumberFormatException ex) {
+                continue;
+            }
+            if (n >= 1 && n <= done.size()) {
+                e.setValue(done.get(n - 1).output);
+            }
+        }
+        return out;
     }
 
     /** The output of an earlier call with the same name and the same arguments, or null. */

@@ -107,6 +107,52 @@ class DelegationSafetyTest {
                         + "auditable afterwards");
     }
 
+    // ── passing a result on without retyping it ──
+
+    @Test
+    @DisplayName("a parameter that is exactly $1 becomes step 1's output")
+    void referenceIsSubstituted() {
+        var done = List.of(step("daily_news_digest", Map.of(), "DIGEST 2026-09-22\nline two"));
+        var out = LocalExecutor.substituteRefs(
+                Map.of("to", "petr@example.com", "body", "$1"), done);
+
+        assertEquals("DIGEST 2026-09-22\nline two", out.get("body"),
+                "the text the owner reads must never pass through the model as output tokens");
+        assertEquals("petr@example.com", out.get("to"), "other parameters are untouched");
+    }
+
+    @Test
+    @DisplayName("$1 inside a larger string is left alone")
+    void onlyWholeValuesAreReferences() {
+        var done = List.of(step("x", Map.of(), "OUTPUT"));
+        var out = LocalExecutor.substituteRefs(
+                Map.of("command", "for f in *; do echo \"$1\"; done"), done);
+
+        assertEquals("for f in *; do echo \"$1\"; done", out.get("command"),
+                "shell is full of $1, and rewriting one inside a script would be a far worse "
+                        + "bug than the one this fixes");
+    }
+
+    @Test
+    @DisplayName("a reference to a step that has not run is left as written")
+    void outOfRangeReferenceIsNotSubstituted() {
+        var done = List.of(step("x", Map.of(), "OUTPUT"));
+        assertEquals("$7", LocalExecutor.substituteRefs(Map.of("body", "$7"), done).get("body"),
+                "silently substituting the wrong step would be worse than an obvious literal");
+        assertEquals("$1", LocalExecutor.substituteRefs(Map.of("body", "$1"), List.of())
+                        .get("body"),
+                "and on the first step there is nothing to reference yet");
+    }
+
+    @Test
+    @DisplayName("$0 and $abc are not references")
+    void malformedReferencesAreLeftAlone() {
+        var done = List.of(step("x", Map.of(), "OUTPUT"));
+        assertEquals("$0", LocalExecutor.substituteRefs(Map.of("b", "$0"), done).get("b"));
+        assertEquals("$abc", LocalExecutor.substituteRefs(Map.of("b", "$abc"), done).get("b"));
+        assertEquals("$", LocalExecutor.substituteRefs(Map.of("b", "$"), done).get("b"));
+    }
+
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
