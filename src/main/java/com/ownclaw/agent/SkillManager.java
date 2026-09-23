@@ -349,6 +349,9 @@ public class SkillManager {
         } catch (IOException e) {
             log.warn("Failed to fully delete skill directory {}: {}", skillDir, e.getMessage());
         }
+        // The environment too. This deleted the code and kept the 7 GB of packages the code had
+        // pulled in, for every skill ever deleted.
+        pythonEnv.removeEnvironments(name);
 
         return "Skill '" + name + "' has been permanently deleted.";
     }

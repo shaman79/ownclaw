@@ -90,14 +90,44 @@ public class SkillMaintenanceService {
     private final JdbcTemplate jdbc;
     private final EventLogService eventLog;
     private final com.ownclaw.config.OwnClawConfig config;
+    private final com.ownclaw.skills.PythonEnvironmentService pythonEnv;
 
     public SkillMaintenanceService(DynamicSkillRegistry registry, JdbcTemplate jdbc,
                                    EventLogService eventLog,
-                                   com.ownclaw.config.OwnClawConfig config) {
+                                   com.ownclaw.config.OwnClawConfig config,
+                                   com.ownclaw.skills.PythonEnvironmentService pythonEnv) {
         this.registry = registry;
         this.jdbc = jdbc;
         this.eventLog = eventLog;
         this.config = config;
+        this.pythonEnv = pythonEnv;
+    }
+
+    // ── environments that outlived their skill ──
+
+    /**
+     * Python environments belonging to no loaded skill — listed, or removed.
+     * <p>
+     * Retiring a skill moves its directory to quarantine; deleting one removes it; the agent
+     * rewrites one under a new name. None of that ever touched {@code _envs/<name>}, so by
+     * 2026-09-23 the production host held 45.7 GB of environments for skills that no longer
+     * existed and was at 96% disk. An environment is a cache keyed on the requirements hash: a
+     * quarantined skill that is restored simply provisions again on its next run.
+     * <p>
+     * Explicit only — never from the daily pass. The first version ran it under
+     * {@code auto-retire}, whose documented meaning is that retirement moves and nothing is
+     * deleted; flipping that flag would then have deleted the environments of every skill the
+     * same pass had just retired, plus 45 GB of older ones, with no dry run of the prune ever
+     * shown. A delete on the owner's box is explicit and dry-run first, categorically.
+     *
+     * @param dryRun when true nothing is removed and the list comes back with sizes
+     */
+    public List<com.ownclaw.skills.PythonEnvironmentService.OrphanedEnv> pruneOrphanedEnvironments(
+            boolean dryRun) {
+        Set<String> live = registry.allDynamic().stream()
+                .map(DynamicSkill::name)
+                .collect(java.util.stream.Collectors.toSet());
+        return pythonEnv.pruneOrphans(live, dryRun);
     }
 
     // ── facts ────────────────────────────────────────────────────────────────

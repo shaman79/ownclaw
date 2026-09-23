@@ -84,7 +84,8 @@ public class OpsController {
                         "POST /api/ops/skills/reload",
                     "POST /api/ops/config/native-tools?enabled=true|false",
                     "POST /api/ops/config/local-first?enabled=true|false",
-                    "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)"),
+                    "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)",
+                    "POST /api/ops/skills/envs/prune[?apply=true]   (orphaned Python envs; dry run unless apply=true)"),
                 "notProvided", List.of(
                         "credential values", "arbitrary shell", "deploy", "restart"),
                 "notes", List.of(
@@ -192,6 +193,30 @@ public class OpsController {
      * Skill maintenance. A dry run by default: {@code POST /api/ops/skills/maintenance} shows
      * what it would retire and why, and only {@code ?apply=true} moves anything.
      */
+    /**
+     * Python environments whose skill no longer exists. A dry run by default: it lists them with
+     * sizes; only {@code ?apply=true} removes anything. On 2026-09-23 this was 45.7 GB of a
+     * 99 GB disk.
+     */
+    @PostMapping("/skills/envs/prune")
+    public ResponseEntity<?> pruneSkillEnvironments(
+            @RequestParam(required = false, defaultValue = "false") boolean apply) {
+        var orphans = skillMaintenance.pruneOrphanedEnvironments(!apply);
+        long bytes = orphans.stream().mapToLong(o -> o.bytes()).sum();
+        var out = new LinkedHashMap<String, Object>();
+        out.put("dryRun", !apply);
+        out.put("count", orphans.size());
+        out.put("totalMB", bytes / (1024 * 1024));
+        out.put("orphans", orphans.stream().map(o -> Map.of(
+                "skill", o.skill(), "dir", o.dir().toString(),
+                "mb", o.bytes() / (1024 * 1024))).toList());
+        out.put("note", apply
+                ? "Removed. A quarantined skill that is restored provisions its environment again "
+                  + "on its next run."
+                : "Nothing removed. Repeat with ?apply=true to reclaim the space.");
+        return ResponseEntity.ok(out);
+    }
+
     @PostMapping("/skills/maintenance")
     public ResponseEntity<?> skillMaintenance(
             @RequestParam(required = false, defaultValue = "false") boolean apply) {

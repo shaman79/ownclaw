@@ -18,6 +18,10 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -46,6 +50,32 @@ public class PythonEnvironmentService {
     private final Map<String, String> lastProvisionErrors = new ConcurrentHashMap<>();
 
     private final OwnClawConfig config;
+
+    /** An environment directory whose skill no longer exists. */
+    public record OrphanedEnv(String skill, Path dir, long bytes) {}
+
+    /**
+     * Is there a GPU on this host? {@code /dev/nvidia0} is what the NVIDIA driver creates; if it
+     * is absent there is nothing a CUDA wheel could ever use.
+     */
+    static boolean gpuPresent() {
+        return Files.exists(Path.of("/dev/nvidia0"));
+    }
+
+    /**
+     * Extra pip arguments for a host without a GPU.
+     * <p>
+     * pip resolves {@code torch} to the CUDA build by default on Linux — about 7 GB with its
+     * {@code nvidia-*} dependencies, against ~200 MB for the CPU build. On 2026-09-23 the
+     * production host was at 96% disk, and 59 GB of it was per-skill environments, five of which
+     * held {@code libtorch_cuda.so} on a four-core VM with no GPU, installed so a skill could OCR a
+     * lunch menu. With the CPU index offered, pip picks the {@code +cpu} wheel of the same
+     * version (a local version label sorts above the bare one) and the CUDA libraries are never
+     * pulled in at all. Every other package still comes from PyPI as before.
+     */
+    static List<String> indexArgs(boolean gpu) {
+        return gpu ? List.of() : List.of("--extra-index-url", "https://download.pytorch.org/whl/cpu");
+    }
 
     public PythonEnvironmentService(OwnClawConfig config) {
         this.config = config;
@@ -200,6 +230,112 @@ public class PythonEnvironmentService {
      * per-skill target directory and returns system Python with PYTHONPATH set.</p>
      */
     public record PythonResolution(String python, Map<String, String> extraEnv) {}
+
+    // ── environments that outlived their skill ──
+
+    /**
+     * Environment directories whose skill is not among {@code liveSkills}.
+     * <p>
+     * Deleting, retiring or renaming a skill removed or moved its directory and left its
+     * environment behind — nothing ever cleaned {@code _envs/<name>} or {@code _targets/<name>}.
+     * By 2026-09-23 there were 32 such directories on the production host, 45.7 GB, three of
+     * them 7.4 GB CUDA installs for lunch-menu fetchers deleted in March. An environment is a
+     * rebuildable cache keyed on the requirements hash, so one whose skill no longer exists is
+     * garbage by definition — and one whose skill is merely quarantined is rebuilt on restore.
+     */
+    public List<OrphanedEnv> orphanedEnvironments(Set<String> liveSkills) {
+        return findOrphans(envsDir, targetsDir, liveSkills);
+    }
+
+    /**
+     * Delete the orphans, or only list them.
+     *
+     * @param dryRun when true nothing is touched and the same list comes back — how the ops
+     *               endpoint shows its working before anything is removed
+     */
+    public List<OrphanedEnv> pruneOrphans(Set<String> liveSkills, boolean dryRun) {
+        List<OrphanedEnv> orphans = orphanedEnvironments(liveSkills);
+        if (dryRun || orphans.isEmpty()) return orphans;
+        long freed = 0;
+        for (OrphanedEnv o : orphans) {
+            try {
+                freed += deleteTree(o.dir());
+            } catch (IOException e) {
+                log.warn("Could not remove orphaned environment {}: {}", o.dir(), e.getMessage());
+            }
+            // resolvePython trusts this cache before it looks at the disk, so without this a
+            // skill restored in the same session is handed the path of an interpreter that no
+            // longer exists, until the next restart.
+            forgetProvisioning(o.skill());
+        }
+        log.warn("Pruned {} orphaned skill environment(s), {} MB", orphans.size(),
+                freed / (1024 * 1024));
+        return orphans;
+    }
+
+    /** Remove a skill's environments now, because the skill itself is being removed. */
+    public void removeEnvironments(String skillName) {
+        if (skillName == null || skillName.isBlank() || envsDir == null) return;
+        for (Path dir : List.of(envsDir.resolve(skillName), targetsDir.resolve(skillName))) {
+            try {
+                if (Files.isDirectory(dir)) deleteTree(dir);
+            } catch (IOException e) {
+                log.warn("Could not remove environment {}: {}", dir, e.getMessage());
+            }
+        }
+        forgetProvisioning(skillName);
+    }
+
+    private void forgetProvisioning(String skillName) {
+        provisionedHashes.keySet().removeIf(k -> k.startsWith(skillName + ":"));
+        lastProvisionErrors.keySet().removeIf(k -> k.startsWith(skillName + ":"));
+    }
+
+    /**
+     * The orphan rule, as a function of the directories, so it can be tested on a temp tree.
+     * {@code _bootstrap} and {@code _targets} under the env root are the service's own and are
+     * never candidates.
+     */
+    static List<OrphanedEnv> findOrphans(Path envsDir, Path targetsDir, Set<String> live) {
+        var out = new ArrayList<OrphanedEnv>();
+        for (Path root : List.of(envsDir, targetsDir)) {
+            if (root == null || !Files.isDirectory(root)) continue;
+            try (Stream<Path> children = Files.list(root)) {
+                children.filter(Files::isDirectory).forEach(dir -> {
+                    String name = dir.getFileName().toString();
+                    if (root.equals(envsDir) && (name.equals("_bootstrap") || name.equals("_targets"))) {
+                        return;
+                    }
+                    if (!live.contains(name)) out.add(new OrphanedEnv(name, dir, sizeOf(dir)));
+                });
+            } catch (IOException e) {
+                log.warn("Could not list {}: {}", root, e.getMessage());
+            }
+        }
+        out.sort(Comparator.comparingLong(OrphanedEnv::bytes).reversed());
+        return out;
+    }
+
+    static long sizeOf(Path dir) {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            return walk.filter(Files::isRegularFile).mapToLong(f -> {
+                try { return Files.size(f); } catch (IOException e) { return 0L; }
+            }).sum();
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    /** Delete a directory tree; returns the bytes it held. */
+    static long deleteTree(Path dir) throws IOException {
+        long bytes = sizeOf(dir);
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+            });
+        }
+        return bytes;
+    }
 
     /**
      * Resolve the best Python executable for running a skill, provisioning dependencies if needed.
@@ -357,6 +493,7 @@ public class PythonEnvironmentService {
             args.add("install");
             args.add("--disable-pip-version-check");
             args.add("-q");
+            args.addAll(indexArgs(gpuPresent()));
             args.addAll(packages);
 
             ProcessResult install = run(600, new ProcessBuilder(args));
@@ -414,12 +551,13 @@ public class PythonEnvironmentService {
         ensurePipForPython(systemPython, /*isVenv=*/false, skillName);
 
         Path reqFile = skillDir.resolve("requirements.txt");
-        ProcessResult install = run(900, new ProcessBuilder(
+        var targetArgs = new ArrayList<>(List.of(
                 systemPython, "-m", "pip", "install",
                 "--disable-pip-version-check",
                 "-q", "-r", reqFile.toAbsolutePath().toString(),
-                "--target", targetDir.toAbsolutePath().toString()
-        ));
+                "--target", targetDir.toAbsolutePath().toString()));
+        targetArgs.addAll(indexArgs(gpuPresent()));
+        ProcessResult install = run(900, new ProcessBuilder(targetArgs));
 
         if (install.exitCode != 0) {
             throw new IOException("pip --target install failed: " + install.output);
@@ -562,10 +700,12 @@ public class PythonEnvironmentService {
         ensurePipAvailable(venvDir);
 
         // Install requirements using `python -m pip` (more portable than pip.exe path)
-        ProcessResult install = run(300, new ProcessBuilder(
+        var reqArgs = new ArrayList<>(List.of(
                 venvPython, "-m", "pip", "install",
                 "--disable-pip-version-check",
                 "-q", "-r", reqFile.toAbsolutePath().toString()));
+        reqArgs.addAll(indexArgs(gpuPresent()));
+        ProcessResult install = run(300, new ProcessBuilder(reqArgs));
         if (install.exitCode != 0) {
             throw new IOException("pip install failed: " + install.output);
         }
