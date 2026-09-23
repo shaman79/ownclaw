@@ -364,7 +364,8 @@ public class LocalExecutor {
             // here, a skill used every single morning looks untouched to maintenance -- which
             // retires skills for being unused. The telemetry has to follow the work.
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult);
+                    toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult,
+                    artifact.label());
 
             log.info("Delegation step {} — {} {} (result: {} chars, {})",
                     step + 1, artifact.handle() + " " + action.tool, toolOk ? "OK" : "FAIL",
