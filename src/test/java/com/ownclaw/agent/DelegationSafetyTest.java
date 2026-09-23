@@ -396,7 +396,7 @@ class DelegationSafetyTest {
         var done = List.of(step("daily_news_digest", Map.of(), digest));
         // Wasteful -- it paid 2,000 output tokens to move something $1 would have moved -- but
         // byte-identical, so nothing was invented and nothing is refused.
-        assertTrue(done.stream().anyMatch(r -> digest.equals(r.output)));
+        assertTrue(done.stream().anyMatch(r -> digest.equals(r.output())));
     }
 
     @Test
