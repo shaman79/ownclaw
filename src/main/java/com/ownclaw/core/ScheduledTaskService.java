@@ -375,6 +375,7 @@ public class ScheduledTaskService {
                 case "completed" -> "✅";
                 case "cancelled" -> "⛔";
                 case "failed"    -> "❌";
+                case "partial"   -> "⚠️";
                 default -> "❓";
             };
 
@@ -579,6 +580,14 @@ public class ScheduledTaskService {
                         if (result.success()) {
                             onTaskCompleted(taskId, userId, taskType, description,
                                     result.response(), used, agentTaskId);
+                        } else if (result.terminationReason()
+                                == com.ownclaw.agent.AgentResult.TerminationReason.PRIVACY_BLOCKED) {
+                            // The door refused to send. Delivered and rescheduled like a failure,
+                            // recorded as partial: the run row plus the delivered message ARE the
+                            // owner's review item -- a scheduled run never asks, it finishes
+                            // partial and says what stopped it.
+                            onTaskFailed(taskId, userId, taskType, description,
+                                    describeFailure(result), used, agentTaskId, "partial");
                         } else {
                             onTaskFailed(taskId, userId, taskType, description,
                                     describeFailure(result), used, agentTaskId);
@@ -730,6 +739,12 @@ public class ScheduledTaskService {
     private void onTaskFailed(long taskId, String userId, String taskType,
                               String description, String error, String skillsUsed,
                               String agentTaskId) {
+        onTaskFailed(taskId, userId, taskType, description, error, skillsUsed, agentTaskId, "failed");
+    }
+
+    private void onTaskFailed(long taskId, String userId, String taskType,
+                              String description, String error, String skillsUsed,
+                              String agentTaskId, String status) {
         int newRunCount = incrementRunCount(taskId);
 
         // A failed scheduled run is worth as much of the user's attention as a successful one —
@@ -739,7 +754,7 @@ public class ScheduledTaskService {
                 "Scheduled task did not finish: " + truncate(description, 60), error);
 
         // Record full execution history
-        recordRun(taskId, userId, description, taskType, "failed", null, error,
+        recordRun(taskId, userId, description, taskType, status, null, error,
                 newRunCount, skillsUsed, agentTaskId);
 
         if (taskType.equals("recurring")) {

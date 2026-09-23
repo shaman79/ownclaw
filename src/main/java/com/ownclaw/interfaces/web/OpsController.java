@@ -84,6 +84,8 @@ public class OpsController {
                         "POST /api/ops/skills/reload",
                     "POST /api/ops/config/native-tools?enabled=true|false",
                     "POST /api/ops/config/local-first?enabled=true|false",
+                    "POST /api/ops/config/privacy-canary?mode=enforce|observe",
+                    "GET  /api/ops/egress?limit=50[&decision=SENT|REFUSED|OBSERVED_LEAK|ERROR]",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)",
                     "POST /api/ops/skills/envs/prune[?apply=true]   (orphaned Python envs; dry run unless apply=true)"),
                 "notProvided", List.of(
@@ -305,6 +307,32 @@ public class OpsController {
                 "previous", before,
                 "note", "Applies from the next reasoning step. Not persisted: a restart returns "
                         + "to ownclaw.mentor.native-tools in configuration."));
+    }
+
+    /** What the canary does on a hit. Not persisted; OWNCLAW_PRIVACY_CANARY on restart. */
+    @PostMapping("/config/privacy-canary")
+    public ResponseEntity<?> privacyCanary(@RequestParam String mode) {
+        var before = config.getPrivacy().getCanary();
+        com.ownclaw.llm.CloudGateway.Mode next;
+        try {
+            next = com.ownclaw.llm.CloudGateway.Mode.valueOf(mode.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "mode must be enforce or observe"));
+        }
+        config.getPrivacy().setCanary(next);
+        log.warn("Privacy canary {} at runtime (was {})", next, before);
+        return ResponseEntity.ok(Map.of(
+                "canary", next.name(), "previous", before == null ? "ENFORCE" : before.name(),
+                "note", "OBSERVE sends a hit and records OBSERVED_LEAK instead of refusing. Using "
+                        + "it is a bug report with the handle and part index attached, not a "
+                        + "configuration. Not persisted: a restart returns to OWNCLAW_PRIVACY_CANARY."));
+    }
+
+    /** What left this JVM for a cloud model: sizes, hashes, decisions. Never content. */
+    @GetMapping("/egress")
+    public ResponseEntity<?> egress(@RequestParam(required = false, defaultValue = "50") int limit,
+                                    @RequestParam(required = false) String decision) {
+        return ResponseEntity.ok(ops.egress(limit, decision));
     }
 
     /** Withhold the registry from the cloud on unattended work, so it must delegate. */

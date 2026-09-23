@@ -116,6 +116,15 @@ ownclaw:
     # Off instantly and without a restart: POST /api/ops/config/local-first?enabled=false
     local-first-unattended: ${OWNCLAW_LOCAL_FIRST:true}
 
+  privacy:
+    # The canary: every outbound cloud body is checked, byte-wise, against the task's PRIVATE
+    # artifacts before the socket opens. ENFORCE refuses a hit and ends the task
+    # PRIVACY_BLOCKED; OBSERVE sends it and records OBSERVED_LEAK. There is no off: the door
+    # being the only path to a provider, labels at source, descriptors for private results,
+    # secrets scrubbed and every call ledgered are not policies. Expected hits in normal
+    # operation: zero. Flip at runtime: POST /api/ops/config/privacy-canary?mode=observe
+    canary: ${OWNCLAW_PRIVACY_CANARY:ENFORCE}
+
   budgets:
     daily-cloud-tokens: 0
     per-task-cloud-tokens: 0

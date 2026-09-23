@@ -785,8 +785,103 @@ public class OpsService {
         out.put("memory", jdbc.queryForList(
                 "SELECT created_at, user_id, memory_type, outcome, substr(content,1,400) AS content "
                         + "FROM agent_memory WHERE task_id = ? ORDER BY created_at", taskId));
-        out.put("note", "Per-step think/act/observe detail is not persisted by this build; "
-                + "use /api/ops/logs?grep=Task+" + taskId + " for the step trail.");
+        // What left this JVM for a cloud model on this task, from the ledger rows -- and the
+        // artifacts the steps recorded. Headed "llmChannel" and not "left the machine": the
+        // door covers the two LLM API endpoints from this process and nothing else, and a page
+        // that said more would lie. notObserved names the channels it cannot see.
+        out.put("llmChannel", egressSummary(taskId));
+        out.put("artifacts", artifactsOf(taskId));
+        out.put("notObserved", List.of(
+                "a skill with requires_network can send its inputs, an attachment or its vault "
+                        + "environment to any host; the sandbox has no egress policy yet",
+                "OWNCLAW_EXECUTOR_URL is wherever the local model is; nothing asserts it is private",
+                "the OpenAI availability probe sends the bearer key to /v1/models with no "
+                        + "content and no ledger row"));
+        return out;
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper DETAILS =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    private Map<String, Object> egressSummary(String taskId) {
+        var rows = jdbc.queryForList(
+                "SELECT details FROM events WHERE task_id = ? AND event_type = 'egress'", taskId);
+        long calls = 0, bytes = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0, scrubs = 0;
+        double cost = 0;
+        var decisions = new java.util.TreeMap<String, Integer>();
+        for (var r : rows) {
+            try {
+                var d = DETAILS.readTree(String.valueOf(r.get("details")));
+                calls++;
+                bytes += d.path("bytesOut").asLong();
+                prompt += d.path("promptTokens").asLong();
+                completion += d.path("completionTokens").asLong();
+                cacheRead += d.path("cacheReadTokens").asLong();
+                cacheWrite += d.path("cacheWriteTokens").asLong();
+                scrubs += d.path("scrubs").asLong();
+                cost += d.path("costUsd").asDouble();
+                decisions.merge(d.path("decision").asText("?"), 1, Integer::sum);
+            } catch (Exception ignored) {
+                // A row that cannot be parsed is still a row; count it as unknown.
+                decisions.merge("unparsed", 1, Integer::sum);
+            }
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("calls", calls); out.put("bytesOut", bytes);
+        out.put("promptTokens", prompt); out.put("completionTokens", completion);
+        out.put("cacheReadTokens", cacheRead); out.put("cacheWriteTokens", cacheWrite);
+        out.put("scrubs", scrubs); out.put("costUsd", Math.round(cost * 1_000_000) / 1_000_000.0);
+        out.put("decisions", decisions);
+        return out;
+    }
+
+    private List<Map<String, Object>> artifactsOf(String taskId) {
+        var rows = jdbc.queryForList(
+                "SELECT details FROM events WHERE task_id = ? AND event_type = 'step' ORDER BY timestamp", taskId);
+        var out = new ArrayList<Map<String, Object>>();
+        for (var r : rows) {
+            try {
+                var d = DETAILS.readTree(String.valueOf(r.get("details")));
+                if (d.has("artifact")) {
+                    var a = new LinkedHashMap<String, Object>();
+                    a.put("handle", d.path("artifact").asText());
+                    a.put("tool", d.path("tool").asText());
+                    a.put("label", d.path("label").asText());
+                    a.put("chars", d.path("chars").asLong());
+                    a.put("sha256_16", d.path("sha256_16").asText());
+                    if (d.has("why")) a.put("why", DETAILS.convertValue(d.get("why"), List.class));
+                    out.add(a);
+                }
+                if (d.has("artifacts")) {
+                    for (var x : d.get("artifacts")) {
+                        var a = new LinkedHashMap<String, Object>();
+                        a.put("handle", "$" + x.path("n").asInt());
+                        a.put("tool", x.path("tool").asText());
+                        a.put("label", x.path("label").asText());
+                        a.put("chars", x.path("chars").asLong());
+                        if (x.has("why")) a.put("why", DETAILS.convertValue(x.get("why"), List.class));
+                        out.add(a);
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
+        return out;
+    }
+
+    /** The ledger, newest first. */
+    public Map<String, Object> egress(int limit, String decision) {
+        int cap = Math.max(1, Math.min(limit, 500));
+        String sql = "SELECT timestamp, user_id, task_id, summary, details FROM events "
+                + "WHERE event_type = 'egress'"
+                + (decision == null || decision.isBlank() ? "" : " AND summary LIKE ?")
+                + " ORDER BY timestamp DESC LIMIT " + cap;
+        var rows = decision == null || decision.isBlank()
+                ? jdbc.queryForList(sql)
+                : jdbc.queryForList(sql, decision.trim().toUpperCase(java.util.Locale.ROOT) + " %");
+        var out = new LinkedHashMap<String, Object>();
+        out.put("rows", rows);
+        out.put("note", "Sizes, kinds and hash prefixes of every part; tokens and cost. No content, "
+                + "by construction: the ledger cannot become an audit copy.");
         return out;
     }
 

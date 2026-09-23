@@ -52,7 +52,35 @@ public class ResultDelivery {
         } else {
             header = label + " — did not finish (" + result.terminationReason() + ")";
         }
-        deliver(userId, header, result.response());
+        deliver(userId, header, result.response() + withheldLine(result));
+    }
+
+    /**
+     * One line, computed from the run, on what stayed on this machine — worded as what was
+     * checked, never as a claim about what left. A delegation's artifacts are on its
+     * observation; an unattended run executes through delegations, so this is complete where
+     * it matters and says nothing where it cannot see.
+     */
+    static String withheldLine(AgentResult result) {
+        if (result == null || result.trajectory() == null) return "";
+        int total = 0;
+        var withheld = new java.util.LinkedHashSet<String>();
+        for (var turn : result.trajectory().turns()) {
+            if (turn.observation() == null || turn.observation().structured() == null) continue;
+            Object arts = turn.observation().structured().get("artifacts");
+            if (!(arts instanceof java.util.List<?> list)) continue;
+            for (Object o : list) {
+                if (!(o instanceof java.util.Map<?, ?> a)) continue;
+                total++;
+                if ("PRIVATE".equals(String.valueOf(a.get("label")))) {
+                    withheld.add(String.valueOf(a.get("tool")));
+                }
+            }
+        }
+        if (total == 0) return "";
+        return "\n\n_" + total + " result" + (total == 1 ? "" : "s") + ", " + withheld.size()
+                + " withheld from the cloud" + (withheld.isEmpty() ? "" : " (" + String.join(", ", withheld) + ")")
+                + "_";
     }
 
     /** Deliver text as a real assistant message in the user's current conversation. */
