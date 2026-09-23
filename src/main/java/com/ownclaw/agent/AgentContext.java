@@ -196,9 +196,12 @@ public class AgentContext {
         return a;
     }
 
-    /** Every artifact so far, in handle order. Read-only; the list is the task's. */
-    public synchronized List<Artifact> artifacts() {
-        return List.copyOf(artifacts);
+    /**
+     * Every artifact so far, in handle order — a read-only VIEW, not a copy, so a delegation
+     * that records results sees them in the same list it resolves references against.
+     */
+    public List<Artifact> artifacts() {
+        return java.util.Collections.unmodifiableList(artifacts);
     }
 
     public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }

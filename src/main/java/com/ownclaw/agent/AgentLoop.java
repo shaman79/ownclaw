@@ -944,9 +944,13 @@ public class AgentLoop {
                 }
                 // Which skills really ran, so curation and scheduled_task_runs.skills_used see
                 // the work instead of a single 'delegate' entry.
-                Map<String, Object> structured = outcome.toolsRun().isEmpty()
-                        ? Map.of()
-                        : Map.of("delegatedTools", outcome.toolsRun());
+                Map<String, Object> structured = new LinkedHashMap<>();
+                if (!outcome.toolsRun().isEmpty()) structured.put("delegatedTools", outcome.toolsRun());
+                if (!outcome.produced().isEmpty()) {
+                    structured.put("artifacts", outcome.produced().stream().map(a -> Map.of(
+                            "n", a.n(), "tool", a.tool(), "label", a.label().name(),
+                            "chars", a.output().length(), "why", a.why())).toList());
+                }
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, structured, durationMs)
                         : AgentObservation.failure(action.tool(), result, structured, durationMs);

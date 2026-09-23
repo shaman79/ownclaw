@@ -111,16 +111,26 @@ public class LocalExecutor {
                 specs == null ? toolRegistry.all().size() : specs.size());
 
         int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
-        List<StepResult> stepResults = new ArrayList<>();
+        // The task's store, live: numbering is task-wide, so $N means one thing to this ledger,
+        // the cloud's descriptor and the events row, and a later delegation can forward what
+        // an earlier one produced. What THIS delegation produced is the tail from `from`.
+        List<Artifact> stepResults = parentContext.artifacts();
+        int from = stepResults.size();
+        // Once a step of this delegation is PRIVATE, every later step of it is: the local model
+        // has read private content, and anything it writes from then on -- a public tool's
+        // arguments included -- may carry it.
+        boolean tainted = false;
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
         messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext, nativeTools)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
-        messages.add(LlmMessage.user(plan.steps().isEmpty()
+        String opening = plan.steps().isEmpty()
                 ? "Begin. Make the first tool call that moves toward the goal."
-                : "Begin executing the plan. Start with step 1."));
+                : "Begin executing the plan. Start with step 1.";
+        if (from > 0) opening += "\n\n" + describeAvailableRefs(stepResults);
+        messages.add(LlmMessage.user(opening));
 
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
                 "Delegating to local LLM: " + truncate(plan.goal(), 100));
@@ -130,7 +140,7 @@ public class LocalExecutor {
                 // Partial work is not worthless: it is the only record of what the local model
                 // managed before the plug was pulled, and throwing it away is why a timed-out
                 // delegation used to leave nothing behind at all.
-                return partial("Task cancelled during delegation.", stepResults);
+                return partial("Task cancelled during delegation.", stepResults.subList(from, stepResults.size()));
             }
 
             // Keep the conversation from outgrowing the window it has to answer in.
@@ -167,7 +177,7 @@ public class LocalExecutor {
                 }
                 log.error("Local LLM call failed during delegation step {}: {}{}",
                         step + 1, msg, hint, e);
-                return partial("Local LLM call failed: " + msg + hint, stepResults);
+                return partial("Local LLM call failed: " + msg + hint, stepResults.subList(from, stepResults.size()));
             }
 
             parentContext.addLocalTokens(response.totalTokens());
@@ -190,7 +200,7 @@ public class LocalExecutor {
                 raw = renderCall(call);
             } else {
                 if (raw == null || raw.isBlank()) {
-                    return partial("Local LLM returned empty response", stepResults);
+                    return partial("Local LLM returned empty response", stepResults.subList(from, stepResults.size()));
                 }
                 // A tools-capable model can still answer in prose; the text parser is the
                 // fallback, not dead code.
@@ -215,14 +225,11 @@ public class LocalExecutor {
                 // its judgement, and a scheduled task shaped "fetch X, decide whether Y, act"
                 // would otherwise have it judge on a small model's paraphrase of the evidence
                 // -- today it reads up to 12,000 characters of the real output.
-                String body = buildConsolidatedResult(plan.goal(), stepResults);
-                String summary = action.summary == null || action.summary.isBlank()
-                        ? body
-                        : action.summary + "\n\n---\n" + body;
                 // The claim and the evidence travel together. Without the ledger the cloud reads
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.
-                return completed(summary, stepResults);
+                return completed(action.summary, plan.goal(),
+                        stepResults.subList(from, stepResults.size()));
             }
 
             if (action.tool == null || action.tool.isBlank()) {
@@ -336,9 +343,22 @@ public class LocalExecutor {
                     "Delegate: running " + action.tool + "...");
 
             long toolStartMs = System.currentTimeMillis();
-            String toolResult = executeToolDirect(action.tool, params, parentContext);
+            ToolResult result = executeToolDirect(action.tool, params, parentContext);
             long toolMs = System.currentTimeMillis() - toolStartMs;
-            boolean toolOk = !toolResult.startsWith("ERROR");
+            boolean toolOk = result.success();
+            String toolResult = toolOk ? result.output() : "ERROR: " + result.output();
+
+            // The label, from facts already at hand -- and the record on the task, which is
+            // where the bytes live from now on. `params` is what actually ran (references
+            // substituted); `action.params` is what the model typed, and is the only one ever
+            // printed.
+            Tool ran = toolRegistry.find(action.tool).orElse(null);
+            Artifact.Decision decision = Artifact.labelFor(
+                    ran == null ? List.of() : ran.requiredCredentials(),
+                    !parentContext.attachmentIds().isEmpty(), tainted, action.params, stepResults);
+            Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
+                    toolResult, toolOk, decision);
+            tainted |= artifact.isPrivate();
 
             // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
             // here, a skill used every single morning looks untouched to maintenance -- which
@@ -346,16 +366,15 @@ public class LocalExecutor {
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
                     toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult);
 
-            stepResults.add(new StepResult(action.tool, params, toolResult, toolOk));
-
-            log.info("Delegation step {} — {} {} (result: {} chars)",
-                    step + 1, action.tool, toolOk ? "OK" : "FAIL", toolResult.length());
+            log.info("Delegation step {} — {} {} (result: {} chars, {})",
+                    step + 1, artifact.handle() + " " + action.tool, toolOk ? "OK" : "FAIL",
+                    toolResult.length(), artifact.label());
 
             // OBSERVE: feed result back to local LLM
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(
                     "Tool result [" + action.tool + "] " + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
-                    feedback(toolResult, stepResults.size()) + "\n\n" +
+                    feedback(toolResult, artifact.n()) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
                     (nativeTools
                             ? "call done and say what you did — the result above is passed on "
@@ -365,7 +384,8 @@ public class LocalExecutor {
 
         // Hit max steps without "done"
         log.warn("Delegation hit max steps ({}) for goal: {}", maxSteps, plan.goal());
-        return partial("Delegation reached max steps (" + maxSteps + ")", stepResults);
+        return partial("Delegation reached max steps (" + maxSteps + ")",
+                stepResults.subList(from, stepResults.size()));
     }
 
     /**
@@ -524,11 +544,11 @@ public class LocalExecutor {
      * Execute a tool directly from the registry.
      * Simplified version of AgentLoop.executeTool() without LongRunningTaskManager.
      */
-    private String executeToolDirect(String toolName, Map<String, Object> params, AgentContext context) {
+    private ToolResult executeToolDirect(String toolName, Map<String, Object> params, AgentContext context) {
         var toolOpt = toolRegistry.find(toolName);
         if (toolOpt.isEmpty()) {
-            return "ERROR: Tool '" + toolName + "' not found. Available: " +
-                    String.join(", ", toolRegistry.names());
+            return ToolResult.failure("Tool '" + toolName + "' not found. Available: " +
+                    String.join(", ", toolRegistry.names()));
         }
 
         Tool tool = toolOpt.get();
@@ -545,13 +565,10 @@ public class LocalExecutor {
         );
 
         try {
-            ToolResult result = tool.execute(params != null ? params : Map.of(), execCtx);
-            return result.success()
-                    ? result.output()
-                    : "ERROR: " + result.output();
+            return tool.execute(params != null ? params : Map.of(), execCtx);
         } catch (Exception e) {
             log.error("Tool '{}' threw exception during delegation", toolName, e);
-            return "ERROR: Tool '" + toolName + "' threw exception: " + e.getMessage();
+            return ToolResult.failure("Tool '" + toolName + "' threw exception: " + e.getMessage());
         }
     }
 
@@ -640,7 +657,7 @@ public class LocalExecutor {
      * numbers exist. That is the quiet dividend of passing by reference: the transcript can be
      * cut without cutting the data.
      */
-    static void trimHistory(List<LlmMessage> messages, List<StepResult> done) {
+    static void trimHistory(List<LlmMessage> messages, List<Artifact> done) {
         // system + opening instruction + the tail. Below that there is nothing to gain.
         if (messages.size() <= HISTORY_TAIL + 2) return;
 
@@ -649,11 +666,11 @@ public class LocalExecutor {
         int from = messages.size() - HISTORY_TAIL;
         if ((from - 2) % 2 != 0) from++;
 
-        var ledger = new StringBuilder("Earlier steps in this delegation:\n");
+        var ledger = new StringBuilder("Results available:\n");
         for (int i = 0; i < done.size(); i++) {
-            ledger.append("  $").append(i + 1).append(" = ").append(done.get(i).tool)
-                  .append(done.get(i).success ? " (ok, " : " (FAILED, ")
-                  .append(done.get(i).output == null ? 0 : done.get(i).output.length())
+            ledger.append("  ").append(done.get(i).handle()).append(" = ").append(done.get(i).tool())
+                  .append(done.get(i).success() ? " (ok, " : " (FAILED, ")
+                  .append(done.get(i).output() == null ? 0 : done.get(i).output().length())
                   .append(" chars)\n");
         }
         ledger.append("Their full output is still available by reference — $1, $2, and so on, or "
@@ -691,7 +708,7 @@ public class LocalExecutor {
      * because calling one twice costs nothing but time and the goal may genuinely need it.
      */
     private String repeatedSideEffect(ExecutorAction action, Map<String, Object> params,
-                                      List<StepResult> done) {
+                                      List<Artifact> done) {
         var tool = toolRegistry.find(action.tool).orElse(null);
         if (tool == null || !tool.hasSideEffects()) return null;
         return priorIdenticalOutput(action.tool, params, done);
@@ -791,7 +808,7 @@ public class LocalExecutor {
      * findable in a log rather than a mystery.
      */
     private String composedPayload(String tool, Map<String, Object> written,
-                                   List<StepResult> done) {
+                                   List<Artifact> done) {
         // The arguments as the MODEL WROTE them, before substitution. $1.body_text is the
         // correct way to forward a field, and the substituted value never equals a whole step
         // output, so checking the resolved map reported every correct forward as a paraphrase --
@@ -806,7 +823,7 @@ public class LocalExecutor {
             // Equal to a step's output means it was copied perfectly, which is only wasteful.
             // A reference is the intended path and is short. Anything else is the model's own
             // prose standing in for a result.
-            boolean isAPriorResult = done.stream().anyMatch(r -> v.equals(r.output));
+            boolean isAPriorResult = done.stream().anyMatch(r -> v.equals(r.output()));
             if (!isAPriorResult) return e.getKey();
         }
         return null;
@@ -828,26 +845,18 @@ public class LocalExecutor {
     }
 
     /** What the model could have referenced, so the correction is actionable rather than a no. */
-    private String describeAvailableRefs(List<StepResult> done) {
+    private String describeAvailableRefs(List<Artifact> done) {
         if (done.isEmpty()) {
             return "No step has produced a result yet, so there is nothing to reference.";
         }
         var sb = new StringBuilder("Results you can reference: ");
         for (int i = 0; i < done.size(); i++) {
             if (i > 0) sb.append("; ");
-            sb.append("$").append(i + 1).append(" = ").append(done.get(i).tool);
-            try {
-                var node = mapper.readTree(done.get(i).output);
-                if (node != null && node.isObject()) {
-                    var names = new ArrayList<String>();
-                    node.fieldNames().forEachRemaining(names::add);
-                    if (!names.isEmpty()) {
-                        sb.append(" (fields: ").append(String.join(", ", names)).append(")");
-                    }
-                }
-            } catch (Exception ignored) {
-                // Not JSON; $N alone is the only way to reference it, which is the default.
-            }
+            Artifact a = done.get(i);
+            sb.append(a.handle()).append(" = ").append(a.tool());
+            // Not JSON: $N alone is the only way to reference it, which is the default.
+            List<String> fields = Artifact.jsonFields(a.output());
+            if (!fields.isEmpty()) sb.append(" (fields: ").append(String.join(", ", fields)).append(")");
         }
         return sb.append(". Use one of those exactly, as the whole value.").toString();
     }
@@ -878,7 +887,7 @@ public class LocalExecutor {
      * one this fixes.
      */
     static Map<String, Object> substituteRefs(Map<String, Object> params,
-                                              List<StepResult> done) {
+                                              List<Artifact> done) {
         if (params == null || params.isEmpty() || done.isEmpty()) {
             return params == null ? Map.of() : params;
         }
@@ -905,7 +914,7 @@ public class LocalExecutor {
      * One level, no path syntax, no wildcards. A nested structure is not worth a query language
      * the model would then get wrong.
      */
-    private static String resolveRef(String token, List<StepResult> done) {
+    private static String resolveRef(String token, List<Artifact> done) {
         if (token.length() < 2 || token.charAt(0) != '$') return null;
         String body = token.substring(1);
         String field = null;
@@ -922,7 +931,7 @@ public class LocalExecutor {
             return null;
         }
         if (n < 1 || n > done.size()) return null;
-        String output = done.get(n - 1).output;
+        String output = done.get(n - 1).output();
         if (field == null) return output;
         try {
             var node = mapper.readTree(output);
@@ -939,32 +948,39 @@ public class LocalExecutor {
 
     /** The output of an earlier call with the same name and the same arguments, or null. */
     static String priorIdenticalOutput(String tool, Map<String, Object> params,
-                                       List<StepResult> done) {
+                                       List<Artifact> done) {
         Map<String, Object> args = params == null ? Map.of() : params;
-        for (StepResult r : done) {
-            if (r.tool.equals(tool)
-                    && Objects.equals(r.params == null ? Map.of() : r.params, args)) {
-                return r.output;
+        for (Artifact r : done) {
+            if (r.tool().equals(tool)
+                    && Objects.equals(r.resolved() == null ? Map.of() : r.resolved(), args)) {
+                return r.output();
             }
         }
         return null;
     }
 
-    private static List<String> toolNames(List<StepResult> results) {
-        return results.stream().map(r -> r.tool).distinct().toList();
+    private static List<String> toolNames(List<Artifact> results) {
+        return results.stream().map(r -> r.tool()).distinct().toList();
     }
 
     /** The ledger of what ran, appended to a claim so the claim can be checked. */
-    private static String ledger(List<StepResult> results) {
+    private static String ledger(List<Artifact> results) {
         if (results.isEmpty()) {
             return "\n\n[No tool was executed during this delegation.]";
         }
         var sb = new StringBuilder("\n\n[Tools run: ");
         for (int i = 0; i < results.size(); i++) {
             if (i > 0) sb.append(", ");
-            sb.append(results.get(i).tool).append(results.get(i).success ? " ok" : " FAILED");
+            Artifact r = results.get(i);
+            sb.append(r.handle()).append(' ').append(r.tool()).append(r.success() ? " ok" : " FAILED");
+            if (r.isPrivate()) sb.append(" (PRIVATE, ").append(r.output().length()).append(" chars withheld)");
         }
-        return sb.append("]").toString();
+        sb.append("]");
+        if (results.stream().anyMatch(Artifact::isPrivate)) {
+            sb.append("\nPrivate results are not shown. A later delegation can forward one by "
+                    + "reference ($N or $N.field as the whole value of a parameter).");
+        }
+        return sb.toString();
     }
 
     /**
@@ -974,8 +990,23 @@ public class LocalExecutor {
      * produce a successful step, a successful task and a scheduled run recorded as delivered —
      * with the registry withheld, the cloud has no instrument to check it with.
      */
-    static Outcome completed(String summary, List<StepResult> results) {
-        boolean anyFailed = results.stream().anyMatch(r -> !r.success);
+    static Outcome completed(String localSummary, String goal, List<Artifact> results) {
+        boolean anyFailed = results.stream().anyMatch(r -> !r.success());
+        boolean anyPrivate = results.stream().anyMatch(Artifact::isPrivate);
+        // The local model's own prose is withheld when it has read private content: it is a
+        // paraphrase of that content, and a paraphrase is the one thing the canary cannot see.
+        // The descriptors, the ledger and the PUBLIC outputs remain, which is what the cloud
+        // decides on. All-PUBLIC delegations read exactly as before.
+        String summary;
+        if (anyPrivate) {
+            summary = "(local summary withheld — this delegation touched "
+                    + results.stream().filter(Artifact::isPrivate).map(Artifact::handle)
+                            .collect(Collectors.joining(", ")) + ")";
+        } else {
+            summary = localSummary == null || localSummary.isBlank() ? "" : localSummary;
+        }
+        String body = buildConsolidatedResult(goal, results);
+        summary = summary.isEmpty() ? body : summary + "\n\n---\n" + body;
         // A delegation can fail on one step and still have SENT THE EMAIL on another. Reporting
         // it failed is right -- the traceback is what feeds the repair loop -- but it also hands
         // the registry back and tells the cloud to finish the job, and "on failure, try a
@@ -985,7 +1016,7 @@ public class LocalExecutor {
         // truncation cannot drop it, not as a tick buried in a ledger.
         String head = "";
         if (anyFailed && !results.isEmpty()) {
-            String ran = results.stream().filter(r -> r.success).map(r -> r.tool)
+            String ran = results.stream().filter(r -> r.success()).map(r -> r.tool())
                     .distinct().collect(Collectors.joining(", "));
             if (!ran.isBlank()) {
                 head = "ALREADY DONE — these succeeded and must NOT be repeated: " + ran
@@ -998,7 +1029,7 @@ public class LocalExecutor {
                 // skill from its traceback is the self-learning loop this project exists for,
                 // and it cannot run through a paraphrase. Marking the delegation failed is what
                 // restores the registry and engages the repair path.
-                !results.isEmpty() && !anyFailed);
+                !results.isEmpty() && !anyFailed, List.copyOf(results));
     }
 
     /**
@@ -1009,47 +1040,54 @@ public class LocalExecutor {
      * description of a stack trace — on the one path where verbatim error text is worth more
      * than any summary.
      */
-    private static String verbatimFailures(List<StepResult> results) {
-        var failed = results.stream().filter(r -> !r.success).toList();
+    private static String verbatimFailures(List<Artifact> results) {
+        var failed = results.stream().filter(r -> !r.success()).toList();
         if (failed.isEmpty()) return "";
         var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");
-        for (StepResult r : failed) {
-            sb.append("\n[").append(r.tool).append("] ").append(r.params).append("\n")
-              .append(truncate(r.output, 20_000));
+        for (Artifact r : failed) {
+            // The arguments as WRITTEN, never as resolved: the resolved map carries the
+            // substituted bytes of whatever $N pointed at.
+            sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
+              .append(r.written()).append("\n")
+              .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
         }
         return sb.toString();
     }
 
-    private Outcome partial(String reason, List<StepResult> results) {
+    private Outcome partial(String reason, List<Artifact> results) {
         return new Outcome(buildPartialResult(reason, results), toolNames(results),
-                results.size(), false);
+                results.size(), false, List.copyOf(results));
     }
 
-    private String buildPartialResult(String reason, List<StepResult> results) {
+    private String buildPartialResult(String reason, List<Artifact> results) {
         var sb = new StringBuilder();
         sb.append("Delegation incomplete: ").append(reason).append("\n\n");
         if (!results.isEmpty()) {
             sb.append("Partial results collected:\n");
             for (int i = 0; i < results.size(); i++) {
                 var r = results.get(i);
-                sb.append(i + 1).append(". [").append(r.tool).append("] ")
-                        .append(r.success ? "OK" : "FAIL").append(": ")
+                sb.append(r.handle()).append(" [").append(r.tool()).append("] ")
+                        .append(r.success() ? "OK" : "FAIL").append(": ")
                         // Failures keep far more: a truncated traceback is a traceback that
                         // cannot be acted on, and this is the only copy that reaches the cloud.
-                        .append(truncate(r.output, r.success ? 2000 : 20_000)).append("\n");
+                        .append(r.isPrivate() ? r.describe()
+                                : truncate(r.output(), r.success() ? 2000 : 20_000)).append("\n");
             }
         }
         return sb.toString();
     }
 
-    private String buildConsolidatedResult(String goal, List<StepResult> results) {
+    static String buildConsolidatedResult(String goal, List<Artifact> results) {
         var sb = new StringBuilder();
         sb.append("Delegation completed for: ").append(goal).append("\n\n");
-        for (int i = 0; i < results.size(); i++) {
-            var r = results.get(i);
-            sb.append("### Step ").append(i + 1).append(": ").append(r.tool)
-                    .append(r.success ? " ✓" : " ✗").append("\n");
-            sb.append(truncate(r.output, 5000)).append("\n\n");
+        for (Artifact r : results) {
+            sb.append("### ").append(r.handle()).append(": ").append(r.tool())
+                    .append(r.success() ? " ✓" : " ✗");
+            if (r.isPrivate()) {
+                sb.append(" — ").append(r.describe()).append("\n\n");
+            } else {
+                sb.append("\n").append(truncate(r.output(), 5000)).append("\n\n");
+            }
         }
         return sb.toString();
     }
@@ -1122,8 +1160,9 @@ public class LocalExecutor {
      * @param stepCount how many tool calls ran
      * @param ok        whether this counts as a successful delegation
      */
-    public record Outcome(String text, List<String> toolsRun, int stepCount, boolean ok) {
-        static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false); }
+    public record Outcome(String text, List<String> toolsRun, int stepCount, boolean ok,
+                          List<Artifact> produced) {
+        static Outcome failed(String text) { return new Outcome(text, List.of(), 0, false, List.of()); }
     }
 
     /** Parsed action from the local executor LLM. */
@@ -1137,5 +1176,4 @@ public class LocalExecutor {
     }
 
     /** Result of a single tool execution within a delegation. */
-    record StepResult(String tool, Map<String, Object> params, String output, boolean success) {}
 }

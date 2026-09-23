@@ -25,9 +25,19 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class DelegationSafetyTest {
 
-    private static LocalExecutor.StepResult step(String tool, Map<String, Object> params,
-                                                 String output) {
-        return new LocalExecutor.StepResult(tool, params, output, true);
+    private static Artifact step(String tool, Map<String, Object> params, String output) {
+        return new Artifact(tool, params, output, true);
+    }
+
+    /** A PUBLIC artifact with a task-wide handle — the shape the store produces. */
+    private static Artifact numbered(int n, String tool, String output) {
+        return new Artifact(n, tool, Map.of(), Map.of(), output, true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+    }
+
+    private static Artifact privateStep(int n, String tool, String output, boolean ok) {
+        return new Artifact(n, tool, Map.of(), Map.of(), output, ok,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials: SMTP_PASS"));
     }
 
     // ── repeat suppression ──
@@ -79,7 +89,7 @@ class DelegationSafetyTest {
     @DisplayName("finishing without running anything is not a success")
     void zeroStepsIsNotSuccess() {
         var outcome = LocalExecutor.completed(
-                "I have fetched today's headlines and emailed the digest.", List.of());
+                "I have fetched today's headlines and emailed the digest.", "send the digest", List.of());
 
         assertFalse(outcome.ok(),
                 "the summary reads like a delivered job; nothing ran. With the registry "
@@ -92,7 +102,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a real delegation carries its ledger with the claim")
     void successCarriesEvidence() {
-        var outcome = LocalExecutor.completed("Digest sent.", List.of(
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
                 step("daily_news_digest", Map.of(), "...headlines..."),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")));
 
@@ -344,10 +354,10 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a failure that already sent the email says so first")
     void failureNamesWhatAlreadySucceeded() {
-        var outcome = LocalExecutor.completed("Could not verify.", List.of(
+        var outcome = LocalExecutor.completed("Could not verify.", "send it", List.of(
                 step("daily_news_digest", Map.of(), "...digest..."),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent, id 42"),
-                new LocalExecutor.StepResult("verify_delivery", Map.of(), "ERROR: no such tool",
+                new Artifact("verify_delivery", Map.of(), "ERROR: no such tool",
                         false)));
 
         assertFalse(outcome.ok(), "a failed step still hands the registry back");
@@ -364,7 +374,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a clean delegation is not prefixed with a warning about itself")
     void successHasNoAlreadyDoneHeader() {
-        var outcome = LocalExecutor.completed("Digest sent.", List.of(
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
                 step("smtp_send_email", Map.of(), "Sent")));
         assertTrue(outcome.ok());
         assertTrue(outcome.text().startsWith("Digest sent."));
@@ -373,8 +383,8 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a failure with nothing successful carries no misleading header")
     void allFailedHasNoHeader() {
-        var outcome = LocalExecutor.completed("Nothing worked.", List.of(
-                new LocalExecutor.StepResult("x", Map.of(), "ERROR: boom", false)));
+        var outcome = LocalExecutor.completed("Nothing worked.", "send it", List.of(
+                new Artifact("x", Map.of(), "ERROR: boom", false)));
         assertFalse(outcome.text().startsWith("ALREADY DONE"));
     }
 
@@ -429,7 +439,7 @@ class DelegationSafetyTest {
         var m = conversation(8);
         var done = List.of(step("restaurant_url_finder", Map.of(), "urls"),
                 step("web_fetch_and_parse", Map.of(), "x".repeat(4279)),
-                new LocalExecutor.StepResult("web_fetch_and_parse", Map.of(), "ERR", false));
+                new Artifact("web_fetch_and_parse", Map.of(), "ERR", false));
 
         LocalExecutor.trimHistory(m, done);
 
@@ -451,8 +461,9 @@ class DelegationSafetyTest {
     @DisplayName("the results survive the trim, because they never lived in the transcript")
     void trimKeepsTheReferences() {
         var m = conversation(8);
-        var done = List.of(step("daily_news_digest", Map.of(), "D".repeat(3000)),
-                step("smtp_send_email", Map.of(), "sent"));
+        // Handles are the artifact's own task-wide number now, not its position in a list.
+        var done = List.of(numbered(1, "daily_news_digest", "D".repeat(3000)),
+                numbered(2, "smtp_send_email", "sent"));
 
         LocalExecutor.trimHistory(m, done);
         String ledger = m.get(1).content();
@@ -473,16 +484,103 @@ class DelegationSafetyTest {
     void trimLedgerNamesFailures() {
         var m = conversation(8);
         LocalExecutor.trimHistory(m, List.of(
-                new LocalExecutor.StepResult("web_fetch_and_parse", Map.of(), "ERR", false)));
+                new Artifact("web_fetch_and_parse", Map.of(), "ERR", false)));
         assertTrue(m.get(1).content().contains("FAILED"),
                 "otherwise the model retries something it has no idea already broke");
+    }
+
+    // ── what the cloud reads of a delegation that touched private data ──
+
+    @Test
+    @DisplayName("a private result is rendered as its descriptor and the local summary is withheld")
+    void privateResultsAreDescribedNotShown() {
+        String digest = "📰 Digest — 2026-09-23\n" + "line ".repeat(200);
+        var pub = new Artifact(1, "daily_news_digest", Map.of(), Map.of(), digest, true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var priv = privateStep(2, "smtp_send_email", "Sent, message id 42", true);
+
+        var outcome = LocalExecutor.completed("Local prose about the mailbox", "send it",
+                List.of(pub, priv));
+
+        assertTrue(outcome.ok());
+        assertTrue(outcome.text().contains("📰 Digest — 2026-09-23"), "the public result, in full");
+        assertTrue(outcome.text().contains("$2 smtp_send_email"), "the private one by handle");
+        assertTrue(outcome.text().contains("PRIVATE"));
+        assertFalse(outcome.text().contains("message id 42"), "and never by content");
+        assertFalse(outcome.text().contains("Local prose"),
+                "the local model's prose is a paraphrase of what it read, and a paraphrase is the "
+                        + "one thing the canary cannot see");
+        assertTrue(outcome.text().contains("withheld"));
+        assertTrue(outcome.text().contains("forward one by reference"));
+    }
+
+    @Test
+    @DisplayName("an all-public delegation reads exactly as before, summary included")
+    void allPublicIsUnchanged() {
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
+                step("daily_news_digest", Map.of(), "the digest"),
+                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")));
+
+        assertTrue(outcome.text().startsWith("Digest sent."));
+        assertTrue(outcome.text().contains("the digest"));
+        assertFalse(outcome.text().contains("withheld"));
+    }
+
+    @Test
+    @DisplayName("a private failure keeps its traceback off the cloud; a public one keeps it verbatim")
+    void privateFailureIsDescribed() {
+        var priv = privateStep(1, "imap_fetch", "Traceback: petr@x SMTP AUTH failed", false);
+        var pub = new Artifact(2, "web_fetch_and_parse", Map.of("url", "https://x"),
+                Map.of("url", "https://x"), "Traceback: KeyError 'menu'", false,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+
+        var outcome = LocalExecutor.completed("", "fetch", List.of(priv, pub));
+
+        assertFalse(outcome.text().contains("petr@x"));
+        assertTrue(outcome.text().contains("$1"));
+        assertTrue(outcome.text().contains("✗"));
+        assertTrue(outcome.text().contains("KeyError 'menu'"),
+                "the public traceback is the self-repair loop's evidence and stays verbatim");
+    }
+
+    @Test
+    @DisplayName("failed steps print the arguments as written, never the substituted bytes")
+    void failuresPrintWrittenParams() {
+        var a = new Artifact(2, "smtp_send_email", Map.of("body", "$1.body_text"),
+                Map.of("body", "THE WHOLE SUBSTITUTED DIGEST"), "ERROR: auth", false,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+
+        var outcome = LocalExecutor.completed("", "send", List.of(a));
+        assertTrue(outcome.text().contains("$1.body_text"));
+        assertFalse(outcome.text().contains("THE WHOLE SUBSTITUTED DIGEST"),
+                "the resolved map carries the bytes of whatever $N pointed at");
+    }
+
+    @Test
+    @DisplayName("the local tier keeps full access: a reference into a PRIVATE artifact still resolves")
+    void privateStillResolvesLocally() {
+        var priv = privateStep(1, "imap_fetch", "{\"body_text\":\"the mail\"}", true);
+        assertEquals("the mail",
+                LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), List.of(priv)).get("body"),
+                "private means withheld from the cloud, not from the machine it lives on");
+    }
+
+    @Test
+    @DisplayName("an identical side-effecting call from an earlier delegation is found by task-wide numbering")
+    void repeatsSpanDelegations() {
+        var earlier = new Artifact(3, "smtp_send_email", Map.of("to", "petr@example.com"),
+                Map.of("to", "petr@example.com"), "Sent", true, com.ownclaw.privacy.Label.PRIVATE, List.of());
+        assertEquals("Sent", LocalExecutor.priorIdenticalOutput("smtp_send_email",
+                        Map.of("to", "petr@example.com"), List.of(earlier)),
+                "the store is the task's, so the cross-delegation double send is blocked by "
+                        + "the same guard that blocks it within one");
     }
 
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
-        var outcome = LocalExecutor.completed("Done.", List.of(
-                new LocalExecutor.StepResult("smtp_send_email", Map.of(), "ERROR: auth", false)));
+        var outcome = LocalExecutor.completed("Done.", "send it", List.of(
+                new Artifact("smtp_send_email", Map.of(), "ERROR: auth", false)));
 
         assertTrue(outcome.text().contains("smtp_send_email FAILED"),
                 "a summary that says 'Done.' over a failed send is exactly what the ledger is "
