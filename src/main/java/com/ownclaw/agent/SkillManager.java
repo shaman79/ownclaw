@@ -368,8 +368,8 @@ public class SkillManager {
     /**
      * LLM-powered library analysis.
      */
-    public String analyzeSkills() {
-        return curatorService.analyzeLibrary();
+    public String analyzeSkills(com.ownclaw.llm.EgressContext egress) {
+        return curatorService.analyzeLibrary(egress);
     }
 
     // ────────────────────── Helpers ──────────────────────

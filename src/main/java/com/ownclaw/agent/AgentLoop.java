@@ -197,6 +197,15 @@ public class AgentLoop {
         try {
             List<String> keys = credentialVault.listCredentialKeys(userId);
             context.setCredentialKeys(keys);
+            // The secret ones, decrypted once. The gateway scrubs them from every cloud call;
+            // decrypting per call would run PBKDF2 on every step. Keys that are not secrets --
+            // SMTP_HOST, SMTP_USER -- are not decrypted and not scrubbed, so a prompt can still
+            // say who the mail goes from.
+            List<String> secretKeys = keys.stream()
+                    .filter(com.ownclaw.users.CredentialVault::isSecretKey).toList();
+            if (!secretKeys.isEmpty()) {
+                context.setSecretValues(credentialVault.getCredentials(userId, secretKeys));
+            }
         } catch (Exception e) {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
@@ -495,6 +504,18 @@ public class AgentLoop {
             ThinkResult thinkResult;
             try {
                 thinkResult = thinkingEngine.decideNextActionFull(context, provider);
+            } catch (com.ownclaw.llm.EgressRefused refused) {
+                // The gateway found bytes of a PRIVATE artifact in the request and nothing was
+                // sent. Deterministic, so there is no retry; and no valve, because handing the
+                // registry back would not change what the next prompt contains. Expected count
+                // in normal operation: zero. An occurrence is a bug report with the handle and
+                // the part index attached, and that is what the message carries.
+                log.error("Task {} step {}: PRIVACY_BLOCKED — {}", context.taskId(), step + 1,
+                        refused.getMessage());
+                return AgentResult.privacyBlocked(
+                        "Blocked before sending: " + refused.getMessage()
+                                + " See task " + context.taskId() + " in ops.",
+                        context.trajectory(), context.elapsedMs());
             } finally {
                 stopHeartbeat(thinkHeartbeat);
             }
@@ -793,7 +814,7 @@ public class AgentLoop {
                 }
 
                 long startMs = System.currentTimeMillis();
-                String result = executeSkillManage(action.params());
+                String result = executeSkillManage(action.params(), context);
                 long durationMs = System.currentTimeMillis() - startMs;
                 boolean ok = !result.startsWith("ERROR");
 
@@ -1155,7 +1176,7 @@ public class AgentLoop {
     /**
      * Dispatch a skill_manage action to the appropriate SkillManager method.
      */
-    private String executeSkillManage(Map<String, Object> params) {
+    private String executeSkillManage(Map<String, Object> params, AgentContext context) {
         String action = params.get("action") != null ? params.get("action").toString() : "";
         String name = params.get("name") != null ? params.get("name").toString() : null;
 
@@ -1163,7 +1184,7 @@ public class AgentLoop {
             case "read" -> skillManager.readSkill(name);
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
-            case "analyze" -> skillManager.analyzeSkills();
+            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"));
             default -> "ERROR: Unknown action '" + action + "'. Use one of: read, delete, list, analyze";
         };
     }
@@ -1809,7 +1830,7 @@ public class AgentLoop {
                     null,   // no token limit — let the model finish naturally
                     false,  // no JSON mode — we want raw Python code
                     null    // use provider default read timeout
-            );
+            ).withEgress(context.egress("codegen"));
 
             ScheduledFuture<?> heartbeat = startLlmHeartbeat(context.userId(),
                     "Generating code for '" + name + "'");

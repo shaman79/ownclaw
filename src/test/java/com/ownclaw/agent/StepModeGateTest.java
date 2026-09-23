@@ -234,6 +234,33 @@ class StepModeGateTest {
                         + "the task — a kill switch that leaves the thing it killed running");
     }
 
+    // ── the think call carries the task to the door ──
+
+    @Test
+    @DisplayName("every think call is made on behalf of the task, or the gateway would refuse it")
+    void thinkCallCarriesTheEgressContext() {
+        var seen = new java.util.ArrayList<LlmRequestConfig>();
+        LlmProvider recording = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                seen.add(c); return respondCall("Paris.");
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+        };
+        var ctx = context(false, true);
+        engine(config(true, false)).decideNextActionFull(ctx, recording);
+
+        assertEquals(1, seen.size());
+        var e = seen.get(0).egress();
+        assertNotNull(e, "unclassified means denied: a think call without a context is refused "
+                + "at the door, so the call site must attach one");
+        assertEquals("think", e.purpose());
+        assertEquals("t1", e.taskId());
+        assertEquals("u1", e.userId());
+        assertSame(ctx.privateIndex(), e.index(), "the task's own index, not an empty one");
+    }
+
     // ── the health answer is settled once ──
 
     @Test

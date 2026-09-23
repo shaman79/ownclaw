@@ -115,6 +115,9 @@ public class ThinkingEngine {
                 !nativeTools,
                 null    // use provider default read timeout
         );
+        // On whose behalf. Without this the gateway refuses the call -- which is the point:
+        // a call site that forgets is stopped, not silently unscanned.
+        requestConfig = requestConfig.withEgress(context.egress("think"));
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
         } else {
@@ -233,6 +236,10 @@ public class ThinkingEngine {
                     response.promptTokens(), response.completionTokens(),
                     response.cacheCreationTokens(), response.cacheReadTokens(),
                     provider.model());
+        } catch (com.ownclaw.llm.EgressRefused refused) {
+            // Deterministic: the same prompt refuses again. Retrying it three times as
+            // "reasoning failures" is the wrong branch; the loop ends the task on it.
+            throw refused;
         } catch (LlmException e) {
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
             AgentAction action = new AgentAction(AgentAction.RESPOND,

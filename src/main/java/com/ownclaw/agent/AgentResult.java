@@ -40,6 +40,8 @@ public record AgentResult(
         ERROR,
         /** Too many consecutive failures. */
         FAILURE_LIMIT,
+        /** The cloud request contained bytes of a PRIVATE artifact; nothing was sent. */
+        PRIVACY_BLOCKED,
         /**
          * The agent asked the user a question and is waiting for the answer.
          *
@@ -113,5 +115,10 @@ public record AgentResult(
 
     public static AgentResult failureLimit(String response, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.FAILURE_LIMIT);
+    }
+
+    /** The gateway refused to send. Not a success, and not a reasoning failure either. */
+    public static AgentResult privacyBlocked(String response, AgentTrajectory trajectory, long durationMs) {
+        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.PRIVACY_BLOCKED);
     }
 }

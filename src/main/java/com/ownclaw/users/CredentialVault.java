@@ -38,6 +38,21 @@ public class CredentialVault {
     /** System-level master key, loaded on startup. */
     private String masterKey;
 
+    /**
+     * Whether a vault key names a secret — as opposed to a host, a port or a user name that
+     * a prompt may legitimately carry. One regex, moved here from the curator so the door and
+     * the database redaction agree on what a secret is: a value whose key matches is decrypted
+     * once per task and scrubbed from every cloud call; one whose key does not is left alone,
+     * so the owner's own address in SMTP_USER does not turn into a placeholder in a delegate
+     * goal.
+     */
+    public static boolean isSecretKey(String key) {
+        return key != null && SECRET_KEY.matcher(key).find();
+    }
+
+    private static final java.util.regex.Pattern SECRET_KEY = java.util.regex.Pattern.compile(
+            "(?i)(pass|pwd|secret|token|api[_-]?key|credential|auth|bearer|cookie|session)");
+
     public CredentialVault(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
