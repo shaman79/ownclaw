@@ -212,14 +212,16 @@ public class OpsController {
         out.put("orphans", orphans.stream().map(o -> Map.of(
                 "skill", o.skill(), "dir", o.dir().toString(),
                 "mb", o.bytes() / (1024 * 1024), "removed", o.removed())).toList());
-        out.put("note", !apply
-                ? "Nothing removed. Repeat with ?apply=true to reclaim the space."
-                : stillThere == 0
-                    ? "Removed. A quarantined skill that is restored provisions its environment "
-                      + "again on its next run."
-                    : stillThere + " could not be removed and are still on disk (a file the "
-                      + "service user cannot delete, or no skill is loaded so nothing was "
-                      + "touched); see the log.");
+        out.put("note", orphans.isEmpty()
+                ? "Nothing to remove — no orphaned environment was listed. (If no skill is loaded "
+                  + "at all, the registry cannot say what is live and nothing is listed; see the log.)"
+                : !apply
+                    ? "Nothing removed. Repeat with ?apply=true to reclaim the space."
+                    : stillThere == 0
+                        ? "Removed. A quarantined skill that is restored provisions its "
+                          + "environment again on its next run."
+                        : stillThere + " could not be removed and are still on disk (a file the "
+                          + "service user cannot delete); see the log.");
         return ResponseEntity.ok(out);
     }
 
