@@ -1,6 +1,7 @@
 package com.ownclaw.agent;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LocalModelCheck;
 import org.slf4j.Logger;
@@ -32,24 +33,23 @@ public class LlmRouter {
     private static final Logger log = LoggerFactory.getLogger(LlmRouter.class);
 
     private final LlmProvider localProvider;
-    private final LlmProvider openAiProvider;
-    private final LlmProvider anthropicProvider;
+    /**
+     * The one door to a cloud model. Not a provider chosen here: the gateway reads the
+     * configured provider on every call, so the setup wizard and the settings page changing it
+     * take effect without this class holding a stale reference.
+     */
+    private final CloudGateway cloudProvider;
     private final OwnClawConfig config;
     private final LocalModelCheck localModelCheck;
 
-    /** The currently active cloud provider (resolved from config). */
-    private volatile LlmProvider cloudProvider;
-
     public LlmRouter(
             @Qualifier("ollamaProvider") LlmProvider localProvider,
-            @Qualifier("openAiProvider") LlmProvider openAiProvider,
-            @Qualifier("anthropicProvider") LlmProvider anthropicProvider,
+            CloudGateway cloud,
             OwnClawConfig config,
             LocalModelCheck localModelCheck
     ) {
         this.localProvider = localProvider;
-        this.openAiProvider = openAiProvider;
-        this.anthropicProvider = anthropicProvider;
+        this.cloudProvider = cloud;
         this.config = config;
         this.localModelCheck = localModelCheck;
     }
@@ -60,16 +60,15 @@ public class LlmRouter {
     }
 
     /**
-     * Re-resolve the active cloud provider from config.
-     * Called at startup and after /setup wizard changes the provider setting.
+     * Say which cloud provider is configured. It used to swap a field; the gateway now reads the
+     * configuration on every call, so the callers that still invoke this after the wizard or the
+     * settings page change the provider get the log line and nothing else needs to happen.
      */
     public void resolveCloudProvider() {
         String provider = config.getMentor().getProvider();
         if ("anthropic".equalsIgnoreCase(provider)) {
-            this.cloudProvider = anthropicProvider;
             log.info("Cloud LLM provider: Anthropic (model: {})", config.getMentor().getAnthropicModel());
         } else {
-            this.cloudProvider = openAiProvider;
             log.info("Cloud LLM provider: OpenAI (model: {})", config.getMentor().getModel());
         }
     }

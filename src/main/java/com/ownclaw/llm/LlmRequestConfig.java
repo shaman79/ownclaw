@@ -19,17 +19,23 @@ public record LlmRequestConfig(
      * Per request rather than per provider because the tool set is dynamic: every tool is a
      * Python skill the agent wrote at runtime, so the list changes within a single session.
      */
-    List<ToolSpec> tools
-) {
+    List<ToolSpec> tools,
     /**
-     * Without native tools — which is every call site that existed before they did.
-     * <p>
-     * A delegating constructor rather than an edit to every call site, matching the shape
-     * {@link LlmResponse} already uses for its optional components.
+     * On whose behalf this call is made, for the cloud gateway. Null means unclassified, and
+     * an unclassified cloud call is refused — a local call ignores it.
      */
+    EgressContext egress
+) {
+    /** Without native tools or a context — every call site that existed before either did. */
     public LlmRequestConfig(String model, Double temperature, Integer maxTokens,
                             boolean jsonMode, Integer readTimeoutSec) {
-        this(model, temperature, maxTokens, jsonMode, readTimeoutSec, null);
+        this(model, temperature, maxTokens, jsonMode, readTimeoutSec, null, null);
+    }
+
+    /** With tools, without a context. */
+    public LlmRequestConfig(String model, Double temperature, Integer maxTokens,
+                            boolean jsonMode, Integer readTimeoutSec, List<ToolSpec> tools) {
+        this(model, temperature, maxTokens, jsonMode, readTimeoutSec, tools, null);
     }
 
     /** Use all defaults from the provider config. */
@@ -51,7 +57,12 @@ public record LlmRequestConfig(
 
     /** This request, but offering the model these tools natively. */
     public LlmRequestConfig withTools(List<ToolSpec> toolSpecs) {
-        return new LlmRequestConfig(model, temperature, maxTokens, jsonMode, readTimeoutSec, toolSpecs);
+        return new LlmRequestConfig(model, temperature, maxTokens, jsonMode, readTimeoutSec, toolSpecs, egress);
+    }
+
+    /** This request, made on behalf of a task. */
+    public LlmRequestConfig withEgress(EgressContext egressContext) {
+        return new LlmRequestConfig(model, temperature, maxTokens, jsonMode, readTimeoutSec, tools, egressContext);
     }
 
     /** Whether native tools are being offered on this call. */

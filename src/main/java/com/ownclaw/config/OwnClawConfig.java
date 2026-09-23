@@ -191,6 +191,23 @@ public class OwnClawConfig {
         public void setOwner(String owner) { this.owner = owner; }
     }
 
+    /**
+     * Privacy. One switch, and it is not "off": the canary is ENFORCE or OBSERVE. OBSERVE
+     * changes exactly one thing — a canary hit is sent and recorded as OBSERVED_LEAK instead of
+     * refused. The gateway being the only door, labels being assigned at source, private
+     * observations rendering as descriptors, secrets being scrubbed and every call writing its
+     * row are not policies and cannot be toggled.
+     */
+    public static class Privacy {
+        private com.ownclaw.llm.CloudGateway.Mode canary = com.ownclaw.llm.CloudGateway.Mode.ENFORCE;
+        public com.ownclaw.llm.CloudGateway.Mode getCanary() { return canary; }
+        public void setCanary(com.ownclaw.llm.CloudGateway.Mode v) { this.canary = v; }
+    }
+
+    private Privacy privacy = new Privacy();
+    public Privacy getPrivacy() { return privacy; }
+    public void setPrivacy(Privacy p) { this.privacy = p; }
+
     public static class Ops {
         /**
          * Shared secret for /api/ops/*. Env-only (OWNCLAW_OPS_TOKEN); never persisted.

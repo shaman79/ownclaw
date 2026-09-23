@@ -9,7 +9,6 @@ import com.ownclaw.config.OwnClawConfig;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
@@ -25,8 +24,9 @@ import java.util.regex.Pattern;
  * <p>
  * Reasoning models reject sampling parameters — see {@link #supportsSampling(String)}.
  */
-@Component
-public class OpenAiProvider implements LlmProvider {
+// Not a bean, and not public: CloudGateway is the only thing that constructs this, and a
+// test walks the source tree to keep it so. Every cloud call goes through the door.
+class OpenAiProvider implements LlmProvider {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiProvider.class);
     private static final MediaType JSON_TYPE = MediaType.get("application/json");
@@ -51,7 +51,7 @@ public class OpenAiProvider implements LlmProvider {
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
-    public OpenAiProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper) {
+    OpenAiProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper) {
         this.config = ownClawConfig.getMentor();
         this.mapper = mapper;
         this.httpClient = new OkHttpClient.Builder()
