@@ -105,6 +105,17 @@ public final class PrivateIndex {
 
     /** The earliest run in {@code part} that belongs to a registered artifact, or null. */
     public Hit firstHitIn(String part) {
+        return firstHitIn(part, 0);
+    }
+
+    /**
+     * The earliest run at or after {@code from} (an offset into the NORMALISED text).
+     * <p>
+     * The caller needs this because one allowed hit does not clear a part: a private
+     * confirmation may open with a run of the public thing it was given and continue with an
+     * address and a message id that are nobody else's.
+     */
+    public Hit firstHitIn(String part, int from) {
         String n = normalise(part);
         if (n.length() < MIN_SHORT) return null;
         Hit best = null;
@@ -115,7 +126,7 @@ public final class PrivateIndex {
                 h = h * BASE + n.charAt(i);
                 if (i >= WINDOW) h -= n.charAt(i - WINDOW) * BASE_POW_WINDOW;
                 int start = i - WINDOW + 1;
-                if (start < 0) continue;
+                if (start < from) continue;
                 for (int k = 0; k < handles.length; k++) {
                     if (Arrays.binarySearch(windowHashes[k], h) >= 0) {
                         best = new Hit(handles[k], start, WINDOW);
@@ -129,14 +140,14 @@ public final class PrivateIndex {
         for (int k = 0; k < shortHashes.length; k++) {
             int len = shortLengths[k];
             if (len > n.length()) continue;
-            if (best != null && best.offset() == 0) break;
+            if (best != null && best.offset() == from) break;
             long pow = pow(BASE, len);
             long h = 0;
             for (int i = 0; i < n.length(); i++) {
                 h = h * BASE + n.charAt(i);
                 if (i >= len) h -= n.charAt(i - len) * pow;
                 int start = i - len + 1;
-                if (start < 0) continue;
+                if (start < from) continue;
                 if (best != null && start >= best.offset()) break;
                 if (h == shortHashes[k]) {
                     best = new Hit(shortHandles[k], start, len);

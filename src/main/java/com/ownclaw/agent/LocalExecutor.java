@@ -855,8 +855,11 @@ public class LocalExecutor {
             if (i > 0) sb.append("; ");
             Artifact a = done.get(i);
             sb.append(a.handle()).append(" = ").append(a.tool());
-            // Not JSON: $N alone is the only way to reference it, which is the default.
-            List<String> fields = Artifact.jsonFields(a.output());
+            // The bare names. jsonFields annotates them for the DESCRIPTOR ("body_text
+            // (string, 4 chars)"), and a model reading this writes exactly what it is shown --
+            // "$1.body_text (string, 4 chars)", which resolveRef cannot parse and unresolvedRef
+            // does not recognise as a reference, so it would have been sent as literal text.
+            List<String> fields = Artifact.jsonFieldNames(a.output());
             if (!fields.isEmpty()) sb.append(" (fields: ").append(String.join(", ", fields)).append(")");
         }
         return sb.append(". Use one of those exactly, as the whole value.").toString();
@@ -1049,7 +1052,12 @@ public class LocalExecutor {
             // The arguments as WRITTEN, never as resolved: the resolved map carries the
             // substituted bytes of whatever $N pointed at.
             sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
-              .append(r.written()).append("\n")
+              // The arguments too, when the step is private. A tainted step's arguments are
+              // what the local model wrote AFTER reading private content -- the recipient it
+              // was given, the body it forwarded -- so printing them here handed the cloud
+              // exactly what the descriptor two lines up is withholding.
+              .append(r.isPrivate() ? "(arguments withheld)" : String.valueOf(r.written()))
+              .append("\n")
               .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
         }
         return sb.toString();

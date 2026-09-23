@@ -31,9 +31,4 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
         allowed = allowed == null ? (h, w) -> false : allowed;
         purpose = purpose == null ? "unspecified" : purpose;
     }
-
-    /** For a call that belongs to no task — nothing is private to it, nothing is allowed. */
-    public static EgressContext noTask(String purpose, String userId) {
-        return new EgressContext(userId, null, purpose, new PrivateIndex(), Map.of(), (h, w) -> false);
-    }
 }

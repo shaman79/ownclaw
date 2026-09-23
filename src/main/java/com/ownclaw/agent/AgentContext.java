@@ -62,6 +62,9 @@ public class AgentContext {
     /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door. */
     private Map<String, String> secretValues = Map.of();
 
+    /** See {@link #setSkillSource}. */
+    private Function<String, String> skillSource = n -> null;
+
     public AgentContext(String userId, String taskId, String originalMessage) {
         this.userId = userId;
         this.taskId = taskId;
@@ -220,9 +223,14 @@ public class AgentContext {
     /**
      * Whether a canary hit is material the cloud was already given, and may go.
      * <p>
-     * Two sources count: what the task started with — the message, the conversation summary,
-     * the preferences, the recalled memories — and the output of every PUBLIC artifact recorded
-     * BEFORE the private one that hit. The order matters. A public artifact recorded after a
+     * Four sources count. What the task started with — the message, the conversation summary,
+     * the preferences, the recalled memories. The output of every PUBLIC artifact recorded
+     * BEFORE the private one that hit; the order matters there. What the CLOUD itself wrote —
+     * its own tool-call arguments and reasoning, which the Anthropic renderer replays verbatim
+     * as assistant turns: a skill that echoes an argument it was given would otherwise make the
+     * next prompt unsendable. And the SOURCE of the skill that produced the hit artifact: a
+     * Python traceback quotes the line that threw, so a credentialed skill's failure would
+     * otherwise make its own repair prompt — the loop this project exists for — impossible. A public artifact recorded after a
      * private one can be that private content laundered — a skill that echoes what it was given,
      * a summary the local model wrote — and whitelisting it would let the leak through as
      * "already public". The smtp confirmation that quotes the public digest it just sent is the
@@ -240,7 +248,31 @@ public class AgentContext {
             if (a.n() >= hitHandle) break;
             if (!a.isPrivate() && n.apply(a.output()).contains(normalisedWindow)) return true;
         }
+        for (var turn : trajectory.turns()) {
+            var action = turn.action();
+            if (action == null) continue;
+            if (action.reasoning() != null && n.apply(action.reasoning()).contains(normalisedWindow)) {
+                return true;
+            }
+            for (Object v : action.params().values()) {
+                if (v != null && n.apply(String.valueOf(v)).contains(normalisedWindow)) return true;
+            }
+        }
+        Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
+                ? artifacts.get(hitHandle - 1) : null;
+        if (hit != null) {
+            String source = skillSource.apply(hit.tool());
+            if (source != null && n.apply(source).contains(normalisedWindow)) return true;
+        }
         return false;
+    }
+
+    /**
+     * How to read a skill's source, for the clause above. Supplied once per task by the loop;
+     * the default answers nothing, so a context built without it is no more permissive.
+     */
+    public void setSkillSource(Function<String, String> reader) {
+        this.skillSource = reader == null ? n -> null : reader;
     }
 
     /** What a cloud call made on behalf of this task carries to the door. */

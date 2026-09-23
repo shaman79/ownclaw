@@ -10,9 +10,4 @@ package com.ownclaw.privacy;
  */
 public enum Label {
     PUBLIC, PRIVATE;
-
-    /** The more restrictive of the two: private wins. */
-    public static Label max(Label a, Label b) {
-        return a == PRIVATE || b == PRIVATE ? PRIVATE : PUBLIC;
-    }
 }

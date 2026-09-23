@@ -64,7 +64,7 @@ public final class CloudGateway implements LlmProvider {
         this.anthropic = anthropic;
         this.openai = openai;
         this.config = config;
-        this.ledger = ledger == null ? EgressLedger.none() : ledger;
+        this.ledger = ledger == null ? row -> { } : ledger;
         this.mapper = mapper == null ? new ObjectMapper() : mapper;
     }
 
@@ -96,7 +96,7 @@ public final class CloudGateway implements LlmProvider {
         // (a) Unclassified means denied.
         if (egress == null) {
             ledger.record(row(null, providerName, model, EgressLedger.Decision.REFUSED,
-                    List.of(), 0, 0, null, 0, 0, "unclassified"));
+                    List.of(), 0, null, 0, "unclassified"));
             throw new EgressRefused(providerName);
         }
 
@@ -121,43 +121,66 @@ public final class CloudGateway implements LlmProvider {
         }
 
         // (c) The canary: every part, before the socket opens.
+        String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
-        int privateArtifacts = egress.index().isEmpty() ? 0 : -1; // -1: unknown count, index non-empty
+        // The registry's own text -- tool descriptions and schemas -- is material the cloud
+        // wrote (skill_create) or the owner did, and it was in the prompt before any artifact
+        // existed. A skill description that says what its output looks like would otherwise
+        // collide with that output's first window and refuse every call after the skill ran.
+        boolean leaked = false;
         for (Part part : parts) {
-            PrivateIndex.Hit hit = egress.index().firstHitIn(part.text());
-            if (hit == null) continue;
-            String window = PrivateIndex.normalise(part.text())
-                    .substring(hit.offset(), Math.min(hit.offset() + hit.length(),
-                            PrivateIndex.normalise(part.text()).length()));
-            if (egress.allowed().test(hit.handle(), window)) continue;
+            if (leaked) break;
+            // A tool description or schema is authored by the cloud at skill_create, or by the
+            // owner, and it was in the prompt on every step before the artifact existed -- so a
+            // run of it matching a later result is a coincidence, not a disclosure. Skills
+            // routinely describe their own output shape, which collided with that output's
+            // first window and refused every call after the skill had run. The allowance is for
+            // THESE parts only: a message that happens to quote the same text is still checked,
+            // because a message is written after the result exists.
+            boolean registry = part.kind().startsWith("tool:") || part.kind().startsWith("schema:");
+            String normalised = PrivateIndex.normalise(part.text());
+            int from = 0;
+            PrivateIndex.Hit hit;
+            // Every hit in the part, not only the first. Stopping at the first ALLOWED one left
+            // the rest of that part unscanned: a private confirmation whose opening quotes the
+            // public digest it sent was allowed on that window, and its address, host and
+            // message id -- the part that is actually private -- went unchecked.
+            while ((hit = egress.index().firstHitIn(part.text(), from)) != null) {
+                from = hit.offset() + 1;
+                String window = normalised.substring(hit.offset(),
+                        Math.min(hit.offset() + hit.length(), normalised.length()));
+                if (registry || egress.allowed().test(hit.handle(), window)) continue;
             String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
                     + ") at " + hit.offset();
             if (mode() == Mode.ENFORCE) {
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, scrubs, privateArtifacts, null, 0, 0, ref));
+                        parts, scrubs, null, 0, ref));
                 log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
                 throw new EgressRefused(providerName, hit.handle(), "artifact", part.index(),
                         part.kind(), hit.offset());
             }
+            // OBSERVE: remember it and go on to send. The row is written once, after the
+            // call, so it carries the tokens and the cost like any other -- two rows for one
+            // call made the ledger's own count say a call had been made twice.
             log.warn("Cloud call would have been refused for task {} (canary in OBSERVE): {}",
                     egress.taskId(), ref);
-            ledger.record(row(egress, providerName, model, EgressLedger.Decision.OBSERVED_LEAK,
-                    parts, scrubs, privateArtifacts, null, 0, 0, ref));
+            observed = ref;
+            leaked = true;
             break;
+            }
         }
 
         // (d) Send, and record what happened either way.
         LlmRequestConfig outbound = scrubbedTools == null ? cfg : cfg.withTools(scrubbedTools);
         try {
             LlmResponse response = provider.chat(scrubbedMessages, outbound);
-            ledger.record(row(egress, providerName, model, EgressLedger.Decision.SENT, parts,
-                    scrubs, privateArtifacts, response,
-                    tools == null ? 0 : tools.size(), 0, null));
+            ledger.record(row(egress, providerName, model,
+                    observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
+                    parts, scrubs, response, tools == null ? 0 : tools.size(), observed));
             return response;
         } catch (RuntimeException e) {
             ledger.record(row(egress, providerName, model, EgressLedger.Decision.ERROR, parts,
-                    scrubs, privateArtifacts, null, tools == null ? 0 : tools.size(), 0,
-                    e.getClass().getSimpleName()));
+                    scrubs, null, tools == null ? 0 : tools.size(), e.getClass().getSimpleName()));
             throw e;
         }
     }
@@ -211,11 +234,18 @@ public final class CloudGateway implements LlmProvider {
         for (var e : secrets.entrySet()) {
             String value = e.getValue();
             if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
-            int at;
-            while ((at = out.indexOf(value)) >= 0) {
-                out = out.substring(0, at) + "«vault:" + e.getKey() + "»" + out.substring(at + value.length());
+            String marker = "«vault:" + e.getKey() + "»";
+            // Scan forward from after each replacement. Restarting from zero never terminated
+            // when the value was a substring of its own marker -- a vault value of "vault:pass"
+            // rewrote itself for ever and hung the call, holding the task's only worker thread.
+            var sb = new StringBuilder();
+            int from = 0, at;
+            while ((at = out.indexOf(value, from)) >= 0) {
+                sb.append(out, from, at).append(marker);
+                from = at + value.length();
                 count++;
             }
+            if (from > 0) out = sb.append(out.substring(from)).toString();
         }
         return new Scrubbed(out, count);
     }
@@ -224,8 +254,8 @@ public final class CloudGateway implements LlmProvider {
 
     private static EgressLedger.Row row(EgressContext egress, String provider, String model,
                                         EgressLedger.Decision decision, List<Part> parts,
-                                        int scrubs, int privateArtifacts, LlmResponse response,
-                                        int toolCount, int unused, String refusalRef) {
+                                        int scrubs, LlmResponse response, int toolCount,
+                                        String refusalRef) {
         long bytes = 0;
         var ledgerParts = new ArrayList<EgressLedger.Part>(parts.size());
         for (Part p : parts) {
@@ -242,8 +272,11 @@ public final class CloudGateway implements LlmProvider {
                 egress == null ? null : egress.userId(),
                 egress == null ? null : egress.taskId(),
                 egress == null ? "unclassified" : egress.purpose(),
-                provider, model, decision, List.copyOf(ledgerParts), bytes, toolCount,
-                pt, ct, cw, cr, cost, scrubs, privateArtifacts, refusalRef);
+                provider, model, decision, List.copyOf(ledgerParts),
+                // Bytes that LEFT. A refused call sent none, and counting its payload as egress
+                // is the one arithmetic error that would make the ledger overstate exposure.
+                decision == EgressLedger.Decision.REFUSED ? 0 : bytes,
+                toolCount, pt, ct, cw, cr, cost, scrubs, refusalRef);
     }
 
     private static double safeCost(String model, LlmResponse response) {

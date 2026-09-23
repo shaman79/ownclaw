@@ -219,6 +219,10 @@ public class AgentLoop {
             if (!secretKeys.isEmpty()) {
                 context.setSecretValues(credentialVault.getCredentials(userId, secretKeys));
             }
+            // A skill's own source is not a disclosure of what that skill returned: a Python
+            // traceback quotes the line that threw, so without this a credentialed skill's
+            // failure made its own repair prompt unsendable.
+            context.setSkillSource(skillManager::readSkillCode);
         } catch (Exception e) {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
@@ -290,9 +294,16 @@ public class AgentLoop {
                 String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
                 var why = new ArrayList<String>(List.of("attachment"));
                 why.add(ct + ", " + size + " bytes" + (text == null ? ", not text or too large" : ""));
+                // PRIVATE only when nobody is watching. On attended chat the owner uploaded the
+                // file to this conversation and is waiting for an answer about it; labelling it
+                // private there means the cloud can never read it, the delegation's summary is
+                // withheld, and "summarise this" returns nothing by any path — which is a
+                // capability this slice was not meant to remove. Later-turn inlining stays gone
+                // either way, and a scheduled run still never inherits a chat file.
+                var label = context.isUnattended()
+                        ? com.ownclaw.privacy.Label.PRIVATE : com.ownclaw.privacy.Label.PUBLIC;
                 context.addArtifact("attachment:" + name, Map.of("fileId", id), Map.of("fileId", id),
-                        text == null ? "" : text, true,
-                        new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, why));
+                        text == null ? "" : text, true, new Artifact.Decision(label, why));
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
@@ -1153,10 +1164,17 @@ public class AgentLoop {
                 context.attachmentIds()
         );
 
+        // The same reference mechanism the delegation uses. The delegate tool's description
+        // tells the cloud that results are named $N and can be forwarded without reading them;
+        // on this path nothing resolved them, so the promise was only half true — and a $N the
+        // cloud wrote would have reached a skill as the literal two characters.
+        Map<String, Object> resolved =
+                LocalExecutor.substituteRefs(action.params(), context.artifacts());
+
         long startMs = System.currentTimeMillis();
         ToolResult result;
         try {
-            result = tool.execute(action.params(), execCtx);
+            result = tool.execute(resolved, execCtx);
         } catch (Exception e) {
             log.error("Tool '{}' threw exception: {}", action.tool(), e.getMessage(), e);
             result = ToolResult.failure("Tool execution error: " + e.getMessage());
@@ -1171,8 +1189,11 @@ public class AgentLoop {
         // nothing downstream -- the renderers, the progress summary, the episode, the events
         // rows, the repair evidence -- ever sees the other.
         Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(),
-                !context.attachmentIds().isEmpty(), false, action.params(), context.artifacts());
-        Artifact artifact = context.addArtifact(tool.name(), action.params(), action.params(),
+                context.isUnattended() && !context.attachmentIds().isEmpty(), false,
+                action.params(), context.artifacts());
+        // labelFor reads the arguments as WRITTEN, so a $N reference to a private artifact is
+        // seen before substitution turns it into content.
+        Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
 
         // Usage, with the raw error: the curator's row is the owner's diagnostic and is read
@@ -2194,7 +2215,7 @@ public class AgentLoop {
         obs = compressIfUnattended(context, obs);
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
-        persistStep(context, action, obs, step);
+        persistStep(context, action, obs, step, context.artifacts().size());
     }
 
     /**
@@ -2268,6 +2289,15 @@ public class AgentLoop {
      */
     private void persistStep(AgentContext context, AgentAction action,
                              AgentObservation obs, int step) {
+        persistStep(context, action, obs, step, 0);
+    }
+
+    /**
+     * @param artifactCount the task's artifact count AFTER this step; a step that recorded one
+     *                      has count == the store's size, and one that recorded none does not
+     */
+    private void persistStep(AgentContext context, AgentAction action,
+                             AgentObservation obs, int step, int artifactCount) {
         try {
             var details = new LinkedHashMap<String, Object>();
             details.put("step", step);
@@ -2280,7 +2310,11 @@ public class AgentLoop {
             if (action.isDelegate()) {
                 Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
                 if (arts != null) details.put("artifacts", arts);
-            } else if (!action.isSpecialAction()) {
+            } else if (!action.isSpecialAction() && artifactCount > 0
+                    && context.artifacts().size() == artifactCount) {
+                // Only when THIS step recorded one. A refused, not-found or critic-blocked step
+                // records nothing, and attributing the previous step's handle, label and hash to
+                // it made the ops page say a tool ran that never did.
                 context.lastArtifact().ifPresent(a -> {
                     details.put("artifact", a.handle());
                     details.put("label", a.label().name());

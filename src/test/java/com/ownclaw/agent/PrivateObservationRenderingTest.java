@@ -115,7 +115,7 @@ class PrivateObservationRenderingTest {
         }
         assertTrue(texts.stream().anyMatch(t -> t.contains("$1 imap_fetch")),
                 "and the descriptor IS there, so the cloud knows the result exists");
-        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (credentials: IMAP_PASS)")));
+        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (credentials (1))")));
 
         // Independent: the real door, with the task's own index, sends every message.
         var rows = new ArrayList<EgressLedger.Row>();

@@ -282,10 +282,14 @@ public class TelegramBotService {
         // Persist user message for conversation history
         String currentSessionId = conversationService.getCurrentSession(userId);
         conversationService.autoTitleIfNeeded(userId, currentSessionId, text);
-        conversationService.saveMessage(userId, currentSessionId, "user", text);
+        // The row id, so the loop can skip exactly the turn it is answering. Without it the
+        // message arrives twice: once as the task, once as the last line of "Recent
+        // conversation" -- the websocket path passes it and Telegram did not.
+        String currentMessageId =
+                conversationService.saveMessage(userId, currentSessionId, "user", text);
 
         // Submit to task queue — orchestrator handles conversation persistence
-        taskQueue.submit(userId, text).thenAccept(result -> {
+        taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
             String response = result.response();
             conversationService.saveMessage(userId, currentSessionId, "assistant", response);
             sendMessage(chatId, response);

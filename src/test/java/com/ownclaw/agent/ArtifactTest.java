@@ -27,7 +27,7 @@ class ArtifactTest {
 
     private static Artifact privateResult(String tool, String output, boolean ok) {
         return new Artifact(2, tool, Map.of(), Map.of(), output, ok, Label.PRIVATE,
-                List.of("credentials: SMTP_PASS"));
+                List.of("credentials (1)"));
     }
 
     // ── labelFor: every clause on its own ──
@@ -37,8 +37,11 @@ class ArtifactTest {
     void credentialsMakeItPrivate() {
         var d = Artifact.labelFor(List.of("IMAP_PASS"), false, false, Map.of(), List.of());
         assertEquals(Label.PRIVATE, d.label());
-        assertEquals(List.of("credentials: IMAP_PASS"), d.why(),
-                "the descriptor and the ledger say which fact decided it");
+        assertEquals(List.of("credentials (1)"), d.why(),
+                "the COUNT, not the names: the skill harness words a vault miss as 'Missing "
+                        + "required credentials: SMTP_PASS, SMTP_USER', so naming them here put "
+                        + "a run of the OUTPUT into the descriptor and the canary refused the "
+                        + "call that carried it");
     }
 
     @Test
@@ -87,13 +90,16 @@ class ArtifactTest {
     void descriptorCarriesShapeNotContent() {
         String d = privateResult("smtp_send_email", PRIVATE_JSON, false).describe();
 
-        assertTrue(d.startsWith("$2 smtp_send_email ✗ — PRIVATE (credentials: SMTP_PASS)"), d);
+        assertTrue(d.startsWith("$2 smtp_send_email ✗ — PRIVATE (credentials (1))"), d);
         assertTrue(d.contains("json"), d);
         assertTrue(d.contains("ok=false"),
                 "a success envelope around a failure is the normal shape of a skill result; a "
                         + "descriptor that hid ok=false would have the cloud report a send that "
                         + "never happened");
-        assertTrue(d.contains("count=3"), "numbers are shown with their values");
+        assertTrue(d.contains("count (number)"),
+                "a number can BE the secret — a balance, a count of unread mail — so it gets "
+                        + "its kind and nothing more; only booleans carry their value");
+        assertFalse(d.contains("count=3"));
         assertTrue(d.contains("error (string, "), "a string is where the data is: kind and size only");
         assertTrue(d.contains("messages (array, 3)"), d);
         assertFalse(d.contains("petr@example.com"), "not the error text");
@@ -155,6 +161,36 @@ class ArtifactTest {
                 "the structured map is the same content in another shape");
         assertFalse(obs.success(), "the outcome is not hidden with the content");
         assertFalse(obs.output().contains("confidential"));
+    }
+
+    @Test
+    @DisplayName("a null argument value is ordinary, not a crash")
+    void nullArgumentValues() {
+        // Every provider keeps a JSON null as a null map entry, and a local model routinely
+        // emits "cc": null for an unset optional. Map.copyOf rejects those, so the record threw
+        // AFTER the tool had run: the email went out and the task died with "Internal error".
+        var withNull = new java.util.LinkedHashMap<String, Object>();
+        withNull.put("to", "petr@example.com");
+        withNull.put("cc", null);
+
+        var a = assertDoesNotThrow(() -> new Artifact(2, "smtp_send_email", withNull, withNull,
+                "{\"ok\":true}", true, Label.PRIVATE, List.of("credentials (1)")));
+        assertTrue(a.written().containsKey("cc"));
+        assertNull(a.written().get("cc"));
+        assertDoesNotThrow(a::describe);
+        assertDoesNotThrow(() -> Artifact.labelFor(List.of(), false, false, withNull, List.of()));
+    }
+
+    @Test
+    @DisplayName("field names cannot carry a 32-character run of the output")
+    void fieldNamesAreTooShortToLeak() {
+        String key = "a_very_long_field_name_that_would_otherwise_be_a_window";
+        String json = "{\"" + key + "\": \"x\"}";
+        String d = privateResult("t", json, true).describe();
+        for (int i = 0; i + 32 <= json.length(); i++) {
+            assertFalse(d.contains(json.substring(i, i + 32)),
+                    "a field name at 40 characters was itself a window of the output");
+        }
     }
 
     @Test

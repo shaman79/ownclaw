@@ -46,11 +46,18 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     private static final Pattern REF = Pattern.compile("^\\$(\\d+)(?:\\.[A-Za-z0-9_]+)?$");
     /** How many top-level field names a descriptor shows, and how long each may be. */
     static final int MAX_FIELDS = 12;
-    static final int MAX_FIELD_NAME = 40;
+    static final int MAX_FIELD_NAME = 24;
 
     public Artifact {
-        written = written == null ? Map.of() : Map.copyOf(written);
-        resolved = resolved == null ? Map.of() : Map.copyOf(resolved);
+        // Not Map.copyOf: it rejects a null VALUE, and a tool call carrying one is ordinary —
+        // every provider keeps a JSON null as a null entry, and a local model routinely emits
+        // "cc": null for an unset optional. The old StepResult never copied, so this record
+        // introduced a crash that fired AFTER the tool had run: the email went out and the task
+        // died with "Internal error", trajectory empty.
+        written = written == null ? Map.of()
+                : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(written));
+        resolved = resolved == null ? Map.of()
+                : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(resolved));
         output = output == null ? "" : output;
         label = label == null ? Label.PUBLIC : label;
         why = why == null ? List.of() : List.copyOf(why);
@@ -88,7 +95,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                                     List<Artifact> store) {
         var why = new ArrayList<String>();
         if (requiredCredentials != null && !requiredCredentials.isEmpty()) {
-            why.add("credentials: " + String.join(", ", requiredCredentials));
+            // The COUNT, not the names. A vault miss is worded "Missing required credentials:
+            // SMTP_PASS, SMTP_USER" by the skill harness, so naming them here put a 40-character
+            // run of the output into the descriptor -- and the descriptor is what the cloud
+            // reads, so the canary refused the call that carried it and the run died instead of
+            // saying "credentials missing". The key names are already in the tool schema the
+            // cloud holds, and the raw text is in the skill_usage row the owner reads.
+            why.add("credentials (" + requiredCredentials.size() + ")");
         }
         if (taskHasAttachments) why.add("attachment");
         if (contextTainted) why.add("after a private step");
@@ -152,9 +165,16 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                 r.structured() == null ? Map.of() : r.structured(), durationMs);
     }
 
-    /** The top-level field names of a JSON object, or none. One parser for every caller. */
+    /** The top-level field names ANNOTATED with kind and size, for a descriptor. */
     public static List<String> jsonFields(String text) {
         return shapeOf(text).fields();
+    }
+
+    /** The bare top-level field names, for telling a model what it may reference. */
+    public static List<String> jsonFieldNames(String text) {
+        return shapeOf(text).fields().stream()
+                .map(f -> { int sp = f.indexOf(" ("); return sp < 0 ? f : f.substring(0, sp); })
+                .toList();
     }
 
     /** kind ("json" | "text" | "error"), field names, and primitive values, of a result. */
@@ -177,9 +197,15 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                 String name = e.getKey().length() > MAX_FIELD_NAME
                         ? e.getKey().substring(0, MAX_FIELD_NAME) + "…" : e.getKey();
                 JsonNode v = e.getValue();
-                if (v.isBoolean() || v.isNumber()) {
+                if (v.isBoolean()) {
+                    // Booleans only. ok=false must be visible -- a success envelope around a
+                    // failure is the normal shape of a skill result and hiding it would have the
+                    // cloud report a send that never happened. A NUMBER can be the secret itself
+                    // (a balance, a count of messages), so it gets its kind and nothing more.
                     primitives.put(name, v.asText());
                     fields.add(name);
+                } else if (v.isNumber()) {
+                    fields.add(name + " (number)");
                 } else if (v.isTextual()) {
                     fields.add(name + " (string, " + String.format("%,d", v.asText().length()) + " chars)");
                 } else if (v.isArray()) {

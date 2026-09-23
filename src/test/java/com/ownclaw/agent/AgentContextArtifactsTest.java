@@ -29,6 +29,8 @@ class AgentContextArtifactsTest {
         return sb.substring(0, chars);
     }
 
+    private static final String NL = System.lineSeparator();
+
     private static AgentContext task(String message) {
         return new AgentContext("u1", "t1", message);
     }
@@ -104,6 +106,44 @@ class AgentContextArtifactsTest {
         assertTrue(ctx.isAllowedLeak(smtp.n(), window),
                 "the smtp confirmation quotes the public digest it just sent; the digest was "
                         + "already the cloud's to read");
+    }
+
+    @Test
+    @DisplayName("what the cloud itself wrote is not a leak back to the cloud")
+    void theCloudsOwnWritingIsAllowed() {
+        var ctx = task("send the digest");
+        String subject = "Faktura 2026-09 od dodavatele Novák s.r.o. splatná 15. října";
+        // The cloud typed this into a tool call; the renderer replays it verbatim as an
+        // assistant turn, which the gateway then scans.
+        ctx.trajectory().record(new AgentAction("smtp_send_email",
+                Map.of("subject", subject), "sending the invoice"),
+                AgentObservation.success("smtp_send_email", "sent", Map.of(), 10));
+        var priv = add(ctx, "smtp_send_email", "Sent '" + subject + "' to petr", PRIVATE);
+
+        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(subject).substring(0, 40)),
+                "a skill that echoes an argument it was given would otherwise make the next "
+                        + "prompt unsendable, after the email had gone out");
+        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise("sending the invoice")),
+                "the reasoning too — the renderer replays that as well");
+    }
+
+    @Test
+    @DisplayName("a skill's own source is not a leak of what that skill returned")
+    void theProducersSourceIsAllowed() {
+        var ctx = task("send the digest");
+        String line = "    server.login(os.environ['SMTP_USER'], os.environ['SMTP_PASS'])";
+        ctx.setSkillSource(name -> "smtp_send_email".equals(name)
+                ? "import smtplib" + NL + line + NL : null);
+        // A Python traceback quotes the line that threw, so the failure carries the source.
+        var priv = add(ctx, "smtp_send_email",
+                "Skill error:" + NL + "Traceback..." + NL + line, PRIVATE);
+
+        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(line).substring(0, 40)),
+                "without this a credentialed skill's failure made its own repair prompt "
+                        + "unsendable — and repair is the loop this project exists for");
+        assertFalse(ctx.isAllowedLeak(priv.n(),
+                PrivateIndex.normalise("Traceback... and the mailbox contents that followed")),
+                "only the source, not the rest of the failure");
     }
 
     @Test

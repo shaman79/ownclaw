@@ -21,12 +21,7 @@ public interface EgressLedger {
     record Row(String userId, String taskId, String purpose, String provider, String model,
                Decision decision, List<Part> parts, long bytesOut, int toolCount,
                int promptTokens, int completionTokens, int cacheWriteTokens, int cacheReadTokens,
-               double costUsd, int scrubs, int privateArtifacts, String refusalRef) {}
+               double costUsd, int scrubs, String refusalRef) {}
 
     void record(Row row);
-
-    /** For tests and for wiring nothing: keeps the rows in memory. */
-    static EgressLedger none() {
-        return row -> { };
-    }
 }

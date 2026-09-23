@@ -31,12 +31,40 @@ class ProviderConfinementTest {
         throw new IllegalStateException("src/main/java not found above " + Path.of("").toAbsolutePath());
     }
 
-    /** Source with // and block comments removed, so a javadoc mention does not count. */
+    /**
+     * Source with comments removed, so a javadoc mention does not count — and string literals
+     * kept, which the first version destroyed: stripping from {@code //} to end of line also
+     * erased {@code "https://api.anthropic.com/v1/messages"}, so the host assertion passed on
+     * every file including the providers' own. A one-pass scanner that knows it is inside a
+     * string is the only honest way to do this.
+     */
     private static String code(Path file) throws IOException {
         String s = Files.readString(file);
-        s = s.replaceAll("(?s)/\\*.*?\\*/", "");
-        s = s.replaceAll("(?m)//.*$", "");
-        return s;
+        var out = new StringBuilder(s.length());
+        boolean inString = false, inChar = false, inLine = false, inBlock = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            char next = i + 1 < s.length() ? s.charAt(i + 1) : '\0';
+            if (inLine) { if (c == '\n') { inLine = false; out.append(c); } continue; }
+            if (inBlock) { if (c == '*' && next == '/') { inBlock = false; i++; } continue; }
+            if (inString) {
+                out.append(c);
+                if (c == '\\') { if (i + 1 < s.length()) out.append(s.charAt(++i)); }
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (inChar) {
+                if (c == '\\') i++;
+                else if (c == '\'') inChar = false;
+                continue;
+            }
+            if (c == '/' && next == '/') { inLine = true; i++; continue; }
+            if (c == '/' && next == '*') { inBlock = true; i++; continue; }
+            if (c == '"') { inString = true; out.append(c); continue; }
+            if (c == '\'') { inChar = true; continue; }
+            out.append(c);
+        }
+        return out.toString();
     }
 
     private static List<Path> javaFiles() throws IOException {

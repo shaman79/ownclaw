@@ -579,7 +579,8 @@ public class ScheduledTaskService {
                         String agentTaskId = result.taskId();
                         if (result.success()) {
                             onTaskCompleted(taskId, userId, taskType, description,
-                                    result.response(), used, agentTaskId);
+                                    result.response(), used, agentTaskId,
+                                    ResultDelivery.withheldLine(result));
                         } else if (result.terminationReason()
                                 == com.ownclaw.agent.AgentResult.TerminationReason.PRIVACY_BLOCKED) {
                             // The door refused to send. Delivered and rescheduled like a failure,
@@ -655,9 +656,16 @@ public class ScheduledTaskService {
     /**
      * Called when a scheduled task completes successfully.
      */
+    /**
+     * @param withheld the one line on what stayed on this machine, or "". The scheduler calls
+     *                 the String overload of deliver (it has a header of its own), so the
+     *                 AgentResult overload that computes this never ran for a scheduled task --
+     *                 the line reached /bg runs only, and the morning digest, which is the run
+     *                 with private results in it, said nothing.
+     */
     private void onTaskCompleted(long taskId, String userId, String taskType,
                                  String description, String response, String skillsUsed,
-                                 String agentTaskId) {
+                                 String agentTaskId, String withheld) {
         // Bookkeeping must not be able to rewrite the outcome. This method used to run
         // unguarded inside the completion callback, so anything that threw here -- most easily
         // incrementRunCount finding no row, because the owner deleted the schedule while it was
@@ -670,14 +678,16 @@ public class ScheduledTaskService {
         } catch (Exception e) {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
-            resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60), response);
+            resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
+                response + withheld);
             return;
         }
 
         // Deliver the output, not just a note that output happened. Until this line the result
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
-        resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60), response);
+        resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
+                response + withheld);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,

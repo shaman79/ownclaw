@@ -131,22 +131,69 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("a canary hit inside a tool description is refused too")
-    void canaryCoversToolDescriptions() {
+    @DisplayName("a tool description that describes its own output is not a leak of that output")
+    void registryTextIsNotALeak() {
+        // A skill's description is authored by the cloud at skill_create and was in the prompt
+        // on every step before the skill had ever run, so a run of it matching that skill's
+        // later output is a collision, not a disclosure — and skills routinely say what they
+        // return. Without this, every call after such a skill ran was refused, after the side
+        // effect had happened.
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
-        String secret = prose(5_000, 2);
-        var index = new PrivateIndex(); index.addPrivate(4, secret);
-        var tool = new ToolSpec("leaky", "Does things. Example: " + secret.substring(200, 240),
+        String output = prose(5_000, 2);
+        var index = new PrivateIndex(); index.addPrivate(4, output);
+        var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + output.substring(200, 240),
                 Map.of("type", "object"));
 
         var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
-        var ex = assertThrows(EgressRefused.class, () -> gw.chat(messages("hi"), cfg));
+        gw.chat(messages("send it"), cfg);
 
-        assertTrue(provider.calls.isEmpty());
+        assertEquals(1, provider.calls.size());
+        assertEquals(EgressLedger.Decision.SENT, rows.last().decision());
+    }
+
+    @Test
+    @DisplayName("the allowance is for registry parts only: a MESSAGE quoting the same run is refused")
+    void registryAllowanceDoesNotCoverMessages() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String output = prose(5_000, 2);
+        var index = new PrivateIndex(); index.addPrivate(4, output);
+        var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + output.substring(200, 240),
+                Map.of("type", "object"));
+
+        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+                .withEgress(egress(index, Map.of(), (h, w) -> false));
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages("the mailbox said: " + output.substring(200, 240)), cfg));
+
+        assertTrue(provider.calls.isEmpty(), "a message is written after the result exists");
         assertEquals(4, ex.handle());
-        // Mutation: scan messages only -> sent.
+        // Mutation: allow the registry text for every part -> sent.
+    }
+
+    @Test
+    @DisplayName("every hit in a part is checked, not only the first")
+    void allHitsInAPartAreChecked() {
+        // A private confirmation opens with the public digest it sent and continues with the
+        // address and the message id. Allowing the first run must not end the scan.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String publicPart = prose(500, 21), privatePart = prose(500, 22);
+        var index = new PrivateIndex();
+        index.addPrivate(2, publicPart + " " + privatePart);
+
+        // The first run is allowed (it is the public digest); the tail is not.
+        String allowed = PrivateIndex.normalise(publicPart);
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(),
+                (h, w) -> allowed.contains(w)));
+
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages(publicPart + " " + privatePart), cfg));
+        assertTrue(provider.calls.isEmpty());
+        assertEquals(2, ex.handle());
+        // Mutation: continue to the next PART on an allowed hit -> sent.
     }
 
     @Test
@@ -182,6 +229,39 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("a secret that is a substring of its own marker does not hang the call")
+    void scrubTerminates() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        // "vault:PASS" appears inside «vault:PASS», so restarting the search from zero rewrote
+        // its own replacement for ever, holding the task's only worker thread.
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(),
+                Map.of("PASS", "vault:PASS"), (h, w) -> false));
+
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(5),
+                () -> gw.chat(messages("the value is vault:PASS here"), cfg));
+        assertEquals("the value is «vault:PASS» here", provider.calls.get(0).get(1).content());
+        assertEquals(1, rows.last().scrubs());
+    }
+
+    @Test
+    @DisplayName("a refused call reports zero bytes out: nothing left")
+    void refusedBytesAreNotCountedAsEgress() {
+        var rows = new Rows();
+        var gw = new CloudGateway(new Recording(), new Recording(),
+                config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String secret = prose(5_000, 31);
+        var index = new PrivateIndex(); index.addPrivate(1, secret);
+
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("leak: " + secret.substring(0, 40)),
+                LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false))));
+
+        assertEquals(0, rows.last().bytesOut(),
+                "counting a refused payload as egress is the one arithmetic error that would "
+                        + "make the ledger overstate what left the machine");
+    }
+
+    @Test
     @DisplayName("a provider failure is recorded as ERROR and rethrown")
     void providerErrorIsRecorded() {
         var provider = new Recording(); var rows = new Rows();
@@ -207,9 +287,14 @@ class CloudGatewayTest {
         gw.chat(messages("leak: " + secret.substring(300, 340)), cfg);
 
         assertEquals(1, provider.calls.size());
-        assertEquals(List.of(EgressLedger.Decision.OBSERVED_LEAK, EgressLedger.Decision.SENT),
-                rows.rows.stream().map(EgressLedger.Row::decision).toList());
-        // Mutation: treat OBSERVE as silent -> no OBSERVED_LEAK row.
+        assertEquals(List.of(EgressLedger.Decision.OBSERVED_LEAK),
+                rows.rows.stream().map(EgressLedger.Row::decision).toList(),
+                "one row per call: a second row made the ledger's own count say a call had "
+                        + "been made twice");
+        assertTrue(rows.last().promptTokens() > 0,
+                "and it is written after the send, so it carries the tokens like any other");
+        assertNotNull(rows.last().refusalRef(), "naming what would have been refused");
+        // Mutation: treat OBSERVE as silent -> decision is SENT.
     }
 
     @Test
