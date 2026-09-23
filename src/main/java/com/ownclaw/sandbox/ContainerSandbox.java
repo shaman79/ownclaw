@@ -49,6 +49,21 @@ public class ContainerSandbox {
 
     private static final Logger log = LoggerFactory.getLogger(ContainerSandbox.class);
 
+    /**
+     * The Dockerfile line that installs a skill's requirements. A fourth place torch can be
+     * installed, beside the three host paths in PythonEnvironmentService — not the one that
+     * filled the disk (that was the host venv), but the same 7 GB waiting to happen. The run
+     * command never passes {@code --gpus}, so the container has no GPU whatever the host has,
+     * and the CPU index is always offered here.
+     */
+    public static String pipInstallLine() {
+        var sb = new StringBuilder("RUN pip install --no-cache-dir --disable-pip-version-check ");
+        for (String a : com.ownclaw.skills.PythonEnvironmentService.indexArgs(false)) {
+            sb.append(a).append(' ');
+        }
+        return sb.append("-r /tmp/requirements.txt && rm /tmp/requirements.txt\n").toString();
+    }
+
     /** Prefix for all images built by this sandbox. Includes localhost/ for Podman compatibility. */
     private static final String IMAGE_PREFIX = "localhost/ownclaw-skill-";
 
@@ -349,14 +364,7 @@ public class ContainerSandbox {
                 Files.writeString(buildCtx.resolve("requirements.txt"),
                         pipRequirements, StandardCharsets.UTF_8);
                 dockerfile.append("COPY requirements.txt /tmp/requirements.txt\n");
-                dockerfile.append("RUN pip install --no-cache-dir --disable-pip-version-check ");
-                // A container without --gpus has no GPU either, and this is the path an OCR skill
-                // with system_packages actually takes — the very case that filled the disk.
-                for (String a : com.ownclaw.skills.PythonEnvironmentService.indexArgs(
-                        com.ownclaw.skills.PythonEnvironmentService.gpuPresent(), pipRequirements)) {
-                    dockerfile.append(a).append(' ');
-                }
-                dockerfile.append("-r /tmp/requirements.txt && rm /tmp/requirements.txt\n");
+                dockerfile.append(pipInstallLine());
             }
 
             dockerfile.append("WORKDIR /skill\n");

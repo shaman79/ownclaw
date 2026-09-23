@@ -61,8 +61,9 @@ public class PythonEnvironmentService {
     public record OrphanedEnv(String skill, Path dir, long bytes, boolean removed) {}
 
     /**
-     * Is there a GPU on this host? {@code /dev/nvidia0} is what the NVIDIA driver creates; if it
-     * is absent there is nothing a CUDA wheel could ever use.
+     * Is there a GPU on this host? Either the device node or the driver's /proc entry; the second
+     * exists on hosts where udev has not created the node yet. If neither is present there is
+     * nothing a CUDA wheel could ever use.
      */
     public static boolean gpuPresent() {
         return Files.exists(Path.of("/dev/nvidia0"))
@@ -80,47 +81,41 @@ public class PythonEnvironmentService {
      * version (a local version label sorts above the bare one) and the CUDA libraries are never
      * pulled in at all. Every other package still comes from PyPI as before.
      */
-    public static List<String> indexArgs(boolean gpu, String requirements) {
-        if (gpu || !mentionsTorch(requirements)) return List.of();
-        return List.of("--extra-index-url", "https://download.pytorch.org/whl/cpu");
+    public static List<String> indexArgs(boolean gpu) {
+        return gpu ? List.of() : List.of("--extra-index-url", "https://download.pytorch.org/whl/cpu");
     }
 
-    /**
-     * Whether a requirements text asks for torch or one of its siblings.
-     * <p>
-     * The index is offered ONLY then. pip has no index priority: with an extra index it queries
-     * that host for every project in the dependency closure, the CPU index also mirrors numpy,
-     * pillow, requests and a hundred others, and an outage there costs pip's retries on every
-     * package of every skill. Scoping it to the installs that are minutes long anyway keeps every
-     * other pip command exactly what it was.
-     */
-    static boolean mentionsTorch(String requirements) {
-        if (requirements == null) return false;
-        String r = requirements.toLowerCase(java.util.Locale.ROOT);
-        return r.contains("torch");
-    }
+    // On every install, not only when the requirements name torch. A previous round scoped it to
+    // requirements that mention torch, to spare unrelated installs the extra index; then the real
+    // files were read: daily_menu_fetcher says "easyocr", ocr_image_to_text says "pytesseract",
+    // and both environments hold torch anyway, pulled in as a dependency. The scoping would have
+    // covered none of the installs that filled the disk. So the index is offered whenever there
+    // is no GPU, which is one mechanism and covers dependencies. Its costs, stated: pip queries
+    // the extra index for every project in a closure (one small request each against a CDN), and
+    // if that CDN is unreachable while PyPI is up, provisioning of any skill fails on pip's
+    // retries until it is back — the agent retries the skill later. And pip has no index
+    // priority, so a package the CPU index mirrors at a HIGHER version than PyPI would come from
+    // it; as of today every mirrored version is at or below PyPI's.
 
     // ── the pip commands, as functions, so the wiring can be tested and not only the flag ──
 
     static List<String> packagesInstallArgs(String python, List<String> packages, boolean gpu) {
         var args = new ArrayList<>(List.of(python, "-m", "pip", "install",
                 "--disable-pip-version-check", "-q"));
-        args.addAll(indexArgs(gpu, String.join(" ", packages)));
+        args.addAll(indexArgs(gpu));
         args.addAll(packages);
         return args;
     }
 
-    static List<String> requirementsInstallArgs(String python, Path reqFile, String reqText,
-                                                boolean gpu) {
+    static List<String> requirementsInstallArgs(String python, Path reqFile, boolean gpu) {
         var args = new ArrayList<>(List.of(python, "-m", "pip", "install",
                 "--disable-pip-version-check", "-q", "-r", reqFile.toAbsolutePath().toString()));
-        args.addAll(indexArgs(gpu, reqText));
+        args.addAll(indexArgs(gpu));
         return args;
     }
 
-    static List<String> targetInstallArgs(String python, Path reqFile, String reqText,
-                                          Path targetDir, boolean gpu) {
-        var args = requirementsInstallArgs(python, reqFile, reqText, gpu);
+    static List<String> targetInstallArgs(String python, Path reqFile, Path targetDir, boolean gpu) {
+        var args = requirementsInstallArgs(python, reqFile, gpu);
         args.add("--target");
         args.add(targetDir.toAbsolutePath().toString());
         return args;
@@ -290,27 +285,13 @@ public class PythonEnvironmentService {
     // ── environments that outlived their skill ──
 
     /**
-     * Environment directories whose skill is not among {@code liveSkills}.
-     * <p>
-     * Deleting, retiring or renaming a skill removed or moved its directory and left its
-     * environment behind — nothing ever cleaned {@code _envs/<name>} or {@code _targets/<name>}.
-     * By 2026-09-23 there were 32 such directories on the production host, 45.7 GB, three of
-     * them 7.4 GB CUDA installs for lunch-menu fetchers deleted in March. An environment is a
-     * rebuildable cache keyed on the requirements hash, so one whose skill no longer exists is
-     * garbage by definition — and one whose skill is merely quarantined is rebuilt on restore.
-     */
-    public List<OrphanedEnv> orphanedEnvironments(Set<String> liveSkills) {
-        return findOrphans(envsDir, targetsDir, liveSkills);
-    }
-
-    /**
      * Delete the orphans, or only list them.
      *
      * @param dryRun when true nothing is touched and the same list comes back — how the ops
      *               endpoint shows its working before anything is removed
      */
     public List<OrphanedEnv> pruneOrphans(Set<String> liveSkills, boolean dryRun) {
-        return prune(envsDir, targetsDir, liveSkills, dryRun, this::forgetProvisioning);
+        return prune(envsDir, targetsDir, liveSkills, dryRun);
     }
 
     /**
@@ -324,20 +305,25 @@ public class PythonEnvironmentService {
      * along with the dead ones.
      */
     static List<OrphanedEnv> prune(Path envsDir, Path targetsDir, Set<String> live,
-                                   boolean dryRun, java.util.function.Consumer<String> forget) {
+                                   boolean dryRun) {
+        // The guard comes before the dry-run return, so both modes say the same thing. A dry
+        // run is the owner's gate for the deletion; if it listed every live environment as
+        // removable and the apply then refused, the gate would have lied first.
+        if (live.isEmpty()) {
+            log.warn("No skill is loaded, so the registry cannot be trusted to say what is live: "
+                    + "nothing is listed and nothing would be removed.");
+            return List.of();
+        }
         List<OrphanedEnv> orphans = findOrphans(envsDir, targetsDir, live);
         if (dryRun || orphans.isEmpty()) return orphans;
-        if (live.isEmpty()) {
-            log.warn("Refusing to prune {} environment(s): no skill is loaded, so the registry "
-                    + "cannot be trusted to say what is live. Nothing removed.", orphans.size());
-            return orphans;
-        }
         var out = new ArrayList<OrphanedEnv>();
         long freed = 0;
         for (OrphanedEnv o : orphans) {
             // No traversal check here: findOrphans lists real children of the root, so a path
             // that is not one cannot arrive. removeEnvironments takes a NAME from outside and
-            // is where that check lives.
+            // is where that check lives. No cache eviction either: resolvePython checks that
+            // the interpreter exists before it trusts a cache hit, so a pruned environment
+            // simply misses on the next call.
             try {
                 deleteTree(o.dir());
             } catch (IOException e) {
@@ -346,11 +332,7 @@ public class PythonEnvironmentService {
             boolean removed = !Files.exists(o.dir());
             if (removed) freed += o.bytes();
             else log.warn("Environment {} is still on disk after deletion — a file in it "
-                    + "could not be removed.", o.dir());
-            // resolvePython trusts its cache before it looks at the disk, so without this a
-            // skill restored in the same session is handed the path of an interpreter that no
-            // longer exists, until the next restart.
-            forget.accept(o.skill());
+                    + "could not be removed; the space counted as freed excludes it.", o.dir());
             out.add(new OrphanedEnv(o.skill(), o.dir(), o.bytes(), removed));
         }
         log.warn("Pruned {} of {} orphaned skill environment(s), {} MB: {}",
@@ -432,15 +414,13 @@ public class PythonEnvironmentService {
         }
     }
 
-    /** Delete a directory tree; returns the bytes it held. */
-    static long deleteTree(Path dir) throws IOException {
-        long bytes = sizeOf(dir);
+    /** Delete a directory tree. The bytes it held are known from findOrphans; no second walk. */
+    static void deleteTree(Path dir) throws IOException {
         try (Stream<Path> walk = Files.walk(dir)) {
             walk.sorted(Comparator.reverseOrder()).forEach(p -> {
                 try { Files.deleteIfExists(p); } catch (IOException ignored) { }
             });
         }
-        return bytes;
     }
 
     /**
@@ -652,7 +632,7 @@ public class PythonEnvironmentService {
 
         Path reqFile = skillDir.resolve("requirements.txt");
         ProcessResult install = run(900, new ProcessBuilder(
-                targetInstallArgs(systemPython, reqFile, reqContent, targetDir, gpuPresent())));
+                targetInstallArgs(systemPython, reqFile, targetDir, gpuPresent())));
 
         if (install.exitCode != 0) {
             throw new IOException("pip --target install failed: " + install.output);
@@ -795,9 +775,8 @@ public class PythonEnvironmentService {
         ensurePipAvailable(venvDir);
 
         // Install requirements using `python -m pip` (more portable than pip.exe path)
-        String reqText = Files.readString(reqFile, StandardCharsets.UTF_8);
         ProcessResult install = run(300, new ProcessBuilder(
-                requirementsInstallArgs(venvPython, reqFile, reqText, gpuPresent())));
+                requirementsInstallArgs(venvPython, reqFile, gpuPresent())));
         if (install.exitCode != 0) {
             throw new IOException("pip install failed: " + install.output);
         }

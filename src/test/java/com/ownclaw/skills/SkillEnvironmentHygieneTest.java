@@ -85,13 +85,17 @@ class SkillEnvironmentHygieneTest {
         Path live = dirWithBytes(envs, "daily_menu_fetcher", 5_000);
         Path dead = dirWithBytes(envs, "daily_lunch_preview", 7_000);
 
-        var result = PythonEnvironmentService.prune(envs, targets, Set.of(), false, n -> { });
-
+        var applied = PythonEnvironmentService.prune(envs, targets, Set.of(), false);
         assertTrue(Files.exists(live) && Files.exists(dead),
                 "init found no directory, a scan threw, or a reload is mid-way: in that state "
                         + "every environment on the host looks orphaned and one call would have "
                         + "deleted the live ones along with the dead");
-        assertTrue(result.stream().noneMatch(o -> o.removed()));
+        assertTrue(applied.isEmpty());
+
+        var dry = PythonEnvironmentService.prune(envs, targets, Set.of(), true);
+        assertTrue(dry.isEmpty(),
+                "the dry run is the owner's gate; if it listed the live environments as removable "
+                        + "and the apply then refused, the gate would have lied first");
     }
 
     @Test
@@ -101,18 +105,14 @@ class SkillEnvironmentHygieneTest {
         Path targets = Files.createDirectories(envs.resolve("_targets"));
         Path live = dirWithBytes(envs, "daily_menu_fetcher", 5_000);
         Path dead = dirWithBytes(envs, "daily_lunch_preview", 7_000);
-        var forgotten = new ArrayList<String>();
 
         var result = PythonEnvironmentService.prune(envs, targets,
-                Set.of("daily_menu_fetcher"), false, forgotten::add);
+                Set.of("daily_menu_fetcher"), false);
 
         assertTrue(Files.exists(live));
         assertFalse(Files.exists(dead));
         assertEquals(1, result.size());
         assertTrue(result.get(0).removed(), "and it reports what actually happened");
-        assertEquals(List.of("daily_lunch_preview"), forgotten,
-                "the provisioning cache must forget it, or a restored skill is handed the path "
-                        + "of an interpreter that no longer exists until the next restart");
     }
 
     @Test
@@ -122,7 +122,7 @@ class SkillEnvironmentHygieneTest {
         Path dead = dirWithBytes(envs, "daily_lunch_preview", 7_000);
 
         var result = PythonEnvironmentService.prune(envs, envs.resolve("_targets"),
-                Set.of("something_else"), true, n -> fail("nothing should be forgotten"));
+                Set.of("something_else"), true);
 
         assertTrue(Files.exists(dead));
         assertEquals(1, result.size());
@@ -166,66 +166,62 @@ class SkillEnvironmentHygieneTest {
     }
 
     @Test
-    @DisplayName("deleting a tree reports what it freed")
-    void deleteTreeReturnsBytes(@TempDir Path tmp) throws Exception {
+    @DisplayName("deleting a tree removes all of it")
+    void deleteTreeRemovesTheTree(@TempDir Path tmp) throws Exception {
         Path d = dirWithBytes(tmp, "gone", 4_096);
         Files.createDirectories(d.resolve("nested"));
         Files.write(d.resolve("nested/more.bin"), new byte[1_024]);
 
-        assertEquals(5_120, PythonEnvironmentService.deleteTree(d));
+        PythonEnvironmentService.deleteTree(d);
         assertFalse(Files.exists(d));
     }
 
-    // ── CPU torch: the flag AND the commands that carry it ──
+    // ── CPU torch: the flag, the three host commands, and the container line ──
 
     @Test
-    @DisplayName("without a GPU, a torch requirement gets the CPU index")
-    void cpuIndexForTorchWithoutGpu() {
+    @DisplayName("without a GPU the CPU index is offered on every install")
+    void cpuIndexWithoutGpu() {
         assertEquals(List.of("--extra-index-url", "https://download.pytorch.org/whl/cpu"),
-                PythonEnvironmentService.indexArgs(false, "easyocr\ntorch>=2.0\npillow"),
-                "the +cpu wheel of the same version sorts above the bare one, so pip takes it "
-                        + "and never pulls the nvidia-* libraries at all");
-        assertEquals(List.of("--extra-index-url", "https://download.pytorch.org/whl/cpu"),
-                PythonEnvironmentService.indexArgs(false, "torchvision==0.19"));
-    }
-
-    @Test
-    @DisplayName("a requirement without torch is installed exactly as before")
-    void noIndexWithoutTorch() {
-        assertTrue(PythonEnvironmentService.indexArgs(false, "requests\nbeautifulsoup4").isEmpty(),
-                "pip has no index priority: an extra index is queried for every package of "
-                        + "every skill, and an outage there costs retries on all of them");
-        assertTrue(PythonEnvironmentService.indexArgs(false, "").isEmpty());
-        assertTrue(PythonEnvironmentService.indexArgs(false, null).isEmpty());
+                PythonEnvironmentService.indexArgs(false),
+                "on every install, not only when the requirements name torch: the real files "
+                        + "say easyocr and pytesseract and both environments hold torch anyway, "
+                        + "pulled in as a dependency — a name test would have covered none of the "
+                        + "installs that filled the disk");
     }
 
     @Test
     @DisplayName("with a GPU, pip is left to its defaults")
     void defaultsWithGpu() {
-        assertTrue(PythonEnvironmentService.indexArgs(true, "torch").isEmpty(),
+        assertTrue(PythonEnvironmentService.indexArgs(true).isEmpty(),
                 "a host that can use CUDA should get CUDA");
     }
 
     @Test
-    @DisplayName("every pip command carries the index when it applies — not only the flag")
+    @DisplayName("the three host pip commands carry the index — the builders are asserted, the "
+            + "three one-line call sites are covered by reading")
     void theCommandsCarryTheIndex(@TempDir Path tmp) {
-        // The first fix's mutation claim covered indexArgs() and not one of the commands using
-        // it; dropping the wiring from any path left every test green.
         Path req = tmp.resolve("requirements.txt");
         String idx = "--extra-index-url";
 
-        assertTrue(PythonEnvironmentService.packagesInstallArgs("py", List.of("torch"), false)
-                .contains(idx), "installPackages");
-        assertTrue(PythonEnvironmentService.requirementsInstallArgs("py", req, "torch", false)
+        assertTrue(PythonEnvironmentService.packagesInstallArgs("py", List.of("easyocr"), false)
+                .contains(idx), "installPackages (the self-heal path that installed easyocr)");
+        assertTrue(PythonEnvironmentService.requirementsInstallArgs("py", req, false)
                 .contains(idx), "installRequirements");
-        var target = PythonEnvironmentService.targetInstallArgs("py", req, "torch",
-                tmp.resolve("t"), false);
+        var target = PythonEnvironmentService.targetInstallArgs("py", req, tmp.resolve("t"), false);
         assertTrue(target.contains(idx), "ensureTargetDependencies");
         assertTrue(target.contains("--target"), "and it is still a --target install");
 
-        assertFalse(PythonEnvironmentService.packagesInstallArgs("py", List.of("requests"), false)
-                .contains(idx));
-        assertFalse(PythonEnvironmentService.requirementsInstallArgs("py", req, "torch", true)
-                .contains(idx));
+        assertFalse(PythonEnvironmentService.requirementsInstallArgs("py", req, true).contains(idx));
+    }
+
+    @Test
+    @DisplayName("the container's pip line carries the index: a container never has a GPU")
+    void theContainerLineCarriesTheIndex() {
+        String line = com.ownclaw.sandbox.ContainerSandbox.pipInstallLine();
+        assertTrue(line.startsWith("RUN pip install "));
+        assertTrue(line.contains("--extra-index-url https://download.pytorch.org/whl/cpu"),
+                "the run command never passes --gpus, so this is decided by the container, not "
+                        + "the host");
+        assertTrue(line.endsWith("-r /tmp/requirements.txt && rm /tmp/requirements.txt\n"));
     }
 }

@@ -112,22 +112,24 @@ public class SkillMaintenanceService {
      * rewrites one under a new name. None of that ever touched {@code _envs/<name>}, so by
      * 2026-09-23 the production host held 45.7 GB of environments for skills that no longer
      * existed and was at 96% disk. An environment is a cache keyed on the requirements hash: a
-     * quarantined skill that is restored simply provisions again on its next run.
+     * quarantined skill that is restored simply provisions again on its next run — and a skill
+     * that fails to load at boot is quarantined, so its environment is prunable by design.
      * <p>
-     * Explicit only — never from the daily pass. The first version ran it under
+     * The prune is explicit only — never from the daily pass. The first version ran it under
      * {@code auto-retire}, whose documented meaning is that retirement moves and nothing is
      * deleted; flipping that flag would then have deleted the environments of every skill the
      * same pass had just retired, plus 45 GB of older ones, with no dry run of the prune ever
-     * shown. A delete on the owner's box is explicit and dry-run first, categorically.
+     * shown. ({@code deleteSkill} is different: it removes the environment together with the code
+     * it already deletes, as part of the same explicit deletion.)
      *
      * @param dryRun when true nothing is removed and the list comes back with sizes
      */
     public List<com.ownclaw.skills.PythonEnvironmentService.OrphanedEnv> pruneOrphanedEnvironments(
             boolean dryRun) {
         // Live is what is loaded OR what has a directory under generated/. The directory covers
-        // the windows the registry does not: a skill whose first pip install is still running
-        // before register(), a reload that has emptied the map and not yet refilled it, and a
-        // boot-time load that failed. Either alone was a way to delete a live environment.
+        // the two windows the registry does not: a skill whose first pip install is still running
+        // before register(), and a reload that has emptied the map and not yet refilled it.
+        // Either alone was a way to delete a live environment.
         Set<String> live = new java.util.HashSet<>();
         registry.allDynamic().forEach(d -> live.add(d.name()));
         try (var dirs = java.nio.file.Files.list(
@@ -140,13 +142,14 @@ public class SkillMaintenanceService {
         var result = pythonEnv.pruneOrphans(live, dryRun);
         if (!dryRun) {
             for (var o : result) {
-                if (!o.removed()) continue;
                 try {
-                    // The retirement half writes skill.retired for exactly this reason: an
-                    // unattended deletion of tens of GB with nothing saying what went.
-                    eventLog.log(SYSTEM_ACTOR, null, "skill.env_pruned", "info",
-                            o.skill() + " — " + (o.bytes() / (1024 * 1024)) + " MB",
-                            "{\"dir\":\"" + o.dir() + "\"}", 0);
+                    // One row per attempt, removed or not, as skill.retired records moved=true|false:
+                    // a deletion of tens of GB with nothing saying what went is the failure the
+                    // retirement half already learned from.
+                    eventLog.log(SYSTEM_ACTOR, null, "skill.env_pruned", o.removed() ? "info" : "warn",
+                            o.skill() + " — " + (o.bytes() / (1024 * 1024)) + " MB"
+                                    + (o.removed() ? "" : " (still on disk)"),
+                            "{\"dir\":\"" + o.dir() + "\",\"removed\":" + o.removed() + "}", 0);
                 } catch (Exception e) {
                     log.warn("Could not record the prune of {}: {}", o.skill(), e.getMessage());
                 }
