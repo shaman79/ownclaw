@@ -399,6 +399,85 @@ class DelegationSafetyTest {
         assertTrue(done.stream().anyMatch(r -> digest.equals(r.output())));
     }
 
+    // ── the transcript must not outgrow the window it has to answer in ──
+
+    private static List<com.ownclaw.llm.LlmMessage> conversation(int exchanges) {
+        var m = new java.util.ArrayList<com.ownclaw.llm.LlmMessage>();
+        m.add(com.ownclaw.llm.LlmMessage.system("EXECUTOR PROMPT"));
+        m.add(com.ownclaw.llm.LlmMessage.user("Begin."));
+        for (int i = 0; i < exchanges; i++) {
+            m.add(com.ownclaw.llm.LlmMessage.assistant("call " + i));
+            m.add(com.ownclaw.llm.LlmMessage.user("result " + i));
+        }
+        return m;
+    }
+
+    @Test
+    @DisplayName("a short delegation is left exactly as it is")
+    void shortHistoryIsUntouched() {
+        var m = conversation(3);
+        int before = m.size();
+        LocalExecutor.trimHistory(m, List.of(step("a", Map.of(), "x")));
+        assertEquals(before, m.size(), "there is nothing to gain below the threshold");
+    }
+
+    @Test
+    @DisplayName("a long delegation keeps the system prompt, the goal, a ledger and the tail")
+    void longHistoryIsTrimmed() {
+        // The real shape of the 23 September menu run, which died at step 9 with the prompt
+        // nearly filling the window and 19,326 characters spent on thinking.
+        var m = conversation(8);
+        var done = List.of(step("restaurant_url_finder", Map.of(), "urls"),
+                step("web_fetch_and_parse", Map.of(), "x".repeat(4279)),
+                new LocalExecutor.StepResult("web_fetch_and_parse", Map.of(), "ERR", false));
+
+        LocalExecutor.trimHistory(m, done);
+
+        assertTrue(m.size() < conversation(8).size(), "it has to shrink, that is the point");
+        assertEquals(com.ownclaw.llm.LlmMessage.Role.SYSTEM, m.get(0).role(),
+                "the executor prompt is not optional");
+        assertTrue(m.get(1).content().startsWith("Begin."), "nor is the goal");
+        assertTrue(m.get(m.size() - 1).content().startsWith("result 7"),
+                "the most recent exchange is what it is answering about");
+
+        for (int i = 1; i < m.size(); i++) {
+            assertNotEquals(m.get(i).role(), m.get(i - 1).role(),
+                    "roles must alternate — two user turns in a row is something Ollama "
+                            + "tolerates and other providers reject");
+        }
+    }
+
+    @Test
+    @DisplayName("the results survive the trim, because they never lived in the transcript")
+    void trimKeepsTheReferences() {
+        var m = conversation(8);
+        var done = List.of(step("daily_news_digest", Map.of(), "D".repeat(3000)),
+                step("smtp_send_email", Map.of(), "sent"));
+
+        LocalExecutor.trimHistory(m, done);
+        String ledger = m.get(1).content();
+
+        assertTrue(ledger.contains("$1 = daily_news_digest"), "it must know what $1 is");
+        assertTrue(ledger.contains("$2 = smtp_send_email"));
+        assertTrue(ledger.contains("3000 chars"), "and how much is behind the reference");
+        assertTrue(ledger.contains("have not"),
+                "a model that believes the results are gone will try to reconstruct them");
+
+        // The point: $1 still resolves after the conversation carrying it was dropped.
+        assertEquals("D".repeat(3000),
+                LocalExecutor.substituteRefs(Map.of("body", "$1"), done).get("body"));
+    }
+
+    @Test
+    @DisplayName("a failed earlier step is named as failed in the ledger")
+    void trimLedgerNamesFailures() {
+        var m = conversation(8);
+        LocalExecutor.trimHistory(m, List.of(
+                new LocalExecutor.StepResult("web_fetch_and_parse", Map.of(), "ERR", false)));
+        assertTrue(m.get(1).content().contains("FAILED"),
+                "otherwise the model retries something it has no idea already broke");
+    }
+
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {

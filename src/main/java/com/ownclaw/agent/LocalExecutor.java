@@ -133,6 +133,9 @@ public class LocalExecutor {
                 return partial("Task cancelled during delegation.", stepResults);
             }
 
+            // Keep the conversation from outgrowing the window it has to answer in.
+            trimHistory(messages, stepResults);
+
             // THINK: ask local LLM for next action
             LlmResponse response;
             try {
@@ -610,6 +613,62 @@ public class LocalExecutor {
             log.warn("LocalExecutor: failed to parse local LLM JSON: {}", e.getMessage());
             return ExecutorAction.invalid();
         }
+    }
+
+    /**
+     * How many messages of conversation the executor carries forward.
+     * <p>
+     * The system prompt, the opening instruction, then this many of the most recent messages.
+     * Eight is four exchanges: enough to see what was just tried and what came back, and
+     * bounded so step nine costs what step three did.
+     */
+    private static final int HISTORY_TAIL = 8;
+
+    /**
+     * Drop the middle of the conversation, keeping a ledger of what it contained.
+     * <p>
+     * The real failure this prevents, from the 23 September menu run: by step 9 the history held
+     * eight exchanges on top of the system prompt and 27 tool schemas, the prompt had nearly
+     * filled a 24,576-token window, and the model spent the 4,954 tokens left on reasoning and
+     * never answered. That delegation burned 407 seconds and then failed, and the cloud did the
+     * work in fourteen. The owner's constraints rule out the other two levers — the local model
+     * is to think freely and keep its full output budget — and VRAM rules out a bigger window,
+     * so what has to shrink is the part nobody chose: the transcript.
+     * <p>
+     * Nothing is lost that matters, because results do not live here. {@code stepResults} holds
+     * every output in full, {@code $N} still resolves against it, and the ledger says which
+     * numbers exist. That is the quiet dividend of passing by reference: the transcript can be
+     * cut without cutting the data.
+     */
+    static void trimHistory(List<LlmMessage> messages, List<StepResult> done) {
+        // system + opening instruction + the tail. Below that there is nothing to gain.
+        if (messages.size() <= HISTORY_TAIL + 2) return;
+
+        // The tail must begin with an assistant turn, or the roles stop alternating: after the
+        // opening user message the pattern is assistant, user, assistant, user...
+        int from = messages.size() - HISTORY_TAIL;
+        if ((from - 2) % 2 != 0) from++;
+
+        var ledger = new StringBuilder("Earlier steps in this delegation:\n");
+        for (int i = 0; i < done.size(); i++) {
+            ledger.append("  $").append(i + 1).append(" = ").append(done.get(i).tool)
+                  .append(done.get(i).success ? " (ok, " : " (FAILED, ")
+                  .append(done.get(i).output == null ? 0 : done.get(i).output.length())
+                  .append(" chars)\n");
+        }
+        ledger.append("Their full output is still available by reference — $1, $2, and so on, or "
+                + "$N.field for a JSON result. The conversation above them has been dropped to "
+                + "leave room to answer in; the results themselves have not.");
+
+        // The ledger joins the opening instruction rather than following it, so the roles keep
+        // alternating: system, user, assistant, user, ... Two user turns in a row is something
+        // Ollama tolerates and other providers reject, and this loop should not depend on which.
+        var kept = new ArrayList<LlmMessage>();
+        kept.add(messages.get(0));
+        kept.add(LlmMessage.user(messages.get(1).content() + "\n\n" + ledger));
+        kept.addAll(messages.subList(from, messages.size()));
+        messages.clear();
+        messages.addAll(kept);
     }
 
     /** The model's own tool call, written back into the history it will read next turn. */
