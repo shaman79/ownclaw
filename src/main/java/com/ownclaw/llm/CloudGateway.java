@@ -47,7 +47,12 @@ public final class CloudGateway implements LlmProvider {
     private final EgressLedger ledger;
     private final ObjectMapper mapper;
 
-    /** Spring constructs the providers here, and nowhere else. */
+    /**
+     * Spring constructs the providers here, and nowhere else. Annotated because the class has a
+     * second public constructor for tests, and with two candidates Spring picks neither — the
+     * boot check found the application unable to start, which no unit test could have.
+     */
+    @org.springframework.beans.factory.annotation.Autowired
     public CloudGateway(OwnClawConfig config, ObjectMapper mapper, EgressLedger ledger) {
         this(new AnthropicProvider(config, mapper), new OpenAiProvider(config, mapper),
                 config, ledger, mapper);
