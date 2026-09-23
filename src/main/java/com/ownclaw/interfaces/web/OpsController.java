@@ -190,10 +190,6 @@ public class OpsController {
     // ── actions ──
 
     /**
-     * Skill maintenance. A dry run by default: {@code POST /api/ops/skills/maintenance} shows
-     * what it would retire and why, and only {@code ?apply=true} moves anything.
-     */
-    /**
      * Python environments whose skill no longer exists. A dry run by default: it lists them with
      * sizes; only {@code ?apply=true} removes anything. On 2026-09-23 this was 45.7 GB of a
      * 99 GB disk.
@@ -202,21 +198,35 @@ public class OpsController {
     public ResponseEntity<?> pruneSkillEnvironments(
             @RequestParam(required = false, defaultValue = "false") boolean apply) {
         var orphans = skillMaintenance.pruneOrphanedEnvironments(!apply);
-        long bytes = orphans.stream().mapToLong(o -> o.bytes()).sum();
+        long total = orphans.stream().mapToLong(o -> o.bytes()).sum();
+        long freed = orphans.stream().filter(o -> o.removed()).mapToLong(o -> o.bytes()).sum();
+        long stillThere = orphans.stream().filter(o -> !o.removed()).count();
         var out = new LinkedHashMap<String, Object>();
         out.put("dryRun", !apply);
         out.put("count", orphans.size());
-        out.put("totalMB", bytes / (1024 * 1024));
+        out.put("totalMB", total / (1024 * 1024));
+        if (apply) {
+            out.put("removed", orphans.size() - stillThere);
+            out.put("freedMB", freed / (1024 * 1024));
+        }
         out.put("orphans", orphans.stream().map(o -> Map.of(
                 "skill", o.skill(), "dir", o.dir().toString(),
-                "mb", o.bytes() / (1024 * 1024))).toList());
-        out.put("note", apply
-                ? "Removed. A quarantined skill that is restored provisions its environment again "
-                  + "on its next run."
-                : "Nothing removed. Repeat with ?apply=true to reclaim the space.");
+                "mb", o.bytes() / (1024 * 1024), "removed", o.removed())).toList());
+        out.put("note", !apply
+                ? "Nothing removed. Repeat with ?apply=true to reclaim the space."
+                : stillThere == 0
+                    ? "Removed. A quarantined skill that is restored provisions its environment "
+                      + "again on its next run."
+                    : stillThere + " could not be removed and are still on disk (a file the "
+                      + "service user cannot delete, or no skill is loaded so nothing was "
+                      + "touched); see the log.");
         return ResponseEntity.ok(out);
     }
 
+    /**
+     * Skill maintenance. A dry run by default: {@code POST /api/ops/skills/maintenance} shows
+     * what it would retire and why, and only {@code ?apply=true} moves anything.
+     */
     @PostMapping("/skills/maintenance")
     public ResponseEntity<?> skillMaintenance(
             @RequestParam(required = false, defaultValue = "false") boolean apply) {

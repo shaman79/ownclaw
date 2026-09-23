@@ -124,10 +124,35 @@ public class SkillMaintenanceService {
      */
     public List<com.ownclaw.skills.PythonEnvironmentService.OrphanedEnv> pruneOrphanedEnvironments(
             boolean dryRun) {
-        Set<String> live = registry.allDynamic().stream()
-                .map(DynamicSkill::name)
-                .collect(java.util.stream.Collectors.toSet());
-        return pythonEnv.pruneOrphans(live, dryRun);
+        // Live is what is loaded OR what has a directory under generated/. The directory covers
+        // the windows the registry does not: a skill whose first pip install is still running
+        // before register(), a reload that has emptied the map and not yet refilled it, and a
+        // boot-time load that failed. Either alone was a way to delete a live environment.
+        Set<String> live = new java.util.HashSet<>();
+        registry.allDynamic().forEach(d -> live.add(d.name()));
+        try (var dirs = java.nio.file.Files.list(
+                java.nio.file.Path.of(config.getSkills().getGeneratedPath()))) {
+            dirs.filter(java.nio.file.Files::isDirectory)
+                .forEach(d -> live.add(d.getFileName().toString()));
+        } catch (Exception e) {
+            log.warn("Could not list generated skills for the prune: {}", e.getMessage());
+        }
+        var result = pythonEnv.pruneOrphans(live, dryRun);
+        if (!dryRun) {
+            for (var o : result) {
+                if (!o.removed()) continue;
+                try {
+                    // The retirement half writes skill.retired for exactly this reason: an
+                    // unattended deletion of tens of GB with nothing saying what went.
+                    eventLog.log(SYSTEM_ACTOR, null, "skill.env_pruned", "info",
+                            o.skill() + " — " + (o.bytes() / (1024 * 1024)) + " MB",
+                            "{\"dir\":\"" + o.dir() + "\"}", 0);
+                } catch (Exception e) {
+                    log.warn("Could not record the prune of {}: {}", o.skill(), e.getMessage());
+                }
+            }
+        }
+        return result;
     }
 
     // ── facts ────────────────────────────────────────────────────────────────

@@ -350,6 +350,12 @@ public class ContainerSandbox {
                         pipRequirements, StandardCharsets.UTF_8);
                 dockerfile.append("COPY requirements.txt /tmp/requirements.txt\n");
                 dockerfile.append("RUN pip install --no-cache-dir --disable-pip-version-check ");
+                // A container without --gpus has no GPU either, and this is the path an OCR skill
+                // with system_packages actually takes — the very case that filled the disk.
+                for (String a : com.ownclaw.skills.PythonEnvironmentService.indexArgs(
+                        com.ownclaw.skills.PythonEnvironmentService.gpuPresent(), pipRequirements)) {
+                    dockerfile.append(a).append(' ');
+                }
                 dockerfile.append("-r /tmp/requirements.txt && rm /tmp/requirements.txt\n");
             }
 
