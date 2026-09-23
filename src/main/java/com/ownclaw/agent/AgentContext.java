@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Carries all contextual information for a single agent execution.
@@ -51,6 +52,15 @@ public class AgentContext {
 
     /** File attachment IDs associated with the current user message. */
     private List<String> attachmentIds = List.of();
+
+    // ── the task's results, and what may be said about them ──
+
+    /** Every result this task has produced, numbered $1, $2 ... — the bytes live here only. */
+    private final List<Artifact> artifacts = new java.util.ArrayList<>();
+    /** The canary index over every PRIVATE artifact's bytes. */
+    private final com.ownclaw.privacy.PrivateIndex privateIndex = new com.ownclaw.privacy.PrivateIndex();
+    /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door. */
+    private Map<String, String> secretValues = Map.of();
 
     public AgentContext(String userId, String taskId, String originalMessage) {
         this.userId = userId;
@@ -165,6 +175,70 @@ public class AgentContext {
     public int totalTokens() { return localTokens + cloudTokens; }
 
     // ── File attachments ──
+
+    // ── artifacts ──
+
+    /**
+     * Record a result as the next artifact of this task and return it, numbered.
+     * <p>
+     * Numbering is task-wide and never resets: {@code $3} means one thing to the local
+     * executor's ledger, the cloud's descriptor and the events row, and a later delegation can
+     * forward a result an earlier one produced. A PRIVATE artifact's bytes are indexed for the
+     * canary at this moment; a PUBLIC one's are not, because they may go.
+     */
+    public synchronized Artifact addArtifact(String tool, Map<String, Object> written,
+                                             Map<String, Object> resolved, String output,
+                                             boolean success, Artifact.Decision decision) {
+        Artifact a = new Artifact(artifacts.size() + 1, tool, written, resolved, output, success,
+                decision.label(), decision.why());
+        artifacts.add(a);
+        if (a.isPrivate()) privateIndex.addPrivate(a.n(), a.output());
+        return a;
+    }
+
+    /** Every artifact so far, in handle order. Read-only; the list is the task's. */
+    public synchronized List<Artifact> artifacts() {
+        return List.copyOf(artifacts);
+    }
+
+    public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }
+
+    public Map<String, String> secretValues() { return secretValues; }
+    public void setSecretValues(Map<String, String> values) {
+        this.secretValues = values == null ? Map.of() : Map.copyOf(values);
+    }
+
+    /**
+     * Whether a canary hit is material the cloud was already given, and may go.
+     * <p>
+     * Two sources count: what the task started with — the message, the conversation summary,
+     * the preferences, the recalled memories — and the output of every PUBLIC artifact recorded
+     * BEFORE the private one that hit. The order matters. A public artifact recorded after a
+     * private one can be that private content laundered — a skill that echoes what it was given,
+     * a summary the local model wrote — and whitelisting it would let the leak through as
+     * "already public". The smtp confirmation that quotes the public digest it just sent is the
+     * case the order exists to allow; a public result quoting a private one is the case it
+     * exists to refuse. Computed on demand: hits are rare.
+     */
+    public synchronized boolean isAllowedLeak(int hitHandle, String normalisedWindow) {
+        if (normalisedWindow == null || normalisedWindow.isEmpty()) return false;
+        Function<String, String> n = com.ownclaw.privacy.PrivateIndex::normalise;
+        for (String given : new String[] {originalMessage, conversationSummary, userPreferences,
+                String.valueOf(metadata.get("relevantMemories"))}) {
+            if (given != null && n.apply(given).contains(normalisedWindow)) return true;
+        }
+        for (Artifact a : artifacts) {
+            if (a.n() >= hitHandle) break;
+            if (!a.isPrivate() && n.apply(a.output()).contains(normalisedWindow)) return true;
+        }
+        return false;
+    }
+
+    /** What a cloud call made on behalf of this task carries to the door. */
+    public com.ownclaw.llm.EgressContext egress(String purpose) {
+        return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
+                secretValues, this::isAllowedLeak);
+    }
 
     public List<String> attachmentIds() { return attachmentIds; }
     public void setAttachmentIds(List<String> ids) { this.attachmentIds = ids != null ? ids : List.of(); }
