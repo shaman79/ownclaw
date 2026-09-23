@@ -71,8 +71,16 @@ public final class SpecialActionSchemas {
                             // A JSON *string*, not a nested object: SkillManager.createSkill parses
                             // it that way, and changing that is a different change wearing this
                             // one's clothes.
-                            "parameters", ToolParam.optional("string",
-                                    "JSON object of parameter definitions, as a string."),
+                            // Required, because SkillManager rejects a missing value outright
+                            // -- and the prose that used to say so was removed from the prompt
+                            // when the tools array took over describing these. The cost of the
+                            // gap is not a clear error either: AgentLoop generates the whole
+                            // Python module with a cloud call FIRST, and only then finds out.
+                            "parameters", ToolParam.required("string",
+                                    "JSON object of parameter definitions, as a string: "
+                                            + "{\"arg\": {\"type\": ..., \"description\": ..., "
+                                            + "\"required\": ...}}. Pass {} for a skill that "
+                                            + "takes no arguments."),
                             "requirements", ToolParam.optional("string", "pip requirements, one per line."),
                             "credentials", ToolParam.optional("string", "Comma-separated vault key names."),
                             "system_packages", ToolParam.optional("string",

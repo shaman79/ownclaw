@@ -168,6 +168,13 @@ public class LocalExecutor {
             }
 
             parentContext.addLocalTokens(response.totalTokens());
+            // A local call came back, so this task is not stalled — whatever the loop does with
+            // the answer. Marking progress only after a tool EXECUTED meant that a delegation
+            // being corrected by its own guards looked identical to a hung one: each refusal
+            // costs a full local call at 60-133 seconds, and six in a row reach the 600-second
+            // watchdog with the task working normally. It would then be cancelled outright —
+            // no email, and the valve never gets the chance to hand the registry back.
+            parentContext.markProgress();
             String raw = response.content();
 
             // A native tool call is the answer; content is then usually empty and that is fine.
@@ -268,6 +275,24 @@ public class LocalExecutor {
             }
 
             // (The repeat check the comment above describes.)
+            // A reference that did not resolve. The symmetrical failure to the retyped excerpt,
+            // and until now it had no guard at all: "$1.body" (wrong field), "$2.body_text"
+            // (counting plan steps instead of results) or a reference made before the step it
+            // names all survive substituteRefs as literal text, carry no OMISSION_MARKER, and
+            // are far too short for warnIfComposed. The owner would receive an email whose
+            // entire body is the seven characters "$1.body", sent successfully, recorded green,
+            // with not one line in the log to explain it.
+            String unresolved = unresolvedRef(params);
+            if (unresolved != null) {
+                log.warn("Delegation step {}: '{}' is a reference that does not resolve — refused.",
+                        stepResults.size() + 1, unresolved);
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("The value of '" + unresolved + "' is a reference "
+                        + "that does not exist, so it would have been sent as literal text. "
+                        + describeAvailableRefs(stepResults)));
+                continue;
+            }
+
             String repeated = repeatedSideEffect(action, params, stepResults);
             if (repeated != null) {
                 messages.add(LlmMessage.assistant(raw));
@@ -285,7 +310,23 @@ public class LocalExecutor {
             // were the result. There is no honest test for that (composing text is often
             // exactly the job), so this does not block it. It leaves evidence, which is the
             // difference between a quality regression someone can find and one nobody can.
-            warnIfComposed(action.tool, params, stepResults);
+            String composed = composedPayload(action.tool, action.params, stepResults);
+            if (composed != null) {
+                log.warn("Delegation step {}: '{}' is {} characters the model wrote itself — "
+                                + "refused; a result must be forwarded, not rewritten.",
+                        stepResults.size() + 1, composed,
+                        String.valueOf(action.params.get(composed)).length());
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("STOP. The '" + composed + "' value is text you "
+                        + "wrote out yourself. A result must be forwarded exactly as it came, "
+                        + "never rewritten — rewriting is how a date, a line or a whole section "
+                        + "goes missing, and you cannot see what you dropped. "
+                        + describeAvailableRefs(stepResults)
+                        + " If none of them is what belongs here, this needs composing rather "
+                        + "than forwarding, which is not your job: stop calling this tool and "
+                        + "let the step fail."));
+                continue;
+            }
 
             // ACT: execute the tool
             statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
@@ -303,13 +344,6 @@ public class LocalExecutor {
                     toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult);
 
             stepResults.add(new StepResult(action.tool, params, toolResult, toolOk));
-
-            // The stall watchdog measures time since the last progress, and a delegation used to
-            // report none until it finished. At roughly a minute a local step, a ten-step
-            // delegation reaches the 600-second timeout and is killed for stalling while it is
-            // working normally. A completed tool call IS progress; say so, and the watchdog
-            // goes back to measuring what it was built to measure.
-            parentContext.markProgress();
 
             log.info("Delegation step {} — {} {} (result: {} chars)",
                     step + 1, action.tool, toolOk ? "OK" : "FAIL", toolResult.length());
@@ -676,7 +710,16 @@ public class LocalExecutor {
         return ExecutorAction.done(str(summary));
     }
 
-    /** Text long enough that writing it by hand means reproducing something. */
+    /**
+     * Text long enough that writing it by hand means reproducing something.
+     * <p>
+     * A warning first, and that was not enough. On 23 September the news digest went out as
+     * 2,073 characters the local model had written itself from a 2,745-character source: the
+     * log said so and the owner still read a rewritten digest. Composing prose is judgement, and
+     * judgement is the cloud's half of this architecture — so the local tier forwards results
+     * and does not author them. If a goal genuinely needs text composed, this delegation fails
+     * and the valve hands it to the tier that should have had it.
+     */
     private static final int COMPOSED_WARN_CHARS = 600;
 
     /**
@@ -688,21 +731,66 @@ public class LocalExecutor {
      * digest arrives paraphrased instead of forwarded, this line is what makes the cause
      * findable in a log rather than a mystery.
      */
-    private void warnIfComposed(String tool, Map<String, Object> params,
-                                List<StepResult> done) {
-        if (params == null || done.isEmpty()) return;
+    private String composedPayload(String tool, Map<String, Object> written,
+                                   List<StepResult> done) {
+        // The arguments as the MODEL WROTE them, before substitution. $1.body_text is the
+        // correct way to forward a field, and the substituted value never equals a whole step
+        // output, so checking the resolved map reported every correct forward as a paraphrase --
+        // which is how the one signal for a real paraphrase turns into noise. Raw, the two cases
+        // separate themselves: "$1.body_text" is thirteen characters and falls under the
+        // threshold, while a composed two-thousand-character body is identical either way.
+        if (written == null || done.isEmpty()) return null;
         var t = toolRegistry.find(tool).orElse(null);
-        if (t == null || !t.hasSideEffects()) return;
-        for (var e : params.entrySet()) {
+        if (t == null || !t.hasSideEffects()) return null;
+        for (var e : written.entrySet()) {
             if (!(e.getValue() instanceof String v) || v.length() < COMPOSED_WARN_CHARS) continue;
+            // Equal to a step's output means it was copied perfectly, which is only wasteful.
+            // A reference is the intended path and is short. Anything else is the model's own
+            // prose standing in for a result.
             boolean isAPriorResult = done.stream().anyMatch(r -> v.equals(r.output));
-            if (!isAPriorResult) {
-                log.warn("Delegation: '{}' was given {} characters in '{}' that the model wrote "
-                                + "itself — not $N, and not equal to any step's output. If this "
-                                + "was meant to forward a result, it is a paraphrase of one.",
-                        tool, v.length(), e.getKey());
+            if (!isAPriorResult) return e.getKey();
+        }
+        return null;
+    }
+
+    /** Anything still shaped like a reference after substitution did not resolve. */
+    private static final java.util.regex.Pattern UNRESOLVED =
+            java.util.regex.Pattern.compile("^\\$\\d+(\\.[A-Za-z0-9_]*)?$");
+
+    /** The parameter holding a reference that resolved to nothing, or null when none does. */
+    static String unresolvedRef(Map<String, Object> params) {
+        if (params == null) return null;
+        for (var e : params.entrySet()) {
+            if (e.getValue() instanceof String v && UNRESOLVED.matcher(v.strip()).matches()) {
+                return e.getKey();
             }
         }
+        return null;
+    }
+
+    /** What the model could have referenced, so the correction is actionable rather than a no. */
+    private String describeAvailableRefs(List<StepResult> done) {
+        if (done.isEmpty()) {
+            return "No step has produced a result yet, so there is nothing to reference.";
+        }
+        var sb = new StringBuilder("Results you can reference: ");
+        for (int i = 0; i < done.size(); i++) {
+            if (i > 0) sb.append("; ");
+            sb.append("$").append(i + 1).append(" = ").append(done.get(i).tool);
+            try {
+                var node = mapper.readTree(done.get(i).output);
+                if (node != null && node.isObject()) {
+                    var names = new ArrayList<String>();
+                    node.fieldNames().forEachRemaining(names::add);
+                    if (!names.isEmpty()) {
+                        sb.append(" (fields: ").append(String.join(", ", names)).append(")");
+                    }
+                }
+            } catch (Exception ignored) {
+                // Not JSON; $N alone is the only way to reference it, which is the default.
+            }
+        }
+        return sb.append(". Use one of those exactly, as the whole value.").toString();
     }
 
     /** The parameter that is quoting an excerpt back at us, or null when none is. */
@@ -829,7 +917,23 @@ public class LocalExecutor {
      */
     static Outcome completed(String summary, List<StepResult> results) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.success);
-        return new Outcome(summary + ledger(results) + verbatimFailures(results),
+        // A delegation can fail on one step and still have SENT THE EMAIL on another. Reporting
+        // it failed is right -- the traceback is what feeds the repair loop -- but it also hands
+        // the registry back and tells the cloud to finish the job, and "on failure, try a
+        // fundamentally different approach" then means sending a second digest. CriticAgent
+        // cannot stop it: the delegation's calls are not in the cloud's trajectory, so that send
+        // is a first-time action. So what already succeeded goes FIRST, where head-and-tail
+        // truncation cannot drop it, not as a tick buried in a ledger.
+        String head = "";
+        if (anyFailed && !results.isEmpty()) {
+            String ran = results.stream().filter(r -> r.success).map(r -> r.tool)
+                    .distinct().collect(Collectors.joining(", "));
+            if (!ran.isBlank()) {
+                head = "ALREADY DONE — these succeeded and must NOT be repeated: " + ran
+                        + ". Anything below that failed is what is left to do.\n\n";
+            }
+        }
+        return new Outcome(head + summary + ledger(results) + verbatimFailures(results),
                 toolNames(results), results.size(),
                 // A step that threw means the cloud should have the registry back: rewriting a
                 // skill from its traceback is the self-learning loop this project exists for,

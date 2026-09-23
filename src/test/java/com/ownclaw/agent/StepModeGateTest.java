@@ -6,6 +6,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.ToolCall;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -149,6 +150,88 @@ class StepModeGateTest {
         assertTrue(engine(config(true, true)).stepMode(ctx, provider(true)).localFirst(),
                 "the valve exists for a local tier that cannot manage the work, not for any "
                         + "failure anywhere in the task");
+    }
+
+    // ── a plan is not an answer, on EITHER channel ──
+
+    /** A provider that answers with whatever the test hands it. */
+    private static LlmProvider answering(boolean tools, LlmResponse canned) {
+        return new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) { return canned; }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return tools; }
+            public String name() { return "anthropic"; }
+        };
+    }
+
+    private static LlmResponse respondCall(String message) {
+        return new LlmResponse("", 10, 5, 0, 0, "tool_use",
+                List.of(new ToolCall("t1", AgentAction.RESPOND, Map.of("message", message))));
+    }
+
+    @Test
+    @DisplayName("a native respond call before any work is a reasoning failure, not an answer")
+    void nativeRespondBeforeAnyWorkIsRefused() {
+        // The channel the prompt actually teaches: under native tools it says "For respond, put
+        // the whole answer in the message argument". So a model that cannot run
+        // daily_news_digest says so by CALLING respond — which used to be returned as the final
+        // answer, ending the scheduled run COMPLETED with no email and nothing run.
+        var engine = engine(config(true, true));
+        var ctx = context(true, true);
+
+        var result = engine.decideNextActionFull(ctx,
+                answering(true, respondCall("I'll fetch today's news digest first.")));
+
+        assertEquals(AgentAction.RESPOND, result.action().tool());
+        assertEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+                "AgentLoop keys its retry off this string; without it the task ends green");
+    }
+
+    @Test
+    @DisplayName("a native respond call after real work is a real answer")
+    void nativeRespondAfterWorkIsAnAnswer() {
+        var engine = engine(config(true, true));
+        var ctx = context(true, true);
+        ctx.trajectory().record(
+                new AgentAction(AgentAction.DELEGATE, Map.of("goal", "send it"), ""),
+                AgentObservation.success(AgentAction.DELEGATE, "Digest sent.", Map.of(), 1000));
+
+        var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Sent.")));
+
+        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+                "it did the work and is reporting it; refusing that would loop forever");
+    }
+
+    @Test
+    @DisplayName("attended work can always answer directly")
+    void attendedRespondIsNeverRefused() {
+        var engine = engine(config(true, true));
+        var ctx = context(false, true);
+
+        var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Paris.")));
+
+        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+                "the user asked a question; answering it is the whole job");
+    }
+
+    @Test
+    @DisplayName("the offered set is cleared when the step does not offer tools")
+    void offeredToolsIsClearedOnTheTextPath() {
+        var ctx = context(true, true);
+
+        // A native step first: the restriction is applied and recorded.
+        engine(config(true, true)).decideNextActionFull(ctx,
+                answering(true, respondCall("...")));
+        assertNotNull(ctx.offeredTools(), "the restriction was in force on that step");
+
+        // Then native tools go off — the documented kill switch — and the step offers nothing.
+        engine(config(false, true)).decideNextActionFull(ctx,
+                answering(true, new LlmResponse("{\"tool\":\"respond\",\"params\":{}}", 1, 1)));
+
+        assertNull(ctx.offeredTools(),
+                "toolsFor is the only writer, so without an explicit clear the last restriction "
+                        + "outlives it and AgentLoop refuses every registry tool for the rest of "
+                        + "the task — a kill switch that leaves the thing it killed running");
     }
 
     // ── the health answer is settled once ──

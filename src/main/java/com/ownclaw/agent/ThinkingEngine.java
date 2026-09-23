@@ -117,6 +117,14 @@ public class ThinkingEngine {
         );
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
+        } else {
+            // toolsFor is the only place the offered set is written, so without this a task
+            // that starts on the native path and then falls back -- or that has native tools
+            // switched off mid-task by the documented kill switch -- keeps the last
+            // restriction forever, and AgentLoop refuses every registry tool for the rest of
+            // the run. A kill switch that leaves the thing it killed in place is worse than
+            // not having one.
+            context.setOfferedTools(null);
         }
 
         try {
@@ -158,9 +166,7 @@ public class ThinkingEngine {
                 // reply is a plan ("I'll fetch today's news digest first"), not an answer, and
                 // delivering it as the final answer is how this change would quietly break the
                 // owner's morning email: task COMPLETED, nothing done.
-                boolean nothingRanYet = mode.localFirst()
-                        && context.trajectory().turns().stream()
-                                .noneMatch(t -> t.observation() != null && t.observation().success());
+                boolean nothingRanYet = nothingRanYet(context, mode);
                 AgentAction answer = new AgentAction(AgentAction.RESPOND,
                         Map.of("message", response.content()),
                         nothingRanYet
@@ -177,6 +183,19 @@ public class ThinkingEngine {
             // A native tool call is unambiguous: no parsing, so no parse failure.
             if (nativeTools && response.hasToolCalls()) {
                 var call = response.toolCalls().get(0);
+                // The same guard, on the channel the prompt actually teaches. Under native
+                // tools the system prompt says "For respond: put the whole answer in the message
+                // argument" -- so a model that cannot run daily_news_digest says so by CALLING
+                // respond, not by writing prose. That took the branch below, kept the model's
+                // text as its reasoning, and AgentLoop returned COMPLETED: a scheduled run
+                // recorded green with no email and nothing run. The prose guard covered the
+                // less likely half.
+                String reasoning = response.content() == null ? "" : response.content();
+                if (AgentAction.RESPOND.equals(call.name()) && nothingRanYet(context, mode)) {
+                    log.info("Unattended task {}: refused to finish — nothing has run yet.",
+                            context.taskId());
+                    reasoning = AgentLoop.ANSWERED_WITHOUT_WORKING;
+                }
                 // Logged at INFO because otherwise there is no way to tell from outside which
                 // protocol a step used: a correct answer looks identical either way, and the
                 // token counts do not distinguish them. Without this the flag cannot be
@@ -186,8 +205,7 @@ public class ThinkingEngine {
                         call.arguments() == null ? 0 : call.arguments().size(),
                         provider.name());
                 AgentAction action = new AgentAction(call.name(),
-                        call.arguments() == null ? Map.of() : call.arguments(),
-                        response.content() == null ? "" : response.content());
+                        call.arguments() == null ? Map.of() : call.arguments(), reasoning);
                 return new ThinkResult(action, messages,
                         renderToolCallForDebug(response), response.totalTokens(),
                         response.promptTokens(), response.completionTokens(),
@@ -541,6 +559,19 @@ public class ThinkingEngine {
                     spec.inputSchema());
         });
         return specs;
+    }
+
+    /**
+     * Restricted unattended work where nothing has actually succeeded yet.
+     * <p>
+     * In that state an answer is a plan, not an answer — "I'll fetch today's news digest first"
+     * — and delivering it ends the task COMPLETED having done nothing. Shared by both channels
+     * the model can finish through, because covering one and not the other is what let this
+     * through the first time.
+     */
+    private static boolean nothingRanYet(AgentContext context, StepMode mode) {
+        return mode.localFirst() && context.trajectory().turns().stream()
+                .noneMatch(t -> t.observation() != null && t.observation().success());
     }
 
     /** Whether the local tier has already been given this task and could not finish a step. */

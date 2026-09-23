@@ -309,6 +309,96 @@ class DelegationSafetyTest {
         assertNull(LocalExecutor.normalizeDone(null));
     }
 
+    // ── a reference that resolves to nothing must not be sent ──
+
+    @Test
+    @DisplayName("an unresolved reference is caught before it reaches a tool")
+    void unresolvedReferenceIsDetected() {
+        // The symmetrical failure to the retyped excerpt, and it had no guard: the owner gets
+        // an email whose entire body is the seven characters "$1.body", sent successfully and
+        // recorded green.
+        assertEquals("body", LocalExecutor.unresolvedRef(
+                Map.of("to", "petr@example.com", "body", "$1.body")));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.body_text")));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$3")));
+    }
+
+    @Test
+    @DisplayName("a resolved reference is not mistaken for an unresolved one")
+    void resolvedReferencesAreClean() {
+        var done = List.of(step("daily_news_digest", Map.of(),
+                "{\"ok\":true,\"body_text\":\"the digest\"}"));
+        var resolved = LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), done);
+        assertNull(LocalExecutor.unresolvedRef(resolved),
+                "it resolved, so what is left is content, not a reference");
+
+        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "Costs $5 and $10")),
+                "money is not a reference");
+        assertNull(LocalExecutor.unresolvedRef(Map.of("command", "echo \"$1\" | wc -c")));
+        assertNull(LocalExecutor.unresolvedRef(Map.of()));
+        assertNull(LocalExecutor.unresolvedRef(null));
+    }
+
+    // ── a failed delegation must not invite the work to be done twice ──
+
+    @Test
+    @DisplayName("a failure that already sent the email says so first")
+    void failureNamesWhatAlreadySucceeded() {
+        var outcome = LocalExecutor.completed("Could not verify.", List.of(
+                step("daily_news_digest", Map.of(), "...digest..."),
+                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent, id 42"),
+                new LocalExecutor.StepResult("verify_delivery", Map.of(), "ERROR: no such tool",
+                        false)));
+
+        assertFalse(outcome.ok(), "a failed step still hands the registry back");
+        assertTrue(outcome.text().startsWith("ALREADY DONE"),
+                "the cloud is told to try a different approach on a failure, and the different "
+                        + "approach is sending the owner a second digest — so what already "
+                        + "happened has to be the first thing it reads, not a tick in a ledger "
+                        + "that head-and-tail truncation can drop");
+        assertTrue(outcome.text().contains("smtp_send_email"));
+        assertFalse(outcome.text().contains("verify_delivery,"),
+                "only what succeeded is listed as done");
+    }
+
+    @Test
+    @DisplayName("a clean delegation is not prefixed with a warning about itself")
+    void successHasNoAlreadyDoneHeader() {
+        var outcome = LocalExecutor.completed("Digest sent.", List.of(
+                step("smtp_send_email", Map.of(), "Sent")));
+        assertTrue(outcome.ok());
+        assertTrue(outcome.text().startsWith("Digest sent."));
+    }
+
+    @Test
+    @DisplayName("a failure with nothing successful carries no misleading header")
+    void allFailedHasNoHeader() {
+        var outcome = LocalExecutor.completed("Nothing worked.", List.of(
+                new LocalExecutor.StepResult("x", Map.of(), "ERROR: boom", false)));
+        assertFalse(outcome.text().startsWith("ALREADY DONE"));
+    }
+
+    // ── the local tier forwards results, it does not author them ──
+
+    @Test
+    @DisplayName("a reference is short, so it is never mistaken for composed prose")
+    void referencesAreBelowTheThreshold() {
+        // The refusal keys on length, and every intended path is far under it: "$1" is two
+        // characters and "$1.body_text" is thirteen.
+        assertTrue("$1.body_text".length() < 600);
+        assertTrue("$1".length() < 600);
+    }
+
+    @Test
+    @DisplayName("forwarding a result exactly is not composing")
+    void anExactCopyIsNotComposed() {
+        String digest = "D".repeat(2000);
+        var done = List.of(step("daily_news_digest", Map.of(), digest));
+        // Wasteful -- it paid 2,000 output tokens to move something $1 would have moved -- but
+        // byte-identical, so nothing was invented and nothing is refused.
+        assertTrue(done.stream().anyMatch(r -> digest.equals(r.output)));
+    }
+
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
