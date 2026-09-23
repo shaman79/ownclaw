@@ -249,7 +249,7 @@ public final class CloudGateway implements LlmProvider {
         }
     }
 
-    static String sha256_16(String text) {
+    public static String sha256_16(String text) {
         try {
             var md = MessageDigest.getInstance("SHA-256");
             byte[] d = md.digest((text == null ? "" : text).getBytes(StandardCharsets.UTF_8));

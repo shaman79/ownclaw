@@ -15,6 +15,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.List;
 
 /**
  * Priority-based task queue that serializes Ollama access across users.
@@ -98,6 +99,17 @@ public class TaskQueue {
      * @return a future that will contain the response (or an error message)
      */
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
+        return submit(userId, message, priority, null, List.of());
+    }
+
+    /**
+     * @param currentMessageId the chat row this task answers, so the loop can skip exactly it
+     *                         and no other; null for a scheduled or background run
+     * @param attachmentIds    the files sent with the message, bound to this task explicitly
+     *                         rather than guessed from the newest chat row
+     */
+    public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
+                                                 String currentMessageId, List<String> attachmentIds) {
         if (queueSize.get() >= maxQueuedTasks) {
             eventLog.warn(userId, null, "queue.full", "Queue full, task rejected");
             // An outcome, not a sentence. Returned as a bare string, "System busy" was
@@ -108,7 +120,8 @@ public class TaskQueue {
         }
 
         CompletableFuture<AgentResult> future = new CompletableFuture<>();
-        QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future);
+        QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future,
+                currentMessageId, attachmentIds == null ? List.of() : List.copyOf(attachmentIds));
         // With lanes off, background work stays in the interactive queue and the behaviour is
         // byte-for-byte what it was: one queue, one thread, priority order within it.
         boolean background = separateBackgroundLane && priority >= BACKGROUND_PRIORITY;
@@ -193,7 +206,8 @@ public class TaskQueue {
                     // the outcome away. That is where the scheduler lost the ability to tell a
                     // finished job from one that gave up, and so recorded every run as completed.
                     task.future().complete(
-                            agentLoop.executeFull(task.userId(), task.message(), unattended));
+                            agentLoop.executeFull(task.userId(), task.message(), unattended,
+                                    task.currentMessageId(), task.attachmentIds()));
                 } catch (Exception e) {
                     log.error("Task processing failed on the {} lane for user {}: {}",
                             laneName, task.userId(), e.getMessage(), e);
@@ -226,7 +240,9 @@ public class TaskQueue {
             String message,
             int priority,
             long enqueuedAt,
-            CompletableFuture<AgentResult> future
+            CompletableFuture<AgentResult> future,
+            String currentMessageId,
+            List<String> attachmentIds
     ) implements Comparable<QueuedTask> {
 
         @Override

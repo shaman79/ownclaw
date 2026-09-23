@@ -313,7 +313,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Persist user message BEFORE submitting to the agent loop so conversation
         // history is available when AgentLoop loads context for the LLM.
-        conversationService.saveMessage(userId, currentSessionId, "user", userMessage, attachmentIds);
+        String currentMessageId = conversationService.saveMessage(userId, currentSessionId, "user",
+                userMessage, attachmentIds);
 
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);
@@ -330,7 +331,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // answer simply never arrived. It is persisted just above, so the only way to see it
         // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
         // sendSystemToUser already does.
-        taskQueue.submit(userId, userMessage)
+        taskQueue.submit(userId, userMessage, 1, currentMessageId, attachmentIds)
                 .thenAccept(result -> {
                     String response = result.response();
                     // Persist the assistant response for conversation history

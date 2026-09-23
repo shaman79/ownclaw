@@ -166,12 +166,25 @@ public class AgentLoop {
     }
 
     public AgentResult executeFull(String userId, String message, boolean unattended) {
+        return executeFull(userId, message, unattended, null, List.of());
+    }
+
+    /**
+     * @param currentMessageId the chat row this task answers, or null for a scheduled or
+     *                         background run — which then stops inheriting the last chat row's
+     *                         files and stops dropping that row from the prior context, both
+     *                         of which the old index-0 guess did
+     * @param attachmentIds    the files sent with this turn; registered as PRIVATE artifacts
+     */
+    public AgentResult executeFull(String userId, String message, boolean unattended,
+                                   String currentMessageId, List<String> attachmentIds) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
 
         // Load conversation history so the LLM sees prior exchanges
-        loadConversationContext(context, userId);
+        loadConversationContext(context, userId, currentMessageId);
+        registerAttachments(context, attachmentIds);
 
         // Recall relevant past experiences to enrich context
         try {
@@ -259,7 +272,34 @@ public class AgentLoop {
      *   - Rolling summary of older messages (compressed by ConversationCompressor)
      *   - Last N recent messages in full (the active conversation window)
      */
-    private void loadConversationContext(AgentContext context, String userId) {
+    /**
+     * The files sent with this turn become PRIVATE artifacts: in the canary index, so the cloud
+     * cannot receive their bytes by any route, and named by handle so a delegation can hand one
+     * to a skill without the cloud reading it.
+     */
+    private void registerAttachments(AgentContext context, List<String> attachmentIds) {
+        List<String> ids = attachmentIds == null ? List.of() : attachmentIds;
+        context.setAttachmentIds(ids);
+        for (String id : ids) {
+            try {
+                Map<String, Object> info = fileStorage.getFileInfo(id);
+                if (info == null) continue;
+                String name = String.valueOf(info.get("original_name"));
+                String ct = String.valueOf(info.get("content_type"));
+                Object size = info.get("size_bytes");
+                String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
+                var why = new ArrayList<String>(List.of("attachment"));
+                why.add(ct + ", " + size + " bytes" + (text == null ? ", not text or too large" : ""));
+                context.addArtifact("attachment:" + name, Map.of("fileId", id), Map.of("fileId", id),
+                        text == null ? "" : text, true,
+                        new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, why));
+            } catch (Exception e) {
+                log.debug("Could not register attachment {}: {}", id, e.getMessage());
+            }
+        }
+    }
+
+    private void loadConversationContext(AgentContext context, String userId, String currentMessageId) {
         try {
             String sessionId = conversationService.getCurrentSession(userId);
 
@@ -271,15 +311,6 @@ public class AgentLoop {
             // so it will be at index 0 (DESC order). Skip it and reverse the rest to chronological.
             List<Map<String, Object>> recent = conversationService.getRecentMessages(
                     userId, sessionId, CONVERSATION_CONTEXT_MESSAGES + 1);
-
-            // Capture attachment IDs from the current message (index 0) for skill/tool access
-            if (!recent.isEmpty()) {
-                String currentMsgId = (String) recent.getFirst().get("id");
-                if (currentMsgId != null) {
-                    List<String> attIds = fileStorage.getMessageAttachments(currentMsgId);
-                    context.setAttachmentIds(attIds);
-                }
-            }
 
             StringBuilder sb = new StringBuilder();
 
@@ -293,10 +324,14 @@ public class AgentLoop {
             // Messages are included in FULL — no truncation. Cutting mid-sentence can cause
             // the LLM to misunderstand what was said. The ConversationCompressor already keeps
             // the overall context bounded by summarizing older messages.
-            if (recent.size() > 1) {
+            if (recent.size() > 1 || (recent.size() == 1 && currentMessageId == null)) {
                 sb.append("### Recent conversation\n");
-                for (int i = recent.size() - 1; i >= 1; i--) {
+                for (int i = recent.size() - 1; i >= 0; i--) {
                     Map<String, Object> row = recent.get(i);
+                    // Skip the row this task answers -- it is already the task text -- and only
+                    // that one. Index 0 used to be skipped unconditionally, which on a scheduled
+                    // or background run, where no row is current, dropped the newest message.
+                    if (currentMessageId != null && currentMessageId.equals(row.get("id"))) continue;
                     String role = (String) row.get("role");
                     String content = (String) row.get("content");
                     sb.append(role.toUpperCase()).append(": ").append(content).append("\n");
@@ -309,19 +344,13 @@ public class AgentLoop {
                             String fileName = (String) att.get("original_name");
                             String fileId = (String) att.get("id");
                             String ct = (String) att.get("content_type");
-                            sb.append("[Attached file: ").append(fileName);
-
-                            // For text files, inline the content so the LLM can reason over it
-                            if (fileStorage.isTextContent(ct)) {
-                                String text = fileStorage.readAsText(fileId);
-                                if (text != null) {
-                                    sb.append("]\n```\n").append(text).append("\n```\n");
-                                } else {
-                                    sb.append(" (file too large to inline)]\n");
-                                }
-                            } else {
-                                sb.append(" (binary, ").append(att.get("size_bytes")).append(" bytes)]\n");
-                            }
+                            // Never inlined. A file is PRIVATE: its bytes went to the cloud on
+                            // every later task of the session, up to 100 KB each, for as long as
+                            // the row stayed in the window. A skill reads it on the turn it was
+                            // sent; the cloud sees that it exists.
+                            sb.append("[Attached file: ").append(fileName)
+                              .append(" (").append(ct).append(", ").append(att.get("size_bytes"))
+                              .append(" bytes) — PRIVATE; skills read it on the turn it was sent]\n");
                         }
                     }
                 }
@@ -1030,11 +1059,6 @@ public class AgentLoop {
             // really broke is a better test case than any input we could invent. Successes stay
             // counters only — there is no reason to store the arguments of every call that
             // worked, and doing so would put far more of the user's data in the database.
-            curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
-                    observation.success(), observation.durationMs(),
-                    observation.success() ? null : action.params(),
-                    observation.success() ? null : observation.output());
-
             if (observation.success()) {
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
                         action.tool() + " ✓ " + formatDurationMs(observation.durationMs()),
@@ -1130,51 +1154,42 @@ public class AgentLoop {
         );
 
         long startMs = System.currentTimeMillis();
+        ToolResult result;
         try {
-            ToolResult result = tool.execute(action.params(), execCtx);
-            long durationMs = System.currentTimeMillis() - startMs;
-
-            // If this tool was tracked as long-running, finalize it
-            if (longRunningTaskManager.isActive(context.taskId())) {
-                if (result.success()) {
-                    longRunningTaskManager.complete(context.taskId(),
-                            truncate(result.output(), 200));
-                } else {
-                    longRunningTaskManager.fail(context.taskId(),
-                            truncate(result.output(), 200));
-                }
-            }
-
-            if (result.success()) {
-                return AgentObservation.success(
-                        action.tool(),
-                        result.output(),
-                        result.structured(),
-                        durationMs
-                );
-            } else {
-                return AgentObservation.failure(
-                        action.tool(),
-                        result.output(),
-                        result.structured(),
-                        durationMs
-                );
-            }
+            result = tool.execute(action.params(), execCtx);
         } catch (Exception e) {
-            long durationMs = System.currentTimeMillis() - startMs;
             log.error("Tool '{}' threw exception: {}", action.tool(), e.getMessage(), e);
-
-            // Finalize as failed if tracked
-            if (longRunningTaskManager.isActive(context.taskId())) {
-                longRunningTaskManager.fail(context.taskId(), e.getMessage());
-            }
-
-            return AgentObservation.failure(
-                    action.tool(),
-                    "Tool execution error: " + e.getMessage(),
-                    durationMs
-            );
+            result = ToolResult.failure("Tool execution error: " + e.getMessage());
         }
+        long durationMs = System.currentTimeMillis() - startMs;
+
+        // The record, and the substitution at the source. This is the only place a result on
+        // the attended path enters the trajectory, and it is before the critic-warning rebuild
+        // further up the loop constructs a fresh observation -- which is why the label cannot be
+        // a flag on the observation: that rebuild would drop it. The bytes go to the task's
+        // store; what goes on is either the bytes (PUBLIC) or the descriptor (PRIVATE), and
+        // nothing downstream -- the renderers, the progress summary, the episode, the events
+        // rows, the repair evidence -- ever sees the other.
+        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(),
+                !context.attachmentIds().isEmpty(), false, action.params(), context.artifacts());
+        Artifact artifact = context.addArtifact(tool.name(), action.params(), action.params(),
+                result.output(), result.success(), decision);
+
+        // Usage, with the raw error: the curator's row is the owner's diagnostic and is read
+        // through ops; the label on it is what keeps it out of the cloud's repair prompt.
+        curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
+                result.success(), durationMs,
+                result.success() ? null : action.params(),
+                result.success() ? null : result.output(), artifact.label());
+
+        // If this tool was tracked as long-running, finalize it -- with the shaped text.
+        if (longRunningTaskManager.isActive(context.taskId())) {
+            String shown = truncate(artifact.isPrivate() ? artifact.describe() : result.output(), 200);
+            if (result.success()) longRunningTaskManager.complete(context.taskId(), shown);
+            else longRunningTaskManager.fail(context.taskId(), shown);
+        }
+
+        return Artifact.asObservation(artifact, result, durationMs);
     }
 
     /**
@@ -2261,6 +2276,19 @@ public class AgentLoop {
             details.put("durationMs", obs.durationMs());
             details.put("localTokens", context.localTokens());
             details.put("cloudTokens", context.cloudTokens());
+            // Metadata only, same as the ledger: handle, label, size, hash, why. Never content.
+            if (action.isDelegate()) {
+                Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
+                if (arts != null) details.put("artifacts", arts);
+            } else if (!action.isSpecialAction()) {
+                context.lastArtifact().ifPresent(a -> {
+                    details.put("artifact", a.handle());
+                    details.put("label", a.label().name());
+                    details.put("chars", a.output().length());
+                    details.put("sha256_16", com.ownclaw.llm.CloudGateway.sha256_16(a.output()));
+                    if (!a.why().isEmpty()) details.put("why", a.why());
+                });
+            }
 
             eventLog.log(context.userId(), context.taskId(), "step",
                     obs.success() ? "info" : "warn",

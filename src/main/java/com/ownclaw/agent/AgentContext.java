@@ -204,6 +204,12 @@ public class AgentContext {
         return java.util.Collections.unmodifiableList(artifacts);
     }
 
+    /** The most recently recorded artifact — the one the step just executed. */
+    public synchronized java.util.Optional<Artifact> lastArtifact() {
+        return artifacts.isEmpty() ? java.util.Optional.empty()
+                : java.util.Optional.of(artifacts.get(artifacts.size() - 1));
+    }
+
     public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }
 
     public Map<String, String> secretValues() { return secretValues; }
