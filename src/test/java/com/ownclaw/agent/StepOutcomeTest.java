@@ -19,8 +19,13 @@ class StepOutcomeTest {
     }
 
     private static Map<String, Object> outcome(AgentObservation obs, Optional<Artifact> claimed) {
+        return outcome(obs, claimed, false, Map.of());
+    }
+
+    private static Map<String, Object> outcome(AgentObservation obs, Optional<Artifact> claimed,
+                                               boolean afterPrivateRead, Map<String, String> secrets) {
         var d = new LinkedHashMap<String, Object>();
-        AgentLoop.stepOutcome(d, obs, claimed);
+        AgentLoop.stepOutcome(d, obs, claimed, afterPrivateRead, secrets);
         return d;
     }
 
@@ -48,7 +53,7 @@ class StepOutcomeTest {
     void successIsQuiet() {
         var pub = artifact(Label.PUBLIC, "{\"ok\": true}", true, false);
         var d = outcome(AgentObservation.success("x", "{\"ok\": true}", Map.of(), 5), Optional.of(pub));
-        assertFalse(d.containsKey("reportedFailure"));
+        assertEquals(false, d.get("reportedFailure"), "always written, so a missing key means an old row");
         assertFalse(d.containsKey("reason"));
         assertEquals(false, d.get("indexed"));
     }
@@ -59,6 +64,47 @@ class StepOutcomeTest {
         var d = outcome(AgentObservation.failure("delegate",
                 "Delegation incomplete: Local LLM call failed: done_reason=length", 5), Optional.empty());
         assertTrue(String.valueOf(d.get("reason")).contains("done_reason=length"));
+    }
+
+    @Test
+    @DisplayName("a delegation that failed after reading private data records no excerpt")
+    void taintedDelegationHasNoExcerpt() {
+        String failure = "Delegation incomplete: Local LLM call failed: [ollama] HTTP 500: "
+                + "error parsing tool call: raw='{\"body\":\"Dear customer, your mortgage account 55-019\"}'";
+        var d = outcome(AgentObservation.failure("delegate", failure, 5), Optional.empty(), true, Map.of());
+        assertFalse(d.containsKey("reason"));
+        assertTrue(outcome(AgentObservation.failure("delegate", failure, 5), Optional.empty())
+                .containsKey("reason"), "an untainted one keeps its reason");
+    }
+
+    @Test
+    @DisplayName("a vault value in a failure is scrubbed before it is stored")
+    void secretsAreScrubbed() {
+        String secret = "hunter2-very-secret-pass";
+        String failure = "Traceback ... smtplib login failed for user:" + secret + "@smtp " + "x".repeat(500);
+        var d = outcome(AgentObservation.failure("smtp_send_email", failure, 5), Optional.empty(), false,
+                Map.of("SMTP_PASS", secret));
+        assertFalse(String.valueOf(d.get("reason")).contains(secret));
+        assertTrue(String.valueOf(d.get("reason")).contains("«vault:SMTP_PASS»"));
+    }
+
+    @Test
+    @DisplayName("a real step row: after a private read a failed delegation keeps no excerpt; vault values never")
+    void stepRowWiring() {
+        var ctx = new AgentContext("u1", "t1", "check the bank mail");
+        String secret = "hunter2-very-secret";
+        ctx.setSecretValues(Map.of("IMAP_PASS", secret));
+        var delegate = new AgentAction(AgentAction.DELEGATE, Map.of("goal", "summarise the mail"), "");
+        String failure = "Local LLM call failed: login " + secret + " raw='Dear customer, account 55-019'";
+
+        var before = AgentLoop.stepDetails(ctx, delegate, AgentObservation.failure("delegate", failure, 5), 1);
+        assertTrue(before.containsKey("reason"));
+        assertFalse(String.valueOf(before.get("reason")).contains(secret));
+        assertEquals(false, before.get("reportedFailure"));
+
+        ctx.markLocalTierReadPrivate();
+        var after = AgentLoop.stepDetails(ctx, delegate, AgentObservation.failure("delegate", failure, 5), 2);
+        assertFalse(after.containsKey("reason"), String.valueOf(after));
     }
 
     @Test

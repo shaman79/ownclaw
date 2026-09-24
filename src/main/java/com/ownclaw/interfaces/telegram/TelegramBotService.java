@@ -291,7 +291,9 @@ public class TelegramBotService {
         // Submit to task queue — orchestrator handles conversation persistence
         taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
             String response = result.response();
-            conversationService.saveMessage(userId, currentSessionId, "assistant", response);
+            // With its task id, so the web chat links this answer to what the task did.
+            conversationService.saveMessage(userId, currentSessionId, "assistant", response,
+                    java.util.List.of(), result.taskId());
             sendMessage(chatId, response);
         });
     }

@@ -35,6 +35,8 @@ public class TaskTraceService {
                     + "access can send data elsewhere; that is not recorded.",
             "The check looks for runs of 32 or more characters of private text (or whole values "
                     + "of 8 or more). A paraphrase, or a short value such as a PIN, is not caught.",
+            "Private text the cloud already had from elsewhere (your own message, a public "
+                    + "result, a tool's description) is not counted as found.",
             "The local model's server is assumed to be private; nothing checks that.");
 
     /** The canary cannot look for anything shorter (PrivateIndex's minimum). */
@@ -60,13 +62,15 @@ public class TaskTraceService {
      * The whole page, from the task's rows in id order. Timestamps have one-second resolution, so
      * id order is the only order that keeps a step next to the cloud calls that led to it.
      * <p>
-     * Egress rows are grouped with the next step row: the calls that chose that step. A step row
-     * holds RUNNING token totals, so a step's local tokens are the difference from the previous
-     * step. The tier follows: a delegation ran on the local model; any other step was chosen by
-     * the cloud if cloud calls or cloud tokens preceded it, or by the local model if only local
-     * tokens rose (the fallback when the cloud is down).
+     * Egress rows are grouped with the next step row: the calls made on the way to that step.
+     * Only a "think" call that was answered chose it; the others wrote code (codegen) or read a skill
+     * (analyze) for it. A step row holds RUNNING token totals, so its local tokens are the
+     * difference from the previous step. A delegation ran on the local model only if local
+     * tokens rose. A task from before requests were recorded has no egress rows at all; then the
+     * cloud chose a step if its cloud tokens rose.
      */
     static Map<String, Object> build(List<Map<String, Object>> rows) {
+        boolean recorded = rows.stream().anyMatch(r -> "egress".equals(r.get("event_type")));
         var steps = new ArrayList<Map<String, Object>>();
         var calls = new ArrayList<Map<String, Object>>();
         var callIds = new ArrayList<Long>();
@@ -79,7 +83,7 @@ public class TaskTraceService {
         double cost = 0;
         boolean costIsFloor = false;
         long prevCloud = 0, prevLocal = 0;
-        Map<String, Object> outcome = null, answer = null;
+        Map<String, Object> outcome = null;
         String request = null;
 
         for (var row : rows) {
@@ -108,7 +112,7 @@ public class TaskTraceService {
                     cost += d.path("costUsd").asDouble();
                     // A failed call is recorded with no tokens and no cost, so a total over it
                     // is a lower bound.
-                    if ("ERROR".equals(d.path("decision").asText())) costIsFloor = true;
+                    if (isError(c)) costIsFloor = true;
                 }
                 case "step" -> {
                     if (d == null) continue;
@@ -120,25 +124,29 @@ public class TaskTraceService {
                     int stepNo = d.path("step").asInt();
                     for (var c : pending) c.put("step", stepNo);
 
-                    String decidedBy = !pending.isEmpty() || cloudDelta > 0 ? "cloud"
-                            : localDelta > 0 ? "local" : null;
+                    boolean cloudChose = recorded
+                            ? pending.stream().anyMatch(c -> "think".equals(c.get("purpose")) && answered(c))
+                            : cloudDelta > 0;
+                    String decidedBy = cloudChose ? "cloud" : localDelta > 0 ? "local" : null;
                     String tool = d.path("tool").asText();
-                    boolean reported = d.path("reportedFailure").asBoolean(false);
+                    // Absent on rows written before it was recorded: unknown, not "no".
+                    Boolean reported = d.has("reportedFailure") ? d.path("reportedFailure").asBoolean() : null;
 
                     var s = new LinkedHashMap<String, Object>();
                     s.put("step", stepNo);
                     s.put("at", at);
                     s.put("tool", tool);
-                    s.put("tier", "delegate".equals(tool) ? "local" : decidedBy);
+                    s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
-                    s.put("ok", d.path("success").asBoolean(false) && !reported);
+                    s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));
                     s.put("reportedFailure", reported);
                     s.put("reason", d.hasNonNull("reason") ? d.path("reason").asText() : null);
                     s.put("durationMs", d.path("durationMs").asLong());
-                    s.put("cloudCalls", pending.size());
+                    s.put("cloudCalls", recorded ? pending.size() : null);
                     s.put("cloudTokens", pending.isEmpty() ? cloudDelta : billed(pending));
                     s.put("localTokens", localDelta);
                     s.put("costUsd", pending.isEmpty() ? null : costOf(pending));
+                    s.put("costIsFloor", pending.stream().anyMatch(TaskTraceService::isError));
                     var produced = stepArtifacts(d);
                     s.put("artifacts", produced);
                     for (var a : produced) { artifacts.add(new LinkedHashMap<>(a)); artifactIds.add(id); }
@@ -160,15 +168,6 @@ public class TaskTraceService {
                         outcome.put("cloudTokens", d.path("cloudTokens").asLong());
                         outcome.put("localTokens", d.path("localTokens").asLong());
                         outcome.put("at", at);
-                        long localDelta = Math.max(0, d.path("localTokens").asLong() - prevLocal);
-                        if (!pending.isEmpty() || localDelta > 0) {
-                            answer = new LinkedHashMap<>();
-                            answer.put("cloudCalls", pending.size());
-                            answer.put("cloudTokens", billed(pending));
-                            answer.put("localTokens", localDelta);
-                            answer.put("costUsd", pending.isEmpty() ? null : costOf(pending));
-                            answer.put("tier", pending.isEmpty() ? "local" : "cloud");
-                        }
                     }
                     pending.clear();
                 }
@@ -177,28 +176,36 @@ public class TaskTraceService {
         }
 
         // The canary line for each artifact: how many later requests were checked for its text,
-        // and in how many it was found. Only for a PRIVATE result the canary actually indexed and
-        // long enough to look for -- anything else is shown as not checked, never as clean.
+        // in how many it was found, and how many of those went out anyway (the check was only
+        // observing). Only for a PRIVATE result the canary actually indexed and long enough to
+        // look for -- anything else is shown as not checked, never as clean.
         for (int i = 0; i < artifacts.size(); i++) {
             var a = artifacts.get(i);
             boolean checkable = "PRIVATE".equals(a.get("label")) && Boolean.TRUE.equals(a.get("indexed"))
                     && ((Number) a.get("chars")).longValue() >= MIN_CHECKABLE_CHARS;
             if (!checkable) { a.put("canary", null); continue; }
             String prefix = a.get("handle") + " in part";
-            int checked = 0, hits = 0;
+            int checked = 0, hits = 0, leaked = 0;
             for (int j = 0; j < calls.size(); j++) {
                 if (callIds.get(j) <= artifactIds.get(i)) continue;
                 var c = calls.get(j);
-                Object refusal = c.get("refusal");
+                String refusal = c.get("refusal") == null ? null : String.valueOf(c.get("refusal"));
+                boolean named = refusal != null && refusal.startsWith("{{");
                 // A vault refusal happens before the canary runs, so it checked nothing.
-                if ("REFUSED".equals(c.get("decision"))
-                        && (refusal == null || !String.valueOf(refusal).startsWith("{{"))) continue;
+                if ("REFUSED".equals(c.get("decision")) && !named) continue;
+                // The canary stops at its first hit, and the record names only that one; any
+                // other private result in the same request was not looked for.
+                if (named && !refusal.startsWith(prefix)) continue;
                 checked++;
-                if (refusal != null && String.valueOf(refusal).startsWith(prefix)) hits++;
+                if (named) {
+                    hits++;
+                    if (!"REFUSED".equals(c.get("decision"))) leaked++;
+                }
             }
             var canary = new LinkedHashMap<String, Object>();
             canary.put("checkedCalls", checked);
             canary.put("hits", hits);
+            canary.put("leaked", leaked);
             a.put("canary", canary);
         }
 
@@ -219,12 +226,19 @@ public class TaskTraceService {
         out.put("outcome", outcome);
         out.put("totals", totals);
         out.put("steps", steps);
-        out.put("answer", answer);
-        out.put("inProgress", outcome == null && !pending.isEmpty());
         out.put("calls", calls);
         out.put("artifacts", artifacts);
         out.put("notObserved", NOT_OBSERVED);
         return out;
+    }
+
+    /** Whether a request came back with a reply: a refused one never left, a failed one got none. */
+    private static boolean answered(Map<String, Object> c) {
+        return "SENT".equals(c.get("decision")) || "OBSERVED_LEAK".equals(c.get("decision"));
+    }
+
+    private static boolean isError(Map<String, Object> c) {
+        return "ERROR".equals(c.get("decision"));
     }
 
     private static Map<String, Object> call(JsonNode d, String at) {
@@ -237,6 +251,8 @@ public class TaskTraceService {
             else if (kind.startsWith("schema:")) toolChars += chars;
             else { msgCount++; msgChars += chars; }
         }
+        // A call that failed has no response, so no tokens and no cost: not recorded, not zero.
+        boolean error = "ERROR".equals(d.path("decision").asText());
         var c = new LinkedHashMap<String, Object>();
         c.put("at", at);
         c.put("step", null);
@@ -244,11 +260,11 @@ public class TaskTraceService {
         c.put("model", d.path("model").asText(null));
         c.put("decision", d.path("decision").asText());
         c.put("bytesOut", d.path("bytesOut").asLong());
-        c.put("promptTokens", d.path("promptTokens").asLong());
-        c.put("completionTokens", d.path("completionTokens").asLong());
-        c.put("cacheReadTokens", d.path("cacheReadTokens").asLong());
-        c.put("cacheWriteTokens", d.path("cacheWriteTokens").asLong());
-        c.put("costUsd", d.path("costUsd").asDouble());
+        c.put("promptTokens", error ? null : d.path("promptTokens").asLong());
+        c.put("completionTokens", error ? null : d.path("completionTokens").asLong());
+        c.put("cacheReadTokens", error ? null : d.path("cacheReadTokens").asLong());
+        c.put("cacheWriteTokens", error ? null : d.path("cacheWriteTokens").asLong());
+        c.put("costUsd", error ? null : d.path("costUsd").asDouble());
         c.put("scrubs", d.path("scrubs").asInt());
         c.put("refusal", d.hasNonNull("refusal") ? d.path("refusal").asText() : null);
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
@@ -282,15 +298,16 @@ public class TaskTraceService {
     private static long billed(List<Map<String, Object>> group) {
         long t = 0;
         for (var c : group) {
-            t += ((Number) c.get("promptTokens")).longValue() + ((Number) c.get("completionTokens")).longValue()
-                    + ((Number) c.get("cacheReadTokens")).longValue() + ((Number) c.get("cacheWriteTokens")).longValue();
+            for (String k : List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens")) {
+                if (c.get(k) instanceof Number n) t += n.longValue();
+            }
         }
         return t;
     }
 
     private static double costOf(List<Map<String, Object>> group) {
         double t = 0;
-        for (var c : group) t += ((Number) c.get("costUsd")).doubleValue();
+        for (var c : group) if (c.get("costUsd") instanceof Number n) t += n.doubleValue();
         return t;
     }
 

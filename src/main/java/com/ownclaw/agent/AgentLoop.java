@@ -2310,53 +2310,61 @@ public class AgentLoop {
     private void persistStep(AgentContext context, AgentAction action,
                              AgentObservation obs, int step) {
         try {
-            var details = new LinkedHashMap<String, Object>();
-            details.put("step", step);
-            details.put("tool", action.tool());
-            details.put("success", obs.success());
-            details.put("durationMs", obs.durationMs());
-            details.put("localTokens", context.localTokens());
-            details.put("cloudTokens", context.cloudTokens());
-            java.util.Optional<Artifact> claimed = java.util.Optional.empty();
-            // Metadata only, same as the ledger: handle, label, size, hash, why. Never content.
-            if (action.isDelegate()) {
-                Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
-                if (arts != null) {
-                    details.put("artifacts", arts);
-                    // The delegation listed its own; no later step may claim them again. Only
-                    // when it actually ran -- a delegate step that never reached the executor
-                    // recorded nothing, and claiming there would swallow an earlier artifact.
-                    context.claimAllArtifacts();
-                }
-            } else if (!action.isSpecialAction()) {
-                // Only when THIS step recorded one. A refused, not-found or critic-blocked step
-                // records nothing, and attributing the previous step's handle, label and hash to
-                // it made the ops page say a tool ran that never did.
-                //
-                // Claimed, not counted. The first attempt compared the store's size against a
-                // count the caller had just derived from that same store on the same thread:
-                // one expression evaluated twice, always equal, so the guard excluded nothing
-                // and the misattribution it was written to stop carried on unchanged.
-                claimed = context.lastArtifact().filter(a -> context.claimArtifact(a.n()));
-                claimed.ifPresent(a -> {
-                    details.put("artifact", a.handle());
-                    details.put("label", a.label().name());
-                    details.put("chars", a.output().length());
-                    details.put("sha256_16", com.ownclaw.llm.CloudGateway.sha256_16(a.output()));
-                    if (!a.why().isEmpty()) details.put("why", a.why());
-                });
-            }
-            stepOutcome(details, obs, claimed);
-
             eventLog.log(context.userId(), context.taskId(), "step",
                     obs.success() ? "info" : "warn",
                     action.tool() + (obs.success() ? " ok" : " FAILED")
                             + " (" + obs.durationMs() + "ms)",
-                    JSON.writeValueAsString(details), 0);
+                    JSON.writeValueAsString(stepDetails(context, action, obs, step)), 0);
         } catch (Exception e) {
             log.debug("Could not persist step {} of task {}: {}",
                     step, context.taskId(), e.getMessage());
         }
+    }
+
+    /** A step row's details. Claims the step's artifact on the context, so call it once. */
+    static Map<String, Object> stepDetails(AgentContext context, AgentAction action,
+                                           AgentObservation obs, int step) {
+        var details = new LinkedHashMap<String, Object>();
+        details.put("step", step);
+        details.put("tool", action.tool());
+        details.put("success", obs.success());
+        details.put("durationMs", obs.durationMs());
+        details.put("localTokens", context.localTokens());
+        details.put("cloudTokens", context.cloudTokens());
+        java.util.Optional<Artifact> claimed = java.util.Optional.empty();
+        // Metadata only, same as the ledger: handle, label, size, hash, why. Never content.
+        if (action.isDelegate()) {
+            Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
+            if (arts != null) {
+                details.put("artifacts", arts);
+                // The delegation listed its own; no later step may claim them again. Only
+                // when it actually ran -- a delegate step that never reached the executor
+                // recorded nothing, and claiming there would swallow an earlier artifact.
+                context.claimAllArtifacts();
+            }
+        } else if (!action.isSpecialAction()) {
+            // Only when THIS step recorded one. A refused, not-found or critic-blocked step
+            // records nothing, and attributing the previous step's handle, label and hash to
+            // it made the ops page say a tool ran that never did.
+            //
+            // Claimed, not counted. The first attempt compared the store's size against a
+            // count the caller had just derived from that same store on the same thread:
+            // one expression evaluated twice, always equal, so the guard excluded nothing
+            // and the misattribution it was written to stop carried on unchanged.
+            claimed = context.lastArtifact().filter(a -> context.claimArtifact(a.n()));
+            claimed.ifPresent(a -> {
+                details.put("artifact", a.handle());
+                details.put("label", a.label().name());
+                details.put("chars", a.output().length());
+                details.put("sha256_16", com.ownclaw.llm.CloudGateway.sha256_16(a.output()));
+                if (!a.why().isEmpty()) details.put("why", a.why());
+            });
+        }
+        // A delegation's failure text is its own words plus whatever the local model and its
+        // server said, which after a private read can quote that data -- so then, none.
+        stepOutcome(details, obs, claimed,
+                action.isDelegate() && context.localTierReadPrivate(), context.secretValues());
+        return details;
     }
 
     /**
@@ -2364,19 +2372,26 @@ public class AgentLoop {
      * for the canary, whether the skill reported a failure the loop counted as success, and --
      * for a failed step -- an excerpt of how it failed.
      * <p>
-     * The excerpt is the observation the cloud model is shown next, so it holds no class of text
-     * that does not already leave; and none at all for a PRIVATE step, whose observation is its
-     * descriptor. Without it a failure's reason reached only the log and the model -- this
-     * morning's "context window full" delegation left a row that said FAILED and nothing else.
+     * reportedFailure is always written, so a row without it is one from before it existed and
+     * the page can say "not recorded" instead of reading its absence as "no".
+     * <p>
+     * The excerpt is kept locally and shown to the owner, so it must not hold what the gateway
+     * would keep from the cloud: vault values are scrubbed out, and there is none at all for a
+     * PRIVATE step or a delegation after the local model read private data -- whose failure text
+     * can quote it. Without it a failure's reason reached only the log and the model -- the
+     * 2026-09-24 "context window full" delegation left a row that said FAILED and nothing else.
      */
     static void stepOutcome(Map<String, Object> details, AgentObservation obs,
-                            java.util.Optional<Artifact> claimed) {
+                            java.util.Optional<Artifact> claimed, boolean afterPrivateRead,
+                            Map<String, String> secrets) {
         claimed.ifPresent(a -> details.put("indexed", a.indexed()));
         boolean reported = claimed.map(a -> a.success() && !a.succeeded()).orElse(false);
-        if (reported) details.put("reportedFailure", true);
-        boolean privateStep = claimed.map(Artifact::isPrivate).orElse(false);
-        if ((!obs.success() || reported) && !privateStep) {
-            details.put("reason", failureExcerpt(obs.output()));
+        details.put("reportedFailure", reported);
+        boolean privateText = afterPrivateRead || claimed.map(Artifact::isPrivate).orElse(false);
+        if ((!obs.success() || reported) && !privateText) {
+            // Scrubbed before cutting, so a cut cannot leave half a secret the scrub misses.
+            String text = com.ownclaw.llm.CloudGateway.scrub(obs.output(), secrets).text();
+            details.put("reason", failureExcerpt(text));
         }
     }
 

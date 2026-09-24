@@ -253,7 +253,7 @@ public final class CloudGateway implements LlmProvider {
 
     // ── scrubbing ──
 
-    record Scrubbed(String text, int count) {}
+    public record Scrubbed(String text, int count) {}
 
     /**
      * Replace every occurrence of a secret vault value with {@code «vault:KEY»}. Deterministic,
@@ -261,7 +261,7 @@ public final class CloudGateway implements LlmProvider {
      * {@link #MIN_SECRET_LENGTH} are left: they are too short to be secrets and long enough to
      * be words.
      */
-    static Scrubbed scrub(String text, Map<String, String> secrets) {
+    public static Scrubbed scrub(String text, Map<String, String> secrets) {
         if (text == null || text.isEmpty() || secrets == null || secrets.isEmpty()) {
             return new Scrubbed(text, 0);
         }

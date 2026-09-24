@@ -80,15 +80,12 @@ class TaskTraceServiceTest {
         assertEquals(5152L, steps.get(2).get("localTokens"), "the difference, not the running total");
         assertEquals(0, steps.get(2).get("cloudCalls"));
 
-        var answer = (Map<String, Object>) t.get("answer");
-        assertEquals(1, answer.get("cloudCalls"));
-        assertEquals(3010L, answer.get("cloudTokens"));
+        assertFalse(t.containsKey("answer"), "no invented 'final answer'");
         var totals = (Map<String, Object>) t.get("totals");
         assertEquals(0.06, (double) totals.get("costUsd"), 1e-9);
         assertEquals(Map.of("SENT", 3), totals.get("decisions"));
         assertEquals("Fetch the menus", t.get("request"));
         assertEquals("COMPLETED", ((Map<String, Object>) t.get("outcome")).get("reason"));
-        assertEquals(false, t.get("inProgress"));
 
         var call = list(t, "calls").get(0);
         assertEquals(1, call.get("step"));
@@ -112,6 +109,8 @@ class TaskTraceServiceTest {
         var s = list(TaskTraceService.build(rows), "steps").get(0);
         assertEquals("cloud", s.get("tier"));
         assertNull(s.get("costUsd"), "unknown is not zero");
+        assertNull(s.get("cloudCalls"), "no requests were recorded then: unknown, not 0");
+        assertNull(s.get("reportedFailure"), "not recorded then");
         assertEquals(9000L, s.get("cloudTokens"));
     }
 
@@ -129,13 +128,21 @@ class TaskTraceServiceTest {
         row("egress", egress("REFUSED", 0, 0, 0, "vault:SMTP_PASS survived scrubbing"));
         var t = TaskTraceService.build(rows);
         var arts = list(t, "artifacts");
-        assertEquals(Map.of("checkedCalls", 3, "hits", 0), arts.get(0).get("canary"),
+        assertEquals(Map.of("checkedCalls", 3, "hits", 0, "leaked", 0), arts.get(0).get("canary"),
                 "a vault refusal happens before the canary runs, so it checked nothing");
         assertNull(arts.get(1).get("canary"), "an empty text cannot be looked for");
         assertNull(arts.get(2).get("canary"), "an unindexed result was never looked for");
 
         row("egress", egress("REFUSED", 0, 0, 0, "{{1}} in part 4 (user) at 10"));
-        assertEquals(Map.of("checkedCalls", 4, "hits", 1),
+        assertEquals(Map.of("checkedCalls", 4, "hits", 1, "leaked", 0),
+                list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
+
+        // OBSERVE: it went out anyway. And a request whose record names ANOTHER private result
+        // was not checked for this one -- the canary stops at its first hit.
+        row("egress", egress("OBSERVED_LEAK", 5, 5, 0.01, "{{1}} in part 4 (user) at 10"));
+        row("egress", egress("OBSERVED_LEAK", 5, 5, 0.01, "{{9}} in part 2 (user) at 3"));
+        row("egress", egress("ERROR", 0, 0, 0, "{{1}} in part 4 (user) at 10 (call then failed: IOException)"));
+        assertEquals(Map.of("checkedCalls", 6, "hits", 3, "leaked", 2),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
     }
 
@@ -150,12 +157,34 @@ class TaskTraceServiceTest {
     }
 
     @Test
-    @DisplayName("requests with no outcome yet: in progress, no outcome")
-    void inProgress() {
+    @DisplayName("only a think call that went out chose a step; code-writing and failed calls did not")
+    void whoChose() {
+        row("egress", egress("SENT", 1, 1, 0.01, null).replace("\"think\"", "\"codegen\""));
+        row("step", "{\"step\":1,\"tool\":\"skill_create\",\"success\":true,\"localTokens\":0,\"cloudTokens\":2}");
+        row("egress", egress("ERROR", 0, 0, 0, "HttpTimeoutException"));
+        row("step", "{\"step\":2,\"tool\":\"respond\",\"success\":false,\"localTokens\":0,\"cloudTokens\":2}");
+        row("egress", egress("SENT", 3, 3, 0.02, null));
+        row("step", "{\"step\":3,\"tool\":\"delegate\",\"success\":false,\"localTokens\":0,\"cloudTokens\":8}");
+        var steps = list(TaskTraceService.build(rows), "steps");
+        assertNull(steps.get(0).get("decidedBy"), "chosen by a rule, not a model; the call wrote the code");
+        assertEquals(1, steps.get(0).get("cloudCalls"));
+        assertNull(steps.get(1).get("decidedBy"), "the only call failed: nothing chose it");
+        assertEquals(true, steps.get(1).get("costIsFloor"));
+        assertEquals("cloud", steps.get(2).get("decidedBy"));
+        assertNull(steps.get(2).get("tier"), "a delegation that never reached the local model ran nowhere");
+
+        var error = list(TaskTraceService.build(rows), "calls").get(1);
+        assertNull(error.get("promptTokens"), "a failed call's tokens are not recorded, not 0");
+        assertNull(error.get("costUsd"));
+    }
+
+    @Test
+    @DisplayName("no invented answer or running state; a finished task has its outcome")
+    void outcomeOnly() {
         row("egress", egress("SENT", 1, 1, 0, null));
         var t = TaskTraceService.build(rows);
-        assertEquals(true, t.get("inProgress"));
         assertNull(t.get("outcome"));
+        assertFalse(t.containsKey("inProgress"));
     }
 
     @Test
