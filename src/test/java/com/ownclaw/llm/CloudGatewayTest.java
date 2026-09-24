@@ -185,6 +185,52 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("a SHORT private artifact is never waved through by a registry collision")
+    void aShortArtifactIsNotExcusedByTheRegistry() {
+        // The allowance exists for a 32-character run that a skill's own description happens to
+        // reproduce. An artifact of 8..31 characters is registered WHOLE, so for one of those
+        // the window IS the entire artifact, and a plain substring test against the catalogue
+        // waved the whole thing through in every part -- an account number that appears as an
+        // example in some unrelated schema, quoted back in a message, went from REFUSED to SENT.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String iban = "CZ4720100123";
+        var index = new PrivateIndex(); index.addPrivate(4, iban);
+        var tool = new ToolSpec("fx_rates", "Rates. Example account: " + iban,
+                Map.of("type", "object"));
+        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+                .withEgress(egress(index, Map.of(), (h, w) -> false));
+
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages("the statement said the account is " + iban), cfg));
+        assertTrue(provider.calls.isEmpty(), "refused before the socket opens");
+        assertEquals(4, ex.handle());
+        assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
+        // Mutation: drop the hit.length() >= WINDOW condition -> SENT, the whole artifact out.
+    }
+
+    @Test
+    @DisplayName("a vault value scrubbing could not reach refuses the call")
+    void secretsThatSurviveScrubbingAreRefused() {
+        // scrub() rewrites message text and tool DESCRIPTIONS. A schema is neither, so a secret
+        // sitting in one used to travel with a scrub count of zero and nothing to show for it.
+        // The marker itself was also unverified: a value of "redacted" would have been written
+        // out inside «vault:redacted». This is the post-condition rather than the promise.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var tool = new ToolSpec("fx_rates", "Rates.",
+                Map.of("type", "object", "example", "token=hunter2secret"));
+        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+                .withEgress(egress(new PrivateIndex(), Map.of("API_TOKEN", "hunter2secret"),
+                        (h, w) -> false));
+
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("go"), cfg));
+        assertTrue(provider.calls.isEmpty(), "checked before the socket opens");
+        assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
+        assertTrue(rows.last().refusalRef().contains("API_TOKEN"), rows.last().refusalRef());
+    }
+
+    @Test
     @DisplayName("in OBSERVE, a call that then fails still records what was observed")
     void observedLeakSurvivesAProviderFailure() {
         // Consolidating the ledger to one row moved it after the send, and a provider error

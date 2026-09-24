@@ -310,6 +310,11 @@ public class AgentLoop {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
         }
+        // Recorded by no step, so no step may report them. Without this the mark was still 0
+        // when step 1 persisted, and the first step that recorded nothing of its own -- a tool
+        // not found, a critic block -- claimed the attachment, and the ops page named it as the
+        // tool that step had run.
+        context.claimAllArtifacts();
     }
 
     private void loadConversationContext(AgentContext context, String userId, String currentMessageId) {
@@ -1176,7 +1181,11 @@ public class AgentLoop {
         // reference that resolves to nothing is refused rather than passed on: as an argument to
         // smtp_send_email, "$9" is an email whose entire body is two characters, sent
         // successfully and recorded green.
-        String unresolved = LocalExecutor.unresolvedRef(resolved);
+        // Only once this task HAS results to reference. With none, nothing was ever named $N,
+        // so a whole-value "$50" is a price the model typed, not a dangling handle -- and
+        // refusing it would fail a first step that was perfectly correct.
+        String unresolved = context.artifacts().isEmpty()
+                ? null : LocalExecutor.unresolvedRef(resolved);
         if (unresolved != null) {
             log.warn("Task {}: '{}' references a result that does not exist — refused.",
                     context.taskId(), unresolved);
@@ -1204,8 +1213,7 @@ public class AgentLoop {
         // store; what goes on is either the bytes (PUBLIC) or the descriptor (PRIVATE), and
         // nothing downstream -- the renderers, the progress summary, the episode, the events
         // rows, the repair evidence -- ever sees the other.
-        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(),
-                context.isUnattended() && !context.attachmentIds().isEmpty(), false,
+        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(), false,
                 action.params(), context.artifacts());
         // labelFor reads the arguments as WRITTEN, so a $N reference to a private artifact is
         // seen before substitution turns it into content.
@@ -2316,9 +2324,13 @@ public class AgentLoop {
             // Metadata only, same as the ledger: handle, label, size, hash, why. Never content.
             if (action.isDelegate()) {
                 Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
-                if (arts != null) details.put("artifacts", arts);
-                // The delegation listed its own; no later step may claim them again.
-                context.claimAllArtifacts();
+                if (arts != null) {
+                    details.put("artifacts", arts);
+                    // The delegation listed its own; no later step may claim them again. Only
+                    // when it actually ran -- a delegate step that never reached the executor
+                    // recorded nothing, and claiming there would swallow an earlier artifact.
+                    context.claimAllArtifacts();
+                }
             } else if (!action.isSpecialAction()) {
                 // Only when THIS step recorded one. A refused, not-found or critic-blocked step
                 // records nothing, and attributing the previous step's handle, label and hash to

@@ -82,7 +82,6 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      *
      * @param requiredCredentials what the skill declared; non-empty means it reached something
      *                            that needed a secret, and its output is that something
-     * @param taskHasAttachments  the task was given files; everything produced on it is theirs
      * @param contextTainted      an earlier step of this delegation was PRIVATE, so the local
      *                            model has read private content and anything it writes now
      *                            may carry it — into a public tool's arguments included
@@ -90,7 +89,7 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      *                            artifact makes the result PRIVATE, because it is derived from it
      * @param store               the task's artifacts so far, for resolving those references
      */
-    public static Decision labelFor(List<String> requiredCredentials, boolean taskHasAttachments,
+    public static Decision labelFor(List<String> requiredCredentials,
                                     boolean contextTainted, Map<String, Object> written,
                                     List<Artifact> store) {
         var why = new ArrayList<String>();
@@ -103,7 +102,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
             // cloud holds, and the raw text is in the skill_usage row the owner reads.
             why.add("credentials (" + requiredCredentials.size() + ")");
         }
-        if (taskHasAttachments) why.add("attachment");
+        // There was an "attachment" reason here. It could not fire: a file reaches a task only
+        // through attended chat (priority 1), and on an attended task the attachment artifact is
+        // deliberately PUBLIC so that "summarise this" still works. Gating it on unattended made
+        // it unreachable everywhere rather than at two sites; removing the gate would have taken
+        // that capability away instead. What covers the case is already here -- an unattended
+        // attachment artifact is PRIVATE where it is recorded, and anything referencing it is
+        // PRIVATE by the clause below. A reason that cannot fire is not a safeguard.
         if (contextTainted) why.add("after a private step");
         if (written != null && store != null) {
             for (Object v : written.values()) {
@@ -150,6 +155,14 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         if (!shape.fields().isEmpty()) {
             sb.append(" · fields: ").append(String.join(", ", shape.fields()));
         }
+        // How to USE it. Without this the descriptor is a dead end: the cloud is shown that
+        // 4,210 characters of menu exist and is told no way to put them in an email, so it
+        // writes the email from the description and the owner gets a confident message with no
+        // menu in it. The substitution happens on this machine, so naming the handle discloses
+        // nothing -- it is the whole point of naming it.
+        sb.append(" · pass ").append(handle());
+        if (!shape.fields().isEmpty()) sb.append(" or ").append(handle()).append(".<field>");
+        sb.append(" as a whole argument value to any tool and the text is substituted here");
         return sb.toString();
     }
 
@@ -160,7 +173,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public static AgentObservation asObservation(Artifact a, ToolResult r, long durationMs) {
         if (a.isPrivate()) {
-            return new AgentObservation(a.tool(), a.success(), a.describe(), Map.of(), durationMs);
+            // Metadata, never bytes -- the same shape a delegation reports for its own steps.
+            // With Map.of() here a privately-executed direct call was invisible to the withheld
+            // line, which then printed nothing at all; and nothing reads as "nothing withheld".
+            return new AgentObservation(a.tool(), a.success(), a.describe(),
+                    Map.of("artifacts", List.of(Map.of("n", a.n(), "tool", a.tool(),
+                            "label", a.label().name(), "chars", a.output().length()))),
+                    durationMs);
         }
         return new AgentObservation(a.tool(), a.success(), r.output(),
                 r.structured() == null ? Map.of() : r.structured(), durationMs);
@@ -185,7 +204,11 @@ public record Artifact(int n, String tool, Map<String, Object> written,
             JsonNode node = MAPPER.readTree(t);
             if (node == null || !node.isObject()) return List.of();
             var names = new ArrayList<String>();
-            node.fieldNames().forEachRemaining(names::add);
+            // The same count cap the descriptor applies. Deriving from shapeOf carried it for
+            // free; parsing directly dropped it, and every top-level key of a wide result went
+            // into the delegation prompt.
+            var it = node.fieldNames();
+            while (it.hasNext() && names.size() < MAX_FIELDS) names.add(it.next());
             return List.copyOf(names);
         } catch (Exception e) {
             return List.of();

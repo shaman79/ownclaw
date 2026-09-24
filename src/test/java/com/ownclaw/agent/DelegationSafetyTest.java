@@ -588,6 +588,23 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("a reference copied from the truncated descriptor is refused, not sent as text")
+    void anEllipsisReferenceIsStillAReference() {
+        // The descriptor abbreviates a field name over 24 characters and marks the cut with "…".
+        // The cloud copies what it is shown. The old pattern required word characters after the
+        // dot, so "$1.rendered_html_for_ema…" was neither substituted nor recognised as a
+        // dangling reference — it went out as the literal body of an email, and the run was
+        // recorded green. That is the exact failure the guard exists to stop.
+        assertEquals("body", LocalExecutor.unresolvedRef(
+                Map.of("body", "$1.rendered_html_for_ema…")));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$9")));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.no_such_field")));
+        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "the price is $50 today")),
+                "a dollar amount inside prose is not a reference");
+        assertNull(LocalExecutor.unresolvedRef(Map.of("subject", "Menu")));
+    }
+
+    @Test
     @DisplayName("a failed PRIVATE step contributes neither its output nor its arguments")
     void privateFailuresWithholdTheirArgumentsToo() {
         var pub = new Artifact(1, "daily_news_digest", Map.of("topic", "rust"), Map.of(),

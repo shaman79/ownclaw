@@ -355,10 +355,6 @@ public class LocalExecutor {
             Tool ran = toolRegistry.find(action.tool).orElse(null);
             Artifact.Decision decision = Artifact.labelFor(
                     ran == null ? List.of() : ran.requiredCredentials(),
-                    // Unattended only -- and this is the site actually reachable with an
-                    // attachment, because files arrive on attended chat and an attended task is
-                    // what delegates. The gate went onto the two unreachable sites first.
-                    parentContext.isUnattended() && !parentContext.attachmentIds().isEmpty(),
                     tainted, action.params, stepResults);
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);
@@ -835,8 +831,12 @@ public class LocalExecutor {
     }
 
     /** Anything still shaped like a reference after substitution did not resolve. */
+    // Anything after the dot, not only word characters. The descriptor abbreviates a field
+    // name longer than 24 characters and marks the cut with "…", the cloud copies what it is
+    // shown, and "$1.rendered_html_for_ema…" matched neither this pattern nor the resolver --
+    // so it was neither substituted nor refused, and went out as the literal body of an email.
     private static final java.util.regex.Pattern UNRESOLVED =
-            java.util.regex.Pattern.compile("^\\$\\d+(\\.[A-Za-z0-9_]*)?$");
+            java.util.regex.Pattern.compile("^\\$\\d+(\\..*)?$", java.util.regex.Pattern.DOTALL);
 
     /** The parameter holding a reference that resolved to nothing, or null when none does. */
     static String unresolvedRef(Map<String, Object> params) {

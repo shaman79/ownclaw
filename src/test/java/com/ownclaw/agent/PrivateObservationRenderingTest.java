@@ -66,7 +66,7 @@ class PrivateObservationRenderingTest {
     private static AgentContext taskWith(String tool, List<String> credentials, String output) {
         var ctx = new AgentContext("u1", "t1", "Summarise my mailbox and email me the result.");
         ctx.setUnattended(true);
-        var decision = Artifact.labelFor(credentials, false, false, Map.of(), ctx.artifacts());
+        var decision = Artifact.labelFor(credentials, false, Map.of(), ctx.artifacts());
         var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, decision);
         var obs = Artifact.asObservation(a, ToolResult.success(output, Map.of("k", "v")), 10);
         ctx.trajectory().record(new AgentAction(tool, Map.of(), "fetching"), obs);

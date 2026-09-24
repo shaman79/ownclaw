@@ -209,14 +209,15 @@ public class AgentContext {
 
     /** The most recently recorded artifact — the one the step just executed. */
     /**
-     * The highest artifact number already attributed to a step in the ops log. An artifact
-     * belongs to exactly one step — the first to persist after it was recorded. Without a mark,
-     * the step after a refused or not-found tool call inherited the previous step's handle and
-     * the ops page reported a tool that never ran.
+     * True once: for the step that recorded this artifact, and no later step.
+     * <p>
+     * {@code attributedThrough} is the highest artifact number already reported in the ops log.
+     * An artifact belongs to exactly one step. Without the mark, a step that recorded nothing —
+     * a tool not found, a critic block — inherited the previous step's handle, label and hash,
+     * and the ops page named a tool that had never run.
      */
     private int attributedThrough = 0;
 
-    /** True once: for the step that recorded this artifact, and no later step. */
     public synchronized boolean claimArtifact(int n) {
         if (n <= attributedThrough) return false;
         attributedThrough = n;

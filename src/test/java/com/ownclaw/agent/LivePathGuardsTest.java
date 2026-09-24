@@ -33,9 +33,11 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("every labelFor call that looks at attachments is gated on unattended")
-    void theAttachmentGateIsOnEveryCallSite() throws IOException {
-        int sites = 0;
+    @DisplayName("no labelFor call weighs attachments — the rule was unreachable and is gone")
+    void noCallSiteWeighsAttachments() throws IOException {
+        // The previous version of this test asserted the opposite, and cemented a condition
+        // that was false on every path: `isUnattended() && !attachmentIds().isEmpty()` where
+        // attachments only ever arrive on attended chat. It would have failed the honest repair.
         for (String cls : new String[]{"com.ownclaw.agent.AgentLoop",
                                        "com.ownclaw.agent.LocalExecutor"}) {
             String s = read(cls);
@@ -45,18 +47,65 @@ class LivePathGuardsTest {
                 assertTrue(end > at, cls + ": labelFor call is not terminated");
                 String call = s.substring(at, end);
                 at = end;
-                if (!call.contains("attachmentIds()")) continue;
-                sites++;
-                assertTrue(call.contains("isUnattended()"),
-                        cls + ": this labelFor reads attachmentIds() without isUnattended(). "
-                                + "Files arrive on attended chat, so ungated it marks every "
-                                + "result of an attended task PRIVATE and the person asking "
-                                + "gets a descriptor instead of their answer:\n" + call);
+                assertFalse(call.contains("attachmentIds()"),
+                        cls + ": a labelFor call weighs attachments again. The attachment "
+                                + "artifact is labelled where it is recorded and the reference "
+                                + "clause carries it from there; a second rule here either "
+                                + "cannot fire or takes \"summarise this file\" away:\n" + call);
             }
         }
-        assertEquals(2, sites,
-                "both call sites are expected to weigh attachments; if one was moved or "
-                        + "deleted this test has stopped checking what it claims to check");
+    }
+
+    @Test
+    @DisplayName("the reference refusal only applies once the task has results to reference")
+    void theRefusalDoesNotFireOnAFirstStep() throws IOException {
+        String s = read("com.ownclaw.agent.AgentLoop");
+        int at = s.indexOf("LocalExecutor.unresolvedRef(resolved)");
+        assertTrue(at > 0, "the guard moved; this test no longer checks it");
+        String around = s.substring(Math.max(0, at - 400), at + 60);
+        assertTrue(around.contains("artifacts().isEmpty()"),
+                "with no artifacts nothing was ever named $N, so a whole-value \"$50\" is a "
+                        + "price the model typed. Ungated, the guard fails a first step that "
+                        + "was perfectly correct:\n" + around);
+    }
+
+    @Test
+    @DisplayName("attachments are claimed where they are registered, by no step")
+    void attachmentsAreClaimedAtRegistration() throws IOException {
+        String s = read("com.ownclaw.agent.AgentLoop");
+        int start = s.indexOf("private void registerAttachments(");
+        assertTrue(start > 0, "registerAttachments was renamed");
+        int end = s.indexOf("\n    private ", start + 10);
+        String body = end > start ? s.substring(start, end) : s.substring(start);
+        assertTrue(body.contains("claimAllArtifacts()"),
+                "an attachment artifact is recorded by no step, so the mark was still 0 when "
+                        + "step 1 persisted and the first step that recorded nothing of its own "
+                        + "claimed the attachment — the ops page then named it as the tool that "
+                        + "step had run");
+    }
+
+    @Test
+    @DisplayName("persistStep attributes an artifact only by claiming it")
+    void stepAttributionGoesThroughTheClaim() throws IOException {
+        // The unit tests cover AgentContext.claimArtifact, but the defect lived at the call
+        // site: reverting this one line to context.lastArtifact().ifPresent(...) reproduces the
+        // old always-true guard exactly, and the whole suite stayed green when a verifier tried
+        // it. The mechanism has to be pinned where it is used, not only where it is defined.
+        String s = read("com.ownclaw.agent.AgentLoop");
+        int start = s.indexOf("private void persistStep(");
+        assertTrue(start > 0, "persistStep was renamed; this test no longer guards it");
+        int end = s.indexOf("\n    private ", start + 10);
+        String body = end > start ? s.substring(start, end) : s.substring(start);
+
+        int last = body.indexOf("lastArtifact()");
+        assertTrue(last > 0, "persistStep no longer reads the task's last artifact");
+        assertTrue(body.contains("claimArtifact("),
+                "persistStep attributes an artifact to a step without claiming it, so a step "
+                        + "that recorded nothing — a tool not found, a critic block — reports "
+                        + "the previous step's handle, label and hash, and the ops page names a "
+                        + "tool that never ran");
+        assertTrue(body.indexOf("claimArtifact(", last) > last,
+                "the claim has to filter the artifact, not run beside it");
     }
 
     @Test

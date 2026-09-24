@@ -35,7 +35,7 @@ class ArtifactTest {
     @Test
     @DisplayName("a skill that declared credentials produces a PRIVATE result")
     void credentialsMakeItPrivate() {
-        var d = Artifact.labelFor(List.of("IMAP_PASS"), false, false, Map.of(), List.of());
+        var d = Artifact.labelFor(List.of("IMAP_PASS"), false, Map.of(), List.of());
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("credentials (1)"), d.why(),
                 "the COUNT, not the names: the skill harness words a vault miss as 'Missing "
@@ -45,11 +45,18 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("a task given files produces PRIVATE results")
-    void attachmentsMakeItPrivate() {
-        var d = Artifact.labelFor(List.of(), true, false, Map.of(), List.of());
+    @DisplayName("an unattended attachment is covered by reference, not by a separate rule")
+    void attachmentsAreCoveredByTheReferenceClause() {
+        // There was a taskHasAttachments flag here. It could not fire on any path: files arrive
+        // only through attended chat, and an attended attachment artifact is deliberately PUBLIC
+        // so "summarise this" still works. What covers the unattended case is this — the
+        // attachment artifact is PRIVATE where it is recorded, and anything referencing it is
+        // PRIVATE because it is derived from it.
+        var attachment = new Artifact(1, "attachment:statement.csv", Map.of(), Map.of(),
+                "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("attachment"));
+        var d = Artifact.labelFor(List.of(), false, Map.of("text", "$1"), List.of(attachment));
         assertEquals(Label.PRIVATE, d.label());
-        assertTrue(d.why().contains("attachment"));
+        assertEquals(List.of("references $1"), d.why());
     }
 
     @Test
@@ -57,7 +64,7 @@ class ArtifactTest {
     void taintMakesItPrivate() {
         // The local model has read private content; whatever it writes now — including a
         // public tool's arguments — may carry it.
-        var d = Artifact.labelFor(List.of(), false, true, Map.of(), List.of());
+        var d = Artifact.labelFor(List.of(), true, Map.of(), List.of());
         assertEquals(Label.PRIVATE, d.label());
     }
 
@@ -65,20 +72,20 @@ class ArtifactTest {
     @DisplayName("a $N reference to a PRIVATE artifact makes the result PRIVATE")
     void referenceToPrivateMakesItPrivate() {
         var store = List.of(privateResult("imap_fetch", "{}", true));
-        var d = Artifact.labelFor(List.of(), false, false, Map.of("body", "$2.body_text"), store);
+        var d = Artifact.labelFor(List.of(), false, Map.of("body", "$2.body_text"), store);
         assertEquals(Label.PRIVATE, d.label(), "derived from private is private");
         assertTrue(d.why().contains("references $2"));
 
         var pub = List.of(new Artifact(2, "x", Map.of(), Map.of(), "{}", true, Label.PUBLIC, List.of()));
         assertEquals(Label.PUBLIC,
-                Artifact.labelFor(List.of(), false, false, Map.of("body", "$2"), pub).label(),
+                Artifact.labelFor(List.of(), false, Map.of("body", "$2"), pub).label(),
                 "a reference to a PUBLIC artifact is not a reason");
     }
 
     @Test
     @DisplayName("with none of the facts, a result is PUBLIC — exactly as today")
     void nothingMakesItPublic() {
-        var d = Artifact.labelFor(List.of(), false, false, Map.of("url", "https://x"), List.of());
+        var d = Artifact.labelFor(List.of(), false, Map.of("url", "https://x"), List.of());
         assertEquals(Label.PUBLIC, d.label());
         assertTrue(d.why().isEmpty());
     }
@@ -157,10 +164,19 @@ class ArtifactTest {
 
         var obs = Artifact.asObservation(a, r, 12);
         assertEquals(a.describe(), obs.output());
-        assertTrue(obs.structured().isEmpty(),
-                "the structured map is the same content in another shape");
         assertFalse(obs.success(), "the outcome is not hidden with the content");
         assertFalse(obs.output().contains("confidential"));
+
+        // The skill's own structured map is the same content in another shape and never
+        // travels. What replaces it is metadata about the artifact -- the shape the delegation
+        // already reports -- so a privately-executed direct call is still countable by the
+        // withheld line, which otherwise printed nothing and read as "nothing was withheld".
+        assertFalse(obs.structured().containsKey("body_text"),
+                "the skill's own keys are content and must not survive");
+        assertFalse(String.valueOf(obs.structured()).contains("confidential"));
+        assertEquals(List.of(Map.of("n", a.n(), "tool", "smtp_send_email",
+                        "label", "PRIVATE", "chars", PRIVATE_JSON.length())),
+                obs.structured().get("artifacts"));
     }
 
     @Test
@@ -178,7 +194,7 @@ class ArtifactTest {
         assertTrue(a.written().containsKey("cc"));
         assertNull(a.written().get("cc"));
         assertDoesNotThrow(a::describe);
-        assertDoesNotThrow(() -> Artifact.labelFor(List.of(), false, false, withNull, List.of()));
+        assertDoesNotThrow(() -> Artifact.labelFor(List.of(), false, withNull, List.of()));
     }
 
     @Test
@@ -228,6 +244,37 @@ class ArtifactTest {
         assertTrue(new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of())
                         .describe().contains("…"),
                 "while the descriptor still bounds what it prints — they differ on purpose");
+    }
+
+    @Test
+    @DisplayName("the descriptor tells the cloud how to use what it is not allowed to read")
+    void theDescriptorSaysHowToReferenceIt() {
+        // Without this line the descriptor is a dead end. When the local tier is down, the cloud
+        // calls the credentialed skill itself, is shown "4,210 chars · fields: body_text" and is
+        // told no way to put those characters into an email — so it writes the email from the
+        // description and the owner gets a confident message with no menu in it.
+        var a = new Artifact(1, "daily_menu_fetcher", Map.of(), Map.of(),
+                "{\"body_text\": \"Polévka: česneková\"}", true, Label.PRIVATE,
+                List.of("credentials (2)"));
+        String d = a.describe();
+
+        assertTrue(d.contains("$1.<field>"), d);
+        assertTrue(d.contains("body_text"), "and which fields there are: " + d);
+        assertTrue(d.contains("substituted here"), d);
+        assertFalse(d.contains("česneková"), "still never the content");
+    }
+
+    @Test
+    @DisplayName("the reference list is capped, like the descriptor it sits beside")
+    void referenceNamesAreCapped() {
+        var sb = new StringBuilder("{");
+        for (int i = 0; i < 40; i++) sb.append(i > 0 ? "," : "").append("\"f").append(i).append("\":1");
+        List<String> names = Artifact.jsonFieldNames(sb.append("}").toString());
+
+        assertEquals(Artifact.MAX_FIELDS, names.size(),
+                "parsing the JSON directly dropped the count cap that deriving from the "
+                        + "descriptor used to carry, and every key of a wide result went into "
+                        + "the delegation prompt");
     }
 
     @Test

@@ -628,7 +628,8 @@ public class OpsService {
                 "SELECT timestamp, event_type, severity, task_id, summary, details, tokens_used "
                         + "FROM events WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));
         out.put("toolCalls", jdbc.queryForList(
-                "SELECT created_at, tool_name, task_id, success, duration_ms, label "
+                "SELECT created_at, tool_name, task_id, success, duration_ms, label, "
+                        + "substr(error,1,1000) AS error "
                         + "FROM skill_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
         out.put("memory", jdbc.queryForList(
                 "SELECT created_at, memory_type, outcome, tags, substr(content,1,400) AS content "

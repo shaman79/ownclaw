@@ -123,24 +123,45 @@ public final class CloudGateway implements LlmProvider {
         // (c) The canary: every part, before the socket opens.
         String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
-        // The registry's own text -- tool descriptions and schemas -- is material the cloud
-        // wrote (skill_create) or the owner did, and it was in the prompt before any artifact
-        // existed. A skill description that says what its output looks like would otherwise
-        // collide with that output's first window and refuse every call after the skill ran.
-        // The registry text OF THIS REQUEST: tool descriptions and schemas, which are authored
-        // by the cloud at skill_create or by the owner, and were in the prompt before any
-        // artifact existed. A run of one matching a later result is a collision, not a
-        // disclosure -- skills routinely describe their own output shape.
+        // The registry text OF THIS REQUEST -- tool descriptions and schemas, authored by the
+        // cloud at skill_create or by the owner, in the prompt before any artifact existed. A
+        // run of one matching a later result is a collision, not a disclosure: skills routinely
+        // describe the shape of their own output.
         //
-        // Allowed wherever it appears, not only in the tool part. A first version scoped it to
-        // registry parts and that was incoherent: the unattended prompt renders the skill
-        // catalogue TWICE from the same method -- into delegate's description and into the
-        // dynamic block glued onto the last user message -- so refusing the user copy while
-        // sending the tools-array copy refuses a call over bytes the cloud is receiving anyway,
-        // in the same request, a few kilobytes further down.
+        // Allowed wherever it appears, not only inside the registry part, because the unattended
+        // prompt renders the skill catalogue TWICE from one method -- into delegate's description
+        // and into the dynamic block glued onto the last user message -- and refusing the second
+        // copy withholds nothing from a cloud that is receiving the first a few kilobytes down.
+        //
+        // But WINDOW-length hits only. A private artifact of 8..31 characters is registered
+        // whole, so for one of those the "window" IS the entire artifact, and a plain substring
+        // test waved it through in every part as soon as an account number or an order id
+        // happened to appear in some skill's description or example. That was a real hole, wider
+        // than the one it was written to close: proved by probe, an IBAN-shaped artifact quoted
+        // in a user message went from REFUSED to SENT. A collision on a 32-character run is a
+        // coincidence; a short artifact reproduced in full is the artifact.
         String registryText = PrivateIndex.normalise(parts.stream()
                 .filter(p -> p.kind().startsWith("tool:") || p.kind().startsWith("schema:"))
                 .map(Part::text).collect(java.util.stream.Collectors.joining("\n")));
+        // The scrubber's post-condition, checked rather than trusted. A marker is built from
+        // the key name and a value can be a substring of its own replacement, so the fallback
+        // marker was itself unverified -- a value of "redacted" would have been written out
+        // inside «vault:redacted». Whatever the markers are, no vault value survives this point.
+        for (var sv : egress.secretValues().entrySet()) {
+            String value = sv.getValue();
+            if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
+            for (Part part : parts) {
+                int at = part.text() == null ? -1 : part.text().indexOf(value);
+                if (at < 0) continue;
+                ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
+                        parts, scrubs, null, 0, "vault:" + sv.getKey() + " survived scrubbing"));
+                log.error("Cloud call REFUSED for task {}: vault value {} survived scrubbing",
+                        egress.taskId(), sv.getKey());
+                throw new EgressRefused(providerName, 0, "vault:" + sv.getKey(), part.index(),
+                        part.kind(), at);
+            }
+        }
+
         boolean leaked = false;
         for (Part part : parts) {
             if (leaked) break;
@@ -155,26 +176,27 @@ public final class CloudGateway implements LlmProvider {
                 from = hit.offset() + 1;
                 String window = normalised.substring(hit.offset(),
                         Math.min(hit.offset() + hit.length(), normalised.length()));
-                if (registryText.contains(window) || egress.allowed().test(hit.handle(), window)) {
-                    continue;
+                boolean registryCollision = hit.length() >= PrivateIndex.WINDOW
+                        && registryText.contains(window);
+                if (registryCollision || egress.allowed().test(hit.handle(), window)) continue;
+
+                String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
+                        + ") at " + hit.offset();
+                if (mode() == Mode.ENFORCE) {
+                    ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
+                            parts, scrubs, null, 0, ref));
+                    log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
+                    throw new EgressRefused(providerName, hit.handle(), "artifact", part.index(),
+                            part.kind(), hit.offset());
                 }
-            String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
-                    + ") at " + hit.offset();
-            if (mode() == Mode.ENFORCE) {
-                ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, scrubs, null, 0, ref));
-                log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
-                throw new EgressRefused(providerName, hit.handle(), "artifact", part.index(),
-                        part.kind(), hit.offset());
-            }
-            // OBSERVE: remember it and go on to send. The row is written once, after the
-            // call, so it carries the tokens and the cost like any other -- two rows for one
-            // call made the ledger's own count say a call had been made twice.
-            log.warn("Cloud call would have been refused for task {} (canary in OBSERVE): {}",
-                    egress.taskId(), ref);
-            observed = ref;
-            leaked = true;
-            break;
+                // OBSERVE: remember it and go on to send. The row is written once, after the
+                // call, so it carries the tokens and the cost like any other -- two rows for one
+                // call made the ledger's own count say a call had been made twice.
+                log.warn("Cloud call would have been refused for task {} (canary in OBSERVE): {}",
+                        egress.taskId(), ref);
+                observed = ref;
+                leaked = true;
+                break;
             }
         }
 

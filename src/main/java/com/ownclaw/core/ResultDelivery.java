@@ -57,9 +57,17 @@ public class ResultDelivery {
 
     /**
      * One line, computed from the run, on what stayed on this machine — worded as what was
-     * checked, never as a claim about what left. A delegation's artifacts are on its
-     * observation; an unattended run executes through delegations, so this is complete where
-     * it matters and says nothing where it cannot see.
+     * checked, never as a claim about what left.
+     * <p>
+     * Both kinds of step report their artifacts on the observation: a delegation lists the steps
+     * it ran, and a privately-executed direct call reports itself. An earlier version read only
+     * the delegation's list and justified it with "an unattended run executes through
+     * delegations" — false exactly when it matters, because the valve that turns delegation off
+     * after a failure is what runs on a bad morning. On that run every result was withheld and
+     * this line said nothing at all.
+     * <p>
+     * Known limit, stated rather than papered over: a PUBLIC direct call keeps its skill's own
+     * structured output and is not counted, so on a mixed run {@code total} is a floor.
      */
     static String withheldLine(AgentResult result) {
         if (result == null || result.trajectory() == null) return "";
