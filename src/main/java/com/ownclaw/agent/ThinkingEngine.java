@@ -355,10 +355,12 @@ public class ThinkingEngine {
         }
 
         if (effectiveTurns.isEmpty() && lastParseFailure == null) {
-            // Genuine step 0: append dynamic context to the user message.
+            // Genuine step 0: append dynamic context to the user message -- after the cache
+            // boundary, so the task above it is cached now and read back on step 1, where it is
+            // the whole first message.
             LlmMessage lastMsg = messages.get(messages.size() - 1);
             messages.set(messages.size() - 1, LlmMessage.user(
-                    lastMsg.content() + "\n\n---\n" + buildDynamicContext(context, mode)));
+                    lastMsg.content() + CACHE_BOUNDARY_MARKER + "---\n" + buildDynamicContext(context, mode)));
             return;
         }
 
