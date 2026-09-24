@@ -78,10 +78,22 @@ public class LocalExecutor {
                     ToolParam.required("string",
                             "What you did, and what came back, in outline. Not a copy of it."))));
 
-    /** What the local model may call: the tools this delegation is given, plus {@link #DONE}. */
-    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan) {
-        return new ArrayList<>(ToolSchemas.build(List.of(DONE), offered(plan, context),
-                context.credentialKeys()));
+    /**
+     * {@link #DONE} on a task holding the user's files. There the summary is not an outline for
+     * the orchestrator: every result is withheld from it, so the summary is kept as the answer
+     * the user reads (see {@link #recordAnswer}), and an outline would be all they got.
+     */
+    private static final ToolSpec DONE_FILE = new ToolSpec("done",
+            "Call this when the goal is reached. Your summary is the answer the user reads; the "
+                    + "orchestrator is never shown it or the results. Write it in full, copying "
+                    + "figures, dates and names exactly as the tools returned them.",
+            ToolSchemas.toJsonSchema(Map.of("summary",
+                    ToolParam.required("string", "The answer for the user, in full."))));
+
+    /** What the local model may call: the tools this delegation is given, plus {@code done}. */
+    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan, boolean fileTask) {
+        return new ArrayList<>(ToolSchemas.build(List.of(fileTask ? DONE_FILE : DONE),
+                offered(plan, context), context.credentialKeys()));
     }
 
     /**
@@ -209,7 +221,11 @@ public class LocalExecutor {
         // constraint on this hardware, so when the model can take tools as structure, send them
         // as structure and drop the prose copy.
         boolean nativeTools = localProvider.supportsTools();
-        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan) : null;
+        // A task holding the user's files: every result is PRIVATE (AgentContext.decide), so the
+        // cloud cannot answer from them, and the local model's own answer is kept for the user
+        // instead of being withheld and dropped. A delegation without files runs exactly as before.
+        boolean fileTask = !parentContext.files().isEmpty();
+        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, fileTask) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
                 offered(plan, parentContext).size());
 
@@ -226,10 +242,20 @@ public class LocalExecutor {
         // that this one reads back. From then on every result is PRIVATE and not indexed; see
         // AgentContext.decide.
         boolean tainted = parentContext.localTierReadPrivate();
+        // How much private text the local model may still be shown in full, for this whole
+        // delegation. On a file task it is the one reader of the file, so a 400-character excerpt
+        // would leave it answering from the first paragraph of a statement; but the budget is
+        // per delegation rather than per result, so the transcript it carries (HISTORY_TAIL) can
+        // never hold more than this, however many results it reads.
+        int readBudget = fileTask ? PRIVATE_READ_CHARS : 0;
+        // What the model was NOT shown, in the code's words, for the end of its answer: a model
+        // that read half a statement cannot be relied on to say so.
+        List<String> cuts = new ArrayList<>();
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
-        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext, nativeTools)));
+        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext, nativeTools,
+                fileTask)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
         String opening = plan.steps().isEmpty()
@@ -333,8 +359,11 @@ public class LocalExecutor {
                 // The claim and the evidence travel together. Without the ledger the cloud reads
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.
-                return completed(action.summary, plan.goal(),
-                        mine);
+                // On a file task the summary is the user's answer, kept as a PRIVATE result of
+                // its own, which the cloud can hand on by its handle without reading it.
+                Artifact said = fileTask
+                        ? recordAnswer(parentContext, action.summary, mine, cuts) : null;
+                return completed(action.summary, plan.goal(), mine, said);
             }
 
             if (action.tool == null || action.tool.isBlank()) {
@@ -500,18 +529,40 @@ public class LocalExecutor {
                     toolResult.length(), artifact.label());
 
             // OBSERVE: feed result back to local LLM
+            // A private result on a file task is shown in full while the delegation's budget
+            // lasts; everything else as before. Whatever was cut is noted for the answer.
+            boolean readsForTheUser = fileTask && artifact.isPrivate();
+            int fullUpTo = readsForTheUser && readBudget > FEEDBACK_FULL_CHARS
+                    ? readBudget : FEEDBACK_FULL_CHARS;
+            if (readsForTheUser) {
+                readBudget = Math.max(0, readBudget - Math.min(toolResult.length(), fullUpTo));
+                if (toolResult.length() > fullUpTo) {
+                    cuts.add("Read the first " + String.format(Locale.ROOT, "%,d", excerptHead(fullUpTo))
+                            + " of " + String.format(Locale.ROOT, "%,d", toolResult.length())
+                            + " characters that " + action.tool + " returned; the rest did not fit, "
+                            + "so this answer covers only that part.");
+                }
+            }
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(
                     // The handle every time -- a short result used to arrive without one, so the
                     // model had to count for itself, and counting is where {{1}} went wrong.
                     "Tool result " + ArtifactRef.handle(mine.size()) + " [" + action.tool + "] "
                     + (worked ? "SUCCESS" : "FAILED") + ":\n" +
-                    feedback(toolResult, mine.size()) + "\n\n" +
-                    "Continue with the next step, or if all steps are done, " +
-                    (nativeTools
-                            ? "call done and say what you did — the result above is passed on "
-                                    + "verbatim, so do not retype it."
-                            : "output {\"done\": true, \"summary\": \"what you did\"}.")));
+                    feedback(toolResult, mine.size(), fullUpTo) + "\n\n" +
+                    // "Passed on verbatim" is false for a private result: the user sees it only
+                    // through the summary, so the summary is where it has to be written.
+                    (readsForTheUser
+                            ? "Continue, or " + (nativeTools
+                                    ? "call done with the answer for the user"
+                                    : "output {\"done\": true, \"summary\": \"the answer for the user\"}")
+                                    + " — this result is private and reaches them only through "
+                                    + "your summary."
+                            : "Continue with the next step, or if all steps are done, " +
+                            (nativeTools
+                                    ? "call done and say what you did — the result above is passed on "
+                                            + "verbatim, so do not retype it."
+                                    : "output {\"done\": true, \"summary\": \"what you did\"}."))));
         }
 
         // Hit max steps without "done"
@@ -581,7 +632,7 @@ public class LocalExecutor {
      * Includes the plan, available tools, and constrained output format.
      */
     private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context,
-                                             boolean nativeTools) {
+                                             boolean nativeTools, boolean fileTask) {
         var sb = new StringBuilder(4096);
 
         // The header used to say "Follow the plan exactly. No planning authority." unconditionally,
@@ -671,9 +722,21 @@ public class LocalExecutor {
         sb.append("  an envelope into an email body rather than the whole envelope.\n");
         sb.append("  Never retype a result: retyping is where a wrong date or a dropped line\n");
         sb.append("  comes from, and it costs you the whole output again.\n");
-        sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
-        sb.append("  underneath it, so never retype data — a date or number written from\n");
-        sb.append("  memory is an error that was not in the data.\n");
+        if (fileTask) {
+            // The rule below is false here: a file task's results are withheld from the cloud,
+            // so nothing is passed on underneath the summary, and the summary is what the user
+            // reads. No file name is given: the prompt says only that the files are handed.
+            sb.append("- The user's files are given to every tool you call (as _attached_files);\n");
+            sb.append("  you do not pass them.\n");
+            sb.append("- What the tools return here is private: the orchestrator is never shown it,\n");
+            sb.append("  only told that your answer exists. Your done summary is the answer the user\n");
+            sb.append("  reads — write it in full, and copy figures, dates and names exactly as the\n");
+            sb.append("  tools returned them.\n");
+        } else {
+            sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
+            sb.append("  underneath it, so never retype data — a date or number written from\n");
+            sb.append("  memory is an error that was not in the data.\n");
+        }
         sb.append("- No skill_create. Nobody is available to answer questions — decide and proceed.\n");
 
         return sb.toString();
@@ -853,6 +916,14 @@ public class LocalExecutor {
     private static final int FEEDBACK_FULL_CHARS = 1500;
 
     /**
+     * How much private text a delegation on a file task may be shown in full, across all its
+     * results. The local model is the only reader of the file, so it needs more than an excerpt
+     * to answer from; a few thousand tokens of a 24,576-token window leaves the rest for the
+     * prompt, the model's thinking and the answer.
+     */
+    static final int PRIVATE_READ_CHARS = 16_000;
+
+    /**
      * A tool result as the model should see it: in full when it is small, and otherwise an
      * excerpt plus the reference that moves the real thing.
      * <p>
@@ -865,14 +936,19 @@ public class LocalExecutor {
      * and not a token cap. This is about what goes IN.
      */
     static String feedback(String result, int stepNumber) {
+        return feedback(result, stepNumber, FEEDBACK_FULL_CHARS);
+    }
+
+    /**
+     * {@link #feedback(String, int)} with a different allowance: a result up to {@code fullUpTo}
+     * characters is shown whole, and a longer one is cut to that many. Only a file task's private
+     * results get more than the default -- there the local model is answering from them, not
+     * forwarding them (see {@link #PRIVATE_READ_CHARS}).
+     */
+    static String feedback(String result, int stepNumber, int fullUpTo) {
         if (result == null) return "";
-        if (result.length() <= FEEDBACK_FULL_CHARS) return result;
-        // Small enough to say what came back, too small to be worth copying. The first version
-        // showed 1,500 characters and asked the model not to retype them; it retyped them --
-        // annotation and all -- straight into the next tool call, and the file it wrote was
-        // half a digest with this sentence in the middle of it. Telling a model not to do
-        // something it can do is the whole mistake this change exists to stop making.
-        int head = 400;
+        if (result.length() <= fullUpTo) return result;
+        int head = excerptHead(fullUpTo);
         int tail = 150;
         return result.substring(0, head)
                 + "\n\n" + OMISSION_MARKER + stepNumber + "}}⟧\n\n"
@@ -897,6 +973,19 @@ public class LocalExecutor {
      * ran.
      */
     static final String OMISSION_MARKER = "⟦middle omitted — pass it on with {{";
+
+    /**
+     * How much of the start of a cut result is shown. With the default allowance: small enough
+     * to say what came back, too small to be worth copying. The first version showed 1,500
+     * characters and asked the model not to retype them; it retyped them -- annotation and all --
+     * straight into the next tool call, and the file it wrote was half a digest with this
+     * sentence in the middle of it. Telling a model not to do something it can do is the whole
+     * mistake this change exists to stop making. With a larger allowance the model is reading,
+     * not forwarding, so the head is the whole allowance less the tail.
+     */
+    private static int excerptHead(int fullUpTo) {
+        return fullUpTo > FEEDBACK_FULL_CHARS ? fullUpTo - 150 : 400;
+    }
 
     /**
      * Treat {@code {"tool": "done"}} as the finish it obviously is.
@@ -1033,17 +1122,38 @@ public class LocalExecutor {
      * with the registry withheld, the cloud has no instrument to check it with.
      */
     static Outcome completed(String localSummary, String goal, List<Artifact> results) {
+        return completed(localSummary, goal, results, null);
+    }
+
+    /**
+     * {@link #completed(String, String, List)}, with the local model's answer when one was kept.
+     *
+     * @param said the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
+     *             handle and size, never its text, and it joins what the delegation produced.
+     */
+    static Outcome completed(String localSummary, String goal, List<Artifact> results, Artifact said) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
         boolean anyPrivate = results.stream().anyMatch(Artifact::isPrivate);
+        String touched = results.stream().filter(Artifact::isPrivate).map(Artifact::handle)
+                .collect(Collectors.joining(", "));
         // The local model's own prose is withheld when it has read private content: it is a
         // paraphrase of that content, and a paraphrase is the one thing the canary cannot see.
         // The descriptors, the ledger and the PUBLIC outputs remain, which is what the cloud
         // decides on. All-PUBLIC delegations read exactly as before.
         String summary;
-        if (anyPrivate) {
-            summary = "(local summary withheld — this delegation touched "
-                    + results.stream().filter(Artifact::isPrivate).map(Artifact::handle)
-                            .collect(Collectors.joining(", ")) + ")";
+        if (said != null) {
+            // Withheld all the same, but not lost: it is the answer, and the cloud can deliver it
+            // by its handle. Said here, because a handle the cloud was never told about is one it
+            // cannot use.
+            String k = said.handle();
+            summary = "(The local model's answer is " + k + ": private, "
+                    + String.format(Locale.ROOT, "%,d", said.output().length())
+                    + " characters, written after reading " + touched + ". You are not shown it. "
+                    + "To give it to the user, make " + k + " the whole of respond's message; its "
+                    + "text is filled in on this machine. To send it somewhere, make " + k
+                    + " the whole value of a tool argument.)";
+        } else if (anyPrivate) {
+            summary = "(local summary withheld — this delegation touched " + touched + ")";
         } else {
             // In the task's numbering: the summary says "sent {{1}}" meaning the delegation's
             // first step, and the cloud reads task handles everywhere else.
@@ -1068,13 +1178,42 @@ public class LocalExecutor {
                         + ". Anything below that failed is what is left to do.\n\n";
             }
         }
+        // The answer is among what the delegation produced, so the step's artifacts and the task
+        // page show it; the ledger and the verdict stay about the tools that ran.
+        List<Artifact> produced = new ArrayList<>(results);
+        if (said != null) produced.add(said);
         return new Outcome(head + summary + ledger(results) + verbatimFailures(results),
                 toolNames(results), results.size(),
                 // A step that threw means the cloud should have the registry back: rewriting a
                 // skill from its traceback is the self-learning loop this project exists for,
                 // and it cannot run through a paraphrase. Marking the delegation failed is what
                 // restores the registry and engages the repair path.
-                !results.isEmpty() && !anyFailed, List.copyOf(results));
+                !results.isEmpty() && !anyFailed, List.copyOf(produced));
+    }
+
+    /**
+     * Keep the local model's answer on a file task, as a PRIVATE result of the task; null when
+     * there is none to keep -- it read nothing private, or wrote nothing.
+     * <p>
+     * Everything a file task's tools return is withheld from the cloud, so the cloud cannot
+     * answer from it; the one text written from it is this summary, and it used to be withheld
+     * and then dropped, which left the user with no answer at all. Kept, it is a handle the cloud
+     * can deliver without reading. Indexed, so the canary looks for it in every later request of
+     * the task. In the task's numbering, like any summary; and ending with the code's own note of
+     * what the model was not shown, which the model cannot be relied on to mention.
+     */
+    static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> mine,
+                                 List<String> cuts) {
+        if (summary == null || summary.isBlank() || mine.stream().noneMatch(Artifact::isPrivate)) {
+            return null;
+        }
+        String read = mine.stream().filter(Artifact::isPrivate).map(Artifact::handle)
+                .collect(Collectors.joining(", "));
+        String text = References.proseForTask(summary, mine)
+                + (cuts.isEmpty() ? "" : "\n\n" + String.join("\n", cuts));
+        return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of("written by the local model after reading " + read)));
     }
 
     /**

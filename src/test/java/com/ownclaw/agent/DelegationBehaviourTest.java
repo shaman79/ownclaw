@@ -61,6 +61,8 @@ class DelegationBehaviourTest {
         final String name; final boolean sideEffects; final List<String> creds;
         final Function<Map<String, Object>, ToolResult> body;
         final List<Map<String, Object>> calls = new ArrayList<>();
+        /** The file ids each call was handed, as a skill receives them. */
+        final List<List<String>> handed = new ArrayList<>();
         FakeTool(String name, boolean sideEffects, List<String> creds,
                  Function<Map<String, Object>, ToolResult> body) {
             this.name = name; this.sideEffects = sideEffects; this.creds = creds; this.body = body;
@@ -72,6 +74,7 @@ class DelegationBehaviourTest {
         public List<String> requiredCredentials() { return creds; }
         public ToolResult execute(Map<String, Object> p, ToolExecutionContext c) {
             calls.add(new LinkedHashMap<>(p));
+            handed.add(c == null ? List.of() : c.attachmentIds());
             return body.apply(p);
         }
     }
@@ -418,6 +421,110 @@ class DelegationBehaviourTest {
         assertTrue(llm.allSeen().contains("pass it on with {{1}}⟧"), "the marker names {{1}}");
         assertFalse(llm.allSeen().contains("pass it on with $"), "and never the old $ form");
         assertTrue(String.valueOf(smtp.calls.get(0).get("body")).startsWith("Polévka dne."));
+    }
+
+    // ── a task holding the user's file ──
+
+    static final List<String> PDF = List.of("uploaded file",
+            "application/pdf, 84211 bytes, not text or too large");
+
+    /** A statement-shaped text: every line differs, so a window of it names one place in it. */
+    static String statement(int length) {
+        var sb = new StringBuilder();
+        for (int i = 1; sb.length() < length; i++) {
+            sb.append("2026-09-").append(String.format("%02d", i % 28 + 1)).append(" card ")
+              .append(1000 + i * 37).append('.').append(String.format("%02d", i % 100))
+              .append(" CZK ref ").append(70_000 + i * 13).append('\n');
+        }
+        return sb.substring(0, length);
+    }
+
+    static final String STATEMENT = statement(3_000);
+    static final String SUMMARY = "Closing balance 48,213.07 CZK on 30 September; the largest "
+            + "debit was the 12,500.00 CZK rent on the 1st.";
+
+    /** A 12-character run of {@code secret} that appears in {@code text}, or null. */
+    static String windowOf(String secret, String text) {
+        for (int i = 0; i + 12 <= secret.length(); i++) {
+            if (text.contains(secret.substring(i, i + 12))) return secret.substring(i, i + 12);
+        }
+        return null;
+    }
+
+    @Test
+    @DisplayName("on a file task the local model's answer is kept as a private handle, not dropped")
+    void aFileTaskAnswersThroughAHandle() {
+        // Attended chat with a PDF: what the skill reads is withheld from the cloud, so the only
+        // answer there can be is the one the local model writes. It used to be withheld and lost.
+        var ctx = new AgentContext("u1", "t1", "summarise this statement");
+        ctx.addFile("f1", "", PDF);
+        var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success(STATEMENT));
+        var llm = new Scripted(call("read_statement", Map.of()), done(SUMMARY));
+
+        var outcome = executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx);
+
+        assertEquals(List.of(List.of("f1")), read.handed, "the skill is handed the file");
+        assertTrue(llm.allSeen().contains(STATEMENT),
+                "the local model answers from the whole of it, not a 400-character excerpt");
+        Artifact fromFile = ctx.artifacts().get(1);
+        assertEquals("{{2}}", fromFile.handle());
+        assertEquals(Label.PRIVATE, fromFile.label());
+        assertFalse(fromFile.indexed());
+        Artifact answer = ctx.artifacts().get(2);
+        assertEquals("local_answer", answer.tool());
+        assertEquals(Label.PRIVATE, answer.label());
+        assertTrue(answer.indexed());
+        assertNotNull(ctx.privateIndex().firstHitIn(SUMMARY),
+                "the canary looks for the answer in every later request of the task");
+        assertTrue(answer.output().startsWith(SUMMARY), answer.output());
+        assertTrue(outcome.produced().contains(answer), "the step and the task page show it");
+        assertTrue(outcome.text().contains("{{3}}"), "the cloud is told the handle: " + outcome.text());
+        assertNull(windowOf(STATEMENT, outcome.text()), outcome.text());
+        assertNull(windowOf(SUMMARY, outcome.text()), outcome.text());
+    }
+
+    /** {@code length} characters with {@code marker} at {@code at}, and nothing else to find. */
+    static String withMarkerAt(int length, int at, String marker) {
+        String filler = "x".repeat(length);
+        return filler.substring(0, at) + marker + filler.substring(at + marker.length());
+    }
+
+    @Test
+    @DisplayName("a file task reads 16,000 private characters per delegation and says what it did not read")
+    void privateReadBudgetIsPerDelegationAndFileOnly() {
+        String first = withMarkerAt(10_000, 9_000, "FIRST-MARKER-7731");
+        String second = withMarkerAt(10_000, 9_000, "SECOND-MARKER-4410");
+        var read = new FakeTool("read_statement", false, List.of(),
+                p -> ToolResult.success(Integer.valueOf(1).equals(p.get("page")) ? first : second));
+        var ctx = new AgentContext("u1", "t1", "summarise this statement");
+        ctx.addFile("f1", "", PDF);
+        var llm = new Scripted(call("read_statement", Map.of("page", 1)),
+                call("read_statement", Map.of("page", 2)), done(SUMMARY));
+
+        executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx);
+
+        assertTrue(llm.allSeen().contains("FIRST-MARKER-7731"), "the first page is read whole");
+        assertFalse(llm.allSeen().contains("SECOND-MARKER-4410"),
+                "the budget is the delegation's, so what it carries stays bounded");
+        Artifact answer = ctx.artifacts().get(3);
+        assertEquals("local_answer", answer.tool());
+        assertTrue(answer.output().endsWith("\n\nRead the first 5,850 of 10,000 characters that "
+                        + "read_statement returned; the rest did not fit, so this answer covers only "
+                        + "that part."),
+                "the code says what was cut; the model cannot be relied on to: " + answer.output());
+
+        // The same text, from a credentialed tool in a task with no file: today's excerpt, and
+        // the summary withheld as before, with nothing kept.
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"), p -> ToolResult.success(first));
+        var plain = new AgentContext("u1", "t2", "what came in the mail?");
+        var llm2 = new Scripted(call("imap_fetch", Map.of()), done(SUMMARY));
+
+        var outcome = executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain);
+
+        assertFalse(llm2.allSeen().contains("FIRST-MARKER-7731"), "without a file, the excerpt");
+        assertTrue(plain.artifacts().stream().noneMatch(a -> "local_answer".equals(a.tool())));
+        assertTrue(outcome.text().contains("(local summary withheld — this delegation touched {{1}})"),
+                outcome.text());
     }
 
     @Test
