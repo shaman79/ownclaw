@@ -188,9 +188,23 @@ ownclaw:
     token: ${OWNCLAW_OPS_TOKEN:}
 
   sandbox:
-    type: auto
+    # Skill isolation (SkillJail): every Python process started for a skill runs inside an
+    # unprivileged bubblewrap jail that sees the host read-only and cannot see the database,
+    # .env, uploads it was not handed, other skills, logs or backups. Network stays shared.
+    #   auto      jail when /usr/bin/bwrap is installed and passes its self-check; otherwise
+    #             run skills directly, exactly as before, with one warning (never refuses)
+    #   required  refuse to start a skill when the jail is not working (fail closed)
+    #   off       no jail (development, Windows)
+    # Install:  sudo apt install bubblewrap   (picked up within a minute, no restart)
+    # Switch off: OWNCLAW_SANDBOX_ISOLATION=off in the root-owned .env, then restart.
+    isolation: ${OWNCLAW_SANDBOX_ISOLATION:auto}
+    # Absolute path only; never looked up on PATH.
+    bwrap-path: ${OWNCLAW_SANDBOX_BWRAP_PATH:/usr/bin/bwrap}
+    # Host paths a jailed skill may still read, read-only, e.g. a HOME dotfile it needs:
+    #   OWNCLAW_SANDBOX_EXPOSE=/opt/ownclaw/.ssh,/opt/ownclaw/.config/rclone
+    # Entries that overlap data/, uploads, .env, skills/, logs/, backups/ or repo/ are dropped.
+    expose: []
     stall-timeout: 120   # kill process if no output for this many seconds
-    default-network: deny
     python-path: python
     container-runtime: auto    # auto, docker, podman, or none
     container-base-image: python:3.11-slim

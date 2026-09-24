@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
@@ -15,16 +16,20 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Development sandbox using Java ProcessBuilder.
- * Provides basic isolation via working-dir + timeout, but no namespace/filesystem isolation.
- * Used on Windows and for dev-mode on Linux. Production uses BubblewrapSandbox (Phase 3).
+ * Runs a skill's Python as a child process, with stall detection, progress and need_input
+ * handling. Every launch goes through {@link SkillJail#prepare}: when the jail is READY the
+ * process runs inside bubblewrap (the host read-only, the service's state hidden, its own
+ * directory writable, a private /tmp); when it is inactive or off, directly as before; when it
+ * is refusing, not at all. The environment is the jail's allow-list either way.
  */
 @Component
 public class ProcessSandbox implements SandboxManager {
@@ -33,10 +38,23 @@ public class ProcessSandbox implements SandboxManager {
 
     private final PythonEnvironmentService pythonEnv;
     private final ObjectMapper mapper;
+    private final SkillJail jail;
 
+    /** Without a jail: for tests and tools that build a sandbox by hand. */
     public ProcessSandbox(PythonEnvironmentService pythonEnv, ObjectMapper mapper) {
+        this(pythonEnv, mapper, SkillJail.off());
+    }
+
+    @Autowired
+    public ProcessSandbox(PythonEnvironmentService pythonEnv, ObjectMapper mapper, SkillJail jail) {
         this.pythonEnv = pythonEnv;
         this.mapper = mapper;
+        this.jail = jail;
+    }
+
+    @Override
+    public Optional<String> unavailable() {
+        return jail.unavailable();
     }
 
     @Override
@@ -48,14 +66,44 @@ public class ProcessSandbox implements SandboxManager {
     @Override
     public SandboxResult execute(String python, Path scriptPath, Path workingDir,
                                  String stdinJson, Map<String, String> envVars, int timeoutSec) {
+        return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec, null, List.of());
+    }
+
+    @Override
+    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
+                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
+                                 ProgressCallback progressCallback) {
+        return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec,
+                progressCallback, List.of());
+    }
+
+    @Override
+    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
+                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
+                                 ProgressCallback progressCallback, List<Path> readOnly) {
+        try (SkillJail.Launch launch = jail.prepare(
+                List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly)) {
+            if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
+            SandboxResult result = progressCallback == null
+                    ? run(launch, python, scriptPath, workingDir, stdinJson, envVars, timeoutSec)
+                    : runWithProgress(launch, python, scriptPath, workingDir, stdinJson, envVars,
+                            timeoutSec, progressCallback);
+            jail.afterRun(launch, result.stderr());
+            return result;
+        }
+    }
+
+    private SandboxResult run(SkillJail.Launch launch, String python, Path scriptPath, Path workingDir,
+                              String stdinJson, Map<String, String> envVars, int timeoutSec) {
         long startTime = System.currentTimeMillis();
 
-        ProcessBuilder pb = new ProcessBuilder(python, scriptPath.toAbsolutePath().toString());
+        ProcessBuilder pb = new ProcessBuilder(launch.argv());
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        // Only the allow-listed environment plus the skill's declared credentials.
-        applyEnvironment(pb, envVars);
+        // Only the allow-listed environment plus the skill's declared credentials. When jailed
+        // this is bubblewrap's environment, which it hands to the skill unchanged.
+        SkillJail.applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -134,7 +182,8 @@ public class ProcessSandbox implements SandboxManager {
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
             String errMsg;
-            if (e.getMessage() != null && e.getMessage().contains("Cannot run program")) {
+            // Jailed, the program that could not start is bubblewrap, not Python.
+            if (!launch.jailed() && e.getMessage() != null && e.getMessage().contains("Cannot run program")) {
                 errMsg = "Python interpreter not found at '" + python + "'. "
                         + "Install Python 3 and configure ownclaw.sandbox.python-path, "
                         + "or run /setup to reconfigure.";
@@ -169,21 +218,17 @@ public class ProcessSandbox implements SandboxManager {
      * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted
      * and forwarded via the callback.  They are NOT included in the final stdout.
      */
-    @Override
-    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
-                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
-                                 ProgressCallback progressCallback) {
-        if (progressCallback == null) {
-            return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
-        }
-
+    private SandboxResult runWithProgress(SkillJail.Launch launch, String python, Path scriptPath,
+                                          Path workingDir, String stdinJson,
+                                          Map<String, String> envVars, int timeoutSec,
+                                          ProgressCallback progressCallback) {
         long startTime = System.currentTimeMillis();
 
-        ProcessBuilder pb = new ProcessBuilder(python, scriptPath.toAbsolutePath().toString());
+        ProcessBuilder pb = new ProcessBuilder(launch.argv());
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        applyEnvironment(pb, envVars);
+        SkillJail.applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -276,7 +321,8 @@ public class ProcessSandbox implements SandboxManager {
 
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
-            String errMsg = e.getMessage() != null && e.getMessage().contains("Cannot run program")
+            String errMsg = !launch.jailed() && e.getMessage() != null
+                    && e.getMessage().contains("Cannot run program")
                     ? "Python interpreter not found at '" + python + "'."
                     : "Sandbox I/O error: " + e.getMessage();
             log.error("Sandbox error for {}: {}", scriptPath.getFileName(), errMsg);
@@ -357,13 +403,26 @@ public class ProcessSandbox implements SandboxManager {
                                             String stdinJson, Map<String, String> envVars,
                                             int timeoutSec,
                                             java.util.function.Function<String, String> inputCallback) {
+        try (SkillJail.Launch launch = jail.prepare(
+                List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, List.of())) {
+            if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
+            SandboxResult result = runInteractive(launch, stdinJson, workingDir, envVars, timeoutSec,
+                    inputCallback);
+            jail.afterRun(launch, result.stderr());
+            return result;
+        }
+    }
+
+    private SandboxResult runInteractive(SkillJail.Launch launch, String stdinJson, Path workingDir,
+                                         Map<String, String> envVars, int timeoutSec,
+                                         java.util.function.Function<String, String> inputCallback) {
         long startTime = System.currentTimeMillis();
 
-        ProcessBuilder pb = new ProcessBuilder(python, scriptPath.toAbsolutePath().toString());
+        ProcessBuilder pb = new ProcessBuilder(launch.argv());
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(false);
 
-        applyEnvironment(pb, envVars);
+        SkillJail.applyEnvironment(pb, envVars);
 
         try {
             Process process = pb.start();
@@ -499,48 +558,5 @@ public class ProcessSandbox implements SandboxManager {
             }
         }
         return trimmed;
-    }
-
-    /**
-     * Variables a skill legitimately needs. Everything else is removed before the process
-     * starts, so generated code no longer inherits the service's own secrets.
-     * <p>
-     * The systemd unit loads {@code /opt/ownclaw/.env}, so the JVM environment holds the
-     * cloud API keys, the GitHub token, the Telegram token and the ops token. Until now
-     * {@code pb.environment()} handed all of them to every skill, which meant one buggy or
-     * prompt-injected skill could read them and post them anywhere.
-     */
-    private static final java.util.Set<String> ENV_ALLOWLIST = java.util.Set.of(
-            "PATH",                 // find python and system binaries
-            "HOME",                 // pip, venv and several libraries expect it
-            "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",   // UTF-8 in and out
-            "TZ",
-            "TMPDIR", "TMP", "TEMP",
-            "VIRTUAL_ENV",          // set by PythonEnvironmentService for venv skills
-            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-            "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",       // Windows needs these to run at all
-            "TEMPDIR", "USERPROFILE");
-
-    /**
-     * Replaces the inherited environment with the allow-listed subset plus the variables the
-     * caller explicitly asked for (the skill's declared credentials).
-     */
-    private static void applyEnvironment(ProcessBuilder pb, Map<String, String> envVars) {
-        Map<String, String> env = pb.environment();
-        Map<String, String> keep = new java.util.LinkedHashMap<>();
-        for (String name : ENV_ALLOWLIST) {
-            String value = env.get(name);
-            if (value != null) {
-                keep.put(name, value);
-            }
-        }
-        env.clear();
-        env.putAll(keep);
-        // Default to UTF-8 rather than the platform encoding: skills handle Czech text and
-        // mojibake has been a recurring source of bad output.
-        env.putIfAbsent("PYTHONIOENCODING", "utf-8");
-        if (envVars != null) {
-            env.putAll(envVars);
-        }
     }
 }
