@@ -179,16 +179,15 @@ public class TaskTraceService {
         }
 
         // For each artifact: how many later requests left at all, and -- for a PRIVATE result
-        // the canary indexed and could look for -- how many of those were checked for its text,
-        // in how many it was found, how many of those went out anyway (the check was only
-        // observing), and how many went out without being checked for it. Anything else is
-        // shown as not checked, never as clean.
+        // the canary could look for -- how many of those were checked for its text, in how many
+        // it was found, and of those how many went out anyway (the check was only observing) or
+        // failed (whether they reached the provider is not recorded); and how many later
+        // requests were never checked for it. Anything else is shown as not checked, never as
+        // clean.
         for (int i = 0; i < artifacts.size(); i++) {
             var a = artifacts.get(i);
-            boolean checkable = "PRIVATE".equals(a.get("label")) && Boolean.TRUE.equals(a.get("indexed"))
-                    && ((Number) a.get("chars")).longValue() >= MIN_CHECKABLE_CHARS;
             String prefix = a.get("handle") + " in part";
-            int after = 0, checked = 0, hits = 0, leaked = 0, unchecked = 0;
+            int after = 0, checked = 0, hits = 0, leaked = 0, failed = 0, unchecked = 0;
             for (int j = 0; j < calls.size(); j++) {
                 if (callIds.get(j) <= artifactIds.get(i)) continue;
                 var c = calls.get(j);
@@ -208,15 +207,21 @@ public class TaskTraceService {
                 checked++;
                 if (named) {
                     hits++;
-                    if (!refused) leaked++;
+                    if ("ERROR".equals(c.get("decision"))) failed++;
+                    else if (!refused) leaked++;
                 }
             }
             a.put("requestsAfter", after);
+            // Indexed, or found anyway: rows from before `indexed` was recorded still have hits.
+            boolean checkable = "PRIVATE".equals(a.get("label"))
+                    && ((Number) a.get("chars")).longValue() >= MIN_CHECKABLE_CHARS
+                    && (Boolean.TRUE.equals(a.get("indexed")) || hits > 0);
             if (!checkable) { a.put("canary", null); continue; }
             var canary = new LinkedHashMap<String, Object>();
             canary.put("checkedCalls", checked);
             canary.put("hits", hits);
             canary.put("leaked", leaked);
+            canary.put("failed", failed);
             canary.put("unchecked", unchecked);
             a.put("canary", canary);
         }

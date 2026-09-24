@@ -3036,7 +3036,7 @@
             // No local tokens is not "never reached it": a call that fails -- a full context
             // window, a parse error, a timeout -- throws before its tokens are counted.
             d.appendChild(tdRow('Carried out by', s.tier === 'local' ? 'the local model'
-                    : 'the local model, but no local tokens were counted: it was unreachable, or its first call failed'));
+                    : 'not known: no local tokens were counted'));
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
         // A failed call has no tokens and no cost on record; if that is all there was, say so.
@@ -3098,7 +3098,7 @@
         var priv = arts.filter(function(a) { return a.label === 'PRIVATE'; });
         var rest = arts.filter(function(a) { return a.label !== 'PRIVATE'; });
 
-        panel.appendChild(node('div', 'task-section-title', 'Kept on this machine'));
+        panel.appendChild(node('div', 'task-section-title', 'Private results'));
         if (!priv.length) panel.appendChild(node('div', 'task-trace-note', 'No private result was recorded for this task.'));
         priv.forEach(function(a) {
             var item = node('div', 'task-trace-item');
@@ -3110,10 +3110,15 @@
                 ? node('div', 'task-trace-line muted', 'Nothing went to the cloud after it was read.')
                 : c.leaked > 0
                 ? node('div', 'task-trace-line bad', 'Its text went to the cloud in '
-                        + tdCount(c.leaked, 'request', 'requests') + ': the check was only observing.')
+                        + tdCount(c.leaked, 'request', 'requests')
+                        + (c.failed ? ', and was in ' + tdCount(c.failed, 'failed request', 'failed requests')
+                            + ' that may have gone out' : '') + ': the check was only observing.')
+                : c.failed > 0
+                ? node('div', 'task-trace-line bad', 'Its text was in ' + tdCount(c.failed, 'failed request', 'failed requests')
+                        + '; whether they reached the cloud is not recorded: the check was only observing.')
                 : c.unchecked > 0
-                ? node('div', 'task-trace-line warn', tdCount(c.unchecked, 'later request', 'later requests')
-                        + ' went out without being checked for it: the check stops at the first private result it finds.')
+                ? node('div', 'task-trace-line warn', tdCount(c.unchecked, 'later request was', 'later requests were')
+                        + ' not checked for it and may have gone out: the check stops at the first private result it finds.')
                 // What Artifact.describe() shows of it -- never the text.
                 : node('div', 'task-trace-line muted', a.indexed === false
                         ? 'The cloud was shown only its source and size, not its text.'
@@ -3231,7 +3236,7 @@
                     : a.chars < 8 ? 'Too short to be checked automatically.'
                     : 'No automatic check was recorded for it.' };
         }
-        var stopped = c.hits - c.leaked, clean = c.checkedCalls - c.hits;
+        var stopped = c.hits - c.leaked - c.failed, clean = c.checkedCalls - c.hits;
         if (stopped > 0) {
             return { cls: 'warn', text: 'Its text was in ' + tdCount(stopped, 'request', 'requests')
                     + ' about to go to the cloud; the check stopped ' + (stopped === 1 ? 'it' : 'them') + '.' };
