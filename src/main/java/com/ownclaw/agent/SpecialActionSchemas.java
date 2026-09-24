@@ -130,9 +130,9 @@ public final class SpecialActionSchemas {
                             + "per step, so prefer it when nobody is waiting. Give it a goal; it "
                             + "works out the steps. A delegation starts with no results and "
                             + "cannot see earlier ones, so say in words what it should fetch. "
-                            + "Observations name results as {{N}}; to pass one on verbatim "
-                            + "without reading it, put {{N}} or {{N.field}} as the whole value of "
-                            + "a tool argument yourself.",
+                            + "Observations name results as {{N}}. When you have a tool that "
+                            + "takes a result, put {{N}} or {{N.field}} as the whole value of that "
+                            + "argument to pass it on verbatim without reading it.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));

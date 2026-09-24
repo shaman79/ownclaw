@@ -57,12 +57,14 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("the cloud path resolves once, refuses before running, and labels from what moved")
+    @DisplayName("the cloud path resolves once, refuses and returns before running, and labels from what moved")
     void theCloudPathUsesTheOneResolver() throws IOException {
         // The delegation's side of this is driven for real in DelegationBehaviourTest. AgentLoop
         // is too heavy to construct in a unit test, so its ordering is pinned here: resolve,
-        // refuse on failure, refuse a repeated side effect, and only then run -- with the label
-        // taken from the resolver's own record of what it pulled in.
+        // refuse and return, and only then run -- with the label taken from the resolver's own
+        // record of what it pulled in. (No never-twice check on this path: identical arguments
+        // rarely match a delegation's send, and it refused legitimate repeats like a light
+        // switched on, off and on again.)
         String s = read("com.ownclaw.agent.AgentLoop");
         int start = s.indexOf("private AgentObservation executeTool(");
         assertTrue(start > 0, "executeTool was renamed; this test no longer guards anything");
@@ -71,13 +73,16 @@ class LivePathGuardsTest {
 
         int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
-        int repeat = body.indexOf("LocalExecutor.sideEffectAlreadyDone(");
         int run = body.indexOf("tool.execute(");
         int label = body.indexOf("Artifact.labelFor(tool.requiredCredentials(), refs.used())");
         assertTrue(resolve > 0, "executeTool no longer resolves through References");
         assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
-        assertTrue(body.substring(refuse, run).contains("return "), "...and actually return");
-        assertTrue(repeat > refuse && repeat < run, "a repeated side effect must be refused before it runs");
+        String refusal = body.substring(refuse, body.indexOf("\n        }\n", refuse));
+        assertTrue(refusal.contains("return AgentObservation.failure("), "...and actually return: " + refusal);
+        assertFalse(refusal.contains("available("),
+                "the cloud's refusal must not list field names -- they can be private data");
+        assertTrue(body.substring(refuse, run).contains("resolved = refs.params()"),
+                "the call runs on the resolver's substituted arguments");
         assertTrue(label > run, "the label must come from the resolver's record, not a re-parse");
         assertFalse(body.contains("resolved = LocalExecutor"), "a second resolver is back");
     }

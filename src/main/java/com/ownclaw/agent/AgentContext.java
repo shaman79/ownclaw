@@ -184,10 +184,11 @@ public class AgentContext {
     /**
      * Record a result as the next artifact of this task and return it, numbered.
      * <p>
-     * Numbering is task-wide and never resets: {@code $3} means one thing to the local
-     * executor's ledger, the cloud's descriptor and the events row, and a later delegation can
-     * forward a result an earlier one produced. A PRIVATE artifact's bytes are indexed for the
-     * canary at this moment; a PUBLIC one's are not, because they may go.
+     * Numbering is task-wide and never resets: {@code {{3}}} means one thing to the cloud's
+     * descriptor, the egress ledger and the events row. (Inside a delegation the local model
+     * counts only that delegation's results, from {{1}}.) A PRIVATE artifact's bytes are indexed
+     * for the canary here — unless the decision says it is PRIVATE only for when it was made; a
+     * PUBLIC one's never are, because they may go.
      */
     public synchronized Artifact addArtifact(String tool, Map<String, Object> written,
                                              Map<String, Object> resolved, String output,
@@ -195,7 +196,7 @@ public class AgentContext {
         Artifact a = new Artifact(artifacts.size() + 1, tool, written, resolved, output, success,
                 decision.label(), decision.why());
         artifacts.add(a);
-        if (a.isPrivate()) privateIndex.addPrivate(a.n(), a.output());
+        if (a.isPrivate() && decision.indexed()) privateIndex.addPrivate(a.n(), a.output());
         return a;
     }
 

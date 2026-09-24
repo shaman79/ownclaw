@@ -46,16 +46,23 @@ class ArtifactRefTest {
             // must be refused: dangling, missing field, failed result, not the whole value
             "{{3}}", "{{0}}", "{{1.no_such_field}}", "{{1.body_text (string, 16 chars)}}",
             "{{1.body}}", "{{2}}", "{{2.text}}", "{{1234567890}}",
-            "Menu: {{1.body_text}}", "\"{{1.body_text}}\"", "`{{1}}`", "{{1}} {{1}}",
-            "{{١}}", "{{１}}",
-            // the old syntax, still produced by habit or a stored lesson
-            "$1.body_text", "$2.text", "$12.polévka");
+            "\"{{1.body_text}}\"", "`{{1}}`", "'{{1.body_text}}'",
+            "{{١}}", "{{１}}");
 
     /** Nothing here was meant as a reference: each must pass through untouched. */
     private static final List<String> NOT_ATTEMPTS = List.of(
             "$50", "$5.50", "$1.99", "$1.234,56", "$5.00/kg", "$1", "$2", "the price is $50 today",
             "$5.50 Polévka\nHlavní chod", "petr@example.com", "Menu", "", "{name}", "{{name}}",
-            "{{ user.email }}", "Hello {{name}}!", "#1", "@1", "{1}", "echo \"$1\" | wc -c");
+            "{{ user.email }}", "Hello {{name}}!", "#1", "@1", "{1}", "echo \"$1\" | wc -c",
+            // code and templates that contain braces and a digit -- round 6 found every one of
+            // these refused, with no way to send them
+            "rf\"\\d{{4}}\"", "\\frac{{1}}{{2}}", "int a[2][2] = {{1,2},{3,4}};", "{{1,2},{3,4}}",
+            "Hello {{1}}, your order {{2}} ships today", "{{ 0 if is_state('x','on') else 1 }}",
+            "rename 's/(.*)\\.jpeg$/$1.jpg/'",
+            // a reference INSIDE text is text (the known limit that buys the above)
+            "Menu: {{1.body_text}}", "{{1}} {{1}}",
+            // the old $ form: nothing teaches it any more, and $1.jpg is a regex replacement
+            "$1.body_text", "$2.text", "$12.polévka");
 
     @Test
     @DisplayName("PROPERTY: every reference attempt is substituted or refused — none goes out as text")
@@ -110,6 +117,30 @@ class ArtifactRefTest {
         var r = References.resolve(Map.of("body", "{{2}}"), NAMESPACE);
         assertFalse(r.ok());
         assertTrue(r.reason().contains("FAILED"), r.reason());
+    }
+
+    @Test
+    @DisplayName("quotes or backticks around a reference are forgiven")
+    void quotedReferencesResolve() {
+        for (String v : List.of("\"{{1.body_text}}\"", "`{{1.body_text}}`", "'{{1.body_text}}'")) {
+            var r = References.resolve(Map.of("body", v), NAMESPACE);
+            assertTrue(r.ok(), v + ": " + r.reason());
+            assertEquals("SECRET body text", r.params().get("body"), v);
+        }
+    }
+
+    @Test
+    @DisplayName("an ok:false envelope is a failed result: never forwarded, never offered")
+    void anOkFalseResultIsAFailure() {
+        var smtpError = new Artifact(1, "smtp_send_email", Map.of(), Map.of(),
+                "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}", true,
+                Label.PRIVATE, List.of("credentials (1)"));
+        assertFalse(smtpError.succeeded(), "the harness said success; the skill said it failed");
+        assertFalse(References.resolve(Map.of("body", "{{1}}"), List.of(smtpError)).ok(),
+                "an error envelope is not something to send on");
+        assertFalse(smtpError.describe().contains("use:"),
+                "and the descriptor does not offer a token the resolver would refuse");
+        assertTrue(smtpError.describe().contains("✗"), smtpError.describe());
     }
 
     @Test

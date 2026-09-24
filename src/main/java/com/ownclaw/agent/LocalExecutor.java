@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.*;
 import com.ownclaw.llm.*;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
+import com.ownclaw.privacy.Label;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -111,9 +112,9 @@ public class LocalExecutor {
 
     private static final String OUTSIDE_REFERENCE_NOTE = "NOTE: the delegation's goal named "
             + "earlier results. A delegation starts with no results and cannot see earlier ones, "
-            + "so those references were removed from what it was given. To pass an earlier result "
-            + "on, put {{N}} or {{N.field}} into a tool call yourself; otherwise say in words "
-            + "what the delegation should fetch.\n\n";
+            + "so those references were removed from what it was given. When you have a tool that "
+            + "takes an earlier result, put {{N}} or {{N.field}} into that call yourself; otherwise "
+            + "say in words what the delegation should fetch.\n\n";
 
     /** The plan with every reference replaced by a note; {@code removed[0]} counts them. */
     static DelegationPlan withoutOutsideReferences(DelegationPlan plan, int[] removed) {
@@ -131,8 +132,9 @@ public class LocalExecutor {
         };
         var steps = new ArrayList<DelegationPlan.Step>();
         for (var st : plan.steps()) {
-            steps.add(new DelegationPlan.Step(scrub.apply(st.description()), st.tool(),
-                    scrubValues(st.params(), scrub)));
+            // Step PARAMETERS are left alone: in a plan, {{1}} there means the plan's own step 1,
+            // which is exactly how the delegation numbers. Only prose points outside.
+            steps.add(new DelegationPlan.Step(scrub.apply(st.description()), st.tool(), st.params()));
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
                 : plan.checkpoints().stream().map(scrub).toList();
@@ -140,21 +142,6 @@ public class LocalExecutor {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> T scrubValues(T value, java.util.function.UnaryOperator<String> scrub) {
-        if (value instanceof String s) return (T) scrub.apply(s);
-        if (value instanceof Map<?, ?> m) {
-            var out = new LinkedHashMap<Object, Object>();
-            m.forEach((k, v) -> out.put(k, scrubValues(v, scrub)));
-            return (T) out;
-        }
-        if (value instanceof List<?> l) {
-            var out = new ArrayList<Object>();
-            for (Object v : l) out.add(scrubValues(v, scrub));
-            return (T) out;
-        }
-        return value;
-    }
-
     private Outcome run(DelegationPlan plan, AgentContext parentContext) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
@@ -178,10 +165,8 @@ public class LocalExecutor {
         // forwarded the first one's traceback as the body of the morning email. Every result is
         // still recorded on the task too, under the task-wide handle the cloud and the ledger see.
         List<Artifact> mine = new ArrayList<>();
-        // Whether the local model has read private content yet. It no longer changes the label
-        // of what a public tool returns -- that marked a public web page private and then
-        // refused the cloud's own fetch of the same page. It governs what the MODEL writes: the
-        // arguments it types after this point, and its summary, never reach the cloud.
+        // Whether the local model has read private data yet. From then on every result of this
+        // delegation is PRIVATE (and not indexed); see where the label is decided below.
         boolean tainted = false;
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -315,18 +300,9 @@ public class LocalExecutor {
                 continue;
             }
 
-            // A repeat of a call that already happened, on a tool that changes something.
-            //
-            // The cloud path has CriticAgent, which blocks an identical action after three
-            // tries. Delegation runs before the critic and never reaches it, so the only bound
-            // here is max_steps -- and the model doing the work is the weaker one, which is the
-            // whole premise. An unsure model that re-sends smtp_send_email would send the
-            // owner ten copies of the same email. Re-sending an identical side-effecting call
-            // is never what was wanted, so hand back what it already returned instead.
-            //
-            // One resolution of the arguments first, used by every check below and by the call
-            // itself. It was being computed twice, which is how a guard and the thing it
-            // guards drift apart.
+            // One resolution of the arguments, used by every check below and by the call itself.
+            // It was once computed twice, which is how a guard and the thing it guards drift
+            // apart.
             References.Resolved refs = References.resolve(action.params, mine);
             Map<String, Object> params = refs.params();
 
@@ -356,26 +332,19 @@ public class LocalExecutor {
                         refs.refused());
                 messages.add(LlmMessage.assistant(raw));
                 messages.add(LlmMessage.user("Not run: the value of '" + refs.refused()
-                        + "' would have been sent as literal text. " + refs.reason()));
+                        + "' would have been sent as literal text. " + refs.reason() + " "
+                        + References.available(mine)));
                 continue;
             }
 
-            String repeated = repeatedSideEffect(action, params, mine);
-            if (repeated != null) {
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("You already called " + action.tool
-                        + " with exactly these arguments, and it returned:\n"
-                        + truncate(repeated, 4000)
-                        + "\n\nUse that result. Do not call it again — it changes something, "
-                        + "so a second identical call does it twice. Move to the next step, or "
-                        + "finish."));
-                continue;
-            }
-            // ...and anywhere else in the task, without showing what it returned. Showing an
-            // earlier delegation's output is how a PRIVATE result from outside this delegation
-            // reached the local model and then, paraphrased in its summary, the cloud -- a wifi
-            // password and an alarm code, in a reviewer's probe. Refusing is all the guard needs:
-            // the point is that the email does not go out twice.
+            // A change this task already made is not made again -- by this delegation or an
+            // earlier one. The cloud path has CriticAgent, which blocks an identical action after
+            // three tries; delegation never reaches it, so the only bound here was max_steps, and
+            // an unsure model re-sending smtp_send_email sends the owner ten copies. Only a call
+            // that SUCCEEDED counts (by Artifact.succeeded, which reads an "ok": false envelope):
+            // a send that failed is exactly what a retry is for. And the earlier output is not
+            // shown -- showing an earlier delegation's output is how a PRIVATE result reached the
+            // local model and then, reworded in its summary, the cloud.
             Artifact alreadyDone = sideEffectAlreadyDone(
                     toolRegistry.find(action.tool).orElse(null), params, parentContext.artifacts());
             if (alreadyDone != null) {
@@ -426,23 +395,36 @@ public class LocalExecutor {
             Tool ran = toolRegistry.find(action.tool).orElse(null);
             Artifact.Decision decision = Artifact.labelFor(
                     ran == null ? List.of() : ran.requiredCredentials(), refs.used());
+            // After the local model has read private data, nothing more of this delegation is
+            // shown to the cloud: whatever it types can carry what it read, and a public tool that
+            // echoes its input -- or a file written and then read back -- hands that straight
+            // into the output. So the result is PRIVATE, which every renderer already turns into
+            // a descriptor. It is NOT indexed for the canary: being private only for WHEN it was
+            // made is what made the cloud's own later fetch of the same public page trip the
+            // canary, and a run whose email had gone report "did not finish".
+            if (tainted && decision.label() == Label.PUBLIC) {
+                var why = new ArrayList<>(decision.why());
+                why.add("after private data in this delegation");
+                decision = new Artifact.Decision(Label.PRIVATE, List.copyOf(why), false);
+            }
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);
             mine.add(artifact);
-            // These arguments were typed by a model that had, or had not, read private content.
-            boolean wroteAfterPrivate = tainted;
             tainted |= artifact.isPrivate();
 
             // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
             // here, a skill used every single morning looks untouched to maintenance -- which
             // retires skills for being unused. The telemetry has to follow the work.
-            // The arguments as WRITTEN, as the cloud path records them. `params` is the resolved
-            // map, with every {{N}} already replaced by the artifact's bytes, so a failed step wrote
-            // up to 500 characters of the mailbox into a row whose label is the only thing
-            // keeping it out of the repair prompt -- and that label has been wrong before.
+            // The arguments as WRITTEN, never resolved -- the resolved map carries the bytes of
+            // whatever {{N}} pointed at -- and in the task's numbering, because the repair prompt
+            // reads these rows next to rows from the cloud path. The row's label is what keeps it
+            // out of that prompt, and it is the artifact's label: PRIVATE for anything written
+            // after the model read private data.
+            @SuppressWarnings("unchecked")
+            Map<String, Object> writtenForTask = toolOk ? null
+                    : (Map<String, Object>) References.toTaskHandles(action.params, mine);
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, toolOk || wroteAfterPrivate ? null : action.params,
-                    toolOk ? null : toolResult, artifact.label());
+                    toolOk, toolMs, writtenForTask, toolOk ? null : toolResult, artifact.label());
 
             log.info("Delegation step {} — {} {} (result: {} chars, {})",
                     step + 1, artifact.handle() + " " + action.tool, toolOk ? "OK" : "FAIL",
@@ -750,11 +732,11 @@ public class LocalExecutor {
         var ledger = new StringBuilder("Results available:\n");
         for (int i = 0; i < done.size(); i++) {
             ledger.append("  ").append(ArtifactRef.handle(i + 1)).append(" = ").append(done.get(i).tool())
-                  .append(done.get(i).success() ? " (ok, " : " (FAILED, ")
+                  .append(done.get(i).succeeded() ? " (ok, " : " (FAILED — not referenceable, ")
                   .append(done.get(i).output() == null ? 0 : done.get(i).output().length())
                   .append(" chars)\n");
         }
-        ledger.append("Their full output is still available by reference — {{1}}, {{2}}, and so "
+        ledger.append("A successful result's full output is still available by reference — {{1}}, {{2}}, and so "
                 + "on, or {{N.field}} for a JSON result. The conversation above them has been dropped to "
                 + "leave room to answer in; the results themselves have not.");
 
@@ -781,18 +763,6 @@ public class LocalExecutor {
 
     private static String str(Object o) {
         return o == null ? "" : o.toString();
-    }
-
-    /**
-     * The output of an earlier identical call to a side-effecting tool, or null if this call is
-     * new. Identical means same tool and same arguments; a read-only tool is never blocked,
-     * because calling one twice costs nothing but time and the goal may genuinely need it.
-     */
-    private String repeatedSideEffect(ExecutorAction action, Map<String, Object> params,
-                                      List<Artifact> done) {
-        var tool = toolRegistry.find(action.tool).orElse(null);
-        if (tool == null || !tool.hasSideEffects()) return null;
-        return priorIdenticalOutput(action.tool, params, done);
     }
 
     /**
@@ -829,7 +799,7 @@ public class LocalExecutor {
         int head = 400;
         int tail = 150;
         return result.substring(0, head)
-                + "\n\n" + OMISSION_MARKER + stepNumber + "⟧\n\n"
+                + "\n\n" + OMISSION_MARKER + stepNumber + "}}⟧\n\n"
                 + result.substring(result.length() - tail)
                 + "\n\n[That is the beginning and the end of " + result.length() + " characters. "
                 + "The complete, exact text is " + ArtifactRef.handle(stepNumber) + ": make "
@@ -850,7 +820,7 @@ public class LocalExecutor {
      * one failure the cloud cannot catch — the summary looks right and the ledger says the tool
      * ran.
      */
-    static final String OMISSION_MARKER = "⟦middle omitted — pass it on with $";
+    static final String OMISSION_MARKER = "⟦middle omitted — pass it on with {{";
 
     /**
      * Treat {@code {"tool": "done"}} as the finish it obviously is.
@@ -925,33 +895,20 @@ public class LocalExecutor {
     /**
      * An earlier call anywhere in the task that already SUCCEEDED in doing exactly this, or null.
      * <p>
-     * Both paths use it. A delegation that fails on one step can still have sent the email on
-     * another, and the fallback then hands the tools back to the cloud, which retries the job --
-     * a second morning email, with nothing mechanical in the way. Only a success counts: a send
-     * that failed is exactly what a retry is for. Only a tool that declares side effects: a
-     * second read costs nothing but time.
+     * A delegation that fails on one step can still have sent the email on
+     * another, and a second delegation retrying the job would send a second morning email. Only
+     * a real success counts: a send that failed, including one reported as {@code "ok": false},
+     * is exactly what a retry is for. Only a tool that declares side effects: a second read costs
+     * nothing but time.
      */
     static Artifact sideEffectAlreadyDone(com.ownclaw.agent.tools.Tool tool,
                                           Map<String, Object> resolved, List<Artifact> task) {
         if (tool == null || !tool.hasSideEffects()) return null;
         Map<String, Object> args = resolved == null ? Map.of() : resolved;
         for (Artifact a : task) {
-            if (a.success() && a.tool().equals(tool.name())
+            if (a.succeeded() && a.tool().equals(tool.name())
                     && Objects.equals(a.resolved() == null ? Map.of() : a.resolved(), args)) {
                 return a;
-            }
-        }
-        return null;
-    }
-
-    /** The output of an earlier call with the same name and the same arguments, or null. */
-    static String priorIdenticalOutput(String tool, Map<String, Object> params,
-                                       List<Artifact> done) {
-        Map<String, Object> args = params == null ? Map.of() : params;
-        for (Artifact r : done) {
-            if (r.tool().equals(tool)
-                    && Objects.equals(r.resolved() == null ? Map.of() : r.resolved(), args)) {
-                return r.output();
             }
         }
         return null;
@@ -970,13 +927,13 @@ public class LocalExecutor {
         for (int i = 0; i < results.size(); i++) {
             if (i > 0) sb.append(", ");
             Artifact r = results.get(i);
-            sb.append(r.handle()).append(' ').append(r.tool()).append(r.success() ? " ok" : " FAILED");
+            sb.append(r.handle()).append(' ').append(r.tool()).append(r.succeeded() ? " ok" : " FAILED");
             if (r.isPrivate()) sb.append(" (PRIVATE, ").append(r.output().length()).append(" chars withheld)");
         }
         sb.append("]");
         if (results.stream().anyMatch(Artifact::isPrivate)) {
-            sb.append("\nPrivate results are not shown. To pass one on, put its handle ({{N}} or "
-                    + "{{N.field}}) as the whole value of a tool argument yourself; a new "
+            sb.append("\nPrivate results are not shown. When you have a tool that takes one, put its "
+                    + "handle ({{N}} or {{N.field}}) as the whole value of that argument; a new "
                     + "delegation cannot see it.");
         }
         return sb.toString();
@@ -1002,7 +959,10 @@ public class LocalExecutor {
                     + results.stream().filter(Artifact::isPrivate).map(Artifact::handle)
                             .collect(Collectors.joining(", ")) + ")";
         } else {
-            summary = localSummary == null || localSummary.isBlank() ? "" : localSummary;
+            // In the task's numbering: the summary says "sent {{1}}" meaning the delegation's
+            // first step, and the cloud reads task handles everywhere else.
+            summary = localSummary == null || localSummary.isBlank() ? ""
+                    : (String) References.toTaskHandles(localSummary, results);
         }
         String body = buildConsolidatedResult(goal, results);
         summary = summary.isEmpty() ? body : summary + "\n\n---\n" + body;
@@ -1015,7 +975,7 @@ public class LocalExecutor {
         // truncation cannot drop it, not as a tick buried in a ledger.
         String head = "";
         if (anyFailed && !results.isEmpty()) {
-            String ran = results.stream().filter(r -> r.success()).map(r -> r.tool())
+            String ran = results.stream().filter(Artifact::succeeded).map(r -> r.tool())
                     .distinct().collect(Collectors.joining(", "));
             if (!ran.isBlank()) {
                 head = "ALREADY DONE — these succeeded and must NOT be repeated: " + ran
@@ -1040,24 +1000,20 @@ public class LocalExecutor {
      * than any summary.
      */
     static String verbatimFailures(List<Artifact> results) {
-        if (results.stream().allMatch(Artifact::success)) return "";
+        if (results.stream().allMatch(Artifact::succeeded)) return "";
         var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");
-        boolean readPrivate = false;
         for (Artifact r : results) {
-            if (!r.success()) {
-                // The arguments as WRITTEN, never as resolved: the resolved map carries the
-                // substituted bytes of whatever {{N}} pointed at. And not even those once the
-                // model has read something private: whatever it typed after that -- a recipient,
-                // a search, a body -- may carry it, and a public tool does not make the typing
-                // public. This is where the private-marking belongs; the tool's own output is
-                // labelled on its own facts and shown if it is PUBLIC.
-                boolean withhold = r.isPrivate() || readPrivate;
-                sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
-                  .append(withhold ? "(arguments withheld)" : String.valueOf(r.written()))
-                  .append("\n")
-                  .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
-            }
-            readPrivate |= r.isPrivate();
+            if (r.succeeded()) continue;
+            // The arguments as WRITTEN, never as resolved: the resolved map carries the
+            // substituted bytes of whatever {{N}} pointed at. Rewritten into the task's handles,
+            // because the cloud reads them next to task handles and may copy them into a call of
+            // its own. A PRIVATE step -- including anything after the model read private data --
+            // shows neither its arguments nor its output.
+            sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
+              .append(r.isPrivate() ? "(arguments withheld)"
+                      : String.valueOf(References.toTaskHandles(r.written(), results)))
+              .append("\n")
+              .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
         }
         return sb.toString();
     }
@@ -1075,7 +1031,7 @@ public class LocalExecutor {
             for (int i = 0; i < results.size(); i++) {
                 var r = results.get(i);
                 sb.append(r.handle()).append(" [").append(r.tool()).append("] ")
-                        .append(r.success() ? "OK" : "FAIL").append(": ")
+                        .append(r.succeeded() ? "OK" : "FAIL").append(": ")
                         // Failures keep far more: a truncated traceback is a traceback that
                         // cannot be acted on, and this is the only copy that reaches the cloud.
                         .append(r.isPrivate() ? r.describe()
@@ -1095,7 +1051,7 @@ public class LocalExecutor {
                 sb.append("### ").append(r.describe()).append("\n\n");
             } else {
                 sb.append("### ").append(r.handle()).append(": ").append(r.tool())
-                        .append(r.success() ? " ✓" : " ✗")
+                        .append(r.succeeded() ? " ✓" : " ✗")
                         .append("\n").append(truncate(r.output(), 5000)).append("\n\n");
             }
         }
@@ -1184,6 +1140,4 @@ public class LocalExecutor {
             return new ExecutorAction(false, null, null, Map.of());
         }
     }
-
-    /** Result of a single tool execution within a delegation. */
 }

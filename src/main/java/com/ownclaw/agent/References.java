@@ -45,14 +45,15 @@ final class References {
      * Resolve {@code written} against {@code namespace}, where {@code {{n}}} is the n-th
      * element.
      * <p>
-     * Everything a model plausibly meant as a reference is either substituted or refused;
-     * nothing reference-shaped is ever passed on as literal text, which is how an email whose
-     * whole body was "$1.body" went out and was recorded as a success. Refused, specifically:
+     * Every WHOLE value a model plausibly meant as a reference is either substituted or refused;
+     * none is passed on as literal text, which is how an email whose whole body was "$1.body" went
+     * out and was recorded as a success. Refused, specifically:
      * a handle beyond the list; a field the result does not have; a reference to a result that
-     * FAILED, whose output is an error message and never what anyone meant to send; and a
-     * reference that is not the whole top-level value — inside a sentence, in quotes, or nested
-     * in a list or an object — because substituting inside text is how a summary silently
-     * becomes a quotation.
+     * FAILED (by {@link Artifact#succeeded}, which also reads an {@code "ok": false} envelope),
+     * whose output is an error message and never what anyone meant to send; a malformed
+     * reference; and one nested in a list or an object, which cannot be substituted. A reference
+     * inside other text is not recognised at all — it is text, and so is ordinary code or a
+     * template that happens to contain braces and a digit.
      */
     static Resolved resolve(Map<String, Object> written, List<Artifact> namespace) {
         if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
@@ -65,25 +66,24 @@ final class References {
                 if (ref == null) {
                     if (ArtifactRef.looksLikeReference(s)) {
                         return refuse(written, e.getKey(), "'" + s.strip() + "' looks like a "
-                                + "reference, but a reference has to be the WHOLE value of a "
-                                + "parameter, written exactly {{N}} or {{N.field}}. It is never "
-                                + "substituted inside other text.", namespace);
+                                + "reference but is not a valid one. Write exactly {{N}} or "
+                                + "{{N.field}}, with N one of the numbers below.");
                     }
                     continue;
                 }
                 if (ref.handle() > namespace.size()) {
                     return refuse(written, e.getKey(), ref + " refers to a result that does not "
-                            + "exist.", namespace);
+                            + "exist.");
                 }
                 Artifact a = namespace.get(ref.handle() - 1);
-                if (!a.success()) {
+                if (!a.succeeded()) {
                     return refuse(written, e.getKey(), ref + " is a FAILED result — its output "
-                            + "is an error message, not something to pass on.", namespace);
+                            + "is an error message, not something to pass on.");
                 }
                 String value = ref.field() == null ? a.output() : field(a.output(), ref.field());
                 if (value == null) {
                     return refuse(written, e.getKey(), ref + " names a field that result does "
-                            + "not have.", namespace);
+                            + "not have.");
                 }
                 e.setValue(value);
                 if (!used.contains(a)) used.add(a);
@@ -92,7 +92,7 @@ final class References {
                 if (nested != null) {
                     return refuse(written, e.getKey(), "'" + nested + "' is inside a list or an "
                             + "object. A reference only works as the whole value of a top-level "
-                            + "parameter.", namespace);
+                            + "parameter.");
                 }
             }
         }
@@ -109,8 +109,8 @@ final class References {
             if (i > 0) sb.append("; ");
             Artifact a = namespace.get(i);
             sb.append(ArtifactRef.handle(i + 1)).append(" = ").append(a.tool())
-              .append(a.success() ? " (ok" : " (FAILED — not referenceable");
-            if (a.success()) {
+              .append(a.succeeded() ? " (ok" : " (FAILED — not referenceable");
+            if (a.succeeded()) {
                 List<String> fields = Artifact.jsonFieldNames(a.output());
                 if (!fields.isEmpty()) sb.append("; fields: ").append(String.join(", ", fields));
             }
@@ -120,9 +120,49 @@ final class References {
                 .toString();
     }
 
-    private static Resolved refuse(Map<String, Object> written, String param, String why,
-                                   List<Artifact> namespace) {
-        return new Resolved(written, List.of(), param, why + " " + available(namespace));
+    /**
+     * The reason alone. The list of what can be referenced is appended by the caller that may
+     * see it: the local model gets full field names, the cloud does not. A refusal on the cloud
+     * path once listed every field name of every result, PRIVATE ones included and uncut, which
+     * disclosed names under 32 characters and tripped the canary on longer ones.
+     */
+    private static Resolved refuse(Map<String, Object> written, String param, String why) {
+        return new Resolved(written, List.of(), param, why);
+    }
+
+    /**
+     * Rewrite a delegation's own references ({@code {{1}}} = its first step) into the task's
+     * handles, for text the CLOUD will read — a failed step's arguments, the local summary, a
+     * usage row. The two numberings meet in that text, and a cloud that copied a local
+     * {{1.body_text}} into its own call would have resolved it task-wide: a different result,
+     * possibly a private one from another delegation.
+     */
+    static Object toTaskHandles(Object value, List<Artifact> mine) {
+        if (value instanceof String s) {
+            var m = ArtifactRef.TOKEN.matcher(s);
+            var sb = new StringBuilder();
+            while (m.find()) {
+                ArtifactRef ref = ArtifactRef.parse(m.group());
+                String out = m.group();
+                if (ref != null && ref.handle() <= mine.size()) {
+                    out = new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString();
+                }
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(out));
+            }
+            m.appendTail(sb);
+            return sb.toString();
+        }
+        if (value instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<Object, Object>();
+            map.forEach((k, v) -> out.put(k, toTaskHandles(v, mine)));
+            return out;
+        }
+        if (value instanceof Collection<?> c) {
+            var out = new ArrayList<Object>();
+            for (Object v : c) out.add(toTaskHandles(v, mine));
+            return out;
+        }
+        return value;
     }
 
     /** One field of a JSON result, or null. A name the descriptor cut short matches by prefix. */

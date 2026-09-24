@@ -1185,19 +1185,6 @@ public class AgentLoop {
         }
         Map<String, Object> resolved = refs.params();
 
-        // A change that already happened in this task is not made again -- including one a
-        // delegation made before it failed on a later step and the fallback handed the tools
-        // back. Without this the cloud, told to finish the job, sent a second morning email.
-        Artifact alreadyDone = LocalExecutor.sideEffectAlreadyDone(tool, resolved, context.artifacts());
-        if (alreadyDone != null) {
-            log.warn("Task {}: {} with identical arguments already succeeded as {} — not repeated.",
-                    context.taskId(), action.tool(), alreadyDone.handle());
-            return AgentObservation.failure(action.tool(), "Not run: this exact " + action.tool()
-                    + " call already succeeded earlier in this task (" + alreadyDone.handle()
-                    + "). It changes something, so it is never done twice. If the goal is met, "
-                    + "respond.", 0);
-        }
-
         long startMs = System.currentTimeMillis();
         ToolResult result;
         try {

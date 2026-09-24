@@ -52,29 +52,37 @@ class DelegationSafetyTest {
                 com.ownclaw.privacy.Label.PRIVATE, List.of("credentials: SMTP_PASS"));
     }
 
-    // ── repeat suppression ──
+    // ── a change is never made twice in one task ──
+
+    /** A tool that declares side effects, which is all the guard asks of it. */
+    private static com.ownclaw.agent.tools.Tool sideEffecting(String name) {
+        return new com.ownclaw.agent.tools.Tool() {
+            public String name() { return name; }
+            public String description() { return name; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public boolean hasSideEffects() { return true; }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
+                    com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
+        };
+    }
 
     @Test
-    @DisplayName("an identical earlier call is found, whenever it happened")
+    @DisplayName("an identical earlier success is found, whenever it happened")
     void identicalCallIsFound() {
-        var done = List.of(
-                step("smtp_send_email", Map.of("to", "petr@example.com", "subject", "Digest"),
-                        "Sent, message id 42"),
-                step("daily_news_digest", Map.of(), "...headlines..."));
-
-        assertEquals("Sent, message id 42",
-                LocalExecutor.priorIdenticalOutput("smtp_send_email",
+        var sent = step("smtp_send_email", Map.of("to", "petr@example.com", "subject", "Digest"),
+                "Sent, message id 42");
+        var done = List.of(sent, step("daily_news_digest", Map.of(), "...headlines..."));
+        assertSame(sent, LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
                         Map.of("to", "petr@example.com", "subject", "Digest"), done),
-                "not only the immediately preceding call: a delegation is short, and re-sending "
-                        + "the same email with one unrelated call in between is still sending it "
-                        + "twice");
+                "not only the immediately preceding call: re-sending the same email with one "
+                        + "unrelated call in between is still sending it twice");
     }
 
     @Test
     @DisplayName("different arguments are a different call")
     void differentArgumentsAreNotARepeat() {
         var done = List.of(step("smtp_send_email", Map.of("to", "a@example.com"), "ok"));
-        assertNull(LocalExecutor.priorIdenticalOutput("smtp_send_email",
+        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
                         Map.of("to", "b@example.com"), done),
                 "two recipients is two emails, which is the goal, not a mistake");
     }
@@ -83,16 +91,37 @@ class DelegationSafetyTest {
     @DisplayName("no arguments and null arguments are the same call")
     void nullParamsMatchEmptyParams() {
         var done = List.of(step("publish_report", Map.of(), "published"));
-        assertEquals("published",
-                LocalExecutor.priorIdenticalOutput("publish_report", null, done),
+        assertNotNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("publish_report"), null, done),
                 "a model that omits an empty argument object has not made a different call");
     }
 
     @Test
-    @DisplayName("a call that never happened is not suppressed")
+    @DisplayName("a call that never happened is not suppressed, and neither is a read")
     void freshCallIsAllowed() {
-        assertNull(LocalExecutor.priorIdenticalOutput("smtp_send_email",
+        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
                 Map.of("to", "a@example.com"), List.of()));
+        var read = new com.ownclaw.agent.tools.Tool() {
+            public String name() { return "web_fetch"; }
+            public String description() { return "read"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
+                    com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
+        };
+        assertNull(LocalExecutor.sideEffectAlreadyDone(read, Map.of(),
+                List.of(step("web_fetch", Map.of(), "page"))), "a second read costs only time");
+    }
+
+    @Test
+    @DisplayName("a send reported as ok:false did not happen, and may be retried")
+    void anOkFalseEnvelopeIsNotASuccess() {
+        // The production smtp_send_email reports every SMTP error as success with "ok": false
+        // inside. Trusting the success flag told the model the send had happened and refused
+        // the retry that would have delivered it: no email, and the run recorded complete.
+        var failedSend = step("smtp_send_email", Map.of("to", "petr@example.com"),
+                "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}");
+        assertFalse(failedSend.succeeded());
+        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
+                Map.of("to", "petr@example.com"), List.of(failedSend)));
     }
 
     // ── a claim of completion needs evidence ──
@@ -191,16 +220,16 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("shell text is never touched, and a reference inside text is refused")
+    @DisplayName("text is text: shell, code and templates are never touched or refused")
     void onlyWholeValuesAreReferences() {
         var done = List.of(step("x", Map.of(), "OUTPUT"));
-        assertEquals("for f in *; do echo \"$1\"; done",
-                sub(Map.of("command", "for f in *; do echo \"$1\"; done"), done).get("command"),
-                "shell is full of $1, and rewriting one inside a script would be a far worse "
-                        + "bug than the one this fixes -- the marker is {{N}} now, which shell is not");
-        assertEquals("body", refusedParam(Map.of("body", "Here is the menu: {{1}}"), done),
-                "substituting inside text is how a summary becomes a quotation; leaving it is how "
-                        + "an email arrives with a template token in it");
+        for (String text : List.of("for f in *; do echo \"$1\"; done", "Here is the menu: {{1}}",
+                "rf\"\\d{{4}}-\\d{{2}}\"", "\\frac{{1}}{{2}}", "int a[2][2] = {{1,2},{3,4}};",
+                "Hello {{1}}, your order {{2}} ships today", "{{ 0 if is_state('x','on') else 1 }}")) {
+            assertEquals(text, sub(Map.of("command", text), done).get("command"), text);
+        }
+        // Known limit, chosen over refusing all of the above: a reference inside a sentence goes
+        // out as written. It is visible in what arrives, which the refusals were not.
     }
 
     @Test
@@ -519,7 +548,7 @@ class DelegationSafetyTest {
                 "the local model's prose is a paraphrase of what it read, and a paraphrase is the "
                         + "one thing the canary cannot see");
         assertTrue(outcome.text().contains("withheld"));
-        assertTrue(outcome.text().contains("To pass one on"),
+        assertTrue(outcome.text().contains("When you have a tool that takes one"),
                 "and the cloud is told how to move it without reading it");
     }
 
@@ -553,16 +582,31 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("failed steps print the arguments as written, never the substituted bytes")
+    @DisplayName("failed steps print the arguments as written, in the task's numbering")
     void failuresPrintWrittenParams() {
-        var a = new Artifact(2, "smtp_send_email", Map.of("body", "{{1.body_text}}"),
+        // To the local model {{1}} was its first step; the cloud reads task handles everywhere
+        // else in this text and may copy the arguments into a call of its own.
+        var digest = new Artifact(5, "daily_news_digest", Map.of(), Map.of(),
+                "{\"body_text\":\"THE WHOLE SUBSTITUTED DIGEST\"}", true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var send = new Artifact(6, "smtp_send_email", Map.of("body", "{{1.body_text}}"),
                 Map.of("body", "THE WHOLE SUBSTITUTED DIGEST"), "ERROR: auth", false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-        var outcome = LocalExecutor.completed("", "send", List.of(a));
-        assertTrue(outcome.text().contains("{{1.body_text}}"));
-        assertFalse(outcome.text().contains("THE WHOLE SUBSTITUTED DIGEST"),
-                "the resolved map carries the bytes of whatever {{N}} pointed at");
+        String failures = LocalExecutor.verbatimFailures(List.of(digest, send));
+        assertTrue(failures.contains("{{5.body_text}}"), failures);
+        assertFalse(failures.contains("{{1.body_text}}"), "never the delegation's own numbering");
+        assertFalse(failures.contains("THE WHOLE SUBSTITUTED DIGEST"),
+                "and never the bytes the reference pulled in");
+    }
+
+    @Test
+    @DisplayName("the local summary reaches the cloud in the task's numbering")
+    void theSummaryIsRenumbered() {
+        var digest = new Artifact(7, "daily_news_digest", Map.of(), Map.of(), "digest", true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var outcome = LocalExecutor.completed("Forwarded {{1}} to Petr.", "send it", List.of(digest));
+        assertTrue(outcome.text().startsWith("Forwarded {{7}} to Petr."), outcome.text());
     }
 
     @Test
@@ -615,6 +659,36 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("the goal loses references to earlier results; a plan's own step parameters keep theirs")
+    void theGoalScrubTouchesProseOnly() {
+        var plan = new DelegationPlan("Email {{3.body_text}} to Petr",
+                List.of(new DelegationPlan.Step("fetch the menu", "daily_menu_fetcher", Map.of()),
+                        new DelegationPlan.Step("send {{3}}", "smtp_send_email",
+                                Map.of("body", "{{1.body_text}}"))),
+                List.of(), 6);
+        int[] removed = {0};
+        var own = LocalExecutor.withoutOutsideReferences(plan, removed);
+
+        assertFalse(own.goal().contains("{{3"), own.goal());
+        assertFalse(own.steps().get(1).description().contains("{{3"));
+        assertEquals("{{1.body_text}}", own.steps().get(1).params().get("body"),
+                "in a plan, {{1}} means the plan's own step 1 -- exactly how the delegation numbers");
+        assertEquals(2, removed[0]);
+    }
+
+    @Test
+    @DisplayName("a refusal carries no field names — the cloud reads it")
+    void refusalsListNothing() {
+        var priv = new Artifact(1, "contacts", Map.of(), Map.of(),
+                "{\"petr.kazda.private@example.com\":\"x\"}", true,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+        var r = References.resolve(Map.of("body", "{{1.nope}}"), List.of(priv));
+        assertFalse(r.ok());
+        assertFalse(r.reason().contains("petr.kazda"),
+                "a key can be data; on the cloud path this listed every one of them, uncut");
+    }
+
+    @Test
     @DisplayName("a name the descriptor cut short still resolves, by its visible prefix")
     void aTruncatedFieldNameResolves() {
         // The cut is not optional: a field name of 32 characters would itself be a window of the
@@ -635,16 +709,13 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("prices are not references and references are not prices")
     void pricesAndReferencesCannotBeConfused() {
-        // Five review rounds went into telling "$5.50" from "$1.body_text". The marker ended it.
         var done = List.of(step("a", Map.of(), "{\"body_text\":\"x\"}"));
-        for (String money : List.of("$50", "$5.50", "$1.99", "$1.234,56", "$5.00/kg",
+        for (String money : List.of("$50", "$5.50", "$1.99", "$1.234,56", "$5.00/kg", "$1.jpg",
                 "$5.50 Polévka" + System.lineSeparator() + "Hlavní chod")) {
             assertNull(refusedParam(Map.of("amount", money), done), money);
         }
         assertEquals("body", refusedParam(Map.of("body", "{{1.rendered_html_for_ema…}}"), done),
                 "a cut name with no match is refused, not sent");
-        assertEquals("body", refusedParam(Map.of("body", "$1.body_text"), done),
-                "the old syntax, from habit or a stored lesson, is refused rather than sent");
     }
 
     @Test

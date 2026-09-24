@@ -21,9 +21,9 @@ import java.util.Map;
  * boolean so that {@code ok=false} is never hidden inside an envelope. Nothing
  * downstream needs to know about labels, because nothing downstream ever holds the bytes.
  * <p>
- * The label comes from facts the code already has, in {@link #labelFor}: the skill declared
- * credentials; the task carries an attachment; a parameter references something already
- * PRIVATE; or an earlier step of the same delegation was. Not from a model, and not from a rule
+ * The label comes from facts the code already has: in {@link #labelFor}, the skill declared
+ * credentials or the call pulled in a PRIVATE result; and inside a delegation, a step that
+ * came after one of those (see {@code LocalExecutor}). Not from a model, and not from a rule
  * list — the moment the label needs a taxonomy of tool names, this design has failed.
  *
  * @param n        the task-wide handle number; {@code {{n}}} in every cloud prompt and ledger
@@ -131,7 +131,33 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     }
 
     /** A label and the facts that produced it. */
-    public record Decision(Label label, List<String> why) {}
+    /**
+     * A label, the facts that produced it, and whether the canary should index the bytes.
+     * <p>
+     * Not indexed when the result is PRIVATE only because of WHEN it was produced — after a
+     * delegation read private data — rather than because of what it is. Such a result is withheld
+     * from the cloud like any other PRIVATE one; but indexing it is what made the cloud's own later
+     * fetch of the same public page trip the canary and end a run whose email had already gone.
+     */
+    public record Decision(Label label, List<String> why, boolean indexed) {
+        public Decision(Label label, List<String> why) {
+            this(label, why, true);
+        }
+    }
+
+    /**
+     * Whether the tool did what it was asked, not merely whether its process exited cleanly.
+     * <p>
+     * A skill reports failure two ways: the harness's success flag, or an envelope with
+     * {@code "ok": false} inside — which is how the production smtp_send_email reports every SMTP
+     * error. Trusting the flag alone told the model a send that never happened had succeeded, and
+     * the "never twice" guard then refused the retry that would have delivered it.
+     */
+    public boolean succeeded() {
+        if (!success) return false;
+        var p = shapeOf(output).primitives();
+        return !"false".equals(p.get("ok")) && !"false".equals(p.get("success"));
+    }
 
     /**
      * What may be said about a PRIVATE artifact: everything except its content.
@@ -144,7 +170,7 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public String describe() {
         var sb = new StringBuilder(handle()).append(' ').append(tool)
-                .append(success ? " ✓" : " ✗").append(" — ").append(label);
+                .append(succeeded() ? " ✓" : " ✗").append(" — ").append(label);
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
         Shape shape = shapeOf(output);
         sb.append(" · ").append(shape.kind()).append(" · ")
@@ -168,6 +194,9 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         // envelope puts body_text well beyond them. Cut short like the annotated names, because a
         // full-length name would be a window of the private text; the resolver takes a cut name
         // by its prefix. The substitution happens here, so naming the handle discloses nothing.
+        // Not for a result that failed: the resolver refuses it, so offering it was an
+        // instruction the next step could not carry out.
+        if (!succeeded()) return sb.toString();
         sb.append(" · use: ").append(handle());
         int budget = MAX_OVERFLOW_NAME_CHARS, shown = 0;
         for (String name : referenceOrder(output)) {
@@ -183,7 +212,8 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         // the remainder from that list told the cloud 22 fields were unnamed when 34 were.
         int unnamed = topLevelKeyCount(output) - shown;
         if (unnamed > 0) sb.append(" +").append(unnamed).append(" more");
-        sb.append(" — any of these as a whole argument value; the text is substituted here");
+        sb.append(" — any of these as the whole value of a tool argument, when you have a tool "
+                + "that takes it; the text is substituted here");
         return sb.toString();
     }
 

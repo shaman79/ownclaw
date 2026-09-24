@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
  * and went out as literal text, {@code $1.99} became a reference and blinded the rest of a run.
  * A marker nobody uses for anything else needs none of those rules. Template braces are also the
  * syntax a model reaches for on its own; a reviewer's probes found the model writing
- * {@code {{$1.body_text}}} unprompted.
+ * {@code {{$1.body_text}}} unprompted, which is accepted. The old {@code $1} form is not a
+ * reference at all any more, and nothing teaches it.
  *
  * @param handle 1-based position in whichever list the reference is resolved against — the
  *               delegation's own results for the local model, the task's for the cloud
@@ -25,27 +26,26 @@ public record ArtifactRef(int handle, String field) {
     private static final int MAX_HANDLE_DIGITS = 9;
 
     /**
-     * Anything a model plausibly MEANT as a reference, parsed or not: an opening pair of braces
-     * followed by a digit (optionally a dollar sign first), anywhere in the value; or the old
-     * {@code $1.field} form, which a stored lesson or an old habit can still produce. The old
-     * form only with a field that starts with a letter, because {@code $5.50} is a price.
+     * A WHOLE value that was plausibly meant as a reference: one {@code {{…}}} spanning the entire
+     * value, holding an optional dollar sign, digits of any script, and optionally a dot and a
+     * field. Everything this matches
+     * must be substituted or refused, so {@code {{1.no_such_field}}} or {@code {{١}}} is stopped
+     * instead of being sent as literal text.
      * <p>
-     * Deliberately looser than {@link #parse}: everything this matches must either be
-     * substituted or refused, so a near miss — {@code "{{1}}"} inside a sentence, in quotes, in
-     * a nested list, or {@code {{ 1 .body}}} — is stopped instead of being sent as literal text.
+     * Whole values only. An earlier version refused "{{" followed by a digit ANYWHERE, and a
+     * reviewer listed what that catches: a Python f-string quantifier, a format escape, a C array,
+     * a LaTeX fraction, a WhatsApp template, a Home Assistant expression — ordinary arguments,
+     * refused with no way to send them. A reference inside text is text.
      */
-    // \p{Nd}, not \d: Java's \d is ASCII only, so "{{١}}" -- an Arabic-Indic one -- was not
-    // recognised as an attempt at all and went out as literal text. parse() still accepts only
-    // ASCII, so an attempt like that is refused rather than resolved.
     private static final Pattern LOOKS_LIKE = Pattern.compile(
-            "\\{\\{\\s*\\$?\\s*\\p{Nd}|^\\s*\\$\\p{Nd}{1,9}\\.[\\p{L}_]");
+            "^\\{\\{\\s*\\$?\\s*\\p{Nd}+\\s*(\\.[^{}]*)?\\}\\}$");
 
     /**
-     * A reference inside a longer text, for taking one out of a place where it cannot work —
-     * a delegation's goal names results the delegation cannot see.
+     * A well-formed reference inside prose, for taking one out of a place where it cannot work:
+     * a delegation's goal naming results the delegation cannot see.
      */
     static final Pattern TOKEN = Pattern.compile(
-            "\\{\\{\\s*\\$?\\s*\\p{Nd}[^{}]*\\}\\}|\\$\\p{Nd}{1,9}\\.[\\p{L}_][\\p{L}\\p{N}_.…-]*");
+            "\\{\\{\\s*\\$?\\s*\\d{1,9}\\s*(\\.[^{}]*)?\\}\\}");
 
     /**
      * The reference that IS the whole value, or null.
@@ -56,7 +56,9 @@ public record ArtifactRef(int handle, String field) {
      */
     public static ArtifactRef parse(String value) {
         if (value == null) return null;
-        String s = trim(value);
+        // One layer of quotes or backticks is forgiven: a model writing "{{1}}" or `{{1}}` meant
+        // the reference, and no real argument is exactly a quoted reference.
+        String s = unquote(trim(value));
         if (s.length() < 5 || !s.startsWith("{{") || !s.endsWith("}}")) return null;
         String inner = trim(s.substring(2, s.length() - 2));
         if (inner.startsWith("$")) inner = trim(inner.substring(1));
@@ -78,9 +80,9 @@ public record ArtifactRef(int handle, String field) {
         return handle < 1 ? null : new ArtifactRef(handle, field);
     }
 
-    /** Whether a model plausibly meant this as a reference; see {@link #LOOKS_LIKE}. */
+    /** Whether a model plausibly meant this WHOLE value as a reference; see {@link #LOOKS_LIKE}. */
     public static boolean looksLikeReference(String value) {
-        return value != null && LOOKS_LIKE.matcher(value).find();
+        return value != null && LOOKS_LIKE.matcher(unquote(trim(value))).find();
     }
 
     /** How the n-th result is named to whoever is reading. */
@@ -92,6 +94,15 @@ public record ArtifactRef(int handle, String field) {
     @Override
     public String toString() {
         return field == null ? handle(handle) : "{{" + handle + "." + field + "}}";
+    }
+
+    /** Remove one matching pair of surrounding quotes or backticks. */
+    static String unquote(String s) {
+        if (s.length() >= 2) {
+            char a = s.charAt(0), b = s.charAt(s.length() - 1);
+            if (a == b && (a == '"' || a == '\'' || a == '`')) return trim(s.substring(1, s.length() - 1));
+        }
+        return s;
     }
 
     /**

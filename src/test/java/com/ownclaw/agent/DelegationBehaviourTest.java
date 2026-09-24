@@ -76,14 +76,17 @@ class DelegationBehaviourTest {
         }
     }
 
-    /** What each failed step recorded for the repair loop. */
+    /** What each failed step recorded for the repair loop, and under which label. */
     static final class Usage extends SkillCuratorService {
         final List<Map<String, Object>> failedArgs = new ArrayList<>();
+        final List<Label> failedLabels = new ArrayList<>();
         Usage() { super(null, null, null, null); }
         @Override
         public void recordUsage(String tool, String user, String task, boolean ok, long ms,
                                 Map<String, Object> params, String error, Label label) {
-            if (!ok) failedArgs.add(params == null ? null : new LinkedHashMap<>(params));
+            if (ok) return;
+            failedArgs.add(params == null ? null : new LinkedHashMap<>(params));
+            failedLabels.add(label);
         }
     }
 
@@ -179,12 +182,16 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("after a private step a public tool's result stays PUBLIC; the model's summary is withheld")
-    void privateMarkingFollowsWhatTheModelWrites() {
+    @DisplayName("after private data, a delegation shows the cloud nothing more — without indexing it")
+    void afterPrivateDataNothingMoreIsShown() {
+        // The owner's choice after round 6. The local model has read the mail; a public page it
+        // fetches afterwards is withheld from the cloud like any private result. But it is not
+        // put into the canary's index: that is what made the cloud's own later fetch of the same
+        // public page trip the canary and a run whose email had gone report "did not finish".
+        String pageText = "Restaurant U Fleků — today's menu page, soup of the day and the goulash";
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
                 p -> ToolResult.success("{\"body_text\":\"guest wifi password Kolibri-2291\"}"));
-        var page = new FakeTool("web_fetch", false, List.of(),
-                p -> ToolResult.success("Restaurant U Fleků — today's menu page"));
+        var page = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(pageText));
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_fetch", Map.of("url", "https://ufleku.cz/menu")),
                 done("The mail says the wifi password is Kolibri-2291; the menu page is fetched."));
@@ -192,21 +199,39 @@ class DelegationBehaviourTest {
         var ctx = task();
         var outcome = executor(llm, new Usage(), imap, page).execute(plan("check mail and the menu"), ctx);
 
-        assertEquals(Label.PRIVATE, ctx.artifacts().get(0).label());
-        assertEquals(Label.PUBLIC, ctx.artifacts().get(1).label(),
-                "marking it private made the cloud's own later fetch of the same page trip the "
-                        + "canary, and a run whose email had gone reported 'did not finish'");
-        assertTrue(outcome.text().contains("Restaurant U Fleků"), "the public result reaches the cloud");
-        assertFalse(outcome.text().contains("Kolibri-2291"),
-                "the model's own words, written after reading the mail, do not");
+        Artifact fetched = ctx.artifacts().get(1);
+        assertEquals(Label.PRIVATE, fetched.label());
+        assertTrue(fetched.why().contains("after private data in this delegation"), fetched.why().toString());
+        assertNull(ctx.privateIndex().firstHitIn(pageText),
+                "not indexed, so the cloud's own fetch of the same page is not refused");
+        assertFalse(outcome.text().contains("Restaurant U Fleků"), "withheld from the cloud");
+        assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the model's summary");
     }
 
     @Test
-    @DisplayName("arguments typed after reading private content are withheld from the cloud and the repair log")
-    void argumentsWrittenAfterPrivateAreWithheld() {
+    @DisplayName("a public tool that echoes what the model typed after reading private data leaks nothing")
+    void anEchoingToolCannotLaunderPrivateText() {
+        // Round 6's leak: the model copies a PIN from the mail into a public tool, the tool echoes
+        // its input, and a value that short is invisible to the canary's 32-character windows.
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success("{\"body_text\":\"your card PIN is 4711, alarm code 5180\"}"));
+        var echo = new FakeTool("web_search", false, List.of(),
+                p -> ToolResult.success("No results for: " + p.get("q")));
+        var llm = new Scripted(call("imap_fetch", Map.of()),
+                call("web_search", Map.of("q", "reset card PIN 4711")), done("done"));
+
+        var outcome = executor(llm, new Usage(), imap, echo).execute(plan("sort the mail"), task());
+
+        assertFalse(outcome.text().contains("4711"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a failed step after private data is kept out of the repair prompt")
+    void failuresAfterPrivateAreKeptFromTheRepairPrompt() {
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
                 p -> ToolResult.success("{\"body_text\":\"card PIN 4711\"}"));
-        var search = new FakeTool("web_search", false, List.of(), p -> ToolResult.failure("rate limited"));
+        var search = new FakeTool("web_search", false, List.of(),
+                p -> ToolResult.failure("rate limited for query " + p.get("q")));
         var usage = new Usage();
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_search", Map.of("q", "reset card PIN 4711")), done("done"));
@@ -214,10 +239,9 @@ class DelegationBehaviourTest {
         var outcome = executor(llm, usage, imap, search).execute(plan("sort the mail"), task());
 
         assertFalse(outcome.text().contains("4711"), outcome.text());
-        assertEquals(1, usage.failedArgs.size());
-        assertNull(usage.failedArgs.get(0),
-                "a PUBLIC usage row goes into the cloud's repair prompt; what the model typed after "
-                        + "reading the mail must not be in it");
+        assertEquals(List.of(Label.PRIVATE), usage.failedLabels,
+                "the repair prompt reads only PUBLIC rows, and this row's arguments and error both "
+                        + "carry what the model read");
     }
 
     @Test
@@ -242,6 +266,64 @@ class DelegationBehaviourTest {
         assertFalse(llm.allSeen().contains("{{3"),
                 "the local model would read {{3}} as its own third step");
         assertTrue(outcome.text().startsWith("NOTE:"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("pulling in a private result makes the step private, on the delegation path too")
+    void aReferenceToPrivateMakesItPrivate() {
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success("{\"body_text\":\"the mail\"}"));
+        var archive = new FakeTool("archive_text", false, List.of(), p -> ToolResult.success("archived"));
+        var ctx = task();
+        // A fresh delegation, so taint is not what decides: the reference is.
+        executor(new Scripted(call("imap_fetch", Map.of()), done("ok")), new Usage(), imap)
+                .execute(plan("fetch"), ctx);
+        var llm = new Scripted(call("imap_fetch", Map.of()),
+                call("archive_text", Map.of("text", "{{1.body_text}}")), done("ok"));
+        executor(llm, new Usage(), imap, archive).execute(plan("archive the mail"), ctx);
+
+        assertEquals(Label.PRIVATE, ctx.artifacts().get(2).label());
+        assertTrue(ctx.artifacts().get(2).why().contains("references {{2}}"),
+                "named by its task handle: " + ctx.artifacts().get(2).why());
+    }
+
+    @Test
+    @DisplayName("a send that reported ok:false is retried by the next delegation, not refused")
+    void anOkFalseSendIsRetried() {
+        // Round 6's blocking finding: the production smtp skill reports SMTP errors as success
+        // with "ok": false inside, and the never-twice guard read that as a send that happened.
+        int[] n = {0};
+        var smtp = new FakeTool("smtp_send_email", true, List.of("SMTP_PASS"),
+                p -> ToolResult.success(++n[0] == 1
+                        ? "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}"
+                        : "{\"ok\": true}"));
+        var args = Map.<String, Object>of("to", "petr@example.com", "body", "Dnešní menu");
+        var ctx = task();
+        executor(new Scripted(call("smtp_send_email", args), done("sent")), new Usage(), smtp)
+                .execute(plan("email the menu"), ctx);
+        executor(new Scripted(call("smtp_send_email", args), done("sent")), new Usage(), smtp)
+                .execute(plan("email the menu"), ctx);
+
+        assertEquals(2, smtp.calls.size(), "the retry goes out, as it does on main");
+    }
+
+    @Test
+    @DisplayName("the omission marker speaks the grammar the resolver reads")
+    void theOmissionMarkerIsAReference() {
+        // Round 6's other blocking finding: the marker still said "pass it on with $1", which is
+        // no longer a reference, so a model that followed it emailed the owner the text "$1".
+        String menu = "{\"ok\":true,\"body_text\":\"" + "Polévka dne. ".repeat(200) + "\"}";
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(menu));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Scripted(call("daily_menu_fetcher", Map.of()),
+                call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}")),
+                done("sent"));
+
+        executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+
+        assertTrue(llm.allSeen().contains("pass it on with {{1}}⟧"), "the marker names {{1}}");
+        assertFalse(llm.allSeen().contains("pass it on with $"), "and never the old $ form");
+        assertTrue(String.valueOf(smtp.calls.get(0).get("body")).startsWith("Polévka dne."));
     }
 
     @Test
