@@ -182,8 +182,8 @@ public class AgentLoop {
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
 
-        // Load conversation history so the LLM sees prior exchanges
-        loadConversationContext(context, userId, currentMessageId);
+        // Load conversation history so the LLM sees prior exchanges -- a chat task only.
+        loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage);
         registerAttachments(context, attachmentIds);
 
         // Recall relevant past experiences to enrich context
@@ -323,7 +323,20 @@ public class AgentLoop {
         context.claimAllArtifacts();
     }
 
-    private void loadConversationContext(AgentContext context, String userId, String currentMessageId) {
+    /**
+     * The open chat, for a task that came from it: the compressed summary and the recent
+     * messages in full.
+     * <p>
+     * Not for unattended work. A scheduled task or /bg is a self-contained instruction, and
+     * loading whatever chat happened to be open sent all of it to the cloud on every call of
+     * every such run: on 2026-09-24 that was 65 KB of an 83 KB request, most of what the run
+     * cost, and the morning digest email ended with a reminder about an unrelated server task
+     * it could only have known from the chat. Static, so a test can run it against a database.
+     */
+    static void loadConversationContext(AgentContext context, String userId, String currentMessageId,
+                                        ConversationService conversationService,
+                                        FileStorageService fileStorage) {
+        if (context.isUnattended()) return;
         try {
             String sessionId = conversationService.getCurrentSession(userId);
 
