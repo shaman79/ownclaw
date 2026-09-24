@@ -53,11 +53,22 @@ public class ConversationService {
      */
     public String saveMessage(String userId, String sessionId, String role, String content,
                               List<String> attachmentIds) {
+        return saveMessage(userId, sessionId, role, content, attachmentIds, null);
+    }
+
+    /**
+     * @param taskId the agent task this message is the outcome of, or null. Stored in the
+     *               metadata column (JSON), only when it is a well-formed 8-character task id.
+     */
+    public String saveMessage(String userId, String sessionId, String role, String content,
+                              List<String> attachmentIds, String taskId) {
         String messageId = UUID.randomUUID().toString();
+        String metadata = taskId != null && taskId.matches("[0-9a-f]{8}")
+                ? "{\"taskId\":\"" + taskId + "\"}" : null;
         jdbc.update("""
-            INSERT INTO conversations (id, user_id, session_id, role, content)
-            VALUES (?, ?, ?, ?, ?)
-            """, messageId, userId, sessionId, role, content);
+            INSERT INTO conversations (id, user_id, session_id, role, content, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """, messageId, userId, sessionId, role, content, metadata);
 
         // Link file attachments to this message
         if (attachmentIds != null) {
@@ -168,7 +179,9 @@ public class ConversationService {
      */
     public List<Map<String, Object>> getSessionMessages(String userId, String sessionId) {
         return jdbc.queryForList("""
-            SELECT role, content, timestamp FROM conversations
+            SELECT role, content, timestamp,
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id
+            FROM conversations
             WHERE user_id = ? AND session_id = ? AND role != 'status'
             ORDER BY timestamp ASC
             """, userId, sessionId);

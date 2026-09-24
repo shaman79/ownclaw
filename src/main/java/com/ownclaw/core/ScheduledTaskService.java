@@ -679,7 +679,7 @@ public class ScheduledTaskService {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
             resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld);
+                response + withheld, agentTaskId);
             return;
         }
 
@@ -687,7 +687,7 @@ public class ScheduledTaskService {
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
         resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld);
+                response + withheld, agentTaskId);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,
@@ -761,7 +761,7 @@ public class ScheduledTaskService {
         // arguably more, since a silent failure is how a job stops working without anyone
         // noticing. The status emissions below say a run failed; this says what it said.
         resultDelivery.deliver(userId,
-                "Scheduled task did not finish: " + truncate(description, 60), error);
+                "Scheduled task did not finish: " + truncate(description, 60), error, agentTaskId);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, status, null, error,
@@ -933,12 +933,13 @@ public class ScheduledTaskService {
             jdbc.update("""
                 INSERT INTO scheduled_task_runs
                     (task_id, user_id, description, task_type, status, result, error,
-                     duration_ms, run_number, executed_at, cloud_tokens, local_tokens, skills_used)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+                     duration_ms, run_number, executed_at, cloud_tokens, local_tokens, skills_used,
+                     agent_task_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)
                 """,
                 taskId, userId, description, taskType, status,
                 result, error, durationMs, runNumber,
-                tokens[0], tokens[1], skillsUsed);
+                tokens[0], tokens[1], skillsUsed, agentTaskId);
         } catch (Exception e) {
             log.error("Failed to record task run for task #{}: {}", taskId, e.getMessage());
         }

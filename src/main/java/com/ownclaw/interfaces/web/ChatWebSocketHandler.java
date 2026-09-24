@@ -140,7 +140,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // plain response, so a background digest landing during a six-minute question
                 // ended that question's working state -- the same confusion the taskId fix
                 // removed for statuses. "result" renders identically and touches nothing.
-                sendToSession(session, "result", msg.text());
+                sendToSession(session, "result", msg.text(), null, msg.taskId());
             } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT
                     && msg.taskId() == null) {
                 // Only a LIVE prompt becomes a question bubble.
@@ -335,11 +335,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 .thenAccept(result -> {
                     String response = result.response();
                     // Persist the assistant response for conversation history
-                    conversationService.saveMessage(userId, currentSessionId, "assistant", response);
+                    conversationService.saveMessage(userId, currentSessionId, "assistant", response,
+                            java.util.List.of(), result.taskId());
                     // A question is routed as a question, so the client can offer a reply box
                     // instead of presenting it as the finished answer.
                     sendToUser(userId, result.awaitingUser() ? "input_request" : "response", response,
-                                currentSessionId);
+                                currentSessionId, result.taskId());
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToUser(userId, "session_updated", currentSessionId);
                 })
@@ -510,6 +511,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void sendToUser(String userId, String type, String content, String sessionId) {
+        sendToUser(userId, type, content, sessionId, null);
+    }
+
+    private void sendToUser(String userId, String type, String content, String sessionId,
+                            String taskId) {
         Set<WebSocketSession> open = sessions.get(userId);
         if (open == null || open.isEmpty()) {
             log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
@@ -520,7 +526,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         int sent = 0;
         for (WebSocketSession live : open) {
             if (live.isOpen()) {
-                sendToSession(live, type, content, sessionId);
+                sendToSession(live, type, content, sessionId, taskId);
                 sent++;
             }
         }
@@ -543,12 +549,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      */
     private void sendToSession(WebSocketSession session, String type, String content,
                                String sessionId) {
+        sendToSession(session, type, content, sessionId, null);
+    }
+
+    /** @param taskId the agent task a message is the outcome of, so the chat can link to it */
+    private void sendToSession(WebSocketSession session, String type, String content,
+                               String sessionId, String taskId) {
         if (!session.isOpen()) return;
         try {
             var payload = new LinkedHashMap<String, Object>();
             payload.put("type", type);
             payload.put("content", content);
             if (sessionId != null) payload.put("sessionId", sessionId);
+            if (taskId != null) payload.put("taskId", taskId);
             session.sendMessage(new TextMessage(mapper.writeValueAsString(payload)));
         } catch (IOException e) {
             log.warn("Failed to send WS message: {}", e.getMessage());

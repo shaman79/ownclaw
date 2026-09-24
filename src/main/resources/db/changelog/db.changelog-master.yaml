@@ -50,3 +50,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/017-skill-usage-label.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/018-run-agent-task-id.sql
+      relativeToChangelogFile: false

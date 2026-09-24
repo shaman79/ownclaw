@@ -1399,6 +1399,123 @@
         .task-result-content::-webkit-scrollbar { width: 4px }
         .task-result-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 3px }
 
+        /*  Task detail page: what one agent task did  */
+        .task-run-status.partial { background: #fbbf24 }
+        /* A step or run whose outcome was never written: grey, never green. */
+        .task-run-status.unknown { background: var(--text-3) }
+        .task-detail-value.warn { color: #fbbf24 }
+        .task-stat-value.warn { color: #fbbf24 }
+        /* The outcome card holds words, not a number; at 22px a sentence takes the whole card. */
+        .task-stat-value.text { font-size: 15px; line-height: 1.35 }
+        .task-result-content.error { border-color: var(--red-dim); color: var(--red) }
+        .task-trace-tabs {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin: 12px 0;
+        }
+        .task-trace-tab {
+            padding: 8px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            color: var(--text-2);
+            font-size: 13px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: background .15s, color .15s, border-color .15s;
+        }
+        .task-trace-tab:hover { background: var(--bg-input); color: var(--text-1) }
+        .task-trace-tab.active { border-color: var(--accent); color: var(--text-1) }
+        .tier-badge {
+            font-size: 11px;
+            padding: 1px 6px;
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+        }
+        .tier-badge.local { color: var(--green) }
+        .tier-badge.cloud { color: var(--accent-hi) }
+        .tier-badge.warn { color: #fbbf24 }
+        .tier-badge.bad { color: var(--red) }
+        .task-detail-request {
+            color: var(--text-3);
+            font-size: 13px;
+            line-height: 1.5;
+            margin: -8px 0 16px;
+            white-space: pre-wrap;
+        }
+        .task-trace-headline {
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-1);
+            margin: 4px 0 8px;
+        }
+        .task-trace-note {
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-3);
+            margin-bottom: 12px;
+        }
+        .task-trace-note .skill-back-btn { margin-left: 4px }
+        .task-trace-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            padding: 10px 12px;
+            margin-bottom: 8px;
+        }
+        .task-trace-line {
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-2);
+        }
+        .task-trace-line + .task-trace-line { margin-top: 4px }
+        .task-trace-line.muted { color: var(--text-3) }
+        .task-trace-line.warn { color: #fbbf24 }
+        .task-trace-line.bad { color: var(--red) }
+        .task-trace-summary {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            padding: 12px 14px;
+            margin-top: 12px;
+        }
+        .task-trace-summary .task-detail-row:last-child { margin-bottom: 0 }
+        .task-trace-footer {
+            margin-top: 24px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-3);
+        }
+        .task-trace-footer ul { padding-left: 18px; margin-top: 6px }
+        .task-trace-footer li + li { margin-top: 4px }
+        /* Refusals, reasons, "why" lists, tool and model names are unbroken strings often enough
+           (a URL, a {{handle}} reference, an exception class) to push a 390px screen sideways. */
+        .task-detail h2,
+        .task-detail .task-detail-request,
+        .task-detail .task-stat-value,
+        .task-detail .task-detail-value,
+        .task-detail .task-result-content,
+        .task-detail .task-trace-headline,
+        .task-detail .task-trace-note,
+        .task-detail .task-trace-line,
+        .task-detail .task-trace-footer,
+        .task-detail .task-empty-text { overflow-wrap: anywhere; min-width: 0 }
+        /* "Open steps and cloud calls" at the top of a scheduled run's details. */
+        .task-run-details > .skill-back-btn { margin-bottom: 12px }
+        /* Under an answer in chat. A DOM button after the markdown, never a link inside it. */
+        .msg-trace-link {
+            display: block;
+            margin-top: 8px;
+            padding: 6px 0;
+            background: none;
+            border: none;
+            font: 12px var(--font);
+            color: var(--text-3);
+            cursor: pointer;
+        }
+        .msg-trace-link:hover { color: var(--accent-hi) }
+
         /*  Active task card  */
         .active-task-card {
             background: var(--surface);
@@ -2468,7 +2585,8 @@
     });
 
     tasksBtn.addEventListener('click', function() {
-        if (currentView === 'tasks') return;
+        // A task's detail page is also the 'tasks' view, and Tasks must lead back out of it.
+        if (currentView === 'tasks' && !messagesEl.querySelector('.task-detail')) return;
         switchToTaskHistory();
     });
 
@@ -2680,7 +2798,7 @@
             var msgs = data.messages || [];
             msgs.forEach(function(m) {
                 var type = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'response');
-                addMsg(type, m.content);
+                addMsg(type, m.content, m.task_id);
             });
         })
         .catch(function(e) {
@@ -2783,6 +2901,622 @@
         // Update sidebar active states
         updateSidebarActive(null);
         loadTaskHistory();
+    }
+
+    // ────────── Task detail: what one agent task did ──────────
+    //
+    // Everything on this page is built with node() -- createElement + textContent. Tool names,
+    // reasons, "why" lists, refusals and the request itself are LLM, web or user text, and the
+    // CSP allows 'unsafe-inline', so escaping is the only protection there is: no innerHTML and
+    // no markdown anywhere on it. Any field can be missing from a row written before it existed;
+    // missing is shown as "not recorded" -- never as 0, and never in green.
+
+    /**
+     * Open the page for one agent task. `from` is 'chat' (the link under an answer) or 'tasks'
+     * (a scheduled run) and decides where the back button goes.
+     */
+    function openTaskDetail(taskId, from) {
+        if (!authToken) return;
+        currentView = 'tasks';
+        clearMessages();
+        document.getElementById('input-area').style.display = 'none';
+        document.getElementById('activity-wrap').style.display = 'none';
+        tasksBtn.classList.add('active');
+        settingsBtn.classList.remove('active');
+        skillsBtn.classList.remove('active');
+        updateSidebarActive(null);
+
+        if (!isTaskId(taskId)) {
+            renderTaskDetailError(taskId, from, 'not a valid task id');
+            return;
+        }
+
+        // .task-history-loading, so every view switch removes it; .task-detail as well, so the
+        // Tasks button is not swallowed while this loads (see its handler).
+        var loader = node('div', 'task-history-loading task-detail');
+        loader.appendChild(node('div', 'mini-spinner'));
+        loader.appendChild(node('span', null, 'Loading task…'));
+        messagesEl.insertBefore(loader, thinkingEl);
+
+        // Anything that navigates away clears #messages, and the loader with it. A response that
+        // lands after that must not wipe out whatever the owner has moved on to.
+        function stale() { return !messagesEl.contains(loader); }
+
+        fetch('/api/tasks/' + taskId, {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(function(r) {
+            if (r.status === 404) throw new Error('No record of this task for your account');
+            return okJson(r);
+        })
+        .then(function(t) {
+            if (stale()) return;
+            clearMessages();
+            try {
+                renderTaskDetail(t, from);
+            } catch (err) {
+                clearMessages();
+                console.error('Failed to render task ' + taskId + ':', err);
+                renderTaskDetailError(taskId, from, 'this page could not show it ('
+                        + (err && err.message ? err.message : String(err)) + ')');
+            }
+        }, function(e) {
+            if (!authToken || stale()) return;   // logged out, or the owner has moved on
+            clearMessages();
+            console.error('Failed to load task ' + taskId + ':', e);
+            renderTaskDetailError(taskId, from,
+                    e && e.message ? e.message : 'the server did not respond');
+        });
+    }
+
+    function taskDetailBackButton(from) {
+        var toChat = from === 'chat';
+        var btn = node('button', 'skill-back-btn', toChat ? '← Back to chat' : '← Back to Tasks');
+        btn.type = 'button';
+        btn.addEventListener('click', function() {
+            if (!toChat) { switchToTaskHistory(); return; }
+            var sid = displayedSessionId || activeSessionId;
+            if (sid) switchToSession(sid);
+            else ensureChatView();
+        });
+        return btn;
+    }
+
+    /** Carries .task-history too, so clearMessages() and ensureChatView() remove it. */
+    function renderTaskDetailError(taskId, from, message) {
+        var view = node('div', 'task-history task-detail');
+        var header = node('div', 'task-history-header');
+        header.appendChild(taskDetailBackButton(from));
+        view.appendChild(header);
+        var empty = node('div', 'task-empty');
+        empty.appendChild(node('div', 'task-empty-icon', '⚠️'));
+        empty.appendChild(node('div', 'task-empty-text', 'Could not load task '
+                + tdClip(taskId == null ? '' : String(taskId), 40) + ': ' + message));
+        view.appendChild(empty);
+        messagesEl.insertBefore(view, thinkingEl);
+    }
+
+    function renderTaskDetail(t, from) {
+        t = t || {};
+        var steps = Array.isArray(t.steps) ? t.steps.filter(Boolean) : [];
+        var calls = Array.isArray(t.calls) ? t.calls.filter(Boolean) : [];
+        var outcome = t.outcome || null;
+        var totals = t.totals || null;
+        var counts = tdCallCounts(totals, calls);
+        var hasCalls = calls.length > 0 || counts.total > 0 || counts.unparsed > 0;
+        var spent = t.answer ? steps.concat([t.answer]) : steps;
+        var cloudTokens = outcome && isNum(outcome.cloudTokens) ? outcome.cloudTokens : tdSum(spent, 'cloudTokens');
+        var localTokens = outcome && isNum(outcome.localTokens) ? outcome.localTokens : tdSum(spent, 'localTokens');
+        var oc = outcome ? tdOutcome(outcome.reason) : null;
+
+        // Must carry .task-history: clearMessages() and ensureChatView() remove views by it.
+        var view = node('div', 'task-history task-detail');
+
+        var header = node('div', 'task-history-header');
+        header.appendChild(taskDetailBackButton(from));
+        header.appendChild(node('h2', null, 'Task ' + (isTaskId(t.taskId) ? t.taskId : '?')));
+        view.appendChild(header);
+        view.appendChild(node('div', 'task-detail-request',
+                t.request ? tdClip(String(t.request), 400) : 'The request was not recorded.'));
+
+        if (t.inProgress) {
+            var running = node('div', 'task-trace-note', 'Still running: this shows what has been recorded so far.');
+            var refresh = node('button', 'skill-back-btn', 'Refresh');
+            refresh.type = 'button';
+            refresh.addEventListener('click', function() { openTaskDetail(t.taskId, from); });
+            running.appendChild(refresh);
+            view.appendChild(running);
+        }
+
+        // ── Stat cards ──
+        var stats = node('div', 'task-stats');
+        function stat(value, label, cls) {
+            var card = node('div', 'task-stat');
+            card.appendChild(node('div', 'task-stat-value' + (cls ? ' ' + cls : ''), value));
+            card.appendChild(node('div', 'task-stat-label', label));
+            stats.appendChild(card);
+        }
+        var tone = oc ? ({ success: ' green', error: ' red', warn: ' warn' })[oc.tone] || '' : '';
+        stat(oc ? oc.words : (t.inProgress ? 'Running' : 'Not recorded'), 'Outcome', 'text' + tone);
+        stat(outcome && isNum(outcome.steps) ? String(outcome.steps)
+                : (Array.isArray(t.steps) ? String(steps.length) : '—'), 'Steps');
+        stat(isNum(cloudTokens) ? formatTokenCount(cloudTokens) : '—', 'Cloud tokens');
+        stat(isNum(localTokens) ? formatTokenCount(localTokens) : '—', 'Local tokens');
+        stat(tdCostText(totals, hasCalls, cloudTokens), 'Cost');
+        var bytesOut = totals && isNum(totals.bytesOut) ? totals.bytesOut : tdSum(calls, 'bytesOut');
+        if (hasCalls && isNum(bytesOut)) stat(formatBytes(bytesOut), 'Sent to cloud');
+        else stat('none recorded', 'Sent to cloud', 'text');
+        view.appendChild(stats);
+
+        // ── Two tabs: Steps (default) and Sent to cloud ──
+        var stepsPanel = buildTaskStepsPanel(t, steps, outcome, oc);
+        var sentPanel = buildTaskSentPanel(t, calls, counts, totals, hasCalls, cloudTokens);
+        var tabs = node('div', 'task-trace-tabs');
+        var stepsTab = node('button', 'task-trace-tab', 'Steps');
+        var sentTab = node('button', 'task-trace-tab',
+                hasCalls ? 'Sent to cloud · ' + counts.went : 'Sent to cloud');
+        function select(showSteps) {
+            stepsTab.classList.toggle('active', showSteps);
+            sentTab.classList.toggle('active', !showSteps);
+            stepsTab.setAttribute('aria-pressed', showSteps ? 'true' : 'false');
+            sentTab.setAttribute('aria-pressed', showSteps ? 'false' : 'true');
+            stepsPanel.style.display = showSteps ? '' : 'none';
+            sentPanel.style.display = showSteps ? 'none' : '';
+        }
+        stepsTab.type = 'button';
+        sentTab.type = 'button';
+        stepsTab.addEventListener('click', function() { select(true); });
+        sentTab.addEventListener('click', function() { select(false); });
+        tabs.appendChild(stepsTab);
+        tabs.appendChild(sentTab);
+        select(true);
+        view.appendChild(tabs);
+        view.appendChild(stepsPanel);
+        view.appendChild(sentPanel);
+
+        messagesEl.insertBefore(view, thinkingEl);
+        messagesEl.scrollTop = 0;
+    }
+
+    function buildTaskStepsPanel(t, steps, outcome, oc) {
+        var panel = node('div', 'task-trace-panel');
+        if (!steps.length) panel.appendChild(node('div', 'task-trace-note', 'No steps were recorded for this task.'));
+        steps.forEach(function(s) { panel.appendChild(buildTaskStepElement(s)); });
+
+        var summary = node('div', 'task-trace-summary');
+        if (t.answer) summary.appendChild(tdRow('Final answer', tdAnswerText(t.answer)));
+        if (outcome) {
+            summary.appendChild(tdRow('Outcome', oc.words
+                    + (isNum(outcome.durationMs) ? ' · ' + formatDuration(outcome.durationMs) : ''), oc.tone));
+        } else {
+            summary.appendChild(tdRow('Outcome', 'No outcome recorded: still running, or it ended abnormally.'));
+        }
+        panel.appendChild(summary);
+        return panel;
+    }
+
+    function buildTaskStepElement(s) {
+        var runEl = node('div', 'task-run');
+        var header = node('div', 'task-run-header');
+        header.appendChild(node('div', 'task-run-status '
+                + (s.ok === true ? 'completed' : s.ok === false ? 'failed' : 'unknown')));
+        header.appendChild(node('div', 'task-run-desc',
+                (s.step != null ? s.step : '?') + ' · ' + (s.tool || 'unknown tool')));
+        // At most two meta items, or the description is squeezed to nothing on a phone.
+        var meta = node('div', 'task-run-meta');
+        meta.appendChild(tdTierBadge(s.tier));
+        meta.appendChild(node('span', 'task-run-duration',
+                isNum(s.durationMs) ? formatDuration(s.durationMs) : '—'));
+        header.appendChild(meta);
+        header.appendChild(node('span', 'task-run-toggle', '▼'));
+        tdToggle(runEl, header);
+        runEl.appendChild(header);
+
+        var d = node('div', 'task-run-details');
+        d.appendChild(tdRow('Chosen by', s.decidedBy === 'cloud'
+                ? 'cloud model, ' + (isNum(s.cloudCalls) ? tdCount(s.cloudCalls, 'call', 'calls') : 'calls not recorded')
+                : s.decidedBy === 'local' ? 'local model' : 'unknown'));
+        d.appendChild(tdRow('Carried out by', !s.tool ? 'not recorded'
+                : s.tool === 'delegate' ? 'the local model, via delegation' : 'OwnClaw on this server'));
+        d.appendChild(tdRow('Tokens', tdTokenPair(s.cloudTokens, s.localTokens)));
+        d.appendChild(tdRow('Cost', formatUsd(s.costUsd)));
+
+        var arts = Array.isArray(s.artifacts) ? s.artifacts.filter(Boolean) : [];
+        var succeeded = s.ok === true && !s.reportedFailure;
+        if (s.reportedFailure) {
+            d.appendChild(tdRow('Result', 'Failed: the skill reported ok:false (the agent counted it as a success)', 'error'));
+            if (s.reason) d.appendChild(node('div', 'task-result-content error', s.reason));
+        } else if (s.ok === false) {
+            d.appendChild(tdRow('Result', s.reason ? 'Failed' : 'Failed (no details recorded)', 'error'));
+            if (s.reason) d.appendChild(node('div', 'task-result-content error', s.reason));
+        } else if (s.ok !== true) {
+            d.appendChild(tdRow('Result', 'Not recorded'));
+        } else if (!arts.length) {
+            d.appendChild(tdRow('Result', 'Completed'));
+        }
+        if (arts.length) {
+            var lines = node('div');
+            arts.forEach(function(a) { lines.appendChild(node('div', 'task-trace-line', tdArtifactLine(a))); });
+            d.appendChild(tdRow(succeeded ? 'Result' : 'Output', lines));
+        }
+        runEl.appendChild(d);
+        return runEl;
+    }
+
+    function buildTaskSentPanel(t, calls, counts, totals, hasCalls, cloudTokens) {
+        var panel = node('div', 'task-trace-panel');
+
+        if (hasCalls) {
+            var bytes = totals && isNum(totals.bytesOut) ? totals.bytesOut : tdSum(calls, 'bytesOut');
+            var tokens = tdBilled(totals);
+            if (tokens === null) {
+                calls.forEach(function(c) { var b = tdBilled(c); if (b !== null) tokens = (tokens || 0) + b; });
+            }
+            var head = counts.went > 0
+                ? tdCount(counts.went, 'request', 'requests') + ' went to the cloud model: '
+                    + formatBytes(bytes) + ', '
+                    + (isNum(tokens) ? formatTokenCount(tokens) : 'an unrecorded number of') + ' tokens, '
+                    + tdCostText(totals, true, null) + '.'
+                : 'No recorded request went to the cloud model.';
+            if (counts.REFUSED > 0) {
+                head += ' ' + counts.REFUSED + (counts.REFUSED === 1 ? ' was' : ' were')
+                        + ' stopped before sending (0 bytes).';
+            }
+            if (counts.unparsed > 0) {
+                head += ' ' + tdCount(counts.unparsed, 'record', 'records') + ' could not be read.';
+            }
+            panel.appendChild(node('div', 'task-trace-headline', head));
+            if (counts.OBSERVED_LEAK > 0) {
+                panel.appendChild(node('div', 'task-trace-line bad',
+                        tdCount(counts.OBSERVED_LEAK, 'request', 'requests') + ' went out containing private text: '
+                        + 'the check was only observing, so it did not stop '
+                        + (counts.OBSERVED_LEAK === 1 ? 'it' : 'them') + '.'));
+            }
+        } else if (isNum(cloudTokens) && cloudTokens > 0) {
+            panel.appendChild(node('div', 'task-trace-headline',
+                    'This task used cloud tokens but has no request records: it ran before request recording began.'));
+        } else {
+            panel.appendChild(node('div', 'task-trace-headline',
+                    'No request to a cloud model was recorded for this task.'));
+        }
+        panel.appendChild(node('div', 'task-trace-note', 'For each request, OwnClaw keeps its size, the kind '
+                + 'of each part, tokens and cost. The text itself is not stored, by design.'));
+
+        calls.forEach(function(c) { panel.appendChild(buildTaskCallElement(c)); });
+        if (counts.total > calls.length) {
+            panel.appendChild(node('div', 'task-trace-note',
+                    'Showing ' + calls.length + ' of ' + counts.total + ' requests.'));
+        }
+
+        var arts = Array.isArray(t.artifacts) ? t.artifacts.filter(Boolean) : [];
+        var priv = arts.filter(function(a) { return a.label === 'PRIVATE'; });
+        var pub = arts.filter(function(a) { return a.label === 'PUBLIC'; });
+        var unlabelled = arts.filter(function(a) { return a.label !== 'PRIVATE' && a.label !== 'PUBLIC'; });
+
+        // ── Kept on this machine ──
+        panel.appendChild(node('div', 'task-section-title', 'Kept on this machine'));
+        if (!priv.length) panel.appendChild(node('div', 'task-trace-note', 'No private result was recorded for this task.'));
+        priv.forEach(function(a) {
+            var item = node('div', 'task-trace-item');
+            item.appendChild(node('div', 'task-trace-line', tdHandle(a.handle) + ' ' + (a.tool || 'unknown source')
+                    + ' · ' + tdChars(a.chars) + ' · private' + tdWhy(a.why)));
+            // Not when the check only observed: then its text went out, and saying otherwise is
+            // exactly the claim this page must never make.
+            var sentAnyway = tdLeakedIn(a, calls);
+            item.appendChild(sentAnyway > 0
+                ? node('div', 'task-trace-line bad', 'Its text went to the cloud in '
+                        + tdCount(sentAnyway, 'request', 'requests') + ': the check was only observing.')
+                // What Artifact.describe() shows of it: never the text. An indexed result's
+                // description also names its fields (type and length) and its true/false values.
+                : node('div', 'task-trace-line muted', a.indexed === false
+                        ? 'The cloud was shown only its source and size, not its text.'
+                        : 'The cloud was shown a description, not the text: source, size, field names '
+                            + 'with their types and lengths, and yes/no values.'));
+            var canary = tdCanaryLine(a, sentAnyway);
+            item.appendChild(node('div', 'task-trace-line' + (canary.cls ? ' ' + canary.cls : ''), canary.text));
+            panel.appendChild(item);
+        });
+
+        // ── Could be shown to the cloud ──
+        panel.appendChild(node('div', 'task-section-title', 'Could be shown to the cloud'));
+        if (!pub.length) {
+            panel.appendChild(node('div', 'task-trace-note', 'No public result was recorded for this task.'));
+        } else {
+            var pubBox = node('div', 'task-trace-item');
+            pub.forEach(function(a) {
+                pubBox.appendChild(node('div', 'task-trace-line', tdHandle(a.handle) + ' '
+                        + (a.tool || 'unknown source') + ' · ' + tdChars(a.chars)));
+                if (typeof a.tool === 'string' && a.tool.indexOf('attachment:') === 0) {
+                    pubBox.appendChild(node('div', 'task-trace-line warn',
+                            'Files uploaded in chat are not withheld today: the cloud could read this file.'));
+                }
+            });
+            panel.appendChild(pubBox);
+        }
+
+        if (unlabelled.length) {
+            panel.appendChild(node('div', 'task-section-title', 'Label not recorded'));
+            var otherBox = node('div', 'task-trace-item');
+            unlabelled.forEach(function(a) {
+                otherBox.appendChild(node('div', 'task-trace-line', tdArtifactLine(a)));
+            });
+            panel.appendChild(otherBox);
+        }
+
+        // ── What this record cannot see ──
+        var notObserved = Array.isArray(t.notObserved)
+                ? t.notObserved.filter(function(s) { return s != null && s !== ''; }) : [];
+        if (notObserved.length) {
+            var foot = node('div', 'task-trace-footer');
+            foot.appendChild(node('div', null, 'Limits of this record:'));
+            var ul = node('ul');
+            notObserved.forEach(function(s) { ul.appendChild(node('li', null, s)); });
+            foot.appendChild(ul);
+            panel.appendChild(foot);
+        }
+        return panel;
+    }
+
+    function buildTaskCallElement(c) {
+        var dec = c.decision;
+        var runEl = node('div', 'task-run');
+        var header = node('div', 'task-run-header');
+        header.appendChild(node('div', 'task-run-status ' + (dec === 'SENT' ? 'completed'
+                : dec === 'REFUSED' ? 'partial'
+                : dec === 'OBSERVED_LEAK' || dec === 'ERROR' ? 'failed' : 'unknown')));
+        header.appendChild(node('div', 'task-run-desc', (c.purpose || 'purpose not recorded')
+                + ' · ' + (c.model || 'model not recorded')));
+        var meta = node('div', 'task-run-meta');
+        meta.appendChild(tdDecisionBadge(dec));
+        meta.appendChild(node('span', 'task-run-duration', formatBytes(c.bytesOut)));
+        header.appendChild(meta);
+        header.appendChild(node('span', 'task-run-toggle', '▼'));
+        tdToggle(runEl, header);
+        runEl.appendChild(header);
+
+        var d = node('div', 'task-run-details');
+        var at = tdTime(c.at);
+        d.appendChild(tdRow('Time', at ? at.toLocaleString() : 'not recorded'));
+        if (c.step != null) d.appendChild(tdRow('Step', String(c.step)));
+        var m = c.messages, tl = c.tools;
+        d.appendChild(tdRow('Messages', m ? (isNum(m.count) ? tdCount(m.count, 'part', 'parts') : 'parts not recorded')
+                + ', ' + tdChars(m.chars) : 'not recorded'));
+        d.appendChild(tdRow('Tool definitions', tl ? (isNum(tl.count) ? String(tl.count) : 'count not recorded')
+                + ', ' + tdChars(tl.chars) : 'not recorded'));
+        d.appendChild(tdRow('Tokens', 'in ' + tdTok(c.promptTokens)
+                + ' / cache read ' + tdTok(c.cacheReadTokens)
+                + ' / cache write ' + tdTok(c.cacheWriteTokens)
+                + ' / out ' + tdTok(c.completionTokens)));
+        d.appendChild(tdRow('Cost', formatUsd(c.costUsd)));
+        if (isNum(c.scrubs) && c.scrubs > 0) d.appendChild(tdRow('Vault values replaced', String(c.scrubs)));
+
+        if (dec === 'REFUSED') {
+            d.appendChild(tdRow('Decision', 'Stopped before sending: it contained text from '
+                    + (c.refusal || 'an item whose name was not recorded') + '. Nothing was sent.', 'warn'));
+        } else if (dec === 'ERROR') {
+            d.appendChild(tdRow('Decision', 'Sent; the provider failed.', 'warn'));
+            if (c.refusal) d.appendChild(tdRow('Recorded', c.refusal));
+        } else if (dec === 'OBSERVED_LEAK') {
+            d.appendChild(tdRow('Decision', 'Sent although it contained text from '
+                    + (c.refusal || 'an item whose name was not recorded')
+                    + ': the check was only observing, so it did not stop it.', 'error'));
+        } else if (dec === 'SENT') {
+            d.appendChild(tdRow('Decision', 'Sent'));
+        } else {
+            d.appendChild(tdRow('Decision', dec ? 'Recorded as ' + tdClip(String(dec), 40) : 'Not recorded'));
+        }
+        runEl.appendChild(d);
+        return runEl;
+    }
+
+    // ── Small pieces of the task detail page ──
+
+    function isTaskId(s) {
+        return typeof s === 'string' && /^[0-9a-f]{8}$/.test(s);
+    }
+
+    function isNum(n) {
+        return typeof n === 'number' && isFinite(n);
+    }
+
+    function tdClip(s, max) {
+        return s.length > max ? s.slice(0, max).replace(/[\uD800-\uDBFF]$/, '') + '…' : s;
+    }
+
+    /** SQLite's '2026-09-24 05:03:48' is UTC with no zone; the space form fails in Safari. */
+    function tdTime(s) {
+        if (!s) return null;
+        var iso = String(s);
+        if (iso.indexOf('T') === -1) iso = iso.replace(' ', 'T');
+        if (!/(Z|[+-]\d\d:?\d\d)$/i.test(iso)) iso += 'Z';
+        var d = new Date(iso);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    /** Sum of a numeric field, or null when no item has it recorded -- never a made-up 0. */
+    function tdSum(list, key) {
+        var total = null;
+        list.forEach(function(x) { if (x && isNum(x[key])) total = (total || 0) + x[key]; });
+        return total;
+    }
+
+    /** Tokens billed for a request or a total: in, out, and both cache directions. */
+    function tdBilled(o) {
+        var total = null;
+        ['promptTokens', 'completionTokens', 'cacheReadTokens', 'cacheWriteTokens'].forEach(function(k) {
+            if (o && isNum(o[k])) total = (total || 0) + o[k];
+        });
+        return total;
+    }
+
+    function tdCount(n, one, many) {
+        return n + ' ' + (n === 1 ? one : many);
+    }
+
+    function tdTok(n) {
+        return isNum(n) ? formatTokenCount(n) : '—';
+    }
+
+    function tdTokenPair(cloud, local) {
+        if (!isNum(cloud) && !isNum(local)) return 'not recorded';
+        return tdTok(cloud) + ' cloud / ' + tdTok(local) + ' local';
+    }
+
+    function tdChars(n) {
+        return isNum(n) ? n.toLocaleString('en-US') + ' chars' : 'size not recorded';
+    }
+
+    function tdHandle(h) {
+        if (h == null || h === '') return '{{?}}';
+        h = String(h);
+        return /^\{\{[\s\S]*\}\}$/.test(h) ? h : '{{' + h + '}}';
+    }
+
+    function tdWhy(why) {
+        return Array.isArray(why) && why.length ? ' (' + why.map(String).join('; ') + ')' : '';
+    }
+
+    /** '{{3}} web_fetch · PUBLIC · 5,310 chars', and why it is private when it is. */
+    function tdArtifactLine(a) {
+        return tdHandle(a.handle) + ' ' + (a.tool || 'unknown source') + ' · '
+                + (a.label || 'label not recorded') + ' · ' + tdChars(a.chars)
+                + (a.label === 'PRIVATE' ? ' · private' + tdWhy(a.why) : '');
+    }
+
+    /**
+     * What the automatic check can say about one private result. Unchecked is never "clean".
+     * `leaked` is how many of its hits went out anyway (tdLeakedIn); the rest were stopped.
+     */
+    function tdCanaryLine(a, leaked) {
+        var c = a.canary;
+        if (c) {
+            if (isNum(c.hits) && c.hits > 0) {
+                var stopped = Math.max(0, c.hits - leaked);
+                if (!leaked) {
+                    return { text: 'Its text was in ' + tdCount(stopped, 'request', 'requests')
+                            + ' about to go to the cloud; the check stopped ' + (stopped === 1 ? 'it' : 'them')
+                            + ' before sending.', cls: 'warn' };
+                }
+                return { text: 'Found in ' + tdCount(c.hits, 'request', 'requests')
+                        + (stopped ? ' (' + stopped + ' stopped before sending)' : '') + '.', cls: 'bad' };
+            }
+            if (c.hits === 0 && isNum(c.checkedCalls) && c.checkedCalls > 0) {
+                return { text: 'Checked in ' + c.checkedCalls + ' later '
+                        + (c.checkedCalls === 1 ? 'request' : 'requests') + ': none contained its text.', cls: '' };
+            }
+            if (c.checkedCalls === 0) return { text: 'No request was made after it was read.', cls: 'muted' };
+            return { text: 'The result of the automatic check was not recorded.', cls: 'muted' };
+        }
+        if (a.indexed === false) {
+            return { text: 'Private as a precaution (made after private data was read); not checked automatically.', cls: 'muted' };
+        }
+        if (isNum(a.chars) && a.chars < 8) {
+            return { text: 'Too short or not text, so the automatic check could not look for it.', cls: 'muted' };
+        }
+        return { text: 'No automatic check was recorded for it.', cls: 'muted' };
+    }
+
+    /**
+     * Requests that went out although they held this result's text: the check matched it
+     * (its refusal names the handle) but was only observing. A refused request never left.
+     */
+    function tdLeakedIn(a, calls) {
+        var prefix = tdHandle(a.handle) + ' in part';
+        return calls.filter(function(c) {
+            return (c.decision === 'OBSERVED_LEAK' || c.decision === 'ERROR')
+                    && typeof c.refusal === 'string' && c.refusal.indexOf(prefix) === 0;
+        }).length;
+    }
+
+    function tdOutcome(reason) {
+        switch (reason) {
+            case 'COMPLETED':       return { words: 'Completed', tone: 'success' };
+            case 'NEEDS_INPUT':     return { words: 'Waiting for your answer', tone: '' };
+            case 'PRIVACY_BLOCKED': return { words: 'Stopped: it would have sent private data', tone: 'warn' };
+            case 'MAX_STEPS':       return { words: 'Step limit reached', tone: 'error' };
+            case 'STALLED':         return { words: 'No progress', tone: 'error' };
+            case 'TIMEOUT':         return { words: 'Time limit', tone: 'error' };
+            case 'FAILURE_LIMIT':   return { words: 'Too many failed steps', tone: 'error' };
+            case 'ERROR':           return { words: 'Internal error', tone: 'error' };
+            case 'CANCELLED':       return { words: 'Cancelled', tone: '' };
+            default:                return { words: reason ? String(reason) : 'Not recorded', tone: '' };
+        }
+    }
+
+    function tdAnswerText(a) {
+        var parts = [a.tier === 'cloud' ? 'cloud model' : a.tier === 'local' ? 'local model' : 'model not recorded'];
+        if (isNum(a.cloudCalls)) parts.push(tdCount(a.cloudCalls, 'cloud call', 'cloud calls'));
+        var tok = tdTokenPair(a.cloudTokens, a.localTokens);
+        parts.push(tok === 'not recorded' ? 'tokens not recorded' : tok + ' tokens');
+        parts.push(isNum(a.costUsd) ? formatUsd(a.costUsd) : 'cost not recorded');
+        return parts.join(' · ');
+    }
+
+    /** '≥ $x' when the total is a floor (a failed call has no cost); '—' when not recorded. */
+    function tdCostText(totals, hasCalls, cloudTokens) {
+        if (!totals || !isNum(totals.costUsd)) return '—';
+        // With no request on record, $0 is only true if the task used no cloud token at all.
+        if (!hasCalls && cloudTokens !== 0) return '—';
+        return (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd);
+    }
+
+    function tdCallCounts(totals, calls) {
+        var c = { SENT: 0, REFUSED: 0, OBSERVED_LEAK: 0, ERROR: 0, unparsed: 0 };
+        var d = totals && totals.decisions;
+        if (d && typeof d === 'object') {
+            Object.keys(c).forEach(function(k) { c[k] = isNum(d[k]) ? d[k] : 0; });
+        } else {
+            calls.forEach(function(x) {
+                if (x.decision !== 'unparsed' && Object.prototype.hasOwnProperty.call(c, x.decision)) c[x.decision]++;
+                else c.unparsed++;
+            });
+        }
+        c.went = c.SENT + c.OBSERVED_LEAK + c.ERROR;   // REFUSED never left; unparsed is unknown
+        c.total = totals && isNum(totals.calls) ? totals.calls : calls.length;
+        return c;
+    }
+
+    function tdTierBadge(tier) {
+        var known = tier === 'cloud' || tier === 'local';
+        return node('span', 'tier-badge' + (known ? ' ' + tier : ''), known ? tier : '—');
+    }
+
+    function tdDecisionBadge(dec) {
+        if (dec === 'SENT') return node('span', 'tier-badge', 'sent');
+        if (dec === 'REFUSED') return node('span', 'tier-badge warn', 'stopped');
+        if (dec === 'OBSERVED_LEAK') return node('span', 'tier-badge bad', 'leak');
+        if (dec === 'ERROR') return node('span', 'tier-badge warn', 'error');
+        return node('span', 'tier-badge', dec ? tdClip(String(dec), 16) : '—');
+    }
+
+    function tdRow(label, value, cls) {
+        var row = node('div', 'task-detail-row');
+        row.appendChild(node('span', 'task-detail-label', label));
+        var v;
+        if (value && typeof value === 'object') {
+            v = node('div', 'task-detail-value');
+            v.appendChild(value);
+        } else {
+            v = node('span', 'task-detail-value', value);
+        }
+        if (cls) v.classList.add(cls);
+        row.appendChild(v);
+        return row;
+    }
+
+    /** The same expand-on-click as a scheduled run, reachable from the keyboard as well. */
+    function tdToggle(runEl, header) {
+        header.setAttribute('role', 'button');
+        header.setAttribute('tabindex', '0');
+        header.setAttribute('aria-expanded', 'false');
+        function toggle() {
+            var open = runEl.classList.toggle('expanded');
+            header.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+        header.addEventListener('click', toggle);
+        header.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        });
     }
 
     function loadTaskHistory() {
@@ -3139,8 +3873,14 @@
 
         var durationStr = run.duration_ms != null ? formatDuration(run.duration_ms) : '\u2014';
         var timeStr = run.executed_at ? formatTime(run.executed_at) : '\u2014';
-        var statusClass = run.status || 'completed';
-        var statusIcon = statusClass === 'completed' ? '\u2705' : '\u274C';
+        // A fixed set, because it goes into a class attribute. 'partial' is a run whose task
+        // ended without finishing: amber with a warning sign, not a green 'success' with a cross.
+        // A row with no status recorded is grey -- never green.
+        var statusClass = run.status === 'completed' ? 'completed'
+                : run.status === 'partial' ? 'partial'
+                : run.status ? 'failed' : 'unknown';
+        var statusIcon = { completed: '\u2705', partial: '\u26A0\uFE0F', failed: '\u274C', unknown: '\u2753' }[statusClass];
+        var statusTone = { completed: 'success', partial: 'warn', failed: 'error', unknown: '' }[statusClass];
         var tokenTotal = (run.cloud_tokens || 0) + (run.local_tokens || 0);
         var tokenStr = tokenTotal > 0 ? formatTokenCount(tokenTotal) + ' tok' : '';
 
@@ -3168,9 +3908,9 @@
 
         var execDate = run.executed_at ? new Date(run.executed_at.endsWith('Z') ? run.executed_at : run.executed_at + 'Z') : null;
         var detailsHtml =
-            '<div class="task-detail-row"><span class="task-detail-label">Status</span><span class="task-detail-value ' + (statusClass === 'failed' ? 'error' : 'success') + '">' + statusIcon + ' ' + (run.status || 'unknown') + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Task ID</span><span class="task-detail-value">#' + (run.task_id || '—') + '</span></div>' +
-            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + (run.task_type || '—') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Status</span><span class="task-detail-value ' + statusTone + '">' + statusIcon + ' ' + escapeHtml(run.status || 'not recorded') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">#' + escapeHtml(run.task_id || '—') + '</span></div>' +
+            '<div class="task-detail-row"><span class="task-detail-label">Type</span><span class="task-detail-value">' + escapeHtml(run.task_type || '—') + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Run #</span><span class="task-detail-value">' + (run.run_number || '—') + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Duration</span><span class="task-detail-value">' + durationStr + '</span></div>' +
             '<div class="task-detail-row"><span class="task-detail-label">Executed</span><span class="task-detail-value">' + (execDate ? execDate.toLocaleString() : '—') + '</span></div>';
@@ -3184,7 +3924,7 @@
         }
 
         if (run.cron_expression) {
-            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Schedule</span><span class="task-detail-value">' + escapeHtml(run.cron_expression) + '</span></div>';
+            detailsHtml += '<div class="task-detail-row"><span class="task-detail-label">Cron</span><span class="task-detail-value">' + escapeHtml(run.cron_expression) + '</span></div>';
         }
 
         if (run.skills_used) {
@@ -3202,6 +3942,19 @@
         }
 
         details.innerHTML = detailsHtml;
+
+        // The agent task behind this run: its steps, and what of it went to the cloud model.
+        if (isTaskId(run.agent_task_id)) {
+            var traceBtn = document.createElement('button');
+            traceBtn.type = 'button';
+            traceBtn.className = 'skill-back-btn';
+            traceBtn.textContent = 'Open steps and cloud calls \u2192';
+            traceBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                openTaskDetail(run.agent_task_id, 'tasks');
+            });
+            details.insertBefore(traceBtn, details.firstChild);
+        }
         runEl.appendChild(details);
 
         return runEl;
@@ -3251,6 +4004,27 @@
         if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
         if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
         return String(n);
+    }
+
+    /** createElement + textContent. The only way the task detail page puts text on screen. */
+    function node(tag, cls, text) {
+        var n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined && text !== null) n.textContent = String(text);
+        return n;
+    }
+
+    /** Four decimals under a cent, where two would say $0.00; '—' when not recorded. */
+    function formatUsd(n) {
+        if (typeof n !== 'number' || !isFinite(n)) return '—';
+        return '$' + (Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2));
+    }
+
+    function formatBytes(n) {
+        if (typeof n !== 'number' || !isFinite(n)) return '—';
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
     // ────────── Settings View ──────────
@@ -4876,12 +5650,12 @@
                         if (type === 'response' || type === 'result') { setThinking(false); doneActivity(); }
                         return;
                     }
-                    if (type === 'result') { addMsg('response', content); return; }
+                    if (type === 'result') { addMsg('response', content, data.taskId); return; }
                     if (type === 'response' || type === 'system') {
                         setThinking(false);
                         doneActivity();
                     }
-                    addMsg(type, content);
+                    addMsg(type, content, data.taskId);
                 }
             } catch(ex) {
                 setThinking(false);
@@ -4964,7 +5738,7 @@
      */
     var activeTaskId = null;
 
-    function addMsg(type, text) {
+    function addMsg(type, text, taskId) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
         var senderKey = isUserMsg ? 'user' : (isAiMsg ? 'ai' : null);
@@ -4989,6 +5763,15 @@
             body.className = 'msg-body md';
             body.innerHTML = renderMarkdown(text);
             body.querySelectorAll('pre').forEach(wrapCodeBlock);
+
+            // After the markdown, never inside it: mdSanitize forces target=_blank on every <a>,
+            // and this opens a page in this window rather than leaving it.
+            if (isTaskId(taskId)) {
+                var trace = node('button', 'msg-trace-link', 'What this task did \u2192');
+                trace.type = 'button';
+                trace.addEventListener('click', function() { openTaskDetail(taskId, 'chat'); });
+                body.appendChild(trace);
+            }
 
             div.appendChild(avatar);
             div.appendChild(body);

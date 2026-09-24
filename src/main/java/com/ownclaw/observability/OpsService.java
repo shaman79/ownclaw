@@ -843,7 +843,10 @@ public class OpsService {
 
     private List<Map<String, Object>> artifactsOf(String taskId) {
         var rows = jdbc.queryForList(
-                "SELECT details FROM events WHERE task_id = ? AND event_type = 'step' ORDER BY timestamp", taskId);
+                // By id: timestamps have one-second resolution, and a step and its neighbours
+                // written in the same second came back in any order.
+                "SELECT details FROM events WHERE task_id = ? AND event_type IN ('step','attachment') "
+                        + "ORDER BY id", taskId);
         var out = new ArrayList<Map<String, Object>>();
         for (var r : rows) {
             try {

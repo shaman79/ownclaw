@@ -52,7 +52,7 @@ public class ResultDelivery {
         } else {
             header = label + " — did not finish (" + result.terminationReason() + ")";
         }
-        deliver(userId, header, result.response() + withheldLine(result));
+        deliver(userId, header, result.response() + withheldLine(result), result.taskId());
     }
 
     /**
@@ -97,6 +97,15 @@ public class ResultDelivery {
 
     /** Deliver text as a real assistant message in the user's current conversation. */
     public void deliver(String userId, String header, String text) {
+        deliver(userId, header, text, null);
+    }
+
+    /**
+     * @param taskId the agent task this is the outcome of, or null. Saved with the message and
+     *               sent with it, so the chat can offer "what this task did" -- now and after a
+     *               reload.
+     */
+    public void deliver(String userId, String header, String text, String taskId) {
         if (text == null || text.isBlank()) {
             // Nothing useful to show. Saying so beats an empty bubble, which reads like a bug.
             text = "(the task produced no output)";
@@ -105,11 +114,12 @@ public class ResultDelivery {
 
         try {
             String sessionId = conversations.getCurrentSession(userId);
-            conversations.saveMessage(userId, sessionId, "assistant", message);
+            conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(), taskId);
         } catch (Exception e) {
             // Persisting is the more important half, but failing it must not also lose the push.
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
         }
-        statusEmitter.emit(userId, StatusMessage.Type.RESULT, message);
+        if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message);
+        else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message);
     }
 }

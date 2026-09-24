@@ -304,8 +304,14 @@ public class AgentLoop {
                 // either way, and a scheduled run still never inherits a chat file.
                 var label = context.isUnattended()
                         ? com.ownclaw.privacy.Label.PRIVATE : com.ownclaw.privacy.Label.PUBLIC;
-                context.addArtifact("attachment:" + name, Map.of("fileId", id), Map.of("fileId", id),
-                        text == null ? "" : text, true, new Artifact.Decision(label, why));
+                Artifact a = context.addArtifact("attachment:" + name, Map.of("fileId", id),
+                        Map.of("fileId", id), text == null ? "" : text, true,
+                        new Artifact.Decision(label, why));
+                // A row per file, metadata only. No step ever names an attachment, so without
+                // this nothing recorded that a task had one -- the task page could not show the
+                // file, its label, or whether it was withheld.
+                eventLog.log(context.userId(), context.taskId(), "attachment", "info",
+                        "attachment " + label, JSON.writeValueAsString(attachmentDetails(a)), 0);
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
@@ -996,7 +1002,8 @@ public class AgentLoop {
                 if (!outcome.produced().isEmpty()) {
                     structured.put("artifacts", outcome.produced().stream().map(a -> Map.of(
                             "n", a.n(), "tool", a.tool(), "label", a.label().name(),
-                            "chars", a.output().length(), "why", a.why())).toList());
+                            "chars", a.output().length(), "why", a.why(),
+                            "indexed", a.indexed())).toList());
                 }
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, structured, durationMs)
@@ -2310,6 +2317,7 @@ public class AgentLoop {
             details.put("durationMs", obs.durationMs());
             details.put("localTokens", context.localTokens());
             details.put("cloudTokens", context.cloudTokens());
+            java.util.Optional<Artifact> claimed = java.util.Optional.empty();
             // Metadata only, same as the ledger: handle, label, size, hash, why. Never content.
             if (action.isDelegate()) {
                 Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
@@ -2329,7 +2337,8 @@ public class AgentLoop {
                 // count the caller had just derived from that same store on the same thread:
                 // one expression evaluated twice, always equal, so the guard excluded nothing
                 // and the misattribution it was written to stop carried on unchanged.
-                context.lastArtifact().filter(a -> context.claimArtifact(a.n())).ifPresent(a -> {
+                claimed = context.lastArtifact().filter(a -> context.claimArtifact(a.n()));
+                claimed.ifPresent(a -> {
                     details.put("artifact", a.handle());
                     details.put("label", a.label().name());
                     details.put("chars", a.output().length());
@@ -2337,6 +2346,7 @@ public class AgentLoop {
                     if (!a.why().isEmpty()) details.put("why", a.why());
                 });
             }
+            stepOutcome(details, obs, claimed);
 
             eventLog.log(context.userId(), context.taskId(), "step",
                     obs.success() ? "info" : "warn",
@@ -2347,6 +2357,46 @@ public class AgentLoop {
             log.debug("Could not persist step {} of task {}: {}",
                     step, context.taskId(), e.getMessage());
         }
+    }
+
+    /**
+     * What a step's row says about how it went, beyond success: whether its result is indexed
+     * for the canary, whether the skill reported a failure the loop counted as success, and --
+     * for a failed step -- an excerpt of how it failed.
+     * <p>
+     * The excerpt is the observation the cloud model is shown next, so it holds no class of text
+     * that does not already leave; and none at all for a PRIVATE step, whose observation is its
+     * descriptor. Without it a failure's reason reached only the log and the model -- this
+     * morning's "context window full" delegation left a row that said FAILED and nothing else.
+     */
+    static void stepOutcome(Map<String, Object> details, AgentObservation obs,
+                            java.util.Optional<Artifact> claimed) {
+        claimed.ifPresent(a -> details.put("indexed", a.indexed()));
+        boolean reported = claimed.map(a -> a.success() && !a.succeeded()).orElse(false);
+        if (reported) details.put("reportedFailure", true);
+        boolean privateStep = claimed.map(Artifact::isPrivate).orElse(false);
+        if ((!obs.success() || reported) && !privateStep) {
+            details.put("reason", failureExcerpt(obs.output()));
+        }
+    }
+
+    /** The head and the tail: the first line says what failed, the last says why. */
+    static String failureExcerpt(String text) {
+        if (text == null) return "";
+        if (text.length() <= 400) return text;
+        return text.substring(0, 200) + "\n…\n" + text.substring(text.length() - 200);
+    }
+
+    /** An attachment's row: what it is and how it is labelled -- never its text. */
+    static Map<String, Object> attachmentDetails(Artifact a) {
+        var d = new LinkedHashMap<String, Object>();
+        d.put("artifact", a.handle());
+        d.put("tool", a.tool());
+        d.put("label", a.label().name());
+        d.put("chars", a.output().length());
+        d.put("indexed", a.indexed());
+        if (!a.why().isEmpty()) d.put("why", a.why());
+        return d;
     }
 
     /** Emit observation detail: success/fail status, duration, output preview. */
