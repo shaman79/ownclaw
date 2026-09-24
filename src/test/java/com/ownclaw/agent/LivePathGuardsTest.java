@@ -201,10 +201,12 @@ class LivePathGuardsTest {
                             + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
                     call(s, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
         }
-        assertTrue(call(telegram, "sendMessage(chatId, result.").endsWith("result.response())"),
-                "Telegram is sent the safe text");
-        assertFalse(telegram.contains("result.shown()") || telegram.contains("\"ownerText\""),
-                "nothing in the Telegram path reads the owner's text");
+        // Telegram is the owner's own channel and he decided it gets private answers in full;
+        // what it stores for later turns is still the safe text (asserted above).
+        assertTrue(call(telegram, "sendMessage(chatId, result.").endsWith("result.shown())"),
+                "Telegram is sent the owner's text");
+        assertTrue(telegram.contains("new StringBuilder(telegramText(msg))"),
+                "a delivered result is sent through telegramText, which reads the owner's text");
 
         String scheduler = read("com.ownclaw.core.ScheduledTaskService");
         assertTrue(call(scheduler, "onTaskCompleted(taskId, userId, taskType, description,")

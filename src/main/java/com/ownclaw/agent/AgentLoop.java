@@ -509,7 +509,10 @@ public class AgentLoop {
             for (Artifact a : ctx.artifacts()) {
                 if ("local_answer".equals(a.tool())) said = a;
             }
-            if (said != null && (placed == null || placed.n() != said.n())) {
+            // Only when the cloud placed no local answer at all: one it chose, even an earlier
+            // one, is the answer, and adding the newest beneath it gave the owner two.
+            boolean placedAnAnswer = placed != null && "local_answer".equals(placed.tool());
+            if (said != null && !placedAnAnswer) {
                 ownerText = (ownerText != null ? ownerText : response)
                         + "\n\n" + PRIVATE_HEADER + said.output();
                 if (!response.contains(PRIVATE_NOTE)) response = response + "\n\n" + PRIVATE_NOTE;

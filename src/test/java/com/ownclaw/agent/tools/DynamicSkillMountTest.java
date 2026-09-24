@@ -90,6 +90,53 @@ class DynamicSkillMountTest {
     }
 
     @Test
+    @DisplayName("a self-healed retry still has the file: the fix was made so the skill could read it")
+    void theRetryKeepsTheFile(@TempDir Path tmp) throws Exception {
+        var jdbc = new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + tmp.resolve("t.db")));
+        jdbc.execute("CREATE TABLE file_attachments (id TEXT PRIMARY KEY, user_id TEXT, original_name TEXT, "
+                + "stored_name TEXT, content_type TEXT, size_bytes INTEGER, uploaded_at TEXT)");
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("t.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        var files = new FileStorageService(jdbc, config);
+        String handed = files.store("u1", "statement.pdf", "application/pdf",
+                new ByteArrayInputStream("%PDF".getBytes(StandardCharsets.UTF_8)));
+
+        // First run: the module is missing. The retry after installing it succeeds.
+        var runs = new java.util.ArrayList<Map<String, String>>();
+        var container = new ContainerSandbox(new OwnClawConfig()) {
+            @Override public boolean isAvailable() { return true; }
+            @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
+                                                SandboxManager.ProgressCallback cb) { return "test-image"; }
+            @Override public SandboxResult execute(String image, String python, Path script, Path dir,
+                                                   String stdinJson, Map<String, String> env, int timeout,
+                                                   SandboxManager.ProgressCallback cb,
+                                                   Map<String, String> extraVolumes) {
+                runs.add(extraVolumes);
+                return runs.size() == 1
+                        ? new SandboxResult(1, "", "ModuleNotFoundError: No module named 'pdfplumber'", 1, false)
+                        : new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false);
+            }
+        };
+        var installs = new PythonEnvironmentService(new OwnClawConfig()) {
+            @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
+                return true;
+            }
+        };
+        Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
+        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
+                null, installs, List.of(), null, List.of("poppler-utils"), null, container, files);
+
+        var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false,
+                null, List.of(handed)));
+        assertTrue(result.success(), result.output());
+        assertEquals(2, runs.size(), "the first run and the self-healed retry");
+        assertNotNull(runs.get(1), "the retry is given the file too");
+        assertEquals(runs.get(0), runs.get(1));
+    }
+
+    @Test
     @DisplayName("a task with no file mounts nothing")
     void noFileNoMount(@TempDir Path tmp) throws Exception {
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));

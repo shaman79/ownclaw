@@ -103,6 +103,17 @@ class AnswerForTest {
     }
 
     @Test
+    @DisplayName("an earlier local answer the cloud chose is the answer: the newer one is not added beneath it")
+    void onlyOneLocalAnswer() {
+        var ctx = fileTask();                                    // {{3}} the first answer
+        ctx.addArtifact("local_answer", Map.of(), Map.of(), "A second, later answer.", true,
+                label(Label.PRIVATE));                           // {{4}}
+        var a = AgentLoop.answerFor("{{3}}", ctx);
+        assertEquals(PRIVATE_HEADER + ANSWER, a.ownerText());
+        assertFalse(a.ownerText().contains("second, later"));
+    }
+
+    @Test
     @DisplayName("without a file, nothing is appended")
     void noFileNoFallback() {
         var ctx = new AgentContext("u1", "t1", "x");

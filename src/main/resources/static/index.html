@@ -3258,8 +3258,9 @@
             return { cls: 'muted', text: a.indexed === false
                     ? 'Withheld as a precaution; the automatic check does not look for it.'
                     : a.tool === 'attachment' && !a.chars
-                    ? 'Not text, so the automatic check cannot look for the file itself. Everything read '
-                        + 'from it is withheld (listed below).'
+                    ? 'No text was read from the file here (not text, too large, or not UTF-8), so the '
+                        + 'automatic check cannot look for the file itself. Everything read from it is '
+                        + 'withheld (listed below).'
                     : a.chars < 8 ? 'Too short to be checked automatically.'
                     : 'No automatic check was recorded for it.' };
         }

@@ -213,7 +213,7 @@ public class TelegramBotService {
 
         // Subscribe to status messages for this user → send to Telegram with stats
         statusEmitter.subscribe(userId, this, msg -> {
-            StringBuilder sb = new StringBuilder(msg.formatted());
+            StringBuilder sb = new StringBuilder(telegramText(msg));
             // Append token/step stats if available
             Map<String, Object> data = msg.data();
             if (data != null) {
@@ -296,7 +296,8 @@ public class TelegramBotService {
                     result.response(), java.util.List.of(), result.taskId(), result.ownerText());
             // The safe text only. A private answer arrives here as the note that it is kept on
             // this machine: Telegram's servers are not this machine.
-            sendMessage(chatId, result.response());
+            // The owner's own answer, private text included: he decided Telegram gets it in full.
+            sendMessage(chatId, result.shown());
         });
     }
 
@@ -355,6 +356,19 @@ public class TelegramBotService {
         } catch (Exception e) {
             log.debug("Could not restore Telegram chats: {}", e.getMessage());
         }
+    }
+
+    /**
+     * What Telegram is sent for a status message: for a result that carries the owner's private
+     * text, that text -- the owner decided Telegram gets private answers in full; otherwise the
+     * message as it is formatted everywhere.
+     */
+    static String telegramText(ChatStatusEmitter.StatusMessage msg) {
+        if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT && msg.data() != null
+                && msg.data().get("ownerText") instanceof String owner) {
+            return owner;
+        }
+        return msg.formatted();
     }
 
     private void sendMessage(long chatId, String text) {

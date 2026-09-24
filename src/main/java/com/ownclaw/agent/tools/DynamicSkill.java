@@ -358,15 +358,15 @@ public class DynamicSkill implements Tool {
             SandboxResult result;
             boolean usedContainer = false;
             String containerImageTag = null;
+            // The files this task was given, each on its own, read-only -- for the first run and
+            // for a self-healed retry alike, or the retry cannot see the file it was fixed to read.
+            Map<String, String> extraVolumes = attachedFiles.isEmpty() ? null : containerMounts(attachedFiles);
             if (!systemPackages.isEmpty() && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
                 containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
                         context.progressCallback());
                 usedContainer = true;
-                // Mount the files this task was given, each on its own, read-only
-                Map<String, String> extraVolumes = attachedFiles.isEmpty()
-                        ? null : containerMounts(attachedFiles);
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
@@ -402,7 +402,7 @@ public class DynamicSkill implements Tool {
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
                         if (installed) {
                             SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                    runnerScript, skillDir, inputJson, envVars, timeoutSec);
+                                    runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
                             if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                                 log.info("Self-heal succeeded for skill '{}'", name);
                                 return parseOutput(retry.stdout(), retry.stderr());
@@ -425,7 +425,7 @@ public class DynamicSkill implements Tool {
                             name, pkg, missingModule);
                     if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
                         SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                runnerScript, skillDir, inputJson, envVars, timeoutSec);
+                                runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
                         if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                             log.info("Self-heal (stderr) succeeded for skill '{}'", name);
                             return parseOutput(retry.stdout(), retry.stderr());
@@ -466,7 +466,8 @@ public class DynamicSkill implements Tool {
      */
     private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
                                          Path runnerScript, Path skillDir, String inputJson,
-                                         Map<String, String> envVars, int timeoutSec) {
+                                         Map<String, String> envVars, int timeoutSec,
+                                         Map<String, String> extraVolumes) {
         try {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
@@ -474,7 +475,7 @@ public class DynamicSkill implements Tool {
                 String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage, null);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
-                        inputJson, envVars, timeoutSec);
+                        inputJson, envVars, timeoutSec, null, extraVolumes);
             } else {
                 // Direct process execution
                 var healedResolution = pythonEnv.resolveExecution(skillDir, name);
