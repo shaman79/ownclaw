@@ -779,7 +779,9 @@ public class PythonEnvironmentService {
 
         if (current == null || changed) {
             String content = String.join("\n", existing) + "\n";
-            writeFresh(reqFile, content);
+            // In place, not replaced: see SkillJail.writeAuthored -- a running copy of this
+            // skill holds requirements.txt as a read-only mount.
+            SkillJail.writeAuthored(reqFile, content);
         }
     }
 
@@ -928,7 +930,7 @@ public class PythonEnvironmentService {
      * new, which fails rather than follows if something reappears in between. A planted link
      * cannot turn the write into one over .env or the database.
      */
-    private static void writeFresh(Path file, String content) throws IOException {
+    public static void writeFresh(Path file, String content) throws IOException {
         Files.deleteIfExists(file);
         Files.writeString(file, content, StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);

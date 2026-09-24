@@ -5,6 +5,7 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.ProcessSandbox;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -43,6 +44,14 @@ class SkillLifecycleTest {
     private static final String WORKING_CODE =
             "def run(params):\n    return {'greeting': 'hello ' + str(params.get('name',''))}\n";
 
+    /**
+     * The jail every launch goes through: off here, as on a host without bubblewrap, and the
+     * real one in {@link SkillLifecycleJailedTest}, which runs these same tests inside it.
+     */
+    SkillJail jail(Path root, Path generated) throws IOException {
+        return SkillJail.off();
+    }
+
     @BeforeEach
     void setUp() throws IOException {
         generated = Files.createDirectories(root.resolve("generated"));
@@ -51,9 +60,10 @@ class SkillLifecycleTest {
         cfg.getSkills().setGeneratedPath(generated.toString());
         cfg.getSandbox().setPythonPath("python3");
 
-        PythonEnvironmentService pyEnv = new PythonEnvironmentService(cfg);
+        SkillJail jail = jail(root, generated);
+        PythonEnvironmentService pyEnv = new PythonEnvironmentService(cfg, jail);
         pyEnv.init();
-        ProcessSandbox sandbox = new ProcessSandbox(pyEnv, new ObjectMapper());
+        ProcessSandbox sandbox = new ProcessSandbox(pyEnv, new ObjectMapper(), jail);
         registry = new ToolRegistry(List.of());
         DynamicSkillRegistry dynamic =
                 new DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);

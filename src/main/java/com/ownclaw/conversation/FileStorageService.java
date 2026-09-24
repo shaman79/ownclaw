@@ -31,8 +31,20 @@ public class FileStorageService {
 
     public FileStorageService(JdbcTemplate jdbc, OwnClawConfig config) {
         this.jdbc = jdbc;
-        // Store uploads next to the database: ./data/uploads/
-        this.uploadsDir = Path.of(config.getDatabase().getPath()).getParent().resolve("uploads");
+        this.uploadsDir = uploadsDirFor(config);
+    }
+
+    /**
+     * Where uploads live: next to the database, in {@code data/uploads/}. One formula, so the
+     * directory files are stored in and the one the skill jail hides are the same directory.
+     */
+    public static Path uploadsDirFor(OwnClawConfig config) {
+        return uploadsDirFor(Path.of(config.getDatabase().getPath()));
+    }
+
+    /** {@link #uploadsDirFor(OwnClawConfig)} from the database path itself. */
+    public static Path uploadsDirFor(Path databasePath) {
+        return databasePath.getParent().resolve("uploads");
     }
 
     @PostConstruct
@@ -90,13 +102,47 @@ public class FileStorageService {
     }
 
     /**
-     * Get the disk path for a stored file.
+     * Get the disk path for a stored file, or null when there is none -- or when the row does
+     * not name a file directly inside the uploads directory.
      */
     public Path getFilePath(String fileId) {
         List<String> names = jdbc.queryForList(
                 "SELECT stored_name FROM file_attachments WHERE id = ?", String.class, fileId);
         if (names.isEmpty()) return null;
-        return uploadsDir.resolve(names.getFirst());
+        return storedPath(names.getFirst());
+    }
+
+    /**
+     * The path of a stored name, or null unless it is a plain name that lands directly in the
+     * uploads directory.
+     * <p>
+     * {@link #store} only ever writes such names, but the row is read back from the database and
+     * trusted: a stored_name of {@code ../ownclaw.db} or {@code ../../.env}, put there by an edit
+     * of the database, would hand that file to a skill as its attachment -- read-only inside the
+     * jail, but read -- or serve it from the download endpoint. So the name is checked here, on
+     * the way out, where every caller gets it.
+     */
+    private Path storedPath(String storedName) {
+        // '/' everywhere, and the platform's own separator ('\\' on Windows; on Linux a
+        // backslash is an ordinary character a browser can send in a file name).
+        if (storedName == null || storedName.isEmpty() || storedName.equals(".") || storedName.equals("..")
+                || storedName.indexOf('/') >= 0 || storedName.indexOf(java.io.File.separatorChar) >= 0) {
+            log.warn("Refusing a stored file name that is not a plain name inside the uploads directory");
+            return null;
+        }
+        Path dir = uploadsDir.toAbsolutePath().normalize();
+        Path path;
+        try {
+            path = dir.resolve(storedName).normalize();
+        } catch (java.nio.file.InvalidPathException e) {
+            log.warn("Refusing a stored file name the file system cannot represent");
+            return null;
+        }
+        if (!dir.equals(path.getParent())) {
+            log.warn("Refusing a stored file name that resolves outside the uploads directory");
+            return null;
+        }
+        return path;
     }
 
     /**
@@ -144,12 +190,15 @@ public class FileStorageService {
         Map<String, Object> info = getFileInfo(fileId);
         if (info == null || !userId.equals(info.get("user_id"))) return false;
 
-        // Remove from disk
-        Path path = uploadsDir.resolve((String) info.get("stored_name"));
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            log.warn("Failed to delete file from disk: {}", path, e);
+        // Remove from disk -- only a name that is really inside uploads/, or a tampered row
+        // would delete whatever it points at.
+        Path path = storedPath((String) info.get("stored_name"));
+        if (path != null) {
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException e) {
+                log.warn("Failed to delete file from disk: {}", path, e);
+            }
         }
 
         // Remove DB records

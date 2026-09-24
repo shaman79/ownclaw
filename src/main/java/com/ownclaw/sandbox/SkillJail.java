@@ -1,6 +1,7 @@
 package com.ownclaw.sandbox;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.FileStorageService;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,7 +71,23 @@ public class SkillJail {
     private static final int SELF_CHECK_SECONDS = 10;
 
     /** The files a skill was written as. Read-only inside the jail, always. */
-    static final List<String> AUTHORED = List.of("SKILL.yaml", "skill.py", "requirements.txt");
+    public static final List<String> AUTHORED = List.of("SKILL.yaml", "skill.py", "requirements.txt");
+
+    /**
+     * Write one of a skill's {@link #AUTHORED} files from the JVM: in place, and never through a
+     * link -- the open fails instead.
+     * <p>
+     * In place, not deleted and created anew as the JVM's other files in these directories
+     * are: a jailed run of the same skill may be going on, holding this file as a read-only
+     * mount. Deleting the file on the host takes that mount away and leaves the name free inside
+     * the jail, for the running skill to create its own -- a SKILL.yaml declaring the
+     * credentials it wants, a requirements.txt of its choosing -- before the JVM's create gets
+     * there. Written in place, the mount stays and the running copy sees the new content.
+     */
+    public static void writeAuthored(Path file, String content) throws IOException {
+        Files.writeString(file, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+    }
 
     /** The name the self-check's shell runs under; lets a test double recognise the probe. */
     static final String PROBE_NAME = "ownclaw-jail-probe";
@@ -123,7 +140,7 @@ public class SkillJail {
         }
 
         Path dataDir() { return database.getParent(); }
-        Path uploads() { return dataDir().resolve("uploads"); }
+        Path uploads() { return FileStorageService.uploadsDirFor(database); }
         Path skillsRoot() { return generated.getParent(); }
         Path envsRoot() { return skillsRoot().resolve("_envs"); }
         Path dotEnv() { return cwd.resolve(".env"); }

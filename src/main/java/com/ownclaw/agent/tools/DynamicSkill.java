@@ -12,10 +12,15 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +49,7 @@ public class DynamicSkill implements Tool {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicSkill.class);
     private static final ObjectMapper mapper = new ObjectMapper();
+    private static final SecureRandom NONCES = new SecureRandom();
 
     /** Detect ModuleNotFoundError / ImportError in Python output. */
     private static final Pattern MODULE_NOT_FOUND = Pattern.compile(
@@ -157,6 +163,45 @@ public class DynamicSkill implements Tool {
     }
 
     /**
+     * The opening of every script that loads a skill: the runner below, and SkillManager's load
+     * check, so what the check proves is what runs.
+     * <p>
+     * Both scripts are started from the skill's own directory, which the skill can write, and
+     * Python puts the directory of the script it runs FIRST on sys.path, ahead of the standard
+     * library. A json.py left there would be what {@code import json} loads -- in the harness as
+     * much as in the skill. So that entry comes off before anything else is imported, the
+     * harness makes its own imports, and only then is the directory put back, at the END: the
+     * skill's sibling modules still import, but can no longer stand in for the library's.
+     * <p>
+     * skill.py itself is compiled from its source every time. Importing it would let a
+     * {@code __pycache__/skill.*.pyc} in the same writable directory run in its place whenever
+     * its header said it was current -- so what ran need not be what skill.py says, the file
+     * that is read-only inside the jail and the one every review reads.
+     */
+    public static final String SKILL_LOADER = String.join("\n",
+        "import sys",
+        "if sys.path and not getattr(sys.flags, 'safe_path', False):",
+        "    del sys.path[0]",
+        "import os, io, json, types, builtins, traceback, inspect",
+        "_skill_dir = os.path.dirname(os.path.abspath(__file__))",
+        "_real_skill_dir = os.path.realpath(_skill_dir)",
+        "sys.path[:] = [p for p in sys.path if os.path.realpath(p or os.curdir) != _real_skill_dir]",
+        "sys.path.append(_skill_dir)",
+        "",
+        "def _load_skill(inject=None):",
+        "    path = os.path.join(_skill_dir, 'skill.py')",
+        "    with open(path, 'rb') as f:",
+        "        source = f.read()",
+        "    mod = types.ModuleType('skill')",
+        "    mod.__file__ = path",
+        "    if inject:",
+        "        mod.__dict__.update(inject)",
+        "    exec(compile(source, path, 'exec', dont_inherit=True), mod.__dict__)",
+        "    return mod",
+        ""
+    );
+
+    /**
      * The runner harness that bootstraps skill execution.
      *
      * <p>We do NOT run skill.py directly — instead we run this thin wrapper that:
@@ -174,8 +219,7 @@ public class DynamicSkill implements Tool {
      * structured progress updates for long-running tasks.  These are intercepted
      * by the sandbox and forwarded to the user's chat in real time.
      */
-    private static final String RUNNER_HARNESS = String.join("\n",
-        "import sys, json, os, io, importlib.util, traceback, inspect",
+    private static final String RUNNER_HARNESS = SKILL_LOADER + String.join("\n",
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
@@ -235,16 +279,11 @@ public class DynamicSkill implements Tool {
         "",
         "try:",
         "    params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
-        "    skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'skill.py')",
-        "    spec = importlib.util.spec_from_file_location('skill', skill_path)",
-        "    mod = importlib.util.module_from_spec(spec)",
-        "    # Inject report_progress into the skill module so it can be called directly",
-        "    mod.report_progress = report_progress",
-        "    import builtins",
         "    builtins.report_progress = report_progress",
         "    _capture = io.StringIO()",
         "    sys.stdout = _capture",
-        "    spec.loader.exec_module(mod)",
+        "    # Inject report_progress into the skill module so it can be called directly",
+        "    mod = _load_skill({'report_progress': report_progress})",
         "    if not hasattr(mod, 'run'):",
         "        sys.stdout = _real_stdout",
         "        print(json.dumps({'success': False, 'output': 'skill.py does not define a run(params) function'}))",
@@ -282,34 +321,34 @@ public class DynamicSkill implements Tool {
             // Resolve Python (creates venv + installs requirements if needed)
             var resolution = pythonEnv.resolveExecution(skillDir, name);
 
-            // Write the runner harness with a unique name to avoid conflicts
-            // when the same skill is executed concurrently by different users
-            String runnerId = Long.toHexString(Thread.currentThread().getId())
-                    + "_" + Long.toHexString(System.nanoTime());
-            runnerScript = skillDir.resolve("_runner_" + runnerId + ".py");
-            Files.writeString(runnerScript, RUNNER_HARNESS, java.nio.charset.StandardCharsets.UTF_8);
+            // Write the runner harness under a name of its own, so concurrent runs of the same
+            // skill do not collide and nothing left in the directory can be written through.
+            runnerScript = writeHelperScript(skillDir, "_runner_", RUNNER_HARNESS);
 
             // Serialize input parameters as JSON for stdin.
-            // If the current message has file attachments, inject their paths so the skill can access them.
+            // If the current message has file attachments, inject their paths so the skill can
+            // access them. Each path is the very one bound read-only into the jail: the skill is
+            // told exactly what it can open, and can open exactly what it is told.
             Map<String, Object> effectiveParams = params != null ? new HashMap<>(params) : new HashMap<>();
-            var attachedFiles = new java.util.ArrayList<Map<String, String>>();
-            if (!context.attachmentIds().isEmpty()) {
+            var attachedFiles = new ArrayList<Map<String, String>>();
+            var handed = new ArrayList<Path>();
+            if (!context.attachmentIds().isEmpty() && fileStorage != null) {
                 for (String fileId : context.attachmentIds()) {
-                    if (fileStorage != null) {
-                        var info = fileStorage.getFileInfo(fileId);
-                        if (info != null) {
-                            java.nio.file.Path filePath = fileStorage.getFilePath(fileId);
-                            if (filePath != null) {
-                                attachedFiles.add(Map.of(
-                                        "id", fileId,
-                                        "name", (String) info.get("original_name"),
-                                        "content_type", (String) info.get("content_type"),
-                                        "path", filePath.toAbsolutePath().toString(),
-                                        "container_path", "/uploads/" + filePath.getFileName().toString()
-                                ));
-                            }
-                        }
+                    var info = fileStorage.getFileInfo(fileId);
+                    if (info == null) {
+                        log.warn("Skill '{}': attachment {} has no record; not handing it over", name, fileId);
+                        continue;
                     }
+                    Path file = handedFile(fileId);
+                    if (file == null) continue;
+                    attachedFiles.add(Map.of(
+                            "id", fileId,
+                            "name", Objects.toString(info.get("original_name"), ""),
+                            "content_type", Objects.toString(info.get("content_type"), ""),
+                            "path", file.toString(),
+                            "container_path", "/uploads/" + file.getFileName()
+                    ));
+                    handed.add(file);
                 }
                 if (!attachedFiles.isEmpty()) {
                     effectiveParams.put("_attached_files", attachedFiles);
@@ -381,7 +420,7 @@ public class DynamicSkill implements Tool {
                 result = sandbox.execute(
                         resolution.python(), runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
-                        context.progressCallback());
+                        context.progressCallback(), readOnlyFor(resolution, handed));
             }
 
             if (result.timedOut()) {
@@ -402,7 +441,8 @@ public class DynamicSkill implements Tool {
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
                         if (installed) {
                             SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                    runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
+                                    runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes,
+                                    handed);
                             if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                                 log.info("Self-heal succeeded for skill '{}'", name);
                                 return parseOutput(retry.stdout(), retry.stderr());
@@ -425,7 +465,8 @@ public class DynamicSkill implements Tool {
                             name, pkg, missingModule);
                     if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
                         SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
+                                runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes,
+                                handed);
                         if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                             log.info("Self-heal (stderr) succeeded for skill '{}'", name);
                             return parseOutput(retry.stdout(), retry.stderr());
@@ -461,13 +502,81 @@ public class DynamicSkill implements Tool {
     }
 
     /**
+     * The handed file's real path, or null -- logged by id, never by name -- when it cannot be
+     * handed over: the record names no plain file in the uploads directory, the file is gone,
+     * it is a link, or its real path is anything but a regular file directly inside the uploads
+     * directory. A bad attachment is dropped, not thrown, so one bad row never fails the task.
+     * <p>
+     * The real path, because it is bound into the jail at that path and so has to be what the
+     * skill is told; and a regular file directly inside uploads, because a link or a crafted
+     * row pointing at the database or at another user's upload would otherwise be bound in
+     * read-only as though it were the file this task was given.
+     */
+    private Path handedFile(String fileId) {
+        Path stored = fileStorage.getFilePath(fileId);
+        if (stored == null) {
+            log.warn("Skill '{}': attachment {} names no file in the uploads directory; not handing it over",
+                    name, fileId);
+            return null;
+        }
+        try {
+            if (!Files.isRegularFile(stored, LinkOption.NOFOLLOW_LINKS)) {
+                log.warn("Skill '{}': attachment {} is missing, a link or not a regular file; not handing it over",
+                        name, fileId);
+                return null;
+            }
+            Path uploads = fileStorage.getUploadsDir().toRealPath();
+            Path real = stored.toRealPath();
+            if (!uploads.equals(real.getParent()) || !Files.isRegularFile(real, LinkOption.NOFOLLOW_LINKS)) {
+                log.warn("Skill '{}': attachment {} is not a regular file directly in the uploads directory; "
+                        + "not handing it over", name, fileId);
+                return null;
+            }
+            return real;
+        } catch (IOException | RuntimeException e) {
+            log.warn("Skill '{}': attachment {} could not be resolved ({}); not handing it over",
+                    name, fileId, e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * What an isolated run may read besides the read-only host: the environment its imports
+     * come from, and the files this task was handed. Nothing else of the service's.
+     */
+    static List<Path> readOnlyFor(PythonEnvironmentService.PythonResolution resolution, List<Path> handed) {
+        var out = new ArrayList<Path>();
+        if (resolution.envDir() != null) out.add(resolution.envDir());
+        out.addAll(handed);
+        return out;
+    }
+
+    /**
+     * Write one of the JVM's helper scripts into a skill's directory, under a name nobody can
+     * guess and never through anything already there.
+     * <p>
+     * The directory is the skill's own and writable by it. A link it left at a predictable name
+     * -- the load check was always {@code _load_check.py} -- made the JVM's next write land
+     * wherever the link pointed. The name now carries 128 random bits, and the write removes
+     * whatever is at the name and then creates the file new.
+     */
+    public static Path writeHelperScript(Path dir, String prefix, String content) throws IOException {
+        byte[] nonce = new byte[16];
+        NONCES.nextBytes(nonce);
+        Path script = dir.resolve(prefix + HexFormat.of().formatHex(nonce) + ".py");
+        PythonEnvironmentService.writeFresh(script, content);
+        return script;
+    }
+
+    /**
      * Retry a self-healed skill execution using the same execution path as the original run.
-     * Container-based skills retry inside the container; direct skills retry via the process sandbox.
+     * Container-based skills retry inside the container; direct skills retry via the process
+     * sandbox, with the same handed files as the first run and the environment as it is now.
      */
     private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
                                          Path runnerScript, Path skillDir, String inputJson,
                                          Map<String, String> envVars, int timeoutSec,
-                                         Map<String, String> extraVolumes) {
+                                         Map<String, String> extraVolumes, List<Path> handed) {
         try {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
@@ -486,9 +595,11 @@ public class DynamicSkill implements Tool {
                         .filter(e -> !healedEnv.containsKey(e.getKey()))
                         .collect(java.util.stream.Collectors.toMap(
                                 Map.Entry::getKey, Map.Entry::getValue)));
+                // The heal may have just created the environment, so it is read again rather
+                // than taken from the first run; the handed files are the first run's own.
                 return sandbox.execute(
                         healedResolution.python(), runnerScript, skillDir,
-                        inputJson, healedEnv, timeoutSec);
+                        inputJson, healedEnv, timeoutSec, null, readOnlyFor(healedResolution, handed));
             }
         } catch (Exception e) {
             log.error("Self-heal retry failed for skill '{}': {}", name, e.getMessage());

@@ -11,6 +11,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +21,7 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Stream;
@@ -49,6 +51,20 @@ public class SkillManager {
             .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
             .build();
     private static final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+
+    /**
+     * Imports the skill exactly as the runner does -- the same loader, from source, with the
+     * skill's directory last on sys.path -- and confirms {@code run} is callable.
+     */
+    private static final String LOAD_CHECK = DynamicSkill.SKILL_LOADER +
+            "try:\n" +
+            "    mod = _load_skill()\n" +
+            "    if not callable(getattr(mod, 'run', None)):\n" +
+            "        print('Module imported but has no callable run()', file=sys.stderr)\n" +
+            "        sys.exit(1)\n" +
+            "except Exception:\n" +
+            "    traceback.print_exc()\n" +
+            "    sys.exit(1)\n";
 
     private final DynamicSkillRegistry dynamicSkillRegistry;
     private final ToolRegistry toolRegistry;
@@ -90,6 +106,13 @@ public class SkillManager {
             return "ERROR: Invalid skill name. Must start with a lowercase letter and " +
                     "contain only lowercase letters, digits, and underscores.";
         }
+
+        // When every launch is being refused, stop before touching anything. The syntax and load
+        // checks below could not run, their failure would read as the code's, and what follows a
+        // failed check -- restoring the previous version, quarantining a new one -- would act on
+        // an outage as though it were a verdict.
+        var down = sandbox.unavailable();
+        if (down.isPresent()) return "ERROR: " + down.get();
 
         // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
         // The LLM should overwrite the original skill with the SAME name instead.
@@ -147,24 +170,25 @@ public class SkillManager {
             Path codeFile = skillDir.resolve("skill.py");
             Path yamlFile = skillDir.resolve("SKILL.yaml");
             Path reqFile = skillDir.resolve("requirements.txt");
-            String previousCode = Files.exists(codeFile)
-                    ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
-            String previousYaml = Files.exists(yamlFile)
-                    ? Files.readString(yamlFile, StandardCharsets.UTF_8) : null;
-            String previousRequirements = Files.exists(reqFile)
-                    ? Files.readString(reqFile, StandardCharsets.UTF_8) : null;
-
-            Files.writeString(yamlFile,
-                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
-                            timeout, credentials, systemPackagesStr, containerImage),
-                    StandardCharsets.UTF_8);
-            Files.writeString(codeFile, code, StandardCharsets.UTF_8);
-            if (requirements != null && !requirements.isBlank()) {
-                Files.writeString(reqFile, requirements.strip() + "\n", StandardCharsets.UTF_8);
-            } else {
-                // Remove stale requirements.txt so the old venv isn't used
-                Files.deleteIfExists(reqFile);
+            String tampered = tamperedAuthoredFile(skillDir);
+            if (tampered != null) {
+                log.warn("Refusing to update skill '{}': {}", name, tampered);
+                return "ERROR: " + tampered;
             }
+            String previousCode = readAuthored(codeFile);
+            String previousYaml = readAuthored(yamlFile);
+            String previousRequirements = readAuthored(reqFile);
+
+            SkillJail.writeAuthored(yamlFile,
+                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
+                            timeout, credentials, systemPackagesStr, containerImage));
+            SkillJail.writeAuthored(codeFile, code);
+            // A skill that declares nothing still gets requirements.txt -- empty, which resolves
+            // to system Python exactly as a missing one did, so the old venv is not used. It is
+            // bound read-only into the jail with the other two; a missing one would be a name the
+            // skill could create itself, for the JVM to read and pip to install from.
+            SkillJail.writeAuthored(reqFile, requirements != null && !requirements.isBlank()
+                    ? requirements.strip() + "\n" : "");
 
             // Does it actually load? py_compile above proves the file parses, which is a much
             // weaker claim than it sounds: it never executes a single import, so a skill that
@@ -174,15 +198,11 @@ public class SkillManager {
             if (loadError != null) {
                 if (previousCode != null) {
                     // Put the whole previous version back, not just its code.
-                    Files.writeString(codeFile, previousCode, StandardCharsets.UTF_8);
+                    SkillJail.writeAuthored(codeFile, previousCode);
                     if (previousYaml != null) {
-                        Files.writeString(yamlFile, previousYaml, StandardCharsets.UTF_8);
+                        SkillJail.writeAuthored(yamlFile, previousYaml);
                     }
-                    if (previousRequirements != null) {
-                        Files.writeString(reqFile, previousRequirements, StandardCharsets.UTF_8);
-                    } else {
-                        Files.deleteIfExists(reqFile);
-                    }
+                    SkillJail.writeAuthored(reqFile, previousRequirements != null ? previousRequirements : "");
                     log.warn("Skill '{}' failed to load; restored the previous version in full", name);
                     return "ERROR: the new code for '" + name + "' does not load, so the previous "
                             + "working version was kept. Fix and retry with the SAME name.\n" + loadError;
@@ -226,8 +246,7 @@ public class SkillManager {
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return null;
         try {
-            Path codeFile = skillOpt.get().skillDir().resolve("skill.py");
-            return Files.exists(codeFile) ? Files.readString(codeFile, StandardCharsets.UTF_8) : null;
+            return readAuthored(skillOpt.get().skillDir().resolve("skill.py"));
         } catch (IOException e) {
             log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
             return null;
@@ -248,24 +267,26 @@ public class SkillManager {
             var sb = new StringBuilder();
             sb.append("## Skill: ").append(name).append("\n\n");
 
-            Path yamlFile = skill.skillDir().resolve("SKILL.yaml");
-            if (Files.exists(yamlFile)) {
+            // What is read here goes to the model, so a link at one of these names -- one a
+            // skill left before it was isolated, pointing at .env -- is refused, not followed.
+            String yaml = readAuthored(skill.skillDir().resolve("SKILL.yaml"));
+            if (yaml != null) {
                 sb.append("### SKILL.yaml\n```yaml\n");
-                sb.append(Files.readString(yamlFile, StandardCharsets.UTF_8));
+                sb.append(yaml);
                 sb.append("\n```\n\n");
             }
 
-            Path codeFile = skill.skillDir().resolve("skill.py");
-            if (Files.exists(codeFile)) {
+            String code = readAuthored(skill.skillDir().resolve("skill.py"));
+            if (code != null) {
                 sb.append("### skill.py\n```python\n");
-                sb.append(Files.readString(codeFile, StandardCharsets.UTF_8));
+                sb.append(code);
                 sb.append("\n```\n\n");
             }
 
-            Path reqFile = skill.skillDir().resolve("requirements.txt");
-            if (Files.exists(reqFile)) {
+            String requirements = readAuthored(skill.skillDir().resolve("requirements.txt"));
+            if (requirements != null) {
                 sb.append("### requirements.txt\n```\n");
-                sb.append(Files.readString(reqFile, StandardCharsets.UTF_8));
+                sb.append(requirements);
                 sb.append("\n```\n");
             }
 
@@ -296,7 +317,8 @@ public class SkillManager {
         Path yamlFile = skillDir.resolve("SKILL.yaml");
 
         try {
-            String yaml = Files.readString(yamlFile, StandardCharsets.UTF_8);
+            String yaml = readAuthored(yamlFile);
+            if (yaml == null) return "ERROR: Skill '" + name + "' has no SKILL.yaml.";
 
             // Remove existing credentials line if present
             yaml = yaml.replaceAll("(?m)^credentials:.*\\n?", "");
@@ -309,7 +331,7 @@ public class SkillManager {
                 yaml = yaml.stripTrailing() + "\n" + credLine;
             }
 
-            Files.writeString(yamlFile, yaml, StandardCharsets.UTF_8);
+            SkillJail.writeAuthored(yamlFile, yaml);
 
             // Reload the skill
             dynamicSkillRegistry.unregister(name);
@@ -400,23 +422,17 @@ public class SkillManager {
         Path checkScript = null;
         try {
             var resolution = pythonEnv.resolveExecution(skillDir, name);
-            checkScript = skillDir.resolve("_load_check.py");
-            Files.writeString(checkScript,
-                    "import sys, importlib.util, traceback\n" +
-                    "try:\n" +
-                    "    spec = importlib.util.spec_from_file_location('skill_under_test', 'skill.py')\n" +
-                    "    mod = importlib.util.module_from_spec(spec)\n" +
-                    "    spec.loader.exec_module(mod)\n" +
-                    "    if not callable(getattr(mod, 'run', None)):\n" +
-                    "        print('Module imported but has no callable run()', file=sys.stderr)\n" +
-                    "        sys.exit(1)\n" +
-                    "except Exception:\n" +
-                    "    traceback.print_exc()\n" +
-                    "    sys.exit(1)\n",
-                    StandardCharsets.UTF_8);
+            // Under a fresh name each time: it used to be _load_check.py, and a link the skill
+            // left at that name in its own directory turned this write into one over its target.
+            checkScript = DynamicSkill.writeHelperScript(skillDir, "_load_check_", LOAD_CHECK);
 
+            // The environment is read the way a run reads it, so the check imports what a run
+            // would. A launch the jail refuses comes back as a failed result, never as an
+            // exception, so it cannot reach the "registering unverified" catch below: a skill
+            // whose check could not run isolated is not let in unverified.
+            List<Path> readOnly = resolution.envDir() == null ? List.of() : List.of(resolution.envDir());
             SandboxResult result = sandbox.execute(resolution.python(), checkScript, skillDir,
-                    null, resolution.extraEnv(), 60);
+                    null, resolution.extraEnv(), 60, null, readOnly);
             if (result.isSuccess()) return null;
             if (result.timedOut()) {
                 return "Importing the module timed out after 60s — module-level code should not "
@@ -434,6 +450,39 @@ public class SkillManager {
             if (checkScript != null) {
                 try { Files.deleteIfExists(checkScript); } catch (IOException ignored) {}
             }
+        }
+    }
+
+    /**
+     * Why this skill's authored files cannot be touched, or null. Each must be absent or a
+     * regular file. The directory is the skill's own and writable by it: a link at one of these
+     * names -- left by a skill that ran before isolation, pointing at .env or the database --
+     * would have the snapshot below read its target and the writes land on it.
+     */
+    private static String tamperedAuthoredFile(Path skillDir) {
+        for (String file : SkillJail.AUTHORED) {
+            Path f = skillDir.resolve(file);
+            if (Files.exists(f, LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                return "the skill's " + file + " is not a regular file (a link or something else): "
+                        + "tampered skill, left untouched. Delete the skill and create it again.";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * One of a skill's authored files, or null when it is absent. Anything but a regular file is
+     * refused rather than read -- a link is not followed, and a FIFO would hang the read -- and
+     * the open itself refuses a link that appears after the check.
+     */
+    private static String readAuthored(Path file) throws IOException {
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return null;
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException(file.getFileName() + " is not a regular file (a link or something else): "
+                    + "tampered skill, not reading it");
+        }
+        try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 
