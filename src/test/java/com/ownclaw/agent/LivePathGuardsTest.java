@@ -110,6 +110,84 @@ class LivePathGuardsTest {
     }
 
     @Test
+    @DisplayName("neither refusal call site throws away the count, or skips the check")
+    void bothRefusalCallSitesPassTheCount() throws IOException {
+        // Both of these could be reverted with the whole suite staying green, a reviewer showed:
+        // AgentLoop re-gaining "artifacts().isEmpty() ? null :" (which sends a first step's
+        // "$1.body_text" out as twelve literal characters), and LocalExecutor passing 0 (which
+        // treats every bare "$3" as a price and sends that instead).
+        String loop = read("com.ownclaw.agent.AgentLoop");
+        int at = loop.indexOf("String unresolved = ");
+        assertTrue(at > 0, "the guard in executeTool moved");
+        String stmt = loop.substring(at, loop.indexOf(';', at));
+        assertFalse(stmt.contains("isEmpty()"), "the check is skipped again: " + stmt);
+        assertTrue(stmt.contains("unresolvedRef(resolved, context.artifacts().size())"), stmt);
+
+        String exec = read("com.ownclaw.agent.LocalExecutor");
+        assertTrue(exec.contains("unresolvedRef(params, stepResults.size())"),
+                "the delegation's copy of the guard must pass what it has produced");
+    }
+
+    @Test
+    @DisplayName("a failed delegated step records its arguments as written, not as resolved")
+    void usageRowsGetTheWrittenArguments() throws IOException {
+        // The resolved map has every $N replaced by the artifact's bytes, so a failure wrote up
+        // to 500 characters of the mailbox into skill_usage -- kept out of the repair prompt
+        // only by the row's label, which has been wrong before. The cloud path already records
+        // the written form; the two must match.
+        String exec = read("com.ownclaw.agent.LocalExecutor");
+        int at = exec.indexOf("curatorService.recordUsage(");
+        assertTrue(at > 0, "the usage record moved");
+        String call = exec.substring(at, exec.indexOf(';', at));
+        assertTrue(call.contains("toolOk ? null : action.params"), call);
+        assertFalse(call.contains("toolOk ? null : params,"), call);
+    }
+
+    @Test
+    @DisplayName("a delegate step claims its artifacts only when the delegation actually ran")
+    void delegateClaimIsConditional() throws IOException {
+        String s = read("com.ownclaw.agent.AgentLoop");
+        int branch = s.indexOf("if (action.isDelegate()) {", s.indexOf("private void persistStep("));
+        assertTrue(branch > 0, "persistStep's delegate branch moved");
+        String body = s.substring(branch, s.indexOf("} else if (!action.isSpecialAction())", branch));
+        int guard = body.indexOf("if (arts != null)");
+        int claim = body.indexOf("claimAllArtifacts()");
+        assertTrue(guard > 0 && claim > guard,
+                "a delegate step that never reached the executor recorded nothing; claiming "
+                        + "there swallows an earlier artifact's attribution:\n" + body);
+    }
+
+    @Test
+    @DisplayName("the canary normalises each part once, not once per hit")
+    void theCanaryIsNotQuadratic() throws IOException {
+        // Behaviourally identical, which is why reverting it left the suite green -- the cost is
+        // the only difference: 7.8 seconds measured on one 130 KB part, on every step.
+        String s = read("com.ownclaw.llm.CloudGateway");
+        assertTrue(s.contains("firstHitInNormalised(normalised, from)"),
+                "the per-hit loop must reuse the part's normalised text");
+        assertFalse(s.contains("firstHitIn(part.text(), from)"));
+    }
+
+    @Test
+    @DisplayName("both ops skill_usage reads carry the error the descriptor points at")
+    void theOpsPointerIsTrue() throws IOException {
+        // A PRIVATE descriptor says "text withheld; skill_usage row via ops". Twice that row was
+        // served without the column, and nothing failed either time.
+        String s = read("com.ownclaw.observability.OpsService");
+        int from = 0, selects = 0;
+        while ((from = s.indexOf("FROM skill_usage WHERE", from)) >= 0) {
+            String select = s.substring(s.lastIndexOf("\"SELECT", from), from);
+            if (select.contains("tool_name")) {
+                selects++;
+                assertTrue(select.contains("error"), "an ops read without the error column:\n" + select);
+                assertTrue(select.contains("label"), select);
+            }
+            from++;
+        }
+        assertEquals(2, selects, "the task page and the forensics page");
+    }
+
+    @Test
     @DisplayName("executeTool refuses an unresolved reference before the tool runs")
     void unresolvedReferencesAreRefusedOnTheAttendedPath() throws IOException {
         String s = read("com.ownclaw.agent.AgentLoop");

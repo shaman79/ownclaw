@@ -8,8 +8,6 @@ import com.ownclaw.privacy.Label;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * One tool result, as the task keeps it: the bytes, and what may be said about them.
@@ -43,17 +41,6 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                        Label label, List<String> why) {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    /**
-     * A whole-value reference, as the LABEL sees it.
-     * <p>
-     * Any non-blank field name, because {@code LocalExecutor.resolveRef} accepts any non-blank
-     * field name and the two must not disagree — the narrow version here meant that
-     * {@code $1.body-text}, or a Czech key, or the descriptor's own truncated
-     * {@code rendered_html_for_ema…}, substituted a PRIVATE artifact's text into an argument
-     * and the result was then labelled PUBLIC. The resolver decides what content moves; this
-     * decides whether the result of moving it may leave. Broader here is fail-closed.
-     */
-    private static final Pattern REF = Pattern.compile("^\\$(\\d+)(?:\\.\\S+)?$");
     /** How many top-level field names a descriptor shows, and how long each may be. */
     static final int MAX_FIELDS = 12;
     static final int MAX_FIELD_NAME = 24;
@@ -136,11 +123,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         if (written != null && store != null) {
             for (Object v : written.values()) {
                 if (!(v instanceof String s)) continue;
-                Matcher m = REF.matcher(s.strip());
-                if (!m.matches()) continue;
-                int ref = Integer.parseInt(m.group(1));
+                // The one grammar, shared with the resolver and the refusal. Three private
+                // copies of this question used to give three answers, and every gap between
+                // them moved private bytes under a PUBLIC label.
+                ArtifactRef ref = ArtifactRef.parse(s);
+                if (ref == null) continue;
                 for (Artifact a : store) {
-                    if (a.n() == ref && a.isPrivate()) {
+                    if (a.n() == ref.handle() && a.isPrivate()) {
                         why.add("references " + a.handle());
                         break;
                     }
@@ -177,34 +166,33 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         }
         if (!shape.fields().isEmpty()) {
             sb.append(" · fields: ").append(String.join(", ", shape.fields()));
-            // The names past the descriptor's cap, bare. Without them a thirteenth field was
-            // invisible to the cloud, which then had nothing to reference and composed the
-            // email from the description instead -- and an imap envelope puts body_text well
-            // past the twelfth key. Truncated like the rest, because a full-length name would
-            // be a window of the private text; the resolver matches them by prefix.
-            List<String> all = jsonFieldNames(output);
-            if (all.size() > shape.fields().size()) {
-                var rest = new ArrayList<String>();
-                int budget = MAX_OVERFLOW_NAME_CHARS, dropped = 0;
-                for (String name : all.subList(shape.fields().size(), all.size())) {
-                    String shown = name.length() > MAX_FIELD_NAME
-                            ? name.substring(0, MAX_FIELD_NAME) + "…" : name;
-                    if (budget - shown.length() - 2 < 0) { dropped++; continue; }
-                    budget -= shown.length() + 2;
-                    rest.add(shown);
-                }
-                if (!rest.isEmpty()) sb.append(" · also: ").append(String.join(", ", rest));
-                if (dropped > 0) sb.append(" · +").append(dropped).append(" more");
-            }
         }
-        // How to USE it. Without this the descriptor is a dead end: the cloud is shown that
-        // 4,210 characters of menu exist and is told no way to put them in an email, so it
-        // writes the email from the description and the owner gets a confident message with no
-        // menu in it. The substitution happens on this machine, so naming the handle discloses
-        // nothing -- it is the whole point of naming it.
-        sb.append(" · pass ").append(handle());
-        if (!shape.fields().isEmpty()) sb.append(" or ").append(handle()).append(".<field>");
-        sb.append(" as a whole argument value to any tool and the text is substituted here");
+        // How to USE it, as COMPLETE tokens. Without this the descriptor is a dead end: the cloud
+        // is shown that 4,210 characters of menu exist and told no way to put them in an email,
+        // so it writes the email from the description and the owner gets a confident message
+        // with no menu in it. A template ("pass $1.<field>") was worse, beside a field list that
+        // annotates its names: the cloud composed "$1.body_text (string, 48 chars)", which
+        // resolves to nothing, and the literal went out as the body. So: the exact strings, in
+        // one list, for every field -- including those past the annotated twelve, since an imap
+        // envelope puts body_text well beyond them. Cut short like the annotated names, because a
+        // full-length name would be a window of the private text; the resolver takes a cut name
+        // by its prefix. The substitution happens here, so naming the handle discloses nothing.
+        sb.append(" · use: ").append(handle());
+        int budget = MAX_OVERFLOW_NAME_CHARS, shown = 0;
+        for (String name : referenceOrder(output)) {
+            String cut = name.length() > MAX_FIELD_NAME
+                    ? name.substring(0, MAX_FIELD_NAME) + "…" : name;
+            String token = ", " + handle() + "." + cut;
+            if (budget - token.length() < 0) break;
+            budget -= token.length();
+            sb.append(token);
+            shown++;
+        }
+        // Counted from the JSON rather than from the name list, which is itself capped: taking
+        // the remainder from that list told the cloud 22 fields were unnamed when 34 were.
+        int unnamed = topLevelKeyCount(output) - shown;
+        if (unnamed > 0) sb.append(" +").append(unnamed).append(" more");
+        sb.append(" — any of these as a whole argument value; the text is substituted here");
         return sb.toString();
     }
 
@@ -225,6 +213,58 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         }
         return new AgentObservation(a.tool(), a.success(), r.output(),
                 r.structured() == null ? Map.of() : r.structured(), durationMs);
+    }
+
+    /**
+     * Field names in the order worth offering as references: text fields largest first, then
+     * everything else in key order.
+     * <p>
+     * The list is budgeted, so its order decides which fields get named at all. Key order spent
+     * the budget on the envelope -- from, to, subject, date, uid, flags -- and an imap result's
+     * body_text, thirteenth or later, was never offered, so the cloud had nothing to forward and
+     * wrote the email itself. The content a task forwards is text, and it is the biggest text in
+     * the result. A boolean or a count is not something anyone passes along as a body.
+     */
+    static List<String> referenceOrder(String text) {
+        if (text == null || text.isBlank()) return List.of();
+        String t = text.strip();
+        if (!(t.startsWith("{") && t.endsWith("}"))) return List.of();
+        try {
+            JsonNode node = MAPPER.readTree(t);
+            if (node == null || !node.isObject()) return List.of();
+            var textual = new ArrayList<Map.Entry<String, Integer>>();
+            var rest = new ArrayList<String>();
+            var it = node.fields();
+            while (it.hasNext() && textual.size() + rest.size() < MAX_REFERENCE_NAMES) {
+                var e = it.next();
+                if (e.getValue().isTextual()) {
+                    textual.add(Map.entry(e.getKey(), e.getValue().asText().length()));
+                } else {
+                    rest.add(e.getKey());
+                }
+            }
+            // Stable, so equal lengths keep key order.
+            textual.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
+            var out = new ArrayList<String>();
+            for (var e : textual) out.add(e.getKey());
+            out.addAll(rest);
+            return List.copyOf(out);
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    /** How many top-level keys a JSON object result has; 0 for anything that is not one. */
+    static int topLevelKeyCount(String text) {
+        if (text == null || text.isBlank()) return 0;
+        String t = text.strip();
+        if (!(t.startsWith("{") && t.endsWith("}"))) return 0;
+        try {
+            JsonNode node = MAPPER.readTree(t);
+            return node != null && node.isObject() ? node.size() : 0;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**

@@ -954,7 +954,7 @@ public class ThinkingEngine {
         // OpenAI: has no prompt caching, so the compact prompt on steps 2+ saves ~700
         // real tokens per step.
         if (!context.trajectory().isEmpty() && !"anthropic".equals(providerName)) {
-            return buildCompactSystemPrompt(context);
+            return buildCompactSystemPrompt(context, mode);
         }
 
         var sb = new StringBuilder();
@@ -1093,24 +1093,33 @@ public class ThinkingEngine {
             sb.append(context.userPreferences()).append("\n\n");
         }
 
-        // Smart tool selection — include only relevant tools in detail
-        ToolSelector.Selection selection = toolSelector.select(
-                context.originalMessage(), context.trajectory());
+        // The manifest only on the text protocol -- the same rule the Anthropic path follows in
+        // buildDynamicContext, which this branch never got. With native tools the array already
+        // carries every tool (and, local-first, delegate's description carries the catalogue),
+        // so this was the catalogue a second time; and local-first it advertised as callable the
+        // very skills the array withholds. The duplicate is what deadlocked a run on this
+        // provider -- the default in application.yaml -- when a skill's own short output was
+        // recorded PRIVATE and the canary found it here, in a part with no registry allowance.
+        if (!mode.nativeTools()) {
+            // Smart tool selection — include only relevant tools in detail
+            ToolSelector.Selection selection = toolSelector.select(
+                    context.originalMessage(), context.trajectory());
 
-        sb.append("## Available Tools\n");
-        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-        sb.append(manifest).append("\n");
+            sb.append("## Available Tools\n");
+            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+            sb.append(manifest).append("\n");
 
-        // If some tools were omitted, list them by name so the LLM knows they exist
-        if (!selection.otherNames().isEmpty()) {
-            sb.append("\n## Other Available Tools (use by name if needed)\n");
-            sb.append(String.join(", ", selection.otherNames())).append("\n");
+            // If some tools were omitted, list them by name so the LLM knows they exist
+            if (!selection.otherNames().isEmpty()) {
+                sb.append("\n## Other Available Tools (use by name if needed)\n");
+                sb.append(String.join(", ", selection.otherNames())).append("\n");
+            }
+
+            if (manifest.isBlank()) {
+                sb.append("\nNo tools yet. Use skill_create as first action.\n");
+            }
+            sb.append("\n");
         }
-
-        if (manifest.isBlank()) {
-            sb.append("\nNo tools yet. Use skill_create as first action.\n");
-        }
-        sb.append("\n");
 
         // Dynamic vault contents
         List<String> vaultKeys = context.credentialKeys();
@@ -1133,7 +1142,14 @@ public class ThinkingEngine {
      * and instructional sections that the LLM has already seen on step 1.
      * Saves ~700 cloud tokens per step.
      */
-    private String buildCompactSystemPrompt(AgentContext context) {
+    /**
+     * @param mode honoured the way the full prompt honours it. This one took no mode at all, so
+     *             from step 2 on a non-Anthropic native run got the manifest (the catalogue a
+     *             second time, advertising skills the array withholds), the action list, and the
+     *             "Output: {reasoning, tool, params}" envelope -- the instruction to use the one
+     *             protocol the tools array replaces, which the full prompt stopped sending.
+     */
+    private String buildCompactSystemPrompt(AgentContext context, StepMode mode) {
         var sb = new StringBuilder(2048);
 
         sb.append("Autonomous agent. Reason, pick tools, observe, repeat. Never refuse. skill_create for new capabilities.\n\n");
@@ -1153,33 +1169,35 @@ public class ThinkingEngine {
             sb.append(context.userPreferences()).append("\n\n");
         }
 
-        // Available Tools (always — dynamic tool selection based on trajectory)
-        ToolSelector.Selection selection = toolSelector.select(
-                context.originalMessage(), context.trajectory());
-        sb.append("## Tools\n");
-        String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-        sb.append(manifest).append("\n");
-        if (!selection.otherNames().isEmpty()) {
-            sb.append("Also: ").append(String.join(", ", selection.otherNames())).append("\n");
-        }
-        if (manifest.isBlank()) {
-            sb.append("No tools yet — use skill_create.\n");
-        }
-        sb.append("\n");
+        if (!mode.nativeTools()) {
+            // Available Tools (text protocol only — dynamic tool selection based on trajectory)
+            ToolSelector.Selection selection = toolSelector.select(
+                    context.originalMessage(), context.trajectory());
+            sb.append("## Tools\n");
+            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
+            sb.append(manifest).append("\n");
+            if (!selection.otherNames().isEmpty()) {
+                sb.append("Also: ").append(String.join(", ", selection.otherNames())).append("\n");
+            }
+            if (manifest.isBlank()) {
+                sb.append("No tools yet — use skill_create.\n");
+            }
+            sb.append("\n");
 
-        // Compact special actions — parameter names only, one line each
-        sb.append("## Actions\n");
-        sb.append("respond(message) | ask_user(message)\n");
-        sb.append("skill_create(name, description, parameters[JSON], [requirements], [credentials], [system_packages→container], [timeout])\n");
-        sb.append("Fix skill: reuse SAME name. NEVER _v2/_fixed/_new.\n");
-        sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
-        sb.append("credential_manage(action=list|check, [key])\n");
-        sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
-        sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-        sb.append("delegate(goal, [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
-        sb.append("  It runs its own loop with the full tool set and your credentials, on this machine.\n");
-        sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
-        sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
+            // Compact special actions — parameter names only, one line each
+            sb.append("## Actions\n");
+            sb.append("respond(message) | ask_user(message)\n");
+            sb.append("skill_create(name, description, parameters[JSON], [requirements], [credentials], [system_packages→container], [timeout])\n");
+            sb.append("Fix skill: reuse SAME name. NEVER _v2/_fixed/_new.\n");
+            sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
+            sb.append("credential_manage(action=list|check, [key])\n");
+            sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
+            sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
+            sb.append("delegate(goal, [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
+            sb.append("  It runs its own loop with the full tool set and your credentials, on this machine.\n");
+            sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
+            sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
+        }
 
         // Problem-solving nudge (compact version of the full prompt's ## Problem Solving)
         sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n");
@@ -1192,8 +1210,10 @@ public class ThinkingEngine {
         }
         sb.append("Credentials auto-injected. Only ask for missing ones. Declare in 'credentials' param.\n\n");
 
-        // Output format (always needed)
-        sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+        // The text-protocol envelope, on the text protocol only.
+        if (!mode.nativeTools()) {
+            sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+        }
 
         // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
         Object nudge = context.metadata().get("delegationNudge");

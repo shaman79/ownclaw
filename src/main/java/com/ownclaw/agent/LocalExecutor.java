@@ -363,8 +363,12 @@ public class LocalExecutor {
             // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
             // here, a skill used every single morning looks untouched to maintenance -- which
             // retires skills for being unused. The telemetry has to follow the work.
+            // The arguments as WRITTEN, as the cloud path records them. `params` is the resolved
+            // map, with every $N already replaced by the artifact's bytes, so a failed step wrote
+            // up to 500 characters of the mailbox into a row whose label is the only thing
+            // keeping it out of the repair prompt -- and that label has been wrong before.
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, toolOk ? null : params, toolOk ? null : toolResult,
+                    toolOk, toolMs, toolOk ? null : action.params, toolOk ? null : toolResult,
                     artifact.label());
 
             log.info("Delegation step {} — {} {} (result: {} chars, {})",
@@ -831,15 +835,6 @@ public class LocalExecutor {
     }
 
     /** Anything still shaped like a reference after substitution did not resolve. */
-    // Any non-blank field name, so the descriptor's truncated "rendered_html_for_ema…" is
-    // recognised -- it matched neither the old pattern nor the resolver, so it was neither
-    // substituted nor refused and went out as the literal body of an email. No DOTALL and no
-    // whitespace in the field: a RESOLVED value that merely begins like a reference
-    // ("$5.50 Polévka\nHlavní chod") is a menu, not a dangling handle, and refusing it told the
-    // model to use the reference it had just used correctly.
-    private static final java.util.regex.Pattern UNRESOLVED =
-            java.util.regex.Pattern.compile("^\\$(\\d+)(?:\\.(\\S+))?$");
-
     /**
      * The parameter holding a reference that resolved to nothing, or null when none does.
      * <p>
@@ -854,18 +849,11 @@ public class LocalExecutor {
         if (params == null) return null;
         for (var e : params.entrySet()) {
             if (!(e.getValue() instanceof String v)) continue;
-            var m = UNRESOLVED.matcher(v.strip());
-            if (!m.matches()) continue;
-            String field = m.group(2);
-            // "$5.50" is five dollars fifty, not handle 5's field named "50". No JSON key worth
-            // referencing is all digits, and a price passed as a whole argument value is common.
-            if (field != null && field.chars().allMatch(Character::isDigit)) continue;
-            if (field == null) {
-                // A bare handle. Only a reference if the task could have produced it; anything
-                // beyond that is a dollar amount typed as a whole argument value.
-                int n = Integer.parseInt(m.group(1));
-                if (n < 1 || n > produced) continue;
-            }
+            ArtifactRef ref = ArtifactRef.parse(v);
+            if (ref == null) continue;
+            // A bare handle out of range is a dollar amount; a NAMED field is a reference whatever
+            // the count -- on a first step substitution does nothing and the literal travelled on.
+            if (!ref.hasField() && ref.handle() > produced) continue;
             return e.getKey();
         }
         return null;
@@ -970,28 +958,20 @@ public class LocalExecutor {
      * the model would then get wrong.
      */
     private static String resolveRef(String token, List<Artifact> done) {
-        if (token.length() < 2 || token.charAt(0) != '$') return null;
-        String body = token.substring(1);
-        String field = null;
-        int dot = body.indexOf('.');
-        if (dot > 0) {
-            field = body.substring(dot + 1);
-            body = body.substring(0, dot);
-            if (field.isBlank()) return null;
-        }
-        int n;
-        try {
-            n = Integer.parseInt(body);
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-        if (n < 1 || n > done.size()) return null;
+        ArtifactRef ref = ArtifactRef.parse(token);
+        if (ref == null) return null;
+        String field = ref.field();
+        int n = ref.handle();
+        if (n > done.size()) return null;
         String output = done.get(n - 1).output();
         if (field == null) return output;
         try {
             var node = mapper.readTree(output);
             var value = node.get(field);
-            if (value == null) value = byTruncatedName(node, field);
+            // Only for a name the descriptor cut short. On every miss it turned a visible refusal
+            // into a silent wrong answer: "$1.body" matched body_html, "$1.o" matched ok, and the
+            // owner got an email whose entire body was "true".
+            if (value == null && field.endsWith("…")) value = byTruncatedName(node, field);
             // An absent field is left as the literal "$1.field". Substituting null or "" would
             // send an empty email and call it a success; an unresolved token is at least visible
             // in whatever it reaches.
@@ -1142,12 +1122,14 @@ public class LocalExecutor {
         var sb = new StringBuilder();
         sb.append("Delegation completed for: ").append(goal).append("\n\n");
         for (Artifact r : results) {
-            sb.append("### ").append(r.handle()).append(": ").append(r.tool())
-                    .append(r.success() ? " ✓" : " ✗");
             if (r.isPrivate()) {
-                sb.append(" — ").append(r.describe()).append("\n\n");
+                // describe() already opens with the handle, the tool and the tick; prefixing
+                // them again printed each twice on every private step of every delegation.
+                sb.append("### ").append(r.describe()).append("\n\n");
             } else {
-                sb.append("\n").append(truncate(r.output(), 5000)).append("\n\n");
+                sb.append("### ").append(r.handle()).append(": ").append(r.tool())
+                        .append(r.success() ? " ✓" : " ✗")
+                        .append("\n").append(truncate(r.output(), 5000)).append("\n\n");
             }
         }
         return sb.toString();

@@ -641,6 +641,17 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("a private step is described once in the consolidated result, not twice")
+    void privateStepsAreNotDoublePrefixed() {
+        var priv = new Artifact(1, "imap_unread_summarizer", Map.of(), Map.of(), "{\"ok\":true}",
+                true, com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (3)"));
+        String text = LocalExecutor.buildConsolidatedResult("fetch mail", List.of(priv));
+        assertEquals(1, text.split("imap_unread_summarizer", -1).length - 1,
+                "the descriptor already names the handle and the tool: " + text);
+        assertTrue(text.contains("### $1 imap_unread_summarizer ✓ — PRIVATE"), text);
+    }
+
+    @Test
     @DisplayName("a failed PRIVATE step contributes neither its output nor its arguments")
     void privateFailuresWithholdTheirArgumentsToo() {
         var pub = new Artifact(1, "daily_news_digest", Map.of("topic", "rust"), Map.of(),

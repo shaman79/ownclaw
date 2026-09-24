@@ -75,6 +75,13 @@ class LocalFirstUnattendedTest {
         return messages.stream().map(LlmMessage::content).reduce("", (a, b) -> a + "\n" + b);
     }
 
+    /** Every message, for a provider other than the one the helper above hardcodes. */
+    private static String promptFor(ThinkingEngine engine, AgentContext ctx,
+                                    ThinkingEngine.StepMode mode, String provider) {
+        return engine.buildMessages(ctx, provider, mode).stream()
+                .map(LlmMessage::content).reduce("", (a, b) -> a + "\n" + b);
+    }
+
     private static List<String> names(List<ToolSpec> specs) {
         return specs.stream().map(ToolSpec::name).toList();
     }
@@ -138,6 +145,48 @@ class LocalFirstUnattendedTest {
                 "on the text protocol the message is the only place it can be");
         assertTrue(textNoTools.contains("Fetch and format a news digest."),
                 "and it carries the descriptions, not just the names");
+    }
+
+    @Test
+    @DisplayName("on a non-Anthropic provider too: the catalogue once, and no text protocol")
+    void theOtherProviderGetsTheSameRule() {
+        // Every earlier fix to this landed in buildDynamicContext, which only the Anthropic path
+        // uses. The other provider -- the default in application.yaml -- builds its own system
+        // prompt, and it rendered the full manifest into it unconditionally: the catalogue a
+        // second time, the very skills the array withholds advertised as callable, and the
+        // "Output: {reasoning, tool, params}" instruction the array exists to replace. The
+        // duplicate is what kept the deadlock alive there after it was fixed for Anthropic.
+        var mode = new ThinkingEngine.StepMode(true, true);
+        var engine = engine();
+        var first = unattended();
+        String step0 = promptFor(engine, first, mode, "openai");
+
+        var later = unattended();
+        later.trajectory().record(new AgentAction("delegate", Map.of("goal", "fetch"), "go"),
+                AgentObservation.success("delegate", "done", Map.of(), 10));
+        String step1 = promptFor(engine, later, mode, "openai");   // the compact prompt
+
+        for (String text : List.of(step0, step1)) {
+            assertFalse(text.contains("Fetch and format a news digest."),
+                    "the catalogue lives in delegate's description; a second copy here is what "
+                            + "the canary refused a run over: " + text);
+            assertFalse(text.contains("## Available Tools"), text);
+            assertFalse(text.contains("## Tools"), text);
+            assertFalse(text.contains("## Actions"), text);
+            assertFalse(text.contains("Output: {\"reasoning\""),
+                    "the instruction to use the protocol the tools array replaces: " + text);
+        }
+        String spec = engine.toolsFor(unattended(), mode).stream()
+                .filter(t -> "delegate".equals(t.name())).map(ToolSpec::description)
+                .findFirst().orElse("");
+        assertTrue(spec.contains("Fetch and format a news digest."),
+                "and it still learns the skill exists, or it rebuilds it with skill_create");
+
+        // Without native tools the prompt is the only place any of it can be.
+        String textProtocol = promptFor(engine, unattended(),
+                new ThinkingEngine.StepMode(false, false), "openai");
+        assertTrue(textProtocol.contains("## Available Tools"), textProtocol);
+        assertTrue(textProtocol.contains("Fetch and format a news digest."));
     }
 
     @Test

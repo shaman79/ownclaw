@@ -156,10 +156,6 @@ class ArtifactTest {
         sb.append("}");
         String d = privateResult("t", sb.toString(), true).describe();
         assertTrue(d.contains("field_number_0"));
-        assertTrue(d.contains("field_number_" + (Artifact.MAX_FIELDS + 1)),
-                "a field the cloud is never shown is a field it cannot reference, and it then "
-                        + "composes from the description instead — an imap envelope puts "
-                        + "body_text past the twelfth key");
         assertTrue(d.length() < 900,
                 "bounded by characters, which is what 'a descriptor that has become the "
                         + "content' actually meant: " + d.length() + " chars");
@@ -283,8 +279,11 @@ class ArtifactTest {
                 List.of("credentials (2)"));
         String d = a.describe();
 
-        assertTrue(d.contains("$1.<field>"), d);
-        assertTrue(d.contains("body_text"), "and which fields there are: " + d);
+        // Complete tokens, not a template. "pass $1.<field>" beside a list that annotates its
+        // names made the cloud compose "$1.body_text (string, 48 chars)", which resolves to
+        // nothing — and the literal went out as the body of the email.
+        assertTrue(d.contains("use: $1, $1.body_text"), d);
+        assertFalse(d.contains("<field>"), "nothing left for the cloud to compose: " + d);
         assertTrue(d.contains("substituted here"), d);
         assertFalse(d.contains("česneková"), "still never the content");
     }
@@ -308,6 +307,27 @@ class ArtifactTest {
         assertEquals(Artifact.MAX_REFERENCE_NAMES,
                 Artifact.jsonFieldNames(wide.append("}").toString()).size(),
                 "and it is still a cap");
+    }
+
+    @Test
+    @DisplayName("the body of an imap envelope is offered even when it is the twentieth key")
+    void theContentIsOfferedFirst() {
+        // The reference list is budgeted, so its ORDER decides what gets named. In key order the
+        // budget went on the envelope and body_text — past the twelfth key — was never offered;
+        // the cloud had nothing to forward and wrote the email from the description instead.
+        var sb = new StringBuilder("{");
+        String[] envelope = {"from", "to", "cc", "subject", "date", "message_id", "uid", "flags",
+                "folder", "size", "seen", "snippet", "has_attachments", "in_reply_to",
+                "references", "priority", "thread_id", "labels", "charset"};
+        for (String k : envelope) sb.append('"').append(k).append("\":\"x\",");
+        sb.append("\"body_text\":\"").append("Polévka dne: česneková. ".repeat(120)).append("\"}");
+        String d = privateResult("imap_fetch", sb.toString(), true).describe();
+
+        assertTrue(d.contains("$2.body_text"),
+                "the biggest text in the result is what a task forwards: " + d);
+        assertTrue(d.indexOf("$2.body_text") < d.indexOf("$2.from"),
+                "and it is offered before the envelope, not after it runs the budget out");
+        assertFalse(d.contains("česneková"), "still never the content");
     }
 
     @Test
