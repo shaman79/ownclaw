@@ -125,7 +125,7 @@ public final class SpecialActionSchemas {
 
             spec(AgentAction.DELEGATE,
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
-                            + "full tool set and your credentials, and costs nothing. Best for work "
+                            + "tools you name and your credentials, and costs nothing. Best for work "
                             + "on this machine, the LAN, servers and private data. About a minute "
                             + "per step, so prefer it when nobody is waiting. Give it a goal; it "
                             + "works out the steps. A delegation starts with no results and "
@@ -135,5 +135,9 @@ public final class SpecialActionSchemas {
                             + "argument to pass it on verbatim without reading it.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully."),
+                            "tools", ToolParam.optional("array", "The exact names of the tools it "
+                                    + "will need. Only these are loaded: the local model's context "
+                                    + "is small, and every tool definition takes room it needs for "
+                                    + "the work. Omit to load all of them."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
 }

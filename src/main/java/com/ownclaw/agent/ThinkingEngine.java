@@ -561,7 +561,8 @@ public class ThinkingEngine {
                     spec.description()
                             + "\n\nYou are orchestrating unattended work, so you cannot run "
                             + "skills yourself — this is how the work gets done. State the goal "
-                            + "fully; the local model picks the tools. Skills available to it:\n"
+                            + "fully and name the skills it needs in 'tools'. Skills available "
+                            + "to it:\n"
                             + (catalogue.isBlank() ? "(none yet — use skill_create first)" : catalogue),
                     spec.inputSchema());
         });
@@ -692,7 +693,7 @@ public class ThinkingEngine {
                 String catalogue = skillCatalogue();
                 sb.append(catalogue.isBlank() ? "(none yet — use skill_create)\n" : catalogue + "\n");
                 sb.append("You cannot call these yourself on this task. 'delegate' reaches all of "
-                        + "them: state the goal in full and the local model picks the tools.\n");
+                        + "them: state the goal in full and name the ones it needs in 'tools'.\n");
             }
         } else if (!mode.nativeTools()) {
             ToolSelector.Selection selection = selectToolsForPrompt(context);
@@ -1013,7 +1014,7 @@ public class ThinkingEngine {
         // step's output. The executor never needed it: it runs its own think-act-observe loop
         // with the whole tool manifest. So it takes a goal, and steps are a hint.
         sb.append("delegate: hand a sub-goal to the local model. It runs its own loop on this\n");
-        sb.append("  machine with the full tool set and your credentials, and costs nothing.\n");
+        sb.append("  machine with the tools you name and your credentials, and costs nothing.\n");
         sb.append("  Best for: work on the local machine, LAN, servers and files, and long\n");
         sb.append("  mechanical sequences. Nothing leaves the host, so prefer it for private data.\n");
         sb.append("  Trade-off: roughly a minute per step, so prefer it when nobody is waiting;\n");
@@ -1021,6 +1022,8 @@ public class ThinkingEngine {
         sb.append("  goal* — what to achieve, stated fully; the local model works out the steps.\n");
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
+        sb.append("  tools: the exact names of the tools it will need. Only these are loaded --\n");
+        sb.append("    its context is small and each definition takes room. Omit to load all.\n");
         sb.append("  checkpoints | max_steps (default 10)\n\n");
         }
 
@@ -1193,8 +1196,8 @@ public class ThinkingEngine {
             sb.append("credential_manage(action=list|check, [key])\n");
             sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
             sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-            sb.append("delegate(goal, [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
-            sb.append("  It runs its own loop with the full tool set and your credentials, on this machine.\n");
+            sb.append("delegate(goal, [tools], [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
+            sb.append("  It runs its own loop with the tools you name (all, if none) and your credentials, on this machine.\n");
             sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
             sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
         }

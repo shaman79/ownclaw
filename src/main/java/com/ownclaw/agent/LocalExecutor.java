@@ -78,14 +78,39 @@ public class LocalExecutor {
                     ToolParam.required("string",
                             "What you did, and what came back, in outline. Not a copy of it."))));
 
-    /** What the local model may call: the registry, minus skill_create, plus {@link #DONE}. */
-    private List<ToolSpec> executorTools(AgentContext context) {
-        var tools = toolRegistry.all().stream()
+    /** What the local model may call: the tools this delegation is given, plus {@link #DONE}. */
+    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan) {
+        return new ArrayList<>(ToolSchemas.build(List.of(DONE), offered(plan),
+                context.credentialKeys()));
+    }
+
+    /**
+     * The tools a delegation is given: the ones the cloud named, and any a plan step names --
+     * or the whole registry when it named none that exist. Never skill_create.
+     * <p>
+     * Every definition sent costs the local model context it needs for the work. With the
+     * whole registry (26 skills) the prompt was about 18,000 tokens of a 24,576-token window,
+     * and on 2026-09-24 the morning menu delegation died on its second call with
+     * done_reason=length after 5,947 tokens of thinking: there was no room left to answer in.
+     * The cloud knows which tools the job needs, so it says, and only those are sent.
+     */
+    Collection<Tool> offered(DelegationPlan plan) {
+        var all = toolRegistry.all().stream()
                 .filter(t -> t != null && !"skill_create".equals(t.name()))
                 .collect(Collectors.toList());
-        var specs = new ArrayList<>(ToolSchemas.build(List.of(DONE), tools,
-                context.credentialKeys()));
-        return specs;
+        var wanted = new java.util.HashSet<>(plan.tools());
+        for (var st : plan.steps()) {
+            if (st.tool() != null && !st.tool().isBlank()) wanted.add(st.tool());
+        }
+        var named = all.stream().filter(t -> wanted.contains(t.name())).collect(Collectors.toList());
+        return named.isEmpty() ? all : named;
+    }
+
+    /** The names the cloud asked for that no tool has; said back to it, so it can correct them. */
+    private List<String> unknownTools(DelegationPlan plan) {
+        return plan.tools().stream()
+                .filter(n -> "skill_create".equals(n) || toolRegistry.find(n).isEmpty())
+                .toList();
     }
 
     /**
@@ -102,10 +127,21 @@ public class LocalExecutor {
         // So the references are taken out of what it is given, and the cloud is told why.
         int[] removed = {0};
         Outcome outcome = run(withoutOutsideReferences(plan, removed), parentContext);
-        if (removed[0] == 0) return outcome;
-        log.warn("Delegation goal named {} earlier result(s); removed — a delegation cannot see them.",
-                removed[0]);
-        return new Outcome(OUTSIDE_REFERENCE_NOTE + outcome.text(), outcome.toolsRun(),
+        String notes = "";
+        if (removed[0] > 0) {
+            log.warn("Delegation goal named {} earlier result(s); removed — a delegation cannot see them.",
+                    removed[0]);
+            notes += OUTSIDE_REFERENCE_NOTE;
+        }
+        List<String> unknown = unknownTools(plan);
+        if (!unknown.isEmpty()) {
+            log.warn("Delegation asked for tools that do not exist: {}", unknown);
+            notes += "NOTE: no tool is named " + String.join(", ", unknown) + ", so the delegation "
+                    + "ran without " + (unknown.size() == 1 ? "it" : "them") + ". Use the exact "
+                    + "names from your tool list.\n\n";
+        }
+        if (notes.isEmpty()) return outcome;
+        return new Outcome(notes + outcome.text(), outcome.toolsRun(),
                 outcome.stepCount(), outcome.ok(), outcome.produced());
     }
 
@@ -137,7 +173,8 @@ public class LocalExecutor {
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
                 : plan.checkpoints().stream().map(scrub).toList();
-        return new DelegationPlan(scrub.apply(plan.goal()), steps, checkpoints, plan.maxSteps());
+        return new DelegationPlan(scrub.apply(plan.goal()), steps, checkpoints, plan.maxSteps(),
+                plan.tools());
     }
 
     @SuppressWarnings("unchecked")
@@ -152,9 +189,9 @@ public class LocalExecutor {
         // constraint on this hardware, so when the model can take tools as structure, send them
         // as structure and drop the prose copy.
         boolean nativeTools = localProvider.supportsTools();
-        List<ToolSpec> specs = nativeTools ? executorTools(parentContext) : null;
+        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
-                specs == null ? toolRegistry.all().size() : specs.size());
+                offered(plan).size());
 
         int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
         // This delegation's own results, and the only ones the local model can name: {{1}} is
@@ -505,7 +542,18 @@ public class LocalExecutor {
             } catch (NumberFormatException ignored) {}
         }
 
-        return new DelegationPlan(goal, steps, checkpoints, maxSteps);
+        // An array of names, or -- as a model will sometimes write it -- one string of them.
+        List<String> tools = new ArrayList<>();
+        Object toolsObj = params.get("tools");
+        if (toolsObj instanceof List<?> toolList) {
+            for (Object item : toolList) {
+                if (item != null && !item.toString().isBlank()) tools.add(item.toString().strip());
+            }
+        } else if (toolsObj instanceof String s) {
+            for (String name : s.split("[,\\s]+")) if (!name.isBlank()) tools.add(name);
+        }
+
+        return new DelegationPlan(goal, steps, checkpoints, maxSteps, tools);
     }
 
     // ── Private helpers ──
@@ -575,9 +623,7 @@ public class LocalExecutor {
         // repeating it here would cost the context window twice for the same information.
         if (!nativeTools) {
             sb.append("## Available Tools\n");
-            Collection<Tool> availableTools = toolRegistry.all().stream()
-                    .filter(t -> !"skill_create".equals(t.name()))
-                    .collect(Collectors.toList());
+            Collection<Tool> availableTools = offered(plan);
             if (!availableTools.isEmpty()) {
                 String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
                 sb.append(manifest).append("\n");

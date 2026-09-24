@@ -14,13 +14,23 @@ import java.util.Map;
  * @param steps       ordered list of tool calls to execute
  * @param checkpoints quality criteria to verify before marking as done
  * @param maxSteps    maximum number of executor steps (tool calls + retries)
+ * @param tools       the tools the cloud says this delegation needs; empty means all of them
  */
 public record DelegationPlan(
         String goal,
         List<Step> steps,
         List<String> checkpoints,
-        int maxSteps
+        int maxSteps,
+        List<String> tools
 ) {
+    public DelegationPlan {
+        tools = tools == null ? List.of() : List.copyOf(tools);
+    }
+
+    public DelegationPlan(String goal, List<Step> steps, List<String> checkpoints, int maxSteps) {
+        this(goal, steps, checkpoints, maxSteps, List.of());
+    }
+
     /**
      * A single step in the delegation plan.
      *
