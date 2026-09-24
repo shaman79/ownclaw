@@ -2992,7 +2992,7 @@
         var sentPanel = buildTaskSentPanel(t, recorded);
 
         var tabs = node('div', 'task-trace-tabs');
-        var went = calls.filter(function(c) { return c.decision !== 'REFUSED'; }).length;
+        var went = calls.filter(function(c) { return c.decision === 'SENT' || c.decision === 'OBSERVED_LEAK'; }).length;
         var stepsTab = node('button', 'task-trace-tab', 'Steps');
         var sentTab = node('button', 'task-trace-tab', recorded ? 'Sent to cloud · ' + went : 'Sent to cloud');
         function select(showSteps) {
@@ -3069,8 +3069,11 @@
         var panel = node('div');
         var calls = t.calls || [], totals = t.totals || {}, dec = totals.decisions || {};
         if (calls.length) {
-            var went = calls.length - (dec.REFUSED || 0);
-            var head = tdCount(went, 'request', 'requests') + ' went to the cloud model: '
+            // A failed call is not "went": whether it reached the provider is not recorded.
+            var went = (dec.SENT || 0) + (dec.OBSERVED_LEAK || 0), failedN = dec.ERROR || 0;
+            var head = tdCount(went, 'request', 'requests') + ' went to the cloud model'
+                    + (failedN ? '; ' + failedN + ' failed, and whether ' + (failedN === 1 ? 'it' : 'they')
+                        + ' reached the provider is not recorded' : '') + '. Together: '
                     + formatBytes(totals.bytesOut) + ', ' + formatTokenCount(tdBilled(totals)) + ' tokens, '
                     + (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd) + '.';
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
@@ -3078,7 +3081,8 @@
             panel.appendChild(node('div', 'task-trace-headline', head));
             if (dec.OBSERVED_LEAK) {
                 panel.appendChild(node('div', 'task-trace-line bad', tdCount(dec.OBSERVED_LEAK, 'request', 'requests')
-                        + ' went out containing private text: the check was only observing, so it did not stop them.'));
+                        + ' went out containing private text: the check was only observing, so it did not stop '
+                        + (dec.OBSERVED_LEAK === 1 ? 'it.' : 'them.')));
             }
             var maybe = calls.filter(tdFailedLeak).length;
             if (maybe) {
@@ -3115,10 +3119,12 @@
                             + ' that may have gone out' : '') + ': the check was only observing.')
                 : c.failed > 0
                 ? node('div', 'task-trace-line bad', 'Its text was in ' + tdCount(c.failed, 'failed request', 'failed requests')
-                        + '; whether they reached the cloud is not recorded: the check was only observing.')
+                        + '; whether ' + (c.failed === 1 ? 'it' : 'they') + ' reached the cloud is not recorded: '
+                        + 'the check was only observing.')
                 : c.unchecked > 0
                 ? node('div', 'task-trace-line warn', tdCount(c.unchecked, 'later request was', 'later requests were')
-                        + ' not checked for it and may have gone out: the check stops at the first private result it finds.')
+                        + ' not checked for it: its text may have gone with ' + (c.unchecked === 1 ? 'it' : 'them')
+                        + '. The check stops at the first private result it finds.')
                 // What Artifact.describe() shows of it -- never the text.
                 : node('div', 'task-trace-line muted', a.indexed === false
                         ? 'The cloud was shown only its source and size, not its text.'
@@ -3243,7 +3249,8 @@
         }
         if (clean > 0) {
             return { cls: '', text: 'Checked in ' + tdCount(clean, c.hits ? 'other later request' : 'later request',
-                    c.hits ? 'other later requests' : 'later requests') + ': its text was not in them.' };
+                    c.hits ? 'other later requests' : 'later requests') + ': its text was not in '
+                    + (clean === 1 ? 'it.' : 'them.') };
         }
         return null;   // the line above already says what happened
     }

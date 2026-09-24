@@ -156,6 +156,10 @@ class TaskTraceServiceTest {
         row("egress", egress("OBSERVED_LEAK", 5, 5, 0.01, "{{1}} in part 4 (user) at 10"));
         assertEquals(Map.of("checkedCalls", 1, "hits", 1, "leaked", 1, "failed", 0, "unchecked", 0),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
+        // ...and with no hit, it was never looked for: not "checked and clean".
+        rows.remove(rows.size() - 1);
+        row("egress", egress("SENT", 5, 5, 0.01, null));
+        assertNull(list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
     }
 
     @Test
