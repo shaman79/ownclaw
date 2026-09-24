@@ -123,26 +123,25 @@ public final class CloudGateway implements LlmProvider {
         // (c) The canary: every part, before the socket opens.
         String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
-        // The registry text OF THIS REQUEST -- tool descriptions and schemas, authored by the
-        // cloud at skill_create or by the owner, in the prompt before any artifact existed. A
-        // run of one matching a later result is a collision, not a disclosure: skills routinely
-        // describe the shape of their own output.
+        // A tool description or schema is authored by the cloud at skill_create or by the
+        // owner, and it was in the prompt on every step before the artifact existed -- so a run
+        // of it matching a later result is a collision, not a disclosure. Skills routinely
+        // describe the shape of their own output, and without this the first call after such a
+        // skill ran was refused, after the side effect had happened.
         //
-        // Allowed wherever it appears, not only inside the registry part, because the unattended
-        // prompt renders the skill catalogue TWICE from one method -- into delegate's description
-        // and into the dynamic block glued onto the last user message -- and refusing the second
-        // copy withholds nothing from a cloud that is receiving the first a few kilobytes down.
+        // THE ALLOWANCE IS FOR THESE PARTS. Two attempts widened it to the registry's text
+        // wherever that text appeared, to spare a skill catalogue that the prompt rendered
+        // twice; both leaked. A substring test excused any short artifact quoted anywhere as
+        // soon as its bytes turned up in some skill's example, and length-limiting the test
+        // only moved the boundary to 32 characters and then refused every short artifact's
+        // legitimate self-description -- which deadlocks a task from that step on. The
+        // duplicate render is fixed where it is made (ThinkingEngine renders the catalogue
+        // into the user message only when the tools array is not carrying it), so the door
+        // does not have to reason about text that appears in two places at once.
         //
-        // But WINDOW-length hits only. A private artifact of 8..31 characters is registered
-        // whole, so for one of those the "window" IS the entire artifact, and a plain substring
-        // test waved it through in every part as soon as an account number or an order id
-        // happened to appear in some skill's description or example. That was a real hole, wider
-        // than the one it was written to close: proved by probe, an IBAN-shaped artifact quoted
-        // in a user message went from REFUSED to SENT. A collision on a 32-character run is a
-        // coincidence; a short artifact reproduced in full is the artifact.
-        String registryText = PrivateIndex.normalise(parts.stream()
-                .filter(p -> p.kind().startsWith("tool:") || p.kind().startsWith("schema:"))
-                .map(Part::text).collect(java.util.stream.Collectors.joining("\n")));
+        // Known limit, and it is the trust boundary rather than a bug: if a prompt builder ever
+        // renders artifact content INTO a tool description, this excuses it. The registry is
+        // trusted input here; the canary's promise covers the message parts.
         // The scrubber's post-condition, checked rather than trusted. A marker is built from
         // the key name and a value can be a substring of its own replacement, so the fallback
         // marker was itself unverified -- a value of "redacted" would have been written out
@@ -172,13 +171,15 @@ public final class CloudGateway implements LlmProvider {
             // the rest of that part unscanned: a private confirmation whose opening quotes the
             // public digest it sent was allowed on that window, and its address, host and
             // message id -- the part that is actually private -- went unchecked.
-            while ((hit = egress.index().firstHitIn(part.text(), from)) != null) {
+            boolean registry = part.kind().startsWith("tool:") || part.kind().startsWith("schema:");
+            // Normalised ONCE. firstHitIn re-normalises whatever it is handed, and `from`
+            // advances a character at a time, so a part with many allowed hits was quadratic:
+            // 7.8 seconds measured on a single 130 KB part, paid on every step of the run.
+            while ((hit = egress.index().firstHitInNormalised(normalised, from)) != null) {
                 from = hit.offset() + 1;
                 String window = normalised.substring(hit.offset(),
                         Math.min(hit.offset() + hit.length(), normalised.length()));
-                boolean registryCollision = hit.length() >= PrivateIndex.WINDOW
-                        && registryText.contains(window);
-                if (registryCollision || egress.allowed().test(hit.handle(), window)) continue;
+                if (registry || egress.allowed().test(hit.handle(), window)) continue;
 
                 String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
                         + ") at " + hit.offset();

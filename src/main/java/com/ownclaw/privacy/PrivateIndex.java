@@ -28,6 +28,14 @@ public final class PrivateIndex {
 
     /** Window width for long texts. Below this, a run is too short to be someone's data. */
     public static final int WINDOW = 32;
+
+    /**
+     * Distinct characters a whole string needs before it is registered as a fallback. Far lower
+     * than {@link #MIN_DISTINCT}, which judges one 32-character window: a run of dashes inside
+     * prose is filler, but a 39-character string built from three characters is a pair of card
+     * numbers.
+     */
+    private static final int MIN_DISTINCT_WHOLE = 3;
     /** Whole strings from this length up are registered as they are. */
     public static final int MIN_SHORT = 8;
     /** A window with fewer distinct characters than this is filler (dashes, dots), not data. */
@@ -94,7 +102,15 @@ public final class PrivateIndex {
             if (distinct(n, start) < MIN_DISTINCT) continue;
             hashes[count++] = h;
         }
-        if (count == 0) return;
+        if (count == 0) {
+            // Every window was filler by the distinct-character test -- but "filler" and
+            // "repetitive data" are not the same thing. Two card numbers, a row of dates or a
+            // list of phone numbers has three or four distinct characters and is exactly what
+            // must never leave. Register the whole string instead, so a verbatim quote is still
+            // caught; forty dashes still has too few to bother with.
+            if (distinctInWhole(n) >= MIN_DISTINCT_WHOLE) addShort(handle, n);
+            return;
+        }
         long[] sorted = Arrays.copyOf(hashes, count);
         Arrays.sort(sorted);
         handles = Arrays.copyOf(handles, handles.length + 1);
@@ -116,7 +132,18 @@ public final class PrivateIndex {
      * address and a message id that are nobody else's.
      */
     public Hit firstHitIn(String part, int from) {
-        String n = normalise(part);
+        return firstHitInNormalised(normalise(part), from);
+    }
+
+    /**
+     * The same scan over text that is ALREADY normalised.
+     * <p>
+     * The caller that walks every hit in a part holds the normalised string anyway; handing the
+     * raw text back in made each hit re-normalise the whole part, which is quadratic in the
+     * number of hits.
+     */
+    public Hit firstHitInNormalised(String normalised, int from) {
+        String n = normalised;
         if (n.length() < MIN_SHORT) return null;
         Hit best = null;
 
@@ -169,6 +196,16 @@ public final class PrivateIndex {
     /** Whether anything at all is registered. */
     public boolean isEmpty() {
         return handles.length == 0 && shortHashes.length == 0;
+    }
+
+    /** How many distinct characters the whole string has — the filler test, over all of it. */
+    private static int distinctInWhole(String n) {
+        var seen = new java.util.HashSet<Character>();
+        for (int i = 0; i < n.length(); i++) {
+            seen.add(n.charAt(i));
+            if (seen.size() >= MIN_DISTINCT_WHOLE) return seen.size();
+        }
+        return seen.size();
     }
 
     private void addShort(int handle, String normalised) {

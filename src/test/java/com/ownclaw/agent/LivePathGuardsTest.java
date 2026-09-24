@@ -60,13 +60,14 @@ class LivePathGuardsTest {
     @DisplayName("the reference refusal only applies once the task has results to reference")
     void theRefusalDoesNotFireOnAFirstStep() throws IOException {
         String s = read("com.ownclaw.agent.AgentLoop");
-        int at = s.indexOf("LocalExecutor.unresolvedRef(resolved)");
+        int at = s.indexOf("LocalExecutor.unresolvedRef(resolved");
         assertTrue(at > 0, "the guard moved; this test no longer checks it");
-        String around = s.substring(Math.max(0, at - 400), at + 60);
-        assertTrue(around.contains("artifacts().isEmpty()"),
-                "with no artifacts nothing was ever named $N, so a whole-value \"$50\" is a "
-                        + "price the model typed. Ungated, the guard fails a first step that "
-                        + "was perfectly correct:\n" + around);
+        String call = s.substring(at, Math.min(s.length(), at + 120));
+        assertTrue(call.contains("artifacts().size()"),
+                "the count is what separates a reference from a price, and it has to be passed. "
+                        + "Skipping the check when the task had none was wrong the other way: it "
+                        + "is exactly then that \"$1.body_text\" resolves to nothing and twelve "
+                        + "literal characters went out as the body of an email:\n" + call);
     }
 
     @Test

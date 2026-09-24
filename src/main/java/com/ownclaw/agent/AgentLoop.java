@@ -1181,11 +1181,11 @@ public class AgentLoop {
         // reference that resolves to nothing is refused rather than passed on: as an argument to
         // smtp_send_email, "$9" is an email whose entire body is two characters, sent
         // successfully and recorded green.
-        // Only once this task HAS results to reference. With none, nothing was ever named $N,
-        // so a whole-value "$50" is a price the model typed, not a dangling handle -- and
-        // refusing it would fail a first step that was perfectly correct.
-        String unresolved = context.artifacts().isEmpty()
-                ? null : LocalExecutor.unresolvedRef(resolved);
+        // The count is what tells a reference from a price; see unresolvedRef. Skipping the
+        // check entirely when the task had no results was wrong in the other direction: it is
+        // exactly then that "$1.body_text" -- the form the descriptor now teaches -- resolves to
+        // nothing, and twelve literal characters went out as the body of an email.
+        String unresolved = LocalExecutor.unresolvedRef(resolved, context.artifacts().size());
         if (unresolved != null) {
             log.warn("Task {}: '{}' references a result that does not exist — refused.",
                     context.taskId(), unresolved);

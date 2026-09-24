@@ -43,10 +43,33 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                        Label label, List<String> why) {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Pattern REF = Pattern.compile("^\\$(\\d+)(?:\\.[A-Za-z0-9_]+)?$");
+    /**
+     * A whole-value reference, as the LABEL sees it.
+     * <p>
+     * Any non-blank field name, because {@code LocalExecutor.resolveRef} accepts any non-blank
+     * field name and the two must not disagree — the narrow version here meant that
+     * {@code $1.body-text}, or a Czech key, or the descriptor's own truncated
+     * {@code rendered_html_for_ema…}, substituted a PRIVATE artifact's text into an argument
+     * and the result was then labelled PUBLIC. The resolver decides what content moves; this
+     * decides whether the result of moving it may leave. Broader here is fail-closed.
+     */
+    private static final Pattern REF = Pattern.compile("^\\$(\\d+)(?:\\.\\S+)?$");
     /** How many top-level field names a descriptor shows, and how long each may be. */
     static final int MAX_FIELDS = 12;
     static final int MAX_FIELD_NAME = 24;
+
+    /** How many names the reference list may carry. Names are short; the descriptor's cap is not. */
+    static final int MAX_REFERENCE_NAMES = 48;
+
+    /**
+     * Characters the descriptor may spend naming fields past {@link #MAX_FIELDS}.
+     * <p>
+     * Bounded by length rather than by count, because the thing to avoid is a descriptor that
+     * has become the content, and twelve was too few to be a limit on NAMES: an imap envelope
+     * puts {@code body_text} past the twelfth key, and a field the cloud is never shown is a
+     * field it cannot reference — so it composed the email from the description instead.
+     */
+    static final int MAX_OVERFLOW_NAME_CHARS = 240;
 
     public Artifact {
         // Not Map.copyOf: it rejects a null VALUE, and a tool call carrying one is ordinary —
@@ -154,6 +177,25 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         }
         if (!shape.fields().isEmpty()) {
             sb.append(" · fields: ").append(String.join(", ", shape.fields()));
+            // The names past the descriptor's cap, bare. Without them a thirteenth field was
+            // invisible to the cloud, which then had nothing to reference and composed the
+            // email from the description instead -- and an imap envelope puts body_text well
+            // past the twelfth key. Truncated like the rest, because a full-length name would
+            // be a window of the private text; the resolver matches them by prefix.
+            List<String> all = jsonFieldNames(output);
+            if (all.size() > shape.fields().size()) {
+                var rest = new ArrayList<String>();
+                int budget = MAX_OVERFLOW_NAME_CHARS, dropped = 0;
+                for (String name : all.subList(shape.fields().size(), all.size())) {
+                    String shown = name.length() > MAX_FIELD_NAME
+                            ? name.substring(0, MAX_FIELD_NAME) + "…" : name;
+                    if (budget - shown.length() - 2 < 0) { dropped++; continue; }
+                    budget -= shown.length() + 2;
+                    rest.add(shown);
+                }
+                if (!rest.isEmpty()) sb.append(" · also: ").append(String.join(", ", rest));
+                if (dropped > 0) sb.append(" · +").append(dropped).append(" more");
+            }
         }
         // How to USE it. Without this the descriptor is a dead end: the cloud is shown that
         // 4,210 characters of menu exist and is told no way to put them in an email, so it
@@ -204,11 +246,11 @@ public record Artifact(int n, String tool, Map<String, Object> written,
             JsonNode node = MAPPER.readTree(t);
             if (node == null || !node.isObject()) return List.of();
             var names = new ArrayList<String>();
-            // The same count cap the descriptor applies. Deriving from shapeOf carried it for
-            // free; parsing directly dropped it, and every top-level key of a wide result went
-            // into the delegation prompt.
+            // Bounded, but not at MAX_FIELDS. That cap is the descriptor's, and applying it here
+            // hid the thirteenth key from the local model too -- on an imap envelope body_text
+            // sits past the twelfth, so the one field the task needed could be named by nobody.
             var it = node.fieldNames();
-            while (it.hasNext() && names.size() < MAX_FIELDS) names.add(it.next());
+            while (it.hasNext() && names.size() < MAX_REFERENCE_NAMES) names.add(it.next());
             return List.copyOf(names);
         } catch (Exception e) {
             return List.of();

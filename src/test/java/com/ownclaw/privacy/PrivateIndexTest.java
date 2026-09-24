@@ -144,6 +144,27 @@ class PrivateIndexTest {
     }
 
     @Test
+    @DisplayName("repetitive is not filler: card numbers and dates are still indexed")
+    void repetitiveDataIsNotTreatedAsFiller() {
+        // Every 32-char window of these fails the distinct-character test, so the artifact was
+        // dropped from the index entirely and the bytes went to the cloud in any part, with no
+        // collision needed. Filler is a row of dashes; a pair of card numbers is the data.
+        for (String data : java.util.List.of("4111 1111 1111 1111 4111 1111 1111 1111",
+                                   "2026-10-01 2026-10-02 2026-10-03",
+                                   "+420 111 222 111 222 111 222 111")) {
+            var idx = new PrivateIndex();
+            idx.addPrivate(6, data);
+            assertFalse(idx.isEmpty(), "not indexed at all: " + data);
+            assertNotNull(idx.firstHitIn("the statement shows " + data + " twice"),
+                    "quoted verbatim and not caught: " + data);
+        }
+
+        var filler = new PrivateIndex();
+        filler.addPrivate(7, "-".repeat(40));
+        assertTrue(filler.isEmpty(), "a row of dashes really is filler and must not refuse");
+    }
+
+    @Test
     @DisplayName("normalisation folds case, compatibility forms and whitespace runs")
     void normalisation() {
         assertEquals("kancelář novák 42", PrivateIndex.normalise("  Kancelář\n\tNOVÁK   42 "));

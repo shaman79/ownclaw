@@ -328,9 +328,9 @@ class DelegationSafetyTest {
         // an email whose entire body is the seven characters "$1.body", sent successfully and
         // recorded green.
         assertEquals("body", LocalExecutor.unresolvedRef(
-                Map.of("to", "petr@example.com", "body", "$1.body")));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.body_text")));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$3")));
+                Map.of("to", "petr@example.com", "body", "$1.body"), 4));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.body_text"), 4));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$3"), 4));
     }
 
     @Test
@@ -339,14 +339,14 @@ class DelegationSafetyTest {
         var done = List.of(step("daily_news_digest", Map.of(),
                 "{\"ok\":true,\"body_text\":\"the digest\"}"));
         var resolved = LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), done);
-        assertNull(LocalExecutor.unresolvedRef(resolved),
+        assertNull(LocalExecutor.unresolvedRef(resolved, done.size()),
                 "it resolved, so what is left is content, not a reference");
 
-        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "Costs $5 and $10")),
+        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "Costs $5 and $10"), 1),
                 "money is not a reference");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("command", "echo \"$1\" | wc -c")));
-        assertNull(LocalExecutor.unresolvedRef(Map.of()));
-        assertNull(LocalExecutor.unresolvedRef(null));
+        assertNull(LocalExecutor.unresolvedRef(Map.of("command", "echo \"$1\" | wc -c"), 1));
+        assertNull(LocalExecutor.unresolvedRef(Map.of(), 1));
+        assertNull(LocalExecutor.unresolvedRef(null, 1));
     }
 
     // ── a failed delegation must not invite the work to be done twice ──
@@ -588,6 +588,26 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("a name the descriptor cut short still resolves, by its visible prefix")
+    void aTruncatedFieldNameResolves() {
+        // The cut is not optional: a field name of 32 characters would itself be a window of the
+        // private text, so the descriptor would leak and then refuse the call carrying it. The
+        // cloud copies what it is shown, so what it is shown has to resolve.
+        var done = List.of(step("render", Map.of(),
+                "{\"rendered_html_for_email_body_with_css\":\"<p>Polévka</p>\"}"));
+        assertEquals(Map.of("body", "<p>Polévka</p>"),
+                LocalExecutor.substituteRefs(
+                        Map.of("body", "$1.rendered_html_for_email…"), done));
+
+        // Only when it is unambiguous — a guess here picks somebody's data.
+        var twin = List.of(step("render", Map.of(),
+                "{\"rendered_html_for_email\":\"A\",\"rendered_html_for_export\":\"B\"}"));
+        assertEquals(Map.of("body", "$1.rendered_html_for_e…"),
+                LocalExecutor.substituteRefs(Map.of("body", "$1.rendered_html_for_e…"), twin),
+                "two keys share the prefix, so it stays unresolved and is refused downstream");
+    }
+
+    @Test
     @DisplayName("a reference copied from the truncated descriptor is refused, not sent as text")
     void anEllipsisReferenceIsStillAReference() {
         // The descriptor abbreviates a field name over 24 characters and marks the cut with "…".
@@ -595,13 +615,29 @@ class DelegationSafetyTest {
         // dot, so "$1.rendered_html_for_ema…" was neither substituted nor recognised as a
         // dangling reference — it went out as the literal body of an email, and the run was
         // recorded green. That is the exact failure the guard exists to stop.
+        // A NAMED FIELD is a reference whatever the task has produced — including on a first
+        // step, where substitution does nothing at all and the literal characters used to
+        // travel on as the body of an email.
         assertEquals("body", LocalExecutor.unresolvedRef(
-                Map.of("body", "$1.rendered_html_for_ema…")));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$9")));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.no_such_field")));
-        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "the price is $50 today")),
-                "a dollar amount inside prose is not a reference");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("subject", "Menu")));
+                Map.of("body", "$1.rendered_html_for_ema…"), 0));
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.no_such_field"), 3));
+
+        // A BARE HANDLE is a reference only within range. Out of range it is the fifty dollars
+        // the model meant, and refusing it failed steps that were perfectly correct.
+        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$9"), 12));
+        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$50"), 0),
+                "a price on a first step");
+        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$50"), 3),
+                "and a price on any later step");
+        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$5.50"), 3),
+                "a decimal amount is not handle 5 field '50'");
+
+        // A value that RESOLVED and merely begins like a reference is not one.
+        assertNull(LocalExecutor.unresolvedRef(
+                Map.of("body", "$5.50 Polévka" + System.lineSeparator() + "Hlavní chod"), 9),
+                "this is a menu; refusing it told the model to use the reference it just used");
+        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "the price is $50 today"), 3));
+        assertNull(LocalExecutor.unresolvedRef(Map.of("subject", "Menu"), 3));
     }
 
     @Test

@@ -292,7 +292,7 @@ public class LocalExecutor {
             // are far too short for warnIfComposed. The owner would receive an email whose
             // entire body is the seven characters "$1.body", sent successfully, recorded green,
             // with not one line in the log to explain it.
-            String unresolved = unresolvedRef(params);
+            String unresolved = unresolvedRef(params, stepResults.size());
             if (unresolved != null) {
                 log.warn("Delegation step {}: '{}' is a reference that does not resolve — refused.",
                         stepResults.size() + 1, unresolved);
@@ -831,20 +831,42 @@ public class LocalExecutor {
     }
 
     /** Anything still shaped like a reference after substitution did not resolve. */
-    // Anything after the dot, not only word characters. The descriptor abbreviates a field
-    // name longer than 24 characters and marks the cut with "…", the cloud copies what it is
-    // shown, and "$1.rendered_html_for_ema…" matched neither this pattern nor the resolver --
-    // so it was neither substituted nor refused, and went out as the literal body of an email.
+    // Any non-blank field name, so the descriptor's truncated "rendered_html_for_ema…" is
+    // recognised -- it matched neither the old pattern nor the resolver, so it was neither
+    // substituted nor refused and went out as the literal body of an email. No DOTALL and no
+    // whitespace in the field: a RESOLVED value that merely begins like a reference
+    // ("$5.50 Polévka\nHlavní chod") is a menu, not a dangling handle, and refusing it told the
+    // model to use the reference it had just used correctly.
     private static final java.util.regex.Pattern UNRESOLVED =
-            java.util.regex.Pattern.compile("^\\$\\d+(\\..*)?$", java.util.regex.Pattern.DOTALL);
+            java.util.regex.Pattern.compile("^\\$(\\d+)(?:\\.(\\S+))?$");
 
-    /** The parameter holding a reference that resolved to nothing, or null when none does. */
-    static String unresolvedRef(Map<String, Object> params) {
+    /**
+     * The parameter holding a reference that resolved to nothing, or null when none does.
+     * <p>
+     * {@code produced} is how many results the task has, which is what separates a reference
+     * from a price. {@code $1.body_text} names a field and is a reference whatever the count —
+     * including on a first step, where substitution silently does nothing and the twelve
+     * literal characters used to travel on as the body of an email. A bare {@code $50} names no
+     * field and is out of range, so it is the fifty dollars the model meant; a bare {@code $2}
+     * that IS in range never reaches here, because substitution already replaced it.
+     */
+    static String unresolvedRef(Map<String, Object> params, int produced) {
         if (params == null) return null;
         for (var e : params.entrySet()) {
-            if (e.getValue() instanceof String v && UNRESOLVED.matcher(v.strip()).matches()) {
-                return e.getKey();
+            if (!(e.getValue() instanceof String v)) continue;
+            var m = UNRESOLVED.matcher(v.strip());
+            if (!m.matches()) continue;
+            String field = m.group(2);
+            // "$5.50" is five dollars fifty, not handle 5's field named "50". No JSON key worth
+            // referencing is all digits, and a price passed as a whole argument value is common.
+            if (field != null && field.chars().allMatch(Character::isDigit)) continue;
+            if (field == null) {
+                // A bare handle. Only a reference if the task could have produced it; anything
+                // beyond that is a dollar amount typed as a whole argument value.
+                int n = Integer.parseInt(m.group(1));
+                if (n < 1 || n > produced) continue;
             }
+            return e.getKey();
         }
         return null;
     }
@@ -868,6 +890,30 @@ public class LocalExecutor {
             if (!fields.isEmpty()) sb.append(" (fields: ").append(String.join(", ", fields)).append(")");
         }
         return sb.append(". Use one of those exactly, as the whole value.").toString();
+    }
+
+    /**
+     * The field whose name the descriptor abbreviated, matched by its visible prefix.
+     * <p>
+     * A key longer than {@code Artifact.MAX_FIELD_NAME} is printed cut short with an ellipsis,
+     * and that cut is not optional: a field name of 32 characters would itself be a window of
+     * the private text, so the descriptor would leak and then refuse the call carrying it. The
+     * cloud copies what it is shown, so what it is shown has to resolve. Only when exactly one
+     * key matches — two would be a guess, and a guess here picks somebody's data.
+     */
+    private static com.fasterxml.jackson.databind.JsonNode byTruncatedName(
+            com.fasterxml.jackson.databind.JsonNode node, String field) {
+        String prefix = field.endsWith("…") ? field.substring(0, field.length() - 1) : field;
+        if (prefix.isBlank()) return null;
+        com.fasterxml.jackson.databind.JsonNode found = null;
+        var names = node.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if (!name.startsWith(prefix)) continue;
+            if (found != null) return null;
+            found = node.get(name);
+        }
+        return found;
     }
 
     /** The parameter that is quoting an excerpt back at us, or null when none is. */
@@ -945,6 +991,7 @@ public class LocalExecutor {
         try {
             var node = mapper.readTree(output);
             var value = node.get(field);
+            if (value == null) value = byTruncatedName(node, field);
             // An absent field is left as the literal "$1.field". Substituting null or "" would
             // send an empty email and call it a success; an unresolved token is at least visible
             // in whatever it reaches.

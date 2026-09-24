@@ -109,15 +109,35 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("under localFirst the prompt does not offer a skill the tools array withholds")
     void promptDoesNotContradictTheToolsArray() {
-        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(true, true));
+        var mode = new ThinkingEngine.StepMode(true, true);
+        var engine = engine();
+        String text = prompt(engine, unattended(), mode);
+        String delegateSpec = engine.toolsFor(unattended(), mode).stream()
+                .filter(s -> "delegate".equals(s.name())).map(ToolSpec::description)
+                .findFirst().orElse("");
 
         assertFalse(text.contains("## Tools"),
                 "the actionable manifest is what tells the model it can call these");
-        assertTrue(text.contains("daily_news_digest"),
-                "it must still know the skill exists, or it will rebuild it with skill_create");
-        assertTrue(text.contains("cannot call these yourself"),
-                "knowing a skill exists and being able to call it are different things");
         assertTrue(text.contains("delegate"), "it has to be told how the work gets done");
+
+        // The catalogue lives in ONE place. With a tools array it is delegate's description,
+        // which sits inside the cache prefix; rendering it into the newest user message as well
+        // paid for it twice a step, and forced the canary to reason about the same bytes
+        // appearing in two parts at once — which is how a leak got in.
+        assertTrue(delegateSpec.contains("daily_news_digest"),
+                "it must still know the skill exists, or it will rebuild it with skill_create");
+        assertTrue(delegateSpec.contains("cannot run skills yourself"),
+                "knowing a skill exists and being able to call it are different things");
+        assertFalse(text.contains("## Skills on this machine"),
+                "and not a second copy in the message: " + text);
+
+        // Without an array there is no other copy, so the message carries it.
+        // StepMode is (nativeTools, localFirst) — the text protocol, still local-first.
+        String textNoTools = prompt(engine, unattended(), new ThinkingEngine.StepMode(false, true));
+        assertTrue(textNoTools.contains("## Skills on this machine"),
+                "on the text protocol the message is the only place it can be");
+        assertTrue(textNoTools.contains("Fetch and format a news digest."),
+                "and it carries the descriptions, not just the names");
     }
 
     @Test

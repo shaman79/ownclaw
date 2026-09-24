@@ -83,6 +83,25 @@ class ArtifactTest {
     }
 
     @Test
+    @DisplayName("a field name the resolver accepts is a reference to the label as well")
+    void theLabelSeesEveryFieldNameTheResolverDoes() {
+        // resolveRef accepts ANY non-blank field name. While this pattern required word
+        // characters, a key with a hyphen or an accent — or the descriptor's own truncated
+        // "rendered_html_for_ema…" — moved a PRIVATE artifact's text into the arguments and the
+        // result was then labelled PUBLIC, so it went to the cloud as content.
+        var store = List.of(privateResult("imap_fetch", "{}", true));   // $2, PRIVATE
+        for (String ref : List.of("$2.body-text", "$2.polévka", "$2.Content-Type",
+                                  "$2.rendered_html_for_ema…", "$2.menu.body", "$2")) {
+            assertEquals(Label.PRIVATE,
+                    Artifact.labelFor(List.of(), false, Map.of("body", ref), store).label(),
+                    "moving it makes the result derived from it: " + ref);
+        }
+        assertEquals(Label.PUBLIC,
+                Artifact.labelFor(List.of(), false, Map.of("body", "$5.50 Polévka"), store).label(),
+                "but a price is not a reference, whatever it looks like");
+    }
+
+    @Test
     @DisplayName("with none of the facts, a result is PUBLIC — exactly as today")
     void nothingMakesItPublic() {
         var d = Artifact.labelFor(List.of(), false, Map.of("url", "https://x"), List.of());
@@ -137,8 +156,14 @@ class ArtifactTest {
         sb.append("}");
         String d = privateResult("t", sb.toString(), true).describe();
         assertTrue(d.contains("field_number_0"));
-        assertFalse(d.contains("field_number_" + (Artifact.MAX_FIELDS + 1)),
-                "forty field names is a descriptor that has become the content");
+        assertTrue(d.contains("field_number_" + (Artifact.MAX_FIELDS + 1)),
+                "a field the cloud is never shown is a field it cannot reference, and it then "
+                        + "composes from the description instead — an imap envelope puts "
+                        + "body_text past the twelfth key");
+        assertTrue(d.length() < 900,
+                "bounded by characters, which is what 'a descriptor that has become the "
+                        + "content' actually meant: " + d.length() + " chars");
+        assertTrue(d.contains("more"), "and it says how many it did not name: " + d);
     }
 
     // ── asObservation: the substitution point ──
@@ -271,10 +296,18 @@ class ArtifactTest {
         for (int i = 0; i < 40; i++) sb.append(i > 0 ? "," : "").append("\"f").append(i).append("\":1");
         List<String> names = Artifact.jsonFieldNames(sb.append("}").toString());
 
-        assertEquals(Artifact.MAX_FIELDS, names.size(),
-                "parsing the JSON directly dropped the count cap that deriving from the "
-                        + "descriptor used to carry, and every key of a wide result went into "
-                        + "the delegation prompt");
+        assertEquals(40, names.size(),
+                "bounded, but by its own cap. Borrowing the descriptor's MAX_FIELDS hid the "
+                        + "thirteenth key from the local model too, and on an imap envelope "
+                        + "body_text sits past the twelfth — so the one field the task needed "
+                        + "could be named by nobody");
+        var wide = new StringBuilder("{");
+        for (int i = 0; i < Artifact.MAX_REFERENCE_NAMES + 20; i++) {
+            wide.append(i > 0 ? "," : "").append("\"g").append(i).append("\":1");
+        }
+        assertEquals(Artifact.MAX_REFERENCE_NAMES,
+                Artifact.jsonFieldNames(wide.append("}").toString()).size(),
+                "and it is still a cap");
     }
 
     @Test

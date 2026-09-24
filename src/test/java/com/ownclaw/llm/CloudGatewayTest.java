@@ -154,13 +154,17 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("registry text is allowed wherever it appears — but only that text")
-    void theAllowanceFollowsTheTextNotThePart() {
-        // The unattended prompt renders the skill catalogue TWICE, from one method: into
-        // delegate's description, and into the dynamic block glued onto the last user message.
-        // Scoping this allowance to the tool part refused the second copy — over bytes the
-        // cloud receives anyway, in the same request, a few kilobytes further down. Messages
-        // are scanned first, so on the production unattended path the allowance never fired.
+    @DisplayName("the allowance is for registry parts; a message quoting the same run is refused")
+    void theAllowanceIsForRegistryPartsOnly() {
+        // A skill's description is authored at skill_create and was in the prompt on every step
+        // before the skill had ever run, so a run of it matching that skill's later output is a
+        // collision. Without this, the first call after such a skill ran was refused — after the
+        // side effect had happened.
+        //
+        // Two attempts widened this to "the registry's text, wherever it appears", to spare a
+        // catalogue the prompt rendered twice. Both leaked: a substring test excused any short
+        // artifact quoted anywhere, and length-limiting it moved the hole to exactly 32
+        // characters. The duplicate render is fixed where it is made; the door stays narrow.
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         String output = prose(5_000, 2);
@@ -171,17 +175,18 @@ class CloudGatewayTest {
         var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
-        gw.chat(messages("the catalogue again: " + described), cfg);
+        gw.chat(messages("send the invoice"), cfg);
         assertEquals(1, provider.calls.size(),
-                "the identical bytes are in the tools array of this very request; refusing the "
-                        + "second copy withholds nothing from anyone");
+                "the collision is inside the tool description the cloud authored; refusing it "
+                        + "would kill every call from the moment that skill first ran");
 
-        // ...and ONLY that text. The rest of the private result has no such excuse.
         var ex = assertThrows(EgressRefused.class,
-                () -> gw.chat(messages("the mailbox said: " + output.substring(900, 1200)), cfg));
-        assertTrue(provider.calls.size() == 1, "refused before the socket opens");
+                () -> gw.chat(messages("the mailbox said: " + described), cfg));
+        assertEquals(1, provider.calls.size(), "refused before the socket opens");
         assertEquals(4, ex.handle());
-        // Mutation: allow every hit once any registry part exists -> the second call is sent.
+        assertEquals("user", rows.last().refusalRef().contains("(user)") ? "user" : "?",
+                "a MESSAGE quoting the same run is written after the result existed: " 
+                        + rows.last().refusalRef());
     }
 
     @Test
@@ -207,6 +212,31 @@ class CloudGatewayTest {
         assertEquals(4, ex.handle());
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
         // Mutation: drop the hit.length() >= WINDOW condition -> SENT, the whole artifact out.
+    }
+
+    @Test
+    @DisplayName("a skill describing its own SHORT output does not deadlock the task")
+    void aShortSelfDescriptionIsNotARefusal() {
+        // smtp_send_email's description says it returns {"sent": true}; the step then records
+        // exactly that as a PRIVATE artifact. The bytes are in the tools array of every single
+        // request from then on, so a door that refuses them refuses every remaining call in the
+        // task — either no email at all, or the email went and the owner is told it did not.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String shortOutput = "{\"sent\": true, \"id\": \"m-8891\"}";
+        var index = new PrivateIndex(); index.addPrivate(2, shortOutput);
+        var tool = new ToolSpec("smtp_send_email",
+                "Sends mail. Returns " + shortOutput + " on success.", Map.of("type", "object"));
+        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+                .withEgress(egress(index, Map.of(), (h, w) -> false));
+
+        assertDoesNotThrow(() -> gw.chat(messages("send it"), cfg),
+                "the hit is inside the tool part the cloud wrote and is receiving anyway");
+        assertEquals(EgressLedger.Decision.SENT, rows.last().decision());
+
+        // ...but the same short artifact quoted back in a MESSAGE is still the artifact.
+        assertThrows(EgressRefused.class,
+                () -> gw.chat(messages("the skill returned " + shortOutput), cfg));
     }
 
     @Test
