@@ -66,7 +66,9 @@ public class FileStorageService {
             VALUES (?, ?, ?, ?, ?, ?)
             """, id, userId, safeName, storedName, contentType, bytes);
 
-        log.info("Stored file: id={}, user={}, name={}, type={}, bytes={}", id, userId, safeName, contentType, bytes);
+        // Not the name: a statement's file name can carry its account number, and the log is
+        // read back through the ops API.
+        log.info("Stored file: id={}, user={}, type={}, bytes={}", id, userId, contentType, bytes);
         return id;
     }
 

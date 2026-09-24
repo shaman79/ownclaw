@@ -29,4 +29,25 @@ class StoredFileNameTest {
         assertTrue(Files.exists(files.getFilePath(id)));
         assertEquals("report 10:30.pdf", files.getFileInfo(id).get("original_name"));
     }
+
+    @Test
+    @DisplayName("storing a file logs its id, type and size -- not its name, which can carry an account number")
+    void theNameIsNotLogged(@TempDir Path tmp) throws Exception {
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(FileStorageService.class);
+        logger.addAppender(appender);
+        try {
+            var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+            var config = new OwnClawConfig();
+            config.getDatabase().setPath(tmp.resolve("t.db").toString());
+            Files.createDirectories(tmp.resolve("uploads"));
+            new FileStorageService(jdbc, config).store("u1", "vypis_123456789.pdf", "application/pdf",
+                    new ByteArrayInputStream("%PDF".getBytes(StandardCharsets.UTF_8)));
+            assertFalse(appender.list.isEmpty());
+            assertTrue(appender.list.stream().noneMatch(e -> e.getFormattedMessage().contains("123456789")));
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
 }

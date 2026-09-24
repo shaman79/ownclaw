@@ -79,6 +79,22 @@ class LocalLogPrivacyTest {
     }
 
     @Test
+    @DisplayName("a reply that is not valid JSON is logged by type and length: a parser quotes the token")
+    void unparseableJsonIsNotQuoted() {
+        var appender = capture();
+        try {
+            var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
+            var llm = new Scripted(call("read_statement", Map.of()), "{\"tool\": CZ6508000000192000145399}", done("done"));
+            DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask());
+            String log = logged(appender);
+            assertTrue(log.contains("failed to parse local LLM JSON"), "the bad reply was seen: " + log);
+            assertFalse(log.contains("CZ6508000000192000145399"), log);
+        } finally {
+            release(appender);
+        }
+    }
+
+    @Test
     @DisplayName("after a private read, a failed local call's text reaches neither the cloud nor the log")
     void aFailureAfterAPrivateReadIsKeptOut() {
         var appender = capture();

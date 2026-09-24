@@ -84,7 +84,7 @@ class ScheduledPrivateAnswerTest {
                 "the owner's chat shows the answer on reload: " + rows.get(0));
 
         assertEquals(1, results.size());
-        assertFalse(results.get(0).text().contains(SECRET), "Telegram formats the text");
+        assertFalse(results.get(0).text().contains(SECRET), "the message's text stays the safe one");
         assertTrue(String.valueOf(results.get(0).data().get("ownerText")).contains(SECRET),
                 "the web chat is sent the answer beside it");
     }

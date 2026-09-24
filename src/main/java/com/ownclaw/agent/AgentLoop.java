@@ -439,8 +439,15 @@ public class AgentLoop {
      */
     static final String ANSWERED_WITHOUT_WORKING = "Answered without doing the work";
 
-    /** Above a private answer on the owner's screen: who wrote it, and who never saw it. */
+    /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
     static final String PRIVATE_HEADER = "**Private — written by your local model, not seen by the cloud:**\n\n";
+
+    /** Above any other private result the cloud gives the owner: a skill's output, a file. */
+    static final String PRIVATE_RESULT_HEADER = "**Private — not seen by the cloud:**\n\n";
+
+    /** What a task that ended before the cloud replied says above the local model's answer. */
+    static final String ENDED_WITH_AN_ANSWER =
+            "The task ended before the cloud model replied, but your local model had already answered.";
 
     /**
      * What history, memory, search, the scheduler's records and every later prompt get in place
@@ -500,7 +507,8 @@ public class AgentLoop {
             }
             if (placed.isPrivate()) {
                 response = PRIVATE_NOTE;
-                ownerText = PRIVATE_HEADER + value;
+                // Named by what it is: only a local answer was written by the local model.
+                ownerText = ("local_answer".equals(placed.tool()) ? PRIVATE_HEADER : PRIVATE_RESULT_HEADER) + value;
             } else {
                 // The cloud was shown this text already; nothing here is new to it.
                 response = value;
@@ -535,7 +543,10 @@ public class AgentLoop {
      */
     static AgentResult withLocalAnswers(AgentResult r, AgentContext ctx) {
         if (r.ownerText() != null) return r;
-        Answer a = withLocalAnswers(new Answer(r.response() == null ? "" : r.response(), null, null), null, ctx);
+        // Only an exit other than respond or ask_user gets here with an answer owed, and its text
+        // is progress addressed to the cloud -- "make {{3}} the whole of respond's message", "say
+        // continue" -- none of which the owner can use. The code says what happened instead.
+        Answer a = withLocalAnswers(new Answer(ENDED_WITH_AN_ANSWER, null, null), null, ctx);
         if (a.ownerText() == null) return r;
         return new AgentResult(r.success(), a.response(), r.trajectory(), r.totalSteps(),
                 r.totalDurationMs(), r.terminationReason(), r.taskId(), a.ownerText());

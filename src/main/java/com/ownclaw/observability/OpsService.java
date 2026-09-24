@@ -69,7 +69,7 @@ public class OpsService {
     /** Identifiers that may not appear in ops SQL at all (blocks aliasing around the above). */
     private static final Pattern SQL_FORBIDDEN = Pattern.compile(
             "(?i)\\b(password_hash|encryption_salt|encrypted_value|jwt_secret|vault_master_key"
-                    + "|private_content|conversations|pragma|attach|detach|vacuum)\\b");
+                    + "|private_content|conversations|file_attachments|pragma|attach|detach|vacuum)\\b");
 
     private static final Pattern SQL_ALLOWED_START = Pattern.compile("(?is)^\\s*(select|with)\\b.*");
 

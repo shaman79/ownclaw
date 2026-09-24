@@ -182,8 +182,9 @@ class LivePathGuardsTest {
                 call(telegram, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
         // Telegram is the owner's own channel and he decided it gets private answers in full;
         // what it stores for later turns is still the safe text (asserted above).
-        assertTrue(call(telegram, "sendMessage(chatId, result.").endsWith("result.shown())"),
-                "Telegram is sent the owner's text");
+        assertEquals("sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response())",
+                call(telegram, "sendMessage(chatId, chatId == telegramUserId"),
+                "his private chat is sent his answer; a group he asked from gets the safe text");
         assertTrue(telegram.contains("new StringBuilder(telegramText(msg))"),
                 "a delivered result is sent through telegramText, which reads the owner's text");
         assertTrue(telegram.contains("if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id)))"),

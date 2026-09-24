@@ -50,7 +50,8 @@ class AnswerForTest {
         var a = AgentLoop.answerFor("{{2}}", twoResults());
         assertNull(a.refusal());
         assertEquals(PRIVATE_NOTE, a.response());
-        assertEquals(PRIVATE_HEADER + "{\"body_text\":\"the mail\"}", a.ownerText());
+        assertEquals(AgentLoop.PRIVATE_RESULT_HEADER + "{\"body_text\":\"the mail\"}", a.ownerText(),
+                "a skill's result, not the local model's writing");
     }
 
     @Test
@@ -121,8 +122,9 @@ class AnswerForTest {
         var ctx = fileTask();
         var stopped = AgentResult.maxSteps("Reached the step limit. Last result: {{2}}", new AgentTrajectory(), 5);
         var r = AgentLoop.withLocalAnswers(stopped, ctx);
-        assertTrue(r.ownerText().endsWith(PRIVATE_HEADER + ANSWER), r.ownerText());
-        assertTrue(r.response().endsWith(PRIVATE_NOTE) && !r.response().contains(ANSWER), r.response());
+        assertEquals(AgentLoop.ENDED_WITH_AN_ANSWER + "\n\n" + PRIVATE_HEADER + ANSWER, r.ownerText());
+        assertEquals(AgentLoop.ENDED_WITH_AN_ANSWER + "\n\n" + PRIVATE_NOTE, r.response(),
+                "not the progress note addressed to the cloud, with its stale {{2}}");
         assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason());
 
         var answered = AgentLoop.withLocalAnswers(stopped.withOwnerText("already given"), ctx);

@@ -36,7 +36,8 @@ class OpsServiceTest {
                 "SELECT private_content FROM conversations",
                 "WITH c(a,b,c,d,e,f,g,h,i,j,k) AS (SELECT * FROM conversations) SELECT k FROM c",
                 "SELECT * FROM main.\"Conversations\"",
-                "SELECT x FROM (SELECT 1 AS x UNION SELECT * FROM [conversations])")) {
+                "SELECT x FROM (SELECT 1 AS x UNION SELECT * FROM [conversations])",
+                "SELECT original_name FROM file_attachments")) {
             Map<String, Object> refused = ops.query(sql, null);
             assertTrue(String.valueOf(refused.get("error")).contains("forbidden identifier"), sql + " -> " + refused);
         }

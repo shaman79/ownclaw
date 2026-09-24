@@ -839,7 +839,10 @@ public class LocalExecutor {
 
             return new ExecutorAction(false, null, tool, params);
         } catch (Exception e) {
-            log.warn("LocalExecutor: failed to parse local LLM JSON: {}", e.getMessage());
+            // Not the message: a parser quotes the token it choked on, and on a file task that
+            // token can be an account number the model copied from the file.
+            log.warn("LocalExecutor: failed to parse local LLM JSON ({}, {} chars)",
+                    e.getClass().getSimpleName(), cleaned.length());
             return ExecutorAction.invalid();
         }
     }

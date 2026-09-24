@@ -33,9 +33,9 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The owner's own web chat is the one screen a private answer is shown on: live, when the task
- * ends, and when a background result arrives. Everything else -- the saved row's content, the
- * text Telegram formats -- gets the note that the answer exists.
+ * The owner's own screens show a private answer -- this web chat, live, when the task ends and
+ * when a background result arrives, and (his decision) Telegram. Everything that stores or
+ * forwards it -- the saved row's content, history, search -- gets the note that it exists.
  * <p>
  * Driven through a connected socket: afterConnectionEstablished subscribes the chat to status
  * messages, and handleTextMessage submits the message, with a real ConversationService and
@@ -134,13 +134,15 @@ class PrivateAnswerInTheWebChatTest {
     void aBackgroundPrivateAnswerIsShownInTheChat(@TempDir Path tmp) throws Exception {
         connect(tmp);
         var telegram = new ArrayList<String>();
-        emitter.subscribe(USER, "telegram", m -> telegram.add(m.formatted()));
+        emitter.subscribe(USER, "telegram", m -> telegram.add(
+                com.ownclaw.interfaces.telegram.TelegramBotService.telegramText(m)));
 
         new ResultDelivery(conversations, emitter).deliver(USER, "Background task", privateAnswer());
 
         List<String> shown = frames("result");
         assertEquals(1, shown.size(), String.valueOf(sent));
         assertTrue(shown.get(0).contains(SECRET), "the web chat shows the answer: " + shown);
-        assertTrue(telegram.stream().noneMatch(t -> t.contains(SECRET)), "Telegram is sent the note: " + telegram);
+        assertTrue(telegram.stream().anyMatch(t -> t.contains(SECRET)),
+                "Telegram gets the answer too -- the owner's decision: " + telegram);
     }
 }

@@ -63,10 +63,11 @@ class ResultDeliveryTest {
         var conversations = new ConversationService(jdbc, null);
         var emitter = new ChatStatusEmitter();
         var messages = new ArrayList<StatusMessage>();
-        var formatted = new ArrayList<String>();
+        var telegram = new ArrayList<String>();
         emitter.subscribe("u1", "web", messages::add);
-        // What Telegram's subscriber sends: the formatted text, and nothing from the data.
-        emitter.subscribe("u1", "telegram", m -> formatted.add(m.formatted()));
+        // What Telegram's subscriber sends, through the real function it uses.
+        emitter.subscribe("u1", "telegram", m -> telegram.add(
+                com.ownclaw.interfaces.telegram.TelegramBotService.telegramText(m)));
         String secret = "Closing balance 48,213.07 CZK";
         var answer = AgentResult.completed("[Private answer: kept on this machine.]", new AgentTrajectory(), 1)
                 .withOwnerText("**Private:**\n\n" + secret);
@@ -89,10 +90,11 @@ class ResultDeliveryTest {
         for (StatusMessage m : messages) {
             assertEquals(StatusMessage.Type.RESULT, m.type());
             assertFalse(m.text().contains(secret), m.text());
-            assertTrue(String.valueOf(m.data().get("ownerText")).contains(secret), "for the web chat alone");
+            assertTrue(String.valueOf(m.data().get("ownerText")).contains(secret), "for the owner's screens");
         }
-        assertEquals(2, formatted.size());
-        assertTrue(formatted.stream().noneMatch(f -> f.contains(secret)), "Telegram is sent the safe text: " + formatted);
+        assertEquals(2, telegram.size());
+        assertTrue(telegram.stream().allMatch(t -> t.contains(secret)),
+                "Telegram gets the owner's answer -- his decision: " + telegram);
     }
 
     @Test

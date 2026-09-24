@@ -298,9 +298,10 @@ public class TelegramBotService {
             // the private answer, if there is one, which the web chat shows on reload.
             conversationService.saveMessage(userId, currentSessionId, "assistant",
                     result.response(), java.util.List.of(), result.taskId(), result.ownerText());
-            // The owner's own answer, private text included: he decided Telegram gets it in full.
-            // What is stored above for later turns is still the safe text.
-            sendMessage(chatId, result.shown());
+            // The owner's own answer, private text included: he decided Telegram gets it in full
+            // -- in his private chat (its id is his own). Asked from a group, the group gets the
+            // safe text. What is stored above for later turns is the safe text either way.
+            sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response());
         });
     }
 
@@ -366,7 +367,7 @@ public class TelegramBotService {
      * text, that text -- the owner decided Telegram gets private answers in full; otherwise the
      * message as it is formatted everywhere.
      */
-    static String telegramText(ChatStatusEmitter.StatusMessage msg) {
+    public static String telegramText(ChatStatusEmitter.StatusMessage msg) {
         if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT && msg.data() != null
                 && msg.data().get("ownerText") instanceof String owner) {
             return owner;
