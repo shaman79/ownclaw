@@ -163,6 +163,53 @@ class TaskTraceServiceTest {
     }
 
     @Test
+    @DisplayName("a file keeps its name for the owner's page; no other result is given one")
+    void anAttachmentKeepsItsName() {
+        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
+                + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,"
+                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, not text or too large\"]}");
+        row("egress", egress("SENT", 1, 1, 0, null));
+        row("step", "{\"step\":1,\"tool\":\"delegate\",\"success\":true,\"localTokens\":900,\"cloudTokens\":2,"
+                + "\"artifacts\":[{\"n\":2,\"tool\":\"pdf_text\",\"label\":\"PRIVATE\",\"chars\":12400,"
+                + "\"why\":[\"given the file {{1}}\"],\"indexed\":false},"
+                + "{\"n\":3,\"tool\":\"local_answer\",\"label\":\"PRIVATE\",\"chars\":800,"
+                + "\"why\":[\"written by the local model after reading {{2}}\"],\"indexed\":true}]}");
+        var t = TaskTraceService.build(rows);
+        var arts = list(t, "artifacts");
+
+        var file = arts.get(0);
+        assertEquals("{{1}}", file.get("handle"));
+        assertEquals("attachment", file.get("tool"));
+        assertEquals("statement.pdf", file.get("name"));
+        assertEquals("PRIVATE", file.get("label"));
+        assertEquals(0L, file.get("chars"));
+        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, not text or too large"), file.get("why"));
+        assertNull(file.get("canary"), "a file with no text cannot be looked for");
+        assertEquals(1, file.get("requestsAfter"));
+
+        assertEquals(List.of("pdf_text", "local_answer"), arts.subList(1, 3).stream().map(a -> a.get("tool")).toList());
+        for (var a : arts.subList(1, 3)) assertNull(a.get("name"), "only the file has a name: " + a);
+        @SuppressWarnings("unchecked")
+        var limits = (List<String>) t.get("notObserved");
+        assertTrue(limits.stream().anyMatch(l -> l.contains("open files on this machine by itself")),
+                "the page states that a file opened by path, in a task it was not sent to, is not private");
+    }
+
+    @Test
+    @DisplayName("the page no longer says files are not withheld; an old public attachment is named as from before")
+    void thePageSaysFilesArePrivate() throws Exception {
+        String page;
+        try (var in = TaskTraceServiceTest.class.getResourceAsStream("/static/index.html")) {
+            assertNotNull(in, "static/index.html is not on the classpath");
+            page = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertFalse(page.contains("not withheld today"));
+        assertTrue(page.contains("Uploaded before files became private: the cloud could read this file."));
+        assertFalse(page.contains("made after private data was read"),
+                "a file task's results are withheld because of the file, not because of when they were made");
+    }
+
+    @Test
     @DisplayName("a skill that said ok:false is a failed step, whatever the loop counted")
     void reportedFailureIsAFailure() {
         row("step", "{\"step\":1,\"tool\":\"smtp_send_email\",\"success\":true,\"reportedFailure\":true,"

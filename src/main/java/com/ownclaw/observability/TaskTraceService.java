@@ -37,7 +37,9 @@ public class TaskTraceService {
                     + "of 8 or more). A paraphrase, or a short value such as a PIN, is not caught.",
             "Private text the cloud already had from elsewhere (your own message, a public "
                     + "result, a tool's description) is not counted as found.",
-            "The local model's server is assumed to be private; nothing checks that.");
+            "The local model's server is assumed to be private; nothing checks that.",
+            "A skill can open files on this machine by itself. What it returns in a task you did "
+                    + "not attach the file to is not marked private.");
 
     /** The canary cannot look for anything shorter (PrivateIndex's minimum). */
     private static final int MIN_CHECKABLE_CHARS = 8;
@@ -309,6 +311,9 @@ public class TaskTraceService {
         for (JsonNode w : d.path("why")) why.add(w.asText());
         a.put("why", why);
         a.put("indexed", d.has("indexed") ? d.path("indexed").asBoolean() : null);
+        // Only an attachment's row has one: the name the file was uploaded with. This page is
+        // the owner's; the cloud was never told it, so no artifact carries it.
+        a.put("name", d.hasNonNull("name") ? d.path("name").asText() : null);
         return a;
     }
 

@@ -2523,7 +2523,7 @@
 <div id="input-area">
     <div id="file-chips"></div>
     <div class="input-wrap">
-        <button id="attach-btn" title="Attach files" aria-label="Attach files">
+        <button id="attach-btn" title="Attach files (private: read only on this machine)" aria-label="Attach files (private: read only on this machine)">
             <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6h-1.5v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6H16.5z"/></svg>
         </button>
         <input type="file" id="file-input" multiple hidden>
@@ -2535,7 +2535,7 @@
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -3106,12 +3106,19 @@
         if (!priv.length) panel.appendChild(node('div', 'task-trace-note', 'No private result was recorded for this task.'));
         priv.forEach(function(a) {
             var item = node('div', 'task-trace-item');
-            item.appendChild(node('div', 'task-trace-line', a.handle + ' ' + a.tool + ' · ' + tdChars(a.chars) + tdWhy(a.why)));
+            // A file the owner sent, and the local model's answer from it, are said in words;
+            // the file's name is shown here only, the cloud was never told it.
+            var file = a.tool === 'attachment', answer = a.tool === 'local_answer';
+            item.appendChild(node('div', 'task-trace-line', file
+                    ? a.handle + ' your file' + (a.name != null ? ' "' + a.name + '"' : '') + ' · '
+                        + (a.chars ? tdChars(a.chars) : 'not text') + tdWhy(a.why)
+                    : a.handle + ' ' + a.tool + ' · ' + tdChars(a.chars) + tdWhy(a.why)));
             var c = a.canary || {};
             item.appendChild(!recorded
                 ? node('div', 'task-trace-line muted', 'Requests were not recorded then, so what reached the cloud is not known.')
                 : !a.requestsAfter
-                ? node('div', 'task-trace-line muted', 'Nothing went to the cloud after it was read.')
+                ? node('div', 'task-trace-line muted', 'Nothing went to the cloud after it was '
+                        + (file ? 'sent.' : answer ? 'written.' : 'read.'))
                 : c.leaked > 0
                 ? node('div', 'task-trace-line bad', 'Its text went to the cloud in '
                         + tdCount(c.leaked, 'request', 'requests')
@@ -3125,6 +3132,14 @@
                 ? node('div', 'task-trace-line warn', tdCount(c.unchecked, 'later request was', 'later requests were')
                         + ' not checked for it: its text may have gone with ' + (c.unchecked === 1 ? 'it' : 'them')
                         + '. The check stops at the first private result it finds.')
+                // The Files section names a file by its handle, type and size; the delegation's
+                // note names the answer by its handle and length.
+                : file
+                ? node('div', 'task-trace-line muted', 'The cloud was told only that a file came with your '
+                        + 'message, with its type and size — never its name or its contents.')
+                : answer
+                ? node('div', 'task-trace-line muted', 'Written by the local model for you. The cloud was '
+                        + 'told only that it exists and how long it is.')
                 // What Artifact.describe() shows of it -- never the text.
                 : node('div', 'task-trace-line muted', a.indexed === false
                         ? 'The cloud was shown only its source and size, not its text.'
@@ -3141,9 +3156,10 @@
             var item = node('div', 'task-trace-item');
             item.appendChild(node('div', 'task-trace-line', a.handle + ' ' + a.tool + ' · ' + tdChars(a.chars)
                     + (a.label === 'PUBLIC' ? '' : ' · label not recorded')));
+            // Before files became private an attachment was PUBLIC and named 'attachment:<name>'.
             if (String(a.tool).indexOf('attachment:') === 0) {
                 item.appendChild(node('div', 'task-trace-line warn',
-                        'Files uploaded in chat are not withheld today: the cloud could read this file.'));
+                        'Uploaded before files became private: the cloud could read this file.'));
             }
             panel.appendChild(item);
         });
@@ -3237,8 +3253,13 @@
     function tdCanaryLine(a) {
         var c = a.canary;
         if (!c) {
+            // A file with no text has nothing to look for; what a skill read from it is its own
+            // row, withheld by its label.
             return { cls: 'muted', text: a.indexed === false
-                    ? 'Private as a precaution (made after private data was read); not checked automatically.'
+                    ? 'Withheld as a precaution; the automatic check does not look for it.'
+                    : a.tool === 'attachment' && !a.chars
+                    ? 'Not text, so the automatic check cannot look for the file itself. Everything read '
+                        + 'from it is withheld (listed below).'
                     : a.chars < 8 ? 'Too short to be checked automatically.'
                     : 'No automatic check was recorded for it.' };
         }
