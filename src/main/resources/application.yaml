@@ -32,6 +32,18 @@ spring:
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.yaml
 
+  servlet:
+    multipart:
+      # FileUploadController accepts files up to 50 MB (its MAX_FILE_SIZE) and says so when it
+      # refuses one, but the container parses the upload before the controller runs, and Spring's
+      # defaults there are 1 MB a file and 10 MB a request. Any file over 1 MB -- a scanned
+      # statement, a PDF with images -- was refused before the controller saw it. Keep both equal
+      # to MAX_FILE_SIZE; MultipartLimitTest reads this file and fails when they differ. The
+      # browser sends every file picked at once in one request, so together they must fit in
+      # max-request-size.
+      max-file-size: 50MB
+      max-request-size: 50MB
+
 server:
   port: ${OWNCLAW_SERVER_PORT:${ownclaw.server.port:8080}}
   servlet:
