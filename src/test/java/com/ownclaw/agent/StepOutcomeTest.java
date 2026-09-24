@@ -108,6 +108,19 @@ class StepOutcomeTest {
     }
 
     @Test
+    @DisplayName("a public step whose failure quotes private text keeps no excerpt: the canary's own index decides")
+    void quotedPrivateTextIsWithheld() {
+        var ctx = new AgentContext("u1", "t1", "parse the statement");
+        String statement = "Account CZ65 0800 0000 1920 0014 5399 balance 41200 CZK statement for September";
+        ctx.privateIndex().addPrivate(1, statement);
+        var parse = new AgentAction("json_parse_file", Map.of(), "");
+        var quoted = AgentObservation.failure("json_parse_file", "JSONDecodeError while parsing: " + statement, 5);
+        assertFalse(AgentLoop.stepDetails(ctx, parse, quoted, 3).containsKey("reason"));
+        var plain = AgentObservation.failure("json_parse_file", "JSONDecodeError: Expecting value: line 1", 5);
+        assertTrue(AgentLoop.stepDetails(ctx, parse, plain, 4).containsKey("reason"));
+    }
+
+    @Test
     @DisplayName("the excerpt is the head and the tail")
     void excerpt() {
         assertEquals("", AgentLoop.failureExcerpt(null));

@@ -1401,6 +1401,7 @@
 
         /*  Task detail page: what one agent task did  */
         .task-run-status.partial { background: #fbbf24 }
+        .task-detail-value.warn { color: #fbbf24 }
         /* A step or run whose outcome was never written: grey, never green. */
         .task-run-status.unknown { background: var(--text-3) }
         .task-stat-value.warn { color: #fbbf24 }
@@ -2771,11 +2772,13 @@
         loader.innerHTML = '<div class="mini-spinner"></div><span>Loading messages...</span>';
         messagesEl.appendChild(loader);
 
+        var asked = authToken;   // a reply after logout or another login is dropped
         fetch('/api/chats/' + sessionId + '/messages', {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(okJson)
         .then(function(data) {
+            if (authToken !== asked) return;
             clearMessages();
             var msgs = data.messages || [];
             msgs.forEach(function(m) {
@@ -2957,7 +2960,7 @@
 
     function renderTaskDetail(t, from) {
         var steps = t.steps || [], calls = t.calls || [], totals = t.totals || {}, outcome = t.outcome;
-        var recorded = calls.length > 0;
+        var recorded = !!t.recorded;   // requests are recorded from 24 Sep 2026
         var view = taskDetailShell(from);
         view.firstChild.appendChild(node('h2', null, 'Task ' + t.taskId));
         view.appendChild(node('div', 'task-detail-request', t.request ? tdClip(String(t.request), 400)
@@ -2970,12 +2973,13 @@
             card.appendChild(node('div', 'task-stat-label', label));
             stats.appendChild(card);
         }
-        var oc = tdOutcome(outcome, steps.filter(function(s) { return s.ok === false; }).length);
+        var oc = tdOutcome(outcome, steps.filter(function(s) { return s.ok === false; }).length,
+                steps.some(function(s) { return s.ok && s.reportedFailure == null; }));
         stat(oc.words, 'Outcome', 'text' + (oc.tone ? ' ' + oc.tone : ''));
         stat(formatTokenCount(recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens')), 'Cloud tokens');
         stat(formatTokenCount(outcome ? outcome.localTokens : tdSum(steps, 'localTokens')), 'Local tokens');
-        stat(recorded ? (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd) : 'not recorded', 'Cost',
-                recorded ? '' : 'text');
+        stat(!recorded ? 'not recorded' : calls.length ? (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd)
+                : 'none', 'Cost', calls.length ? '' : 'text');
         view.appendChild(stats);
 
         var stepsPanel = node('div');
@@ -3029,12 +3033,14 @@
                 : s.decidedBy === 'local' ? 'the local model'
                 : recorded ? 'OwnClaw itself, not a model' : 'not recorded'));
         if (s.tool === 'delegate') {
+            // No local tokens is not "never reached it": a call that fails -- a full context
+            // window, a parse error, a timeout -- throws before its tokens are counted.
             d.appendChild(tdRow('Carried out by', s.tier === 'local' ? 'the local model'
-                    : 'nobody: the delegation did not reach the local model'));
+                    : 'the local model, but no local tokens were counted: it was unreachable, or its first call failed'));
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
         // A failed call has no tokens and no cost on record; if that is all there was, say so.
-        var unrecorded = s.costIsFloor && !s.costUsd;
+        var unrecorded = s.costIsFloor && !s.cloudTokens;
         d.appendChild(tdRow('Tokens', (unrecorded ? 'not recorded' : formatTokenCount(s.cloudTokens)) + ' cloud / '
                 + formatTokenCount(s.localTokens) + ' local'));
         d.appendChild(tdRow('Cost', unrecorded ? 'not recorded: the call failed'
@@ -3062,7 +3068,7 @@
     function buildTaskSentPanel(t, recorded) {
         var panel = node('div');
         var calls = t.calls || [], totals = t.totals || {}, dec = totals.decisions || {};
-        if (recorded) {
+        if (calls.length) {
             var went = calls.length - (dec.REFUSED || 0);
             var head = tdCount(went, 'request', 'requests') + ' went to the cloud model: '
                     + formatBytes(totals.bytesOut) + ', ' + formatTokenCount(tdBilled(totals)) + ' tokens, '
@@ -3074,9 +3080,15 @@
                 panel.appendChild(node('div', 'task-trace-line bad', tdCount(dec.OBSERVED_LEAK, 'request', 'requests')
                         + ' went out containing private text: the check was only observing, so it did not stop them.'));
             }
+            var maybe = calls.filter(tdFailedLeak).length;
+            if (maybe) {
+                panel.appendChild(node('div', 'task-trace-line bad', tdCount(maybe, 'failed request', 'failed requests')
+                        + ' contained private text and may have gone out: the check was only observing.'));
+            }
         } else {
-            panel.appendChild(node('div', 'task-trace-headline', 'No request to the cloud model was recorded '
-                    + 'for this task. Requests are recorded from 24 Sep 2026.'));
+            panel.appendChild(node('div', 'task-trace-headline', recorded
+                    ? 'No request went to the cloud model during this task.'
+                    : 'No request to the cloud model was recorded for this task. Requests are recorded from 24 Sep 2026.'));
         }
         panel.appendChild(node('div', 'task-trace-note', 'For each request OwnClaw keeps its size, what kind of '
                 + 'parts it had, tokens and cost — not the text, by design.'));
@@ -3091,16 +3103,23 @@
         priv.forEach(function(a) {
             var item = node('div', 'task-trace-item');
             item.appendChild(node('div', 'task-trace-line', a.handle + ' ' + a.tool + ' · ' + tdChars(a.chars) + tdWhy(a.why)));
-            var leaked = a.canary ? a.canary.leaked : 0;
-            item.appendChild(leaked > 0
+            var c = a.canary || {};
+            item.appendChild(!recorded
+                ? node('div', 'task-trace-line muted', 'Requests were not recorded then, so what reached the cloud is not known.')
+                : !a.requestsAfter
+                ? node('div', 'task-trace-line muted', 'Nothing went to the cloud after it was read.')
+                : c.leaked > 0
                 ? node('div', 'task-trace-line bad', 'Its text went to the cloud in '
-                        + tdCount(leaked, 'request', 'requests') + ': the check was only observing.')
+                        + tdCount(c.leaked, 'request', 'requests') + ': the check was only observing.')
+                : c.unchecked > 0
+                ? node('div', 'task-trace-line warn', tdCount(c.unchecked, 'later request', 'later requests')
+                        + ' went out without being checked for it: the check stops at the first private result it finds.')
                 // What Artifact.describe() shows of it -- never the text.
                 : node('div', 'task-trace-line muted', a.indexed === false
                         ? 'The cloud was shown only its source and size, not its text.'
                         : 'The cloud was shown a description, not the text: source, size, field names '
                             + 'with their types and lengths, and yes/no values.'));
-            var check = tdCanaryLine(a);
+            var check = recorded ? tdCanaryLine(a) : null;
             if (check) item.appendChild(node('div', 'task-trace-line ' + check.cls, check.text));
             panel.appendChild(item);
         });
@@ -3135,7 +3154,7 @@
         header.appendChild(node('div', 'task-run-desc', (c.step != null ? 'Step ' + c.step + ' · ' : '')
                 + c.purpose + ' · ' + c.model));
         var meta = node('div', 'task-run-meta');
-        meta.appendChild(tdDecisionBadge(c.decision));
+        meta.appendChild(tdDecisionBadge(c));
         meta.appendChild(node('span', 'task-run-duration', formatBytes(c.bytesOut)));
         header.appendChild(meta);
         header.appendChild(node('span', 'task-run-toggle', '▼'));
@@ -3212,20 +3231,19 @@
                     : a.chars < 8 ? 'Too short to be checked automatically.'
                     : 'No automatic check was recorded for it.' };
         }
-        var stopped = c.hits - c.leaked;
+        var stopped = c.hits - c.leaked, clean = c.checkedCalls - c.hits;
         if (stopped > 0) {
             return { cls: 'warn', text: 'Its text was in ' + tdCount(stopped, 'request', 'requests')
                     + ' about to go to the cloud; the check stopped ' + (stopped === 1 ? 'it' : 'them') + '.' };
         }
-        if (c.hits > 0) return null;   // every hit went out, and the line above says so
-        if (c.checkedCalls > 0) {
-            return { cls: '', text: 'Checked in ' + tdCount(c.checkedCalls, 'later request', 'later requests')
-                    + ': its text was not in them.' };
+        if (clean > 0) {
+            return { cls: '', text: 'Checked in ' + tdCount(clean, c.hits ? 'other later request' : 'later request',
+                    c.hits ? 'other later requests' : 'later requests') + ': its text was not in them.' };
         }
-        return { cls: 'muted', text: 'No request was made after it was read.' };
+        return null;   // the line above already says what happened
     }
 
-    function tdOutcome(outcome, failedSteps) {
+    function tdOutcome(outcome, failedSteps, unverified) {
         if (!outcome) return { words: 'Not recorded', tone: '' };
         var r = outcome.reason;
         var words = {
@@ -3234,7 +3252,8 @@
             MAX_STEPS: 'Step limit reached', STALLED: 'No progress', TIMEOUT: 'Time limit',
             FAILURE_LIMIT: 'Too many failed steps', ERROR: 'Internal error', CANCELLED: 'Cancelled'
         }[r] || String(r || 'Not recorded');
-        var tone = r === 'COMPLETED' ? (failedSteps ? 'warn' : 'green')
+        // Not green while any step's success is unverified (a row from before 24 Sep 2026).
+        var tone = r === 'COMPLETED' ? (failedSteps ? 'warn' : unverified ? '' : 'green')
                 : r === 'NEEDS_INPUT' || r === 'CANCELLED' || r === 'PRIVACY_BLOCKED' ? 'warn' : 'red';
         return { words: words + ' · ' + formatDuration(outcome.durationMs), tone: tone };
     }
@@ -3243,11 +3262,17 @@
         return tier === 'cloud' || tier === 'local' ? node('span', 'tier-badge ' + tier, tier) : node('span', 'tier-badge', '—');
     }
 
-    function tdDecisionBadge(dec) {
-        return dec === 'SENT' ? node('span', 'tier-badge', 'sent')
-                : dec === 'REFUSED' ? node('span', 'tier-badge warn', 'stopped')
-                : dec === 'OBSERVED_LEAK' ? node('span', 'tier-badge bad', 'leak')
+    function tdDecisionBadge(c) {
+        return c.decision === 'SENT' ? node('span', 'tier-badge', 'sent')
+                : c.decision === 'REFUSED' ? node('span', 'tier-badge warn', 'stopped')
+                : c.decision === 'OBSERVED_LEAK' ? node('span', 'tier-badge bad', 'leak')
+                : tdFailedLeak(c) ? node('span', 'tier-badge bad', 'leak?')
                 : node('span', 'tier-badge warn', 'failed');
+    }
+
+    /** A call that failed after the check, only observing, had found private text in it. */
+    function tdFailedLeak(c) {
+        return c.decision === 'ERROR' && typeof c.refusal === 'string' && c.refusal.indexOf('{{') === 0;
     }
 
     function tdRow(label, value, cls) {
@@ -3279,18 +3304,22 @@
         loader.innerHTML = '<div class="mini-spinner"></div><span>Loading task history...</span>';
         messagesEl.appendChild(loader);
 
+        // A reply that lands after logout -- or after someone else logged in -- is dropped.
+        var asked = authToken;
         // Fetch both tasks and run history in parallel
         Promise.all([
             fetch('/api/scheduled-tasks', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(okJson),
             fetch('/api/scheduled-tasks/runs?limit=50', { headers: { 'Authorization': 'Bearer ' + authToken } }).then(okJson)
         ])
         .then(function(results) {
+            if (authToken !== asked) return;
             clearMessages();
             var tasksData = results[0];
             var runsData = results[1];
             renderTaskHistory(tasksData.tasks || [], runsData.runs || [], runsData.stats || {});
         })
         .catch(function(e) {
+            if (authToken !== asked) return;
             clearMessages();
             console.error('Failed to load task history:', e);
             var errDiv = document.createElement('div');

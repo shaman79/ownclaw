@@ -70,7 +70,10 @@ public class TaskTraceService {
      * cloud chose a step if its cloud tokens rose.
      */
     static Map<String, Object> build(List<Map<String, Object>> rows) {
-        boolean recorded = rows.stream().anyMatch(r -> "egress".equals(r.get("event_type")));
+        // Requests are recorded from the day step rows began carrying reportedFailure, so a task
+        // with such a row and no egress rows made no cloud request -- which is worth saying.
+        boolean recorded = rows.stream().anyMatch(r -> "egress".equals(r.get("event_type"))
+                || "step".equals(r.get("event_type")) && String.valueOf(r.get("details")).contains("\"reportedFailure\""));
         var steps = new ArrayList<Map<String, Object>>();
         var calls = new ArrayList<Map<String, Object>>();
         var callIds = new ArrayList<Long>();
@@ -175,37 +178,46 @@ public class TaskTraceService {
             }
         }
 
-        // The canary line for each artifact: how many later requests were checked for its text,
-        // in how many it was found, and how many of those went out anyway (the check was only
-        // observing). Only for a PRIVATE result the canary actually indexed and long enough to
-        // look for -- anything else is shown as not checked, never as clean.
+        // For each artifact: how many later requests left at all, and -- for a PRIVATE result
+        // the canary indexed and could look for -- how many of those were checked for its text,
+        // in how many it was found, how many of those went out anyway (the check was only
+        // observing), and how many went out without being checked for it. Anything else is
+        // shown as not checked, never as clean.
         for (int i = 0; i < artifacts.size(); i++) {
             var a = artifacts.get(i);
             boolean checkable = "PRIVATE".equals(a.get("label")) && Boolean.TRUE.equals(a.get("indexed"))
                     && ((Number) a.get("chars")).longValue() >= MIN_CHECKABLE_CHARS;
-            if (!checkable) { a.put("canary", null); continue; }
             String prefix = a.get("handle") + " in part";
-            int checked = 0, hits = 0, leaked = 0;
+            int after = 0, checked = 0, hits = 0, leaked = 0, unchecked = 0;
             for (int j = 0; j < calls.size(); j++) {
                 if (callIds.get(j) <= artifactIds.get(i)) continue;
                 var c = calls.get(j);
+                boolean refused = "REFUSED".equals(c.get("decision"));
+                if (!refused) after++;
                 String refusal = c.get("refusal") == null ? null : String.valueOf(c.get("refusal"));
                 boolean named = refusal != null && refusal.startsWith("{{");
                 // A vault refusal happens before the canary runs, so it checked nothing.
-                if ("REFUSED".equals(c.get("decision")) && !named) continue;
+                if (refused && !named) continue;
                 // The canary stops at its first hit, and the record names only that one; any
-                // other private result in the same request was not looked for.
-                if (named && !refusal.startsWith(prefix)) continue;
+                // other private result in the same request was not looked for. If that request
+                // went out anyway, this one's text may have gone with it.
+                if (named && !refusal.startsWith(prefix)) {
+                    if (!refused) unchecked++;
+                    continue;
+                }
                 checked++;
                 if (named) {
                     hits++;
-                    if (!"REFUSED".equals(c.get("decision"))) leaked++;
+                    if (!refused) leaked++;
                 }
             }
+            a.put("requestsAfter", after);
+            if (!checkable) { a.put("canary", null); continue; }
             var canary = new LinkedHashMap<String, Object>();
             canary.put("checkedCalls", checked);
             canary.put("hits", hits);
             canary.put("leaked", leaked);
+            canary.put("unchecked", unchecked);
             a.put("canary", canary);
         }
 
@@ -222,6 +234,7 @@ public class TaskTraceService {
         totals.put("decisions", decisions);
 
         var out = new LinkedHashMap<String, Object>();
+        out.put("recorded", recorded);
         out.put("request", request);
         out.put("outcome", outcome);
         out.put("totals", totals);

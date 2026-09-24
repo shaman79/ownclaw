@@ -128,21 +128,24 @@ class TaskTraceServiceTest {
         row("egress", egress("REFUSED", 0, 0, 0, "vault:SMTP_PASS survived scrubbing"));
         var t = TaskTraceService.build(rows);
         var arts = list(t, "artifacts");
-        assertEquals(Map.of("checkedCalls", 3, "hits", 0, "leaked", 0), arts.get(0).get("canary"),
+        assertEquals(Map.of("checkedCalls", 3, "hits", 0, "leaked", 0, "unchecked", 0), arts.get(0).get("canary"),
                 "a vault refusal happens before the canary runs, so it checked nothing");
         assertNull(arts.get(1).get("canary"), "an empty text cannot be looked for");
+        assertEquals(3, arts.get(1).get("requestsAfter"), "a refused request never left");
         assertNull(arts.get(2).get("canary"), "an unindexed result was never looked for");
 
         row("egress", egress("REFUSED", 0, 0, 0, "{{1}} in part 4 (user) at 10"));
-        assertEquals(Map.of("checkedCalls", 4, "hits", 1, "leaked", 0),
+        assertEquals(Map.of("checkedCalls", 4, "hits", 1, "leaked", 0, "unchecked", 0),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
 
         // OBSERVE: it went out anyway. And a request whose record names ANOTHER private result
-        // was not checked for this one -- the canary stops at its first hit.
+        // was not checked for this one -- the canary stops at its first hit -- so if it went
+        // out, it went out unchecked; if it was stopped, it did not matter.
         row("egress", egress("OBSERVED_LEAK", 5, 5, 0.01, "{{1}} in part 4 (user) at 10"));
         row("egress", egress("OBSERVED_LEAK", 5, 5, 0.01, "{{9}} in part 2 (user) at 3"));
+        row("egress", egress("REFUSED", 0, 0, 0, "{{9}} in part 2 (user) at 3"));
         row("egress", egress("ERROR", 0, 0, 0, "{{1}} in part 4 (user) at 10 (call then failed: IOException)"));
-        assertEquals(Map.of("checkedCalls", 6, "hits", 3, "leaked", 2),
+        assertEquals(Map.of("checkedCalls", 6, "hits", 3, "leaked", 2, "unchecked", 1),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
     }
 
@@ -176,6 +179,20 @@ class TaskTraceServiceTest {
         var error = list(TaskTraceService.build(rows), "calls").get(1);
         assertNull(error.get("promptTokens"), "a failed call's tokens are not recorded, not 0");
         assertNull(error.get("costUsd"));
+    }
+
+    @Test
+    @DisplayName("a task from after recording began that made no cloud request says so, not 'not recorded'")
+    void recordedWithoutCalls() {
+        row("step", "{\"step\":1,\"tool\":\"delegate\",\"success\":true,\"reportedFailure\":false,"
+                + "\"localTokens\":900,\"cloudTokens\":0}");
+        var t = TaskTraceService.build(rows);
+        assertEquals(true, t.get("recorded"));
+        assertEquals(0, list(t, "steps").get(0).get("cloudCalls"));
+
+        rows.clear();
+        row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":9}");
+        assertEquals(false, TaskTraceService.build(rows).get("recorded"), "a row from before");
     }
 
     @Test

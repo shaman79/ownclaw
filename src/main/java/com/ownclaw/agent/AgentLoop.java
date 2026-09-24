@@ -2361,9 +2361,12 @@ public class AgentLoop {
             });
         }
         // A delegation's failure text is its own words plus whatever the local model and its
-        // server said, which after a private read can quote that data -- so then, none.
-        stepOutcome(details, obs, claimed,
-                action.isDelegate() && context.localTierReadPrivate(), context.secretValues());
+        // server said, which after a private read can quote that data -- so then, none. Nor
+        // when the text holds anything the canary would refuse to send: a PUBLIC step can fail
+        // quoting a file a delegation wrote private data into.
+        boolean withhold = action.isDelegate() && context.localTierReadPrivate()
+                || context.privateIndex().firstHitIn(String.valueOf(obs.output())) != null;
+        stepOutcome(details, obs, claimed, withhold, context.secretValues());
         return details;
     }
 
@@ -2377,17 +2380,16 @@ public class AgentLoop {
      * <p>
      * The excerpt is kept locally and shown to the owner, so it must not hold what the gateway
      * would keep from the cloud: vault values are scrubbed out, and there is none at all for a
-     * PRIVATE step or a delegation after the local model read private data -- whose failure text
-     * can quote it. Without it a failure's reason reached only the log and the model -- the
+     * PRIVATE step, or when the caller says to withhold it (see stepDetails). Without it a failure's reason reached only the log and the model -- the
      * 2026-09-24 "context window full" delegation left a row that said FAILED and nothing else.
      */
     static void stepOutcome(Map<String, Object> details, AgentObservation obs,
-                            java.util.Optional<Artifact> claimed, boolean afterPrivateRead,
+                            java.util.Optional<Artifact> claimed, boolean withhold,
                             Map<String, String> secrets) {
         claimed.ifPresent(a -> details.put("indexed", a.indexed()));
         boolean reported = claimed.map(a -> a.success() && !a.succeeded()).orElse(false);
         details.put("reportedFailure", reported);
-        boolean privateText = afterPrivateRead || claimed.map(Artifact::isPrivate).orElse(false);
+        boolean privateText = withhold || claimed.map(Artifact::isPrivate).orElse(false);
         if ((!obs.success() || reported) && !privateText) {
             // Scrubbed before cutting, so a cut cannot leave half a secret the scrub misses.
             String text = com.ownclaw.llm.CloudGateway.scrub(obs.output(), secrets).text();
