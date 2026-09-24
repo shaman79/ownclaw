@@ -296,9 +296,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         boolean waiting = interactionHandler.hasPending(userId);
         if (userMessage.startsWith("/")) {
             String sessionId = conversationService.getCurrentSession(userId);
+            // Asking whether it is a command runs the command, so this answer is handed on and
+            // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
             if (handledAsCommand.isPresent() || !waiting) {
-                handleCommand(userId, sessionId, userMessage, session);
+                handleCommand(userId, sessionId, userMessage, handledAsCommand, session);
                 return;
             }
             // Not a command, and something is waiting for an answer: it is the answer.
@@ -383,8 +385,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * @param shared what the shared CommandHandler answered when handleTextMessage asked whether
+     *               this is a command. That call already ran the command, so it is used here
+     *               rather than asking again. Asking twice ran every shared command twice: /bg
+     *               queued its task twice, /new created two chats, and /files rm deleted the file
+     *               and then reported that there was no such file.
+     */
     private void handleCommand(String userId, String sessionId, String command,
-                               WebSocketSession session) {
+                               Optional<String> shared, WebSocketSession session) {
         String cmd = command.trim();
         String cmdLower = cmd.toLowerCase();
 
@@ -400,12 +409,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     : "\uD83D\uDC1B Debug mode **OFF**";
         } else if (cmdLower.equals("/status")) {
             // Shared status + Web-specific info
-            response = commandHandler.handle(userId, cmd).orElse("")
+            response = shared.orElse("")
                     + " | Connected sockets: " + sessions.values().stream().mapToInt(java.util.Set::size).sum();
         } else {
-            // Delegate to shared CommandHandler
-            var result = commandHandler.handle(userId, cmd);
-            response = result.orElse("Unknown command: " + command + ". Try /help");
+            // The shared CommandHandler's answer; empty when it did not know the command
+            response = shared.orElse("Unknown command: " + command + ". Try /help");
         }
 
         if (response != null && !response.isBlank()) {
