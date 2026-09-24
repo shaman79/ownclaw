@@ -117,7 +117,7 @@ public class ConversationService {
         return jdbc.queryForList("""
             SELECT id, role, content, timestamp FROM conversations
             WHERE user_id = ? AND session_id = ? AND compressed = 0
-            ORDER BY timestamp DESC LIMIT ?
+            ORDER BY timestamp DESC, rowid DESC LIMIT ?
             """, userId, sessionId, limit);
     }
 

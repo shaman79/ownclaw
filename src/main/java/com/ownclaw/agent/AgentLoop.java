@@ -363,18 +363,25 @@ public class AgentLoop {
                 sb.append(sessionSummary).append("\n\n");
             }
 
-            // Include recent messages in chronological order (skip index 0 = current message).
-            // Messages are included in FULL — no truncation. Cutting mid-sentence can cause
-            // the LLM to misunderstand what was said. The ConversationCompressor already keeps
-            // the overall context bounded by summarizing older messages.
-            if (recent.size() > 1 || (recent.size() == 1 && currentMessageId == null)) {
+            // Recent messages in chronological order, each in FULL -- cutting mid-sentence can
+            // make the model misread what was said -- but only as many as the summariser's own
+            // window holds (ConversationCompressor.keptNewest): older ones are in the summary
+            // above, or about to be, and sending them all made one chat task cost $1.30 before it
+            // had done anything. The row this task answers is skipped -- it is already the task
+            // text -- and only that one: a scheduled or background run has no current row.
+            List<Map<String, Object>> others = recent.stream()
+                    .filter(row -> currentMessageId == null || !currentMessageId.equals(row.get("id")))
+                    .toList();
+            int shown = com.ownclaw.conversation.ConversationCompressor.keptNewest(others.stream()
+                    .map(row -> String.valueOf(row.get("content")).length()).toList());
+            if (shown > 0) {
                 sb.append("### Recent conversation\n");
-                for (int i = recent.size() - 1; i >= 0; i--) {
-                    Map<String, Object> row = recent.get(i);
-                    // Skip the row this task answers -- it is already the task text -- and only
-                    // that one. Index 0 used to be skipped unconditionally, which on a scheduled
-                    // or background run, where no row is current, dropped the newest message.
-                    if (currentMessageId != null && currentMessageId.equals(row.get("id"))) continue;
+                if (shown < others.size()) {
+                    sb.append("(").append(others.size() - shown)
+                      .append(" earlier messages are not shown here; the summary above covers what has been compressed.)\n");
+                }
+                for (int i = shown - 1; i >= 0; i--) {
+                    Map<String, Object> row = others.get(i);
                     String role = (String) row.get("role");
                     String content = (String) row.get("content");
                     sb.append(role.toUpperCase()).append(": ").append(content).append("\n");
@@ -401,8 +408,8 @@ public class AgentLoop {
             String conversationContext = sb.toString().strip();
             if (!conversationContext.isEmpty()) {
                 context.setConversationSummary(conversationContext);
-                log.debug("Loaded conversation context for user {} session {}: {} chars, {} recent messages",
-                        userId, sessionId, conversationContext.length(), Math.max(0, recent.size() - 1));
+                log.debug("Loaded conversation context for user {} session {}: {} chars",
+                        userId, sessionId, conversationContext.length());
             }
         } catch (Exception e) {
             log.warn("Failed to load conversation context for user {}: {}", userId, e.getMessage());

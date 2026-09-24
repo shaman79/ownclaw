@@ -51,6 +51,25 @@ class ChatContextTest {
     }
 
     @Test
+    @DisplayName("a chat task sees the newest messages in full up to the window's size; older ones are left out")
+    void theChatWindowIsBounded(@TempDir Path tmp) throws Exception {
+        var db = db(tmp);
+        String session = db.conversations().createSession("u1", "Long answers");
+        for (int i = 0; i < 8; i++) {
+            db.conversations().saveMessage("u1", session, i % 2 == 0 ? "user" : "assistant",
+                    "MSG" + i + " " + "x".repeat(5_995));                // 6,000 characters each
+        }
+        var chat = new AgentContext("u1", "t1", "and next?");
+        AgentLoop.loadConversationContext(chat, "u1", null, db.conversations(), db.files());
+        String summary = chat.conversationSummary();
+        for (int i = 4; i < 8; i++) assertTrue(summary.contains("MSG" + i + " "), "newest kept: MSG" + i);
+        for (int i = 0; i < 4; i++) assertFalse(summary.contains("MSG" + i + " "), "older left out: MSG" + i);
+        assertTrue(summary.contains("4 earlier messages are not shown"), summary.substring(0, 200));
+        assertTrue(summary.length() < ConversationCompressor.ACTIVE_CHARS + 1_000, "bounded: " + summary.length());
+        assertTrue(summary.indexOf("MSG4 ") < summary.indexOf("MSG7 "), "in order, oldest shown first");
+    }
+
+    @Test
     @DisplayName("a chat task sees the open chat; an unattended one does not")
     void onlyChatTasksSeeTheChat(@TempDir Path tmp) throws Exception {
         var db = db(tmp);

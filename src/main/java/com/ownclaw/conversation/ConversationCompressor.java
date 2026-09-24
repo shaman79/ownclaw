@@ -31,10 +31,19 @@ public class ConversationCompressor {
     /** Shorter than this and the summary is treated as a failure, not a summary. */
     private static final int MIN_SUMMARY_CHARS = 40;
 
-    /** Messages to keep uncompressed (the "active window"). */
+    /** Messages to keep uncompressed (the "active window"), at most. */
     private static final int ACTIVE_WINDOW = 10;
-    /** Compress when session has this many uncompressed messages beyond the active window. */
+    /**
+     * ...and at most this much text. Every chat task sends the window to the cloud model in full,
+     * and a count alone let a few long answers make it 65 KB -- about 70k tokens, $1.30 before the
+     * task had done anything. Past this, older messages go into the summary the local model writes.
+     */
+    public static final int ACTIVE_CHARS = 24_000;
+    /** The newest messages are kept however long they are: the exchange being continued. */
+    public static final int ACTIVE_MIN = 2;
+    /** Compress once this many messages, or this much text, sit outside the window. */
     private static final int COMPRESS_THRESHOLD = 6;
+    private static final int COMPRESS_CHARS = 8_000;
     private final JdbcTemplate jdbc;
     private final OllamaProvider ollama;
     private final OllamaSemaphore semaphore;
@@ -55,25 +64,22 @@ public class ConversationCompressor {
      */
     public void compressIfNeeded(String userId, String sessionId) {
         try {
-            // Count total non-status messages in this session
-            Integer totalCount = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM conversations WHERE user_id = ? AND session_id = ? "
-                            + "AND role != 'status' AND compressed = 0",
-                    Integer.class, userId, sessionId);
-
-            if (totalCount == null || totalCount <= ACTIVE_WINDOW + COMPRESS_THRESHOLD) {
-                return; // Not enough messages to warrant compression
-            }
-
-            // Get messages that are outside the active window (oldest first)
-            int toCompress = totalCount - ACTIVE_WINDOW;
-            List<Map<String, Object>> oldMessages = jdbc.queryForList("""
+            // Uncompressed messages, newest first; the window is decided by keptNewest.
+            List<Map<String, Object>> uncompressed = jdbc.queryForList("""
                     SELECT id, role, content FROM conversations
                     WHERE user_id = ? AND session_id = ? AND compressed = 0 AND role != 'status'
-                    ORDER BY timestamp ASC LIMIT ?
-                    """, userId, sessionId, toCompress);
-
-            if (oldMessages.isEmpty()) return;
+                    ORDER BY timestamp DESC, rowid DESC
+                    """, userId, sessionId);
+            int kept = keptNewest(uncompressed.stream()
+                    .map(m -> String.valueOf(m.get("content")).length()).toList());
+            List<Map<String, Object>> oldMessages = new java.util.ArrayList<>(
+                    uncompressed.subList(kept, uncompressed.size()));
+            java.util.Collections.reverse(oldMessages);          // oldest first, for the summary
+            int oldChars = oldMessages.stream().mapToInt(m -> String.valueOf(m.get("content")).length()).sum();
+            if (oldMessages.isEmpty()
+                    || (oldMessages.size() < COMPRESS_THRESHOLD && oldChars < COMPRESS_CHARS)) {
+                return; // Not enough outside the window to warrant a local-model call
+            }
 
             // Build the text to compress
             StringBuilder textToCompress = new StringBuilder();
@@ -131,6 +137,23 @@ public class ConversationCompressor {
         } catch (Exception e) {
             log.warn("Conversation compression failed (non-fatal): {}", e.getMessage());
         }
+    }
+
+    /**
+     * How many of the newest messages are kept in full -- the rule both this summariser and the
+     * agent's chat context use, so what one leaves out the other has summarised or is about to.
+     *
+     * @param lengthsNewestFirst each message's length, newest first
+     */
+    public static int keptNewest(List<Integer> lengthsNewestFirst) {
+        int kept = 0, chars = 0;
+        for (int len : lengthsNewestFirst) {
+            boolean fits = kept < ACTIVE_WINDOW && chars + len <= ACTIVE_CHARS;
+            if (kept >= ACTIVE_MIN && !fits) break;
+            kept++;
+            chars += len;
+        }
+        return kept;
     }
 
     /**
