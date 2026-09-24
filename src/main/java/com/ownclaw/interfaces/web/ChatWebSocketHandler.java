@@ -409,9 +409,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     ? "\uD83D\uDC1B Debug mode **ON** — you will see full prompts, raw LLM output, critic verdicts, and tool results."
                     : "\uD83D\uDC1B Debug mode **OFF**";
         } else if (cmdLower.equals("/status")) {
-            // Shared status + Web-specific info
+            // Shared status + Web-specific info, on a line of its own: the shared text now ends
+            // with the skill isolation line, which the socket count is not part of.
             response = shared.orElse("")
-                    + " | Connected sockets: " + sessions.values().stream().mapToInt(java.util.Set::size).sum();
+                    + "\nConnected sockets: " + sessions.values().stream().mapToInt(java.util.Set::size).sum();
         } else {
             // The shared CommandHandler's answer; empty when it did not know the command
             response = shared.orElse("Unknown command: " + command + ". Try /help");

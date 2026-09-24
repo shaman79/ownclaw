@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.sandbox.SkillJail;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,7 +30,8 @@ class OpsServiceTest {
         var conversations = new ConversationService(jdbc, null);
         String session = conversations.createSession("u1", "Statements");
         conversations.saveMessage("u1", session, "assistant", "[Private answer]", List.of(), "a1b2c3d4", SECRET);
-        var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper());
+        var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper(),
+                SkillJail.off());
 
         // Guarding the column was not enough: a CTE column list renames it without naming it.
         for (String sql : List.of("SELECT * FROM conversations",

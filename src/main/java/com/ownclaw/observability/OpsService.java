@@ -7,6 +7,7 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.users.AuthService;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -92,6 +93,7 @@ public class OpsService {
     private final AuthService authService;
     private final com.ownclaw.agent.SkillCuratorService curatorService;
     private final ObjectMapper mapper;
+    private final SkillJail jail;
     private final OkHttpClient http;
     private final Instant startedAt = Instant.now();
 
@@ -99,7 +101,7 @@ public class OpsService {
                       DynamicSkillRegistry skillRegistry, TaskQueue taskQueue,
                       AuthService authService,
                       com.ownclaw.agent.SkillCuratorService curatorService,
-                      ObjectMapper mapper) {
+                      ObjectMapper mapper, SkillJail jail) {
         this.config = config;
         this.jdbc = jdbc;
         this.toolRegistry = toolRegistry;
@@ -108,6 +110,7 @@ public class OpsService {
         this.authService = authService;
         this.curatorService = curatorService;
         this.mapper = mapper;
+        this.jail = jail;
         // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
         // longer than a normal call would. A hung Ollama therefore blocks one ops request
         // for up to this long; that is acceptable for a probe and is stated in the response.
@@ -160,6 +163,9 @@ public class OpsService {
         checks.put("jvm", jvm());
         checks.put("logFile", logFileInfo());
         checks.put("owner", authService.ownerId().map(id -> (Object) id).orElse("none"));
+        // Whether skills run isolated, and if not why not and what to install: the owner reads
+        // this before installing bubblewrap and again to confirm it took.
+        checks.put("sandbox", jail.health());
 
         out.put("checks", checks);
         return out;
@@ -802,12 +808,33 @@ public class OpsService {
         out.put("llmChannel", egressSummary(taskId));
         out.put("artifacts", artifactsOf(taskId));
         out.put("notObserved", List.of(
-                "a skill with requires_network can send its inputs, an attachment or its vault "
-                        + "environment to any host; the sandbox has no egress policy yet",
+                skillReach(),
                 "OWNCLAW_EXECUTOR_URL is wherever the local model is; nothing asserts it is private",
                 "the OpenAI availability probe sends the bearer key to /v1/models with no "
                         + "content and no ledger row"));
         return out;
+    }
+
+    /**
+     * What a skill could send out, which depends on whether it runs isolated. Said of the jail
+     * as it is now: the task's rows do not record the state it ran under.
+     */
+    private String skillReach() {
+        SkillJail.State state = jail.status().state();
+        String network = "a skill shares the host network on purpose and can send its inputs, "
+                + "the files it was handed or its declared credentials to any host; there is no "
+                + "egress policy";
+        return switch (state) {
+            case READY -> network + ". Skill isolation is ON, so it cannot read the database, "
+                    + ".env, other uploads or other skills (the jail's state now; the task's rows "
+                    + "do not record the state its skills ran under)";
+            case REFUSING -> "skill isolation is REFUSING every skill launch now, so no skill can "
+                    + "run until it is fixed (the jail's state now; the task's rows do not record "
+                    + "the state its skills ran under)";
+            case INACTIVE, OFF -> network + ". Skill isolation is " + state + ", so it can also "
+                    + "read the database -- with it every stored credential -- .env and every "
+                    + "user's uploads";
+        };
     }
 
     private static final com.fasterxml.jackson.databind.ObjectMapper DETAILS =
@@ -978,6 +1005,37 @@ public class OpsService {
         results.add(test("logs.readable", () -> {
             Path f = logFile();
             return Map.of("ok", Files.isReadable(f), "path", f.toString(), "sizeBytes", fileSize(f));
+        }));
+
+        results.add(test("sandbox.isolation", () -> {
+            // Checked again now rather than read from the last check: a host that changed a
+            // minute ago must not pass on the strength of how it looked before.
+            jail.recheck();
+            var h = jail.health();
+            var m = new LinkedHashMap<String, Object>();
+            for (String k : List.of("mode", "state", "isolated", "canRunSkills", "reason", "selfCheck",
+                    "installHint")) {
+                m.put(k, h.get(k));
+            }
+            String state = String.valueOf(h.get("state"));
+            @SuppressWarnings("unchecked")
+            var runs = (Map<String, Object>) h.get("runs");
+            boolean wasReady = runs.get("readySince") != null;
+            // Not installed yet is where every host starts, and auto runs skills exactly as
+            // before there, so that alone does not fail. A jail that refuses, or that was on in
+            // this process and is not now, is a regression, and does.
+            m.put("ok", switch (state) {
+                case "READY", "OFF" -> true;
+                case "INACTIVE" -> !wasReady;
+                default -> false;
+            });
+            if ("INACTIVE".equals(state)) {
+                m.put("warning", wasReady
+                        ? "Skill isolation was on at " + runs.get("readySince") + " and is not now: "
+                          + "skills are running unisolated."
+                        : "Skills run unisolated until bubblewrap is installed: " + h.get("installHint"));
+            }
+            return m;
         }));
 
         long failed = results.stream().filter(r -> !Boolean.TRUE.equals(r.get("ok"))).count();

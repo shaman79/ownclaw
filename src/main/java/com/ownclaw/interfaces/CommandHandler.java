@@ -7,6 +7,7 @@ import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.users.AuthService;
 import com.ownclaw.users.CredentialGrantService;
 import com.ownclaw.users.CredentialVault;
@@ -46,6 +47,7 @@ public class CommandHandler {
     private final com.ownclaw.conversation.FileStorageService fileStorage;
     private final com.ownclaw.core.TaskCancellationService cancellationService;
     private final com.ownclaw.core.ResultDelivery resultDelivery;
+    private final SkillJail jail;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
@@ -55,7 +57,8 @@ public class CommandHandler {
                           AuthService authService, UserRepository userRepo,
                           com.ownclaw.conversation.FileStorageService fileStorage,
                           com.ownclaw.core.TaskCancellationService cancellationService,
-                          com.ownclaw.core.ResultDelivery resultDelivery) {
+                          com.ownclaw.core.ResultDelivery resultDelivery,
+                          SkillJail jail) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -69,6 +72,7 @@ public class CommandHandler {
         this.fileStorage = fileStorage;
         this.cancellationService = cancellationService;
         this.resultDelivery = resultDelivery;
+        this.jail = jail;
     }
 
     /**
@@ -404,7 +408,9 @@ public class CommandHandler {
     // ── Status ──
 
     private String statusText() {
-        return "Queue size: " + taskQueue.getQueueSize();
+        // Whether skills run isolated is part of the system's state the owner checks here,
+        // without opening the ops API.
+        return "Queue size: " + taskQueue.getQueueSize() + "\n" + jail.statusLine();
     }
 
     // ── Log ──

@@ -19,6 +19,9 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -212,6 +215,13 @@ public class SkillJail {
     private final AtomicLong isolatedRuns = new AtomicLong();
     private final AtomicLong directRuns = new AtomicLong();
     private final AtomicLong refusedRuns = new AtomicLong();
+    // Counted from the first moment the jail was READY in this process, not from startup: the
+    // jail picks up a bubblewrap installed while the service runs, and the direct launches from
+    // before that would otherwise read as launches that escaped a working jail. A later fall
+    // back to INACTIVE and its direct launches do count -- that is what this number is for.
+    private final AtomicLong directSinceReady = new AtomicLong();
+    private final long startedAt;
+    private volatile long readySince;
 
     private Evaluation evaluation;
     private boolean recheckRequested;
@@ -254,6 +264,7 @@ public class SkillJail {
         this.layout = layout;
         this.exposeEntries = expose == null ? List.of() : List.copyOf(expose);
         this.clock = clock;
+        this.startedAt = clock.getAsLong();
     }
 
     /** A jail that is switched off, for code and tests that construct a sandbox by hand. */
@@ -293,6 +304,7 @@ public class SkillJail {
         switch (e.state()) {
             case OFF, INACTIVE -> {
                 directRuns.incrementAndGet();
+                if (readySince != 0) directSinceReady.incrementAndGet();
                 return Launch.direct(command);
             }
             case REFUSING -> {
@@ -349,14 +361,28 @@ public class SkillJail {
         }
     }
 
+    /**
+     * Run the evaluation now, self-check included, whatever the once-a-minute schedule says.
+     * For the operator's self-test: a pass there must describe the host as it is, not as it
+     * was when the jail last looked.
+     */
+    public Status recheck() {
+        current(true);
+        return status();
+    }
+
     // ────────────────────────────── evaluation ──────────────────────────────
 
-    private synchronized Evaluation current() {
+    private Evaluation current() {
+        return current(false);
+    }
+
+    private synchronized Evaluation current(boolean force) {
         if (mode == Mode.OFF && evaluation != null) return evaluation;
         long now = clock.getAsLong();
         Signature sig = bwrap == null ? Signature.ABSENT : signature(bwrap);
         Evaluation e = evaluation;
-        boolean due = e == null
+        boolean due = force || e == null
                 || !sig.equals(e.signature())
                 || ((e.state() != State.READY || recheckRequested) && now - e.at() >= RECHECK_MS);
         if (due) {
@@ -373,6 +399,7 @@ public class SkillJail {
                 logState(next);
             }
             evaluation = next;
+            if (next.state() == State.READY && readySince == 0) readySince = next.at();
         }
         return evaluation;
     }
@@ -753,6 +780,254 @@ public class SkillJail {
             }
         }
         return null;
+    }
+
+    // ────────────────────────────── operator view ──────────────────────────────
+
+    /** The settings that decide whether an unprivileged process may create user namespaces. */
+    private static final List<String> USERNS_SYSCTLS = List.of(
+            "kernel.apparmor_restrict_unprivileged_userns",
+            "kernel.unprivileged_userns_clone",
+            "user.max_user_namespaces");
+
+    /**
+     * The AppArmor profile that lets bubblewrap create user namespaces on an Ubuntu that
+     * restricts them (the apparmor package ships it from 25.04), relative to the host root.
+     */
+    static final String BWRAP_PROFILE = "etc/apparmor.d/bwrap-userns-restrict";
+
+    private static final DateTimeFormatter WHEN =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm z").withZone(ZoneId.systemDefault());
+
+    /**
+     * What the owner needs to decide on the jail and to verify it, for the ops health check:
+     * what it is doing and why, what it hides, which bubblewrap is here, what the self-check
+     * saw, how many launches went which way, and the facts about this host that decide what to
+     * install. Names and settings only, never the content of a file.
+     */
+    public Map<String, Object> health() {
+        return health(Path.of("/"), home());
+    }
+
+    /** {@link #health()}, reading the host's files under {@code hostRoot} and HOME at {@code home}. */
+    Map<String, Object> health(Path hostRoot, Path home) {
+        Status s = status();
+        Map<String, String> os = osRelease(hostRoot);
+        Map<String, String> sysctls = sysctls(hostRoot);
+        boolean profile = Files.isRegularFile(hostRoot.resolve(BWRAP_PROFILE));
+        boolean present = bwrap != null && signature(bwrap).present();
+
+        var m = new LinkedHashMap<String, Object>();
+        m.put("mode", s.mode().name().toLowerCase(Locale.ROOT));
+        m.put("state", s.state().name());
+        m.put("isolated", s.state() == State.READY);
+        m.put("canRunSkills", s.state() != State.REFUSING);
+        // Verbatim, bubblewrap's stderr included: its own words are the diagnosis.
+        m.put("reason", s.reason());
+        // Worked out now, as prepare() does for every launch, so the owner can read what the
+        // jail will hide before bubblewrap is even installed.
+        List<String> roots = List.of();
+        if (layout != null) {
+            try {
+                roots = hiddenRoots(layout).stream().map(Path::toString).toList();
+            } catch (RuntimeException ex) {
+                m.put("hiddenRootsError", ex.getMessage());
+            }
+        }
+        m.put("hiddenRoots", roots);
+        // The owner's expose entries that survived the filter; a jail that has not passed its
+        // check yet exposes nothing, so this stays empty until then.
+        m.put("exposed", s.exposed().stream()
+                .map(b -> b.source().equals(b.dest()) ? b.dest().toString() : b.dest() + " <- " + b.source())
+                .toList());
+
+        var binary = new LinkedHashMap<String, Object>();
+        binary.put("path", s.bwrap());
+        binary.put("present", present);
+        binary.put("version", s.version());
+        m.put("bwrap", binary);
+
+        var check = new LinkedHashMap<String, Object>();
+        check.put("checkedAt", iso(s.checkedAtMillis()));
+        // Empty when the probe never ran to the end; the reason then says why.
+        check.put("results", s.selfCheck());
+        m.put("selfCheck", check);
+
+        var runs = new LinkedHashMap<String, Object>();
+        runs.put("since", iso(startedAt));
+        runs.put("isolated", s.isolatedRuns());
+        runs.put("direct", s.directRuns());
+        runs.put("refused", s.refusedRuns());
+        long ready = readySince;
+        runs.put("readySince", ready == 0 ? null : iso(ready));
+        runs.put("directSinceReady", directSinceReady.get());
+        m.put("runs", runs);
+
+        var host = new LinkedHashMap<String, Object>();
+        host.put("os", os.getOrDefault("PRETTY_NAME", "unknown"));
+        host.put("kernel", System.getProperty("os.version"));
+        host.put("sysctls", sysctls);
+        host.put("bwrapProfilePresent", profile);
+        m.put("host", host);
+
+        m.put("homeDotDirs", homeDotDirs(home));
+        m.put("installHint", installHint(s, present, os, sysctls, profile));
+        return m;
+    }
+
+    /**
+     * One line for /status, in the web chat and in Telegram. When ON it counts the launches
+     * that ran unisolated since the jail was first ready: zero is the mechanical proof that
+     * nothing has run outside it since.
+     */
+    public String statusLine() {
+        Status s = status();
+        return switch (s.state()) {
+            case READY -> {
+                long n = directSinceReady.get();
+                yield "Skill isolation: ON (" + (s.version() == null ? "bubblewrap" : s.version()) + ") — "
+                        + n + (n == 1 ? " unisolated launch" : " unisolated launches") + " since "
+                        + WHEN.format(Instant.ofEpochMilli(readySince));
+            }
+            case INACTIVE -> "Skill isolation: INACTIVE, skills run unisolated — " + brief(s.reason());
+            case REFUSING -> "Skill isolation: REFUSING every skill launch — " + brief(s.reason());
+            case OFF -> "Skill isolation: OFF (ownclaw.sandbox.isolation=off)";
+        };
+    }
+
+    /**
+     * The one next step for this host, or "none". The user-namespace settings come before the
+     * install command because on a host that blocks them installing bubblewrap is not enough,
+     * and saying only "install it" would send the owner round the loop once for nothing.
+     */
+    private String installHint(Status s, boolean present, Map<String, String> os,
+                               Map<String, String> sysctls, boolean profile) {
+        if (mode == Mode.OFF) {
+            return "none: isolation is switched off. To turn it on, remove "
+                    + "OWNCLAW_SANDBOX_ISOLATION=off from .env and restart.";
+        }
+        if (configError != null) return "fix the setting in .env and restart: " + configError;
+        if (s.state() == State.READY) {
+            return mode == Mode.REQUIRED
+                    ? "none: isolation is on, and required."
+                    : "none: isolation is on. To refuse skills whenever it is not (fail closed), add "
+                      + "OWNCLAW_SANDBOX_ISOLATION=required to .env and restart.";
+        }
+        String install = present ? null : installCommand(os);
+        // A probe that ran to the end proves the namespaces were created, whatever the settings
+        // suggest; then what is wrong is the jail, not the host.
+        String blocked = s.selfCheck().isEmpty() ? usernsBlocked(sysctls, profile) : null;
+        if (blocked != null) {
+            return install == null ? blocked : install + " -- but that alone is not enough here: " + blocked;
+        }
+        if (install != null) return install;
+        return "bubblewrap is installed but the jail is not working here; the reason says why, "
+                + "in bubblewrap's own words where it had any.";
+    }
+
+    private String installCommand(Map<String, String> os) {
+        var ids = List.of((os.getOrDefault("ID", "") + " " + os.getOrDefault("ID_LIKE", ""))
+                .toLowerCase(Locale.ROOT).trim().split("\\s+"));
+        if (ids.contains("debian") || ids.contains("ubuntu")) return "sudo apt install bubblewrap";
+        if (ids.contains("fedora") || ids.contains("rhel")) return "sudo dnf install bubblewrap";
+        return "install this distribution's bubblewrap package, so that " + bwrap + " exists";
+    }
+
+    private static String usernsBlocked(Map<String, String> sysctls, boolean profile) {
+        if ("0".equals(sysctls.get("kernel.unprivileged_userns_clone"))
+                || "0".equals(sysctls.get("user.max_user_namespaces"))) {
+            return "unprivileged user namespaces are switched off on this host "
+                    + "(kernel.unprivileged_userns_clone or user.max_user_namespaces is 0), and "
+                    + "bubblewrap needs them. Turning them on is a host-wide change for the owner "
+                    + "to decide; nothing is written automatically.";
+        }
+        if ("1".equals(sysctls.get("kernel.apparmor_restrict_unprivileged_userns")) && !profile) {
+            return "kernel.apparmor_restrict_unprivileged_userns=1 and there is no /" + BWRAP_PROFILE
+                    + ", so AppArmor stops bubblewrap creating user namespaces. Allowing it takes an "
+                    + "AppArmor profile for bwrap or a sysctl change, and either weakens a host-wide "
+                    + "restriction: the owner's decision; nothing is written automatically.";
+        }
+        return null;
+    }
+
+    /** NAME=value pairs from os-release under {@code root}; empty when there is none. */
+    static Map<String, String> osRelease(Path root) {
+        var out = new LinkedHashMap<String, String>();
+        for (String name : List.of("etc/os-release", "usr/lib/os-release")) {
+            Path f = root.resolve(name);
+            if (!Files.isRegularFile(f)) continue;
+            try {
+                for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
+                    int eq = line.indexOf('=');
+                    if (eq <= 0 || line.startsWith("#")) continue;
+                    String v = line.substring(eq + 1).strip();
+                    if (v.length() >= 2 && (v.charAt(0) == '"' || v.charAt(0) == '\'')
+                            && v.charAt(v.length() - 1) == v.charAt(0)) {
+                        v = v.substring(1, v.length() - 1);
+                    }
+                    out.put(line.substring(0, eq).strip(), v);
+                }
+            } catch (IOException | RuntimeException e) {
+                // what was read so far is still worth showing
+            }
+            break;
+        }
+        return out;
+    }
+
+    /** The user-namespace sysctls under {@code root}/proc/sys: the value, "absent" or "unreadable". */
+    static Map<String, String> sysctls(Path root) {
+        var out = new LinkedHashMap<String, String>();
+        for (String key : USERNS_SYSCTLS) {
+            Path f = root.resolve("proc/sys/" + key.replace('.', '/'));
+            String v;
+            try {
+                v = Files.readString(f, StandardCharsets.UTF_8).strip();
+            } catch (java.nio.file.NoSuchFileException e) {
+                v = "absent";
+            } catch (IOException | RuntimeException e) {
+                v = "unreadable";
+            }
+            out.put(key, v);
+        }
+        return out;
+    }
+
+    /**
+     * The dot entries directly in HOME, by name only, a directory with a trailing '/'. In
+     * production HOME is the service directory, which the jail hides, so this is what a jailed
+     * skill loses -- ~/.ssh, ~/.config, ~/.netrc -- and what decides whether the owner needs an
+     * expose entry. Never a file's content, and nothing below the top level.
+     */
+    static List<String> homeDotDirs(Path home) {
+        if (home == null || !Files.isDirectory(home)) return List.of();
+        try (var entries = Files.list(home)) {
+            return entries.filter(p -> p.getFileName().toString().startsWith("."))
+                    .map(p -> p.getFileName() + (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS) ? "/" : ""))
+                    .sorted()
+                    .limit(100)
+                    .toList();
+        } catch (IOException | RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    // The HOME a skill is given -- it is on the allow-list -- which is the service's own.
+    private static Path home() {
+        String h = System.getenv("HOME");
+        if (h == null || h.isBlank()) h = System.getProperty("user.home");
+        return h == null || h.isBlank() ? null : Path.of(h);
+    }
+
+    /** A reason on one line and of a length a chat message can carry; health has it whole. */
+    private static String brief(String reason) {
+        if (reason == null) return "no reason recorded";
+        String one = reason.strip().replaceAll("\\s+", " ");
+        return one.length() <= 240 ? one : one.substring(0, 239) + "…";
+    }
+
+    private static String iso(long millis) {
+        return Instant.ofEpochMilli(millis).toString();
     }
 
     // ────────────────────────────── environment ──────────────────────────────
