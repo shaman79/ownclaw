@@ -186,6 +186,101 @@ class AgentContextArtifactsTest {
         assertTrue(ctx.claimArtifact(3), "but a step after it still reports its own");
     }
 
+    // ── a task holding a file ──
+
+    private static final List<String> CSV_WHY = List.of("uploaded file", "text/csv, 412 bytes");
+    private static final List<String> PDF_WHY =
+            List.of("uploaded file", "application/pdf, 84211 bytes, not text or too large");
+
+    @Test
+    @DisplayName("on a file task every result is PRIVATE and unindexed, so its descriptor shows no keys")
+    void fileTaskResultsArePrivateAndUnindexed() {
+        var ctx = task("summarise this statement");
+        ctx.addFile("f1", "date,amount\n2026-09-01,-1200\n", CSV_WHY);
+
+        // No credentials, no reference: the skill reached the file through _attached_files, or
+        // by opening the uploads directory itself. Nothing in the call says so.
+        var d = ctx.decide(List.of(), List.of(), false);
+        assertEquals(Label.PRIVATE, d.label(),
+                "every skill run in this task is handed the file, so what it returns is the file's");
+        assertFalse(d.indexed());
+        assertEquals(List.of("given the file {{1}}"), d.why(), "by handle, never by name");
+
+        // A statement parser's result: its key names and booleans are the statement.
+        String parsed = "{\"ok\": true, \"iban_CZ6508000000192000145399\": \"x\", "
+                + "\"closing_balance\": 41200, \"overdrawn\": false}";
+        String shown = add(ctx, "statement_parser", parsed, d).describe();
+        for (String leaked : List.of("iban", "CZ65", "closing_balance", "overdrawn", "ok=", "use:")) {
+            assertFalse(shown.contains(leaked), leaked + " in the descriptor: " + shown);
+        }
+        assertTrue(shown.startsWith("{{2}} statement_parser ✓ — PRIVATE (given the file {{1}})"), shown);
+    }
+
+    @Test
+    @DisplayName("on a file task, a result that references the file is unindexed too")
+    void referenceToAFileIsUnindexed() {
+        var ctx = task("summarise this statement");
+        var file = ctx.addFile("f1", "date,amount\n2026-09-01,-1200\n", CSV_WHY);
+        assertTrue(file.isPrivate() && file.indexed(), "the upload's own text is in the canary");
+
+        var d = ctx.decide(List.of(), List.of(file), false);
+        assertEquals(Label.PRIVATE, d.label());
+        assertEquals(List.of("references {{1}}"), d.why());
+        assertFalse(d.indexed(),
+                "the file is indexed, so without the file rule this result would be too -- and "
+                        + "its descriptor would list the parser's key names");
+    }
+
+    @Test
+    @DisplayName("on a file task, a credentialed result keeps its indexed, full descriptor")
+    void credentialsOnAFileTaskKeepTheirDescriptor() {
+        var ctx = task("email this statement to my accountant");
+        ctx.addFile("f1", "", PDF_WHY);
+
+        var d = ctx.decide(List.of("SMTP_PASS"), List.of(), false);
+        assertEquals(Label.PRIVATE, d.label());
+        assertEquals(List.of("credentials (1)"), d.why());
+        assertTrue(d.indexed(),
+                "its field names are the skill's schema, and the cloud needs them to forward "
+                        + "{{N.body_text}}");
+    }
+
+    @Test
+    @DisplayName("a task without a file is labelled exactly as before")
+    void noFileNoChange() {
+        var ctx = task("fetch the menu");
+        var plain = ctx.decide(List.of(), List.of(), false);
+        assertEquals(Label.PUBLIC, plain.label());
+        assertEquals(List.of(), plain.why());
+
+        var tainted = ctx.decide(List.of(), List.of(), true);
+        assertEquals(Label.PRIVATE, tainted.label());
+        assertEquals(List.of("after private data in this delegation"), tainted.why());
+        assertFalse(tainted.indexed());
+
+        var creds = ctx.decide(List.of("IMAP_PASS"), List.of(), false);
+        assertEquals(Label.PRIVATE, creds.label());
+        assertTrue(creds.indexed());
+    }
+
+    @Test
+    @DisplayName("the ids a skill is handed are the files that were registered, and nothing else")
+    void handedListIsTheRegisteredList() {
+        var ctx = task("compare these two");
+        assertEquals(List.of(), ctx.attachmentIds());
+        String csv = prose(400, 7);
+        ctx.addFile("f1", csv, CSV_WHY);
+        ctx.addFile("f2", "", PDF_WHY);
+
+        assertEquals(List.of("f1", "f2"), ctx.attachmentIds(),
+                "_attached_files and the file rule read one list, so they cannot drift apart");
+        assertEquals(2, ctx.files().size());
+        assertThrows(UnsupportedOperationException.class, () -> ctx.files().clear());
+        assertNotNull(ctx.privateIndex().firstHitIn("…" + csv.substring(100, 140) + "…"),
+                "a text upload's own bytes are in the canary");
+        assertEquals(List.of("given the files {{1}}, {{2}}"), ctx.decide(List.of(), List.of(), false).why());
+    }
+
     @Test
     @DisplayName("the egress context carries the task's identity, index, secrets and the predicate")
     void egressContext() {

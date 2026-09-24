@@ -125,9 +125,9 @@ public record Artifact(int n, String tool, Map<String, Object> written,
             // cloud holds, and the raw text is in the skill_usage row the owner reads.
             why.add("credentials (" + requiredCredentials.size() + ")");
         }
-        // An attachment is covered here too: an unattended one is recorded PRIVATE, and a call
-        // that pulls it in is PRIVATE by this clause. (A separate attachment rule could never
-        // fire -- files only arrive on attended chat, where they are deliberately PUBLIC.)
+        // Files are not weighed here. Every skill run in a task holding one is given it, whether
+        // or not the call references it, so the rule belongs to the task rather than to the
+        // call: AgentContext.decide applies it, on both paths.
         if (used != null) {
             for (Artifact a : used) {
                 if (a.isPrivate()) why.add("references " + a.handle());

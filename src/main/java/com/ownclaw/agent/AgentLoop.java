@@ -174,7 +174,8 @@ public class AgentLoop {
      *                         background run — which then stops inheriting the last chat row's
      *                         files and stops dropping that row from the prior context, both
      *                         of which the old index-0 guess did
-     * @param attachmentIds    the files sent with this turn; registered as PRIVATE artifacts
+     * @param attachmentIds    the files sent with this turn; each one this user owns is
+     *                         registered PRIVATE, and every result of the task is PRIVATE with it
      */
     public AgentResult executeFull(String userId, String message, boolean unattended,
                                    String currentMessageId, List<String> attachmentIds) {
@@ -184,7 +185,7 @@ public class AgentLoop {
 
         // Load conversation history so the LLM sees prior exchanges -- a chat task only.
         loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage);
-        registerAttachments(context, attachmentIds);
+        registerAttachments(context, attachmentIds, fileStorage, eventLog);
 
         // Recall relevant past experiences to enrich context
         try {
@@ -270,39 +271,42 @@ public class AgentLoop {
     }
 
     /**
-     * The files sent with this turn become PRIVATE artifacts: in the canary index, so the cloud
-     * cannot receive their bytes by any route, and named by handle so a delegation can hand one
-     * to a skill without the cloud reading it.
+     * The files sent with this turn, each checked to be this user's, become the task's files:
+     * PRIVATE artifacts, and the list every skill is handed as {@code _attached_files}.
+     * <p>
+     * That list is also what {@link AgentContext#decide} reads to make every result of the task
+     * PRIVATE, so what a skill is given and what is labelled are one list. An id that is missing
+     * or another user's file is skipped, and so never handed to a skill: the ids come from the
+     * browser, and before this check any id sent was registered and handed on, whoever owned
+     * the file. A text upload's bytes go into the canary's index; a file that is not text has
+     * none, and the label is its guard. Static, so a test can run it against a database.
      */
-    private void registerAttachments(AgentContext context, List<String> attachmentIds) {
+    static void registerAttachments(AgentContext context, List<String> attachmentIds,
+                                    FileStorageService fileStorage, EventLogService eventLog) {
         List<String> ids = attachmentIds == null ? List.of() : attachmentIds;
-        context.setAttachmentIds(ids);
         for (String id : ids) {
             try {
                 Map<String, Object> info = fileStorage.getFileInfo(id);
-                if (info == null) continue;
+                if (info == null || !context.userId().equals(info.get("user_id"))) {
+                    log.warn("Task {}: attachment {} is not a file of this user; not registered.",
+                            context.taskId(), id);
+                    continue;
+                }
                 String name = String.valueOf(info.get("original_name"));
                 String ct = String.valueOf(info.get("content_type"));
                 Object size = info.get("size_bytes");
                 String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
-                var why = new ArrayList<String>(List.of("attachment"));
-                why.add(ct + ", " + size + " bytes" + (text == null ? ", not text or too large" : ""));
-                // PRIVATE only when nobody is watching. On attended chat the owner uploaded the
-                // file to this conversation and is waiting for an answer about it; labelling it
-                // private there means the cloud can never read it, the delegation's summary is
-                // withheld, and "summarise this" returns nothing by any path — which is a
-                // capability this slice was not meant to remove. Later-turn inlining stays gone
-                // either way, and a scheduled run still never inherits a chat file.
-                var label = context.isUnattended()
-                        ? com.ownclaw.privacy.Label.PRIVATE : com.ownclaw.privacy.Label.PUBLIC;
-                Artifact a = context.addArtifact("attachment:" + name, Map.of("fileId", id),
-                        Map.of("fileId", id), text == null ? "" : text, true,
-                        new Artifact.Decision(label, why));
+                // The type and the size, never the name: a statement's file name carries its
+                // account number, and the why is part of every descriptor the cloud reads.
+                var why = List.of("uploaded file",
+                        ct + ", " + size + " bytes" + (text == null ? ", not text or too large" : ""));
+                Artifact a = context.addFile(id, text, why);
                 // A row per file, metadata only. No step ever names an attachment, so without
                 // this nothing recorded that a task had one -- the task page could not show the
-                // file, its label, or whether it was withheld.
+                // file, its label, or whether it was withheld. The name goes into this local row,
+                // for the task page, and not into the artifact.
                 eventLog.log(context.userId(), context.taskId(), "attachment", "info",
-                        "attachment " + label, JSON.writeValueAsString(attachmentDetails(a)), 0);
+                        "attachment " + a.label(), JSON.writeValueAsString(attachmentDetails(a, name)), 0);
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
@@ -369,16 +373,15 @@ public class AgentLoop {
                     if (msgId != null) {
                         List<Map<String, Object>> attachments = fileStorage.getMessageAttachmentDetails(msgId);
                         for (var att : attachments) {
-                            String fileName = (String) att.get("original_name");
-                            String fileId = (String) att.get("id");
                             String ct = (String) att.get("content_type");
-                            // Never inlined. A file is PRIVATE: its bytes went to the cloud on
-                            // every later task of the session, up to 100 KB each, for as long as
-                            // the row stayed in the window. A skill reads it on the turn it was
-                            // sent; the cloud sees that it exists.
-                            sb.append("[Attached file: ").append(fileName)
-                              .append(" (").append(ct).append(", ").append(att.get("size_bytes"))
-                              .append(" bytes) — PRIVATE; skills read it on the turn it was sent]\n");
+                            // Never inlined, and not named. A file is PRIVATE: its bytes went to
+                            // the cloud on every later task of the session, up to 100 KB each, for
+                            // as long as the row stayed in the window; and its name can carry what
+                            // it holds -- a statement's account number. Skills are handed it only
+                            // on the turn it was sent, so this task cannot read it.
+                            sb.append("[A file was attached here (").append(ct).append(", ")
+                              .append(att.get("size_bytes")).append(" bytes). It is private and not ")
+                              .append("available to this task; the user can attach it again.]\n");
                         }
                     }
                 }
@@ -2038,6 +2041,9 @@ public class AgentLoop {
         sys.append("Always `def run(params):` — never keyword args. Use `params.get('key')`.\n");
         sys.append("```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text}\n```\n");
         sys.append("Local env, full access. Credentials as env vars. system_packages on PATH.\n");
+        sys.append("Files the user sent arrive as params['_attached_files']: a list of {'id','name',"
+                + "'content_type','path','container_path'}. Open 'path'; inside a container open "
+                + "'container_path'.\n");
         sys.append("Output: ```python fence + ```requirements fence.\n\n");
         sys.append("SELF-CHECK before outputting:\n");
         sys.append("1. All strings/f-strings properly closed (watch triple-quotes and nested quotes)\n");
@@ -2408,11 +2414,15 @@ public class AgentLoop {
         return text.substring(0, 200) + "\n…\n" + text.substring(text.length() - 200);
     }
 
-    /** An attachment's row: what it is and how it is labelled -- never its text. */
-    static Map<String, Object> attachmentDetails(Artifact a) {
+    /**
+     * An attachment's row: what it is and how it is labelled -- never its text. The name is
+     * here for the task page, which is the owner's; the artifact itself does not carry it.
+     */
+    static Map<String, Object> attachmentDetails(Artifact a, String name) {
         var d = new LinkedHashMap<String, Object>();
         d.put("artifact", a.handle());
         d.put("tool", a.tool());
+        d.put("name", name);
         d.put("label", a.label().name());
         d.put("chars", a.output().length());
         d.put("indexed", a.indexed());

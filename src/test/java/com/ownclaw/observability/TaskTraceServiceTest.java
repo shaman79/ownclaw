@@ -118,11 +118,11 @@ class TaskTraceServiceTest {
     @DisplayName("the check line counts only later requests, and only for what it could look for")
     void canaryLines() {
         row("egress", egress("SENT", 1, 1, 0, null));            // before the file: not counted
-        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment:statement.csv\",\"label\":\"PRIVATE\","
+        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.csv\",\"label\":\"PRIVATE\","
                 + "\"chars\":5000,\"indexed\":true,\"why\":[\"attachment\"]}");
-        row("attachment", "{\"artifact\":\"{{2}}\",\"tool\":\"attachment:scan.pdf\",\"label\":\"PRIVATE\","
+        row("attachment", "{\"artifact\":\"{{2}}\",\"tool\":\"attachment\",\"name\":\"scan.pdf\",\"label\":\"PRIVATE\","
                 + "\"chars\":0,\"indexed\":true,\"why\":[\"attachment\"]}");
-        row("attachment", "{\"artifact\":\"{{3}}\",\"tool\":\"attachment:x.txt\",\"label\":\"PRIVATE\","
+        row("attachment", "{\"artifact\":\"{{3}}\",\"tool\":\"attachment\",\"name\":\"x.txt\",\"label\":\"PRIVATE\","
                 + "\"chars\":900,\"indexed\":false,\"why\":[\"after private data in this delegation\"]}");
         for (int i = 0; i < 3; i++) row("egress", egress("SENT", 1, 1, 0, null));
         row("egress", egress("REFUSED", 0, 0, 0, "vault:SMTP_PASS survived scrubbing"));

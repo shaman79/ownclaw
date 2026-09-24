@@ -1249,6 +1249,38 @@ public class ThinkingEngine {
         sb.append("## Task\n");
         sb.append(context.originalMessage());
 
+        String files = filesSection(context);
+        if (!files.isEmpty()) sb.append("\n\n").append(files);
+
+        return sb.toString();
+    }
+
+    /**
+     * The files sent with this message, as the cloud may know them: a handle, a type and a size.
+     * <p>
+     * Facts, not a rule. The guard is {@link AgentContext#decide}, which makes every result of a
+     * task holding a file PRIVATE whatever the cloud does; this says so, so that it plans for a
+     * result it will not read instead of asking for one and getting a description back. Built
+     * from the handle and the type-and-size line only -- never the name, which can itself be what
+     * the file holds. In the user message, so the cached system prompt and tools stay the same.
+     */
+    static String filesSection(AgentContext context) {
+        List<Artifact> files = context.files();
+        if (files.isEmpty()) return "";
+        var sb = new StringBuilder("## Files sent with this message\n");
+        for (Artifact f : files) {
+            sb.append("- ").append(f.handle());
+            if (f.why().size() > 1) sb.append(": ").append(f.why().get(1));
+            sb.append('\n');
+        }
+        sb.append("These files are private: you are not shown their names or their contents. ")
+          .append("Every skill run in this task is given them as params._attached_files, a list of ")
+          .append("{id, name, content_type, path, container_path}, so every result of this task is ")
+          .append("private too and reaches you only as a description. Only the local model reads ")
+          .append("private results. To answer from a file, delegate and name the skill that reads it ")
+          .append("(if none does, skill_create one that reads params._attached_files). The ")
+          .append("delegation's answer comes back as a handle; make that handle the whole of ")
+          .append("respond's message and its text is filled in on this machine for the user.\n");
         return sb.toString();
     }
 

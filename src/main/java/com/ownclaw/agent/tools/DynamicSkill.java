@@ -292,8 +292,8 @@ public class DynamicSkill implements Tool {
             // Serialize input parameters as JSON for stdin.
             // If the current message has file attachments, inject their paths so the skill can access them.
             Map<String, Object> effectiveParams = params != null ? new HashMap<>(params) : new HashMap<>();
+            var attachedFiles = new java.util.ArrayList<Map<String, String>>();
             if (context.attachmentIds() != null && !context.attachmentIds().isEmpty()) {
-                var attachedFiles = new java.util.ArrayList<Map<String, String>>();
                 for (String fileId : context.attachmentIds()) {
                     if (fileStorage != null) {
                         var info = fileStorage.getFileInfo(fileId);
@@ -364,12 +364,9 @@ public class DynamicSkill implements Tool {
                 containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
                         context.progressCallback());
                 usedContainer = true;
-                // Mount uploads directory so attached files are accessible inside the container
-                Map<String, String> extraVolumes = null;
-                if (fileStorage != null && context.attachmentIds() != null && !context.attachmentIds().isEmpty()) {
-                    extraVolumes = Map.of(
-                            fileStorage.getUploadsDir().toAbsolutePath().toString(), "/uploads");
-                }
+                // Mount the files this task was given, each on its own, read-only
+                Map<String, String> extraVolumes = attachedFiles.isEmpty()
+                        ? null : containerMounts(attachedFiles);
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec,
@@ -448,6 +445,19 @@ public class DynamicSkill implements Tool {
                 try { Files.deleteIfExists(runnerScript); } catch (IOException ignored) {}
             }
         }
+    }
+
+    /**
+     * One mount per file the skill was handed, at the {@code container_path} it was told.
+     * <p>
+     * The whole uploads directory used to be mounted, and it holds every file every user has
+     * sent: a skill handed one statement could read all of them. Now the container sees exactly
+     * the files in {@code _attached_files}, the same list the task's label is decided by.
+     */
+    static Map<String, String> containerMounts(List<Map<String, String>> attached) {
+        var mounts = new java.util.LinkedHashMap<String, String>();
+        for (var f : attached) mounts.put(f.get("path"), f.get("container_path"));
+        return mounts;
     }
 
     /**

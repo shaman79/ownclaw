@@ -45,15 +45,13 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("an unattended attachment is covered by reference, not by a separate rule")
-    void attachmentsAreCoveredByTheReferenceClause() {
-        // There was a taskHasAttachments flag here. It could not fire on any path: files arrive
-        // only through attended chat, and an attended attachment artifact is deliberately PUBLIC
-        // so "summarise this" still works. What covers the unattended case is this — the
-        // attachment artifact is PRIVATE where it is recorded, and anything referencing it is
-        // PRIVATE because it is derived from it.
-        var attachment = new Artifact(1, "attachment:statement.csv", Map.of(), Map.of(),
-                "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("attachment"));
+    @DisplayName("a call that references a file is PRIVATE by the reference clause, and says which")
+    void referenceToAFileMakesItPrivate() {
+        // labelFor weighs the call's own facts only. That a task holds a file at all is weighed
+        // in AgentContext.decide, because every skill run in such a task is handed it whether or
+        // not it references it; this is the call's own fact, and it names the handle it pulled.
+        var attachment = new Artifact(1, "attachment", Map.of(), Map.of(),
+                "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("uploaded file"));
         var used = References.resolve(Map.of("text", "{{1}}"), List.of(attachment)).used();
         var d = Artifact.labelFor(List.of(), used);
         assertEquals(Label.PRIVATE, d.label());

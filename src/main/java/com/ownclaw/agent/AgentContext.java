@@ -50,8 +50,11 @@ public class AgentContext {
     private int localTokens;
     private int cloudTokens;
 
-    /** File attachment IDs associated with the current user message. */
-    private List<String> attachmentIds = List.of();
+    /**
+     * The files sent with this message, as registered: each one this user's, each a PRIVATE
+     * artifact. See {@link #addFile}.
+     */
+    private final List<Artifact> files = new java.util.ArrayList<>();
 
     // ── the task's results, and what may be said about them ──
 
@@ -179,6 +182,38 @@ public class AgentContext {
 
     // ── File attachments ──
 
+    /**
+     * Register a file sent with this message: a PRIVATE artifact, and one of the task's files.
+     * <p>
+     * PRIVATE whoever is watching: a file sent to this assistant is not a file sent to the
+     * cloud, and a statement or a contract is exactly what should not go there. The text of a
+     * text upload is indexed for the canary; a file that is not text has none, and
+     * {@link #decide} is its guard.
+     */
+    public synchronized Artifact addFile(String fileId, String text, List<String> why) {
+        Artifact a = addArtifact("attachment", Map.of("fileId", fileId), Map.of("fileId", fileId),
+                text == null ? "" : text, true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE, why));
+        files.add(a);
+        return a;
+    }
+
+    /** The files registered for this task, in order — a read-only view. */
+    public List<Artifact> files() {
+        return java.util.Collections.unmodifiableList(files);
+    }
+
+    /**
+     * The ids of the registered files: what every skill is handed as {@code _attached_files}.
+     * <p>
+     * Derived from {@link #files()} rather than set beside it, so the list a skill is given and
+     * the list {@link #decide} labels by are one list and cannot drift apart. An id that was
+     * not registered -- missing, or another user's file -- is never handed to a skill.
+     */
+    public List<String> attachmentIds() {
+        return files.stream().map(f -> String.valueOf(f.written().get("fileId"))).toList();
+    }
+
     // ── artifacts ──
 
     /**
@@ -208,21 +243,41 @@ public class AgentContext {
      * typed from then on can carry what it read. Such a result is not indexed for the canary, and
      * neither is one that is PRIVATE only because it pulled in such a result: its bytes are the
      * same public page one hop on, and indexing them is what made the cloud's own later fetch of
-     * that page trip the canary.
+     * that page trip the canary. In a task holding a file every result is PRIVATE and, unless it
+     * needed credentials, unindexed -- so the cloud sees each as a handle, a kind and a size.
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
                                     boolean tainted) {
         Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
-        if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
-            return tainted
-                    ? new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                            List.of("after private data in this delegation"), false)
-                    : own;
-        }
         boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
-        boolean onlyUnindexedSources = !credentials && used != null
-                && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed);
-        return onlyUnindexedSources ? new Artifact.Decision(own.label(), own.why(), false) : own;
+        if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
+            if (tainted) {
+                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of("after private data in this delegation"), false);
+            }
+            // Every skill run in a task holding a file is handed it, and can reach it without a
+            // reference -- through _attached_files, or by opening the uploads directory itself --
+            // so what it returns is the file's as far as anyone can tell.
+            if (!files.isEmpty()) {
+                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of(givenTheFiles()), false);
+            }
+            return own;
+        }
+        // Not indexed on a file task, credentials apart: text read out of a PDF is nothing the
+        // canary holds, so indexing it guards nothing -- and an indexed result's descriptor shows
+        // its JSON key names and booleans, which for a statement parser are the statement. A
+        // credentialed result keeps both: its field names are the skill's schema, and the cloud
+        // needs them to forward {{N.body_text}}.
+        boolean unindexed = !credentials && (!files.isEmpty() || (used != null
+                && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed)));
+        return unindexed ? new Artifact.Decision(own.label(), own.why(), false) : own;
+    }
+
+    /** "given the file {{1}}" -- the reason, by handle, never by name. */
+    private String givenTheFiles() {
+        return (files.size() == 1 ? "given the file " : "given the files ")
+                + String.join(", ", files.stream().map(Artifact::handle).toList());
     }
 
     /**
@@ -342,7 +397,4 @@ public class AgentContext {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
                 secretValues, this::isAllowedLeak);
     }
-
-    public List<String> attachmentIds() { return attachmentIds; }
-    public void setAttachmentIds(List<String> ids) { this.attachmentIds = ids != null ? ids : List.of(); }
 }

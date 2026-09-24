@@ -134,10 +134,11 @@ class StepOutcomeTest {
     @DisplayName("an attachment's row names it and its label, never its text")
     void attachmentRowHasNoText() {
         String marker = "IBAN-CZ65-0800-0000-1920-0014-5399-MARKER";
-        var a = new Artifact(1, "attachment:statement.csv", Map.of(), Map.of(),
-                "acct," + marker + ",41200", true, Label.PRIVATE, List.of("attachment"), true);
-        var d = AgentLoop.attachmentDetails(a);
+        var a = new Artifact(1, "attachment", Map.of(), Map.of(),
+                "acct," + marker + ",41200", true, Label.PRIVATE, List.of("uploaded file"), true);
+        var d = AgentLoop.attachmentDetails(a, "statement.csv");
         assertEquals("{{1}}", d.get("artifact"));
+        assertEquals("statement.csv", d.get("name"), "the owner's task page shows which file");
         assertEquals("PRIVATE", d.get("label"));
         assertEquals(true, d.get("indexed"));
         assertFalse(String.valueOf(d).contains(marker));

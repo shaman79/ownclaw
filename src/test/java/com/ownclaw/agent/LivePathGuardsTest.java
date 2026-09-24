@@ -33,30 +33,6 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("no labelFor call weighs attachments — the rule was unreachable and is gone")
-    void noCallSiteWeighsAttachments() throws IOException {
-        // The previous version of this test asserted the opposite, and cemented a condition
-        // that was false on every path: `isUnattended() && !attachmentIds().isEmpty()` where
-        // attachments only ever arrive on attended chat. It would have failed the honest repair.
-        for (String cls : new String[]{"com.ownclaw.agent.AgentLoop",
-                                       "com.ownclaw.agent.LocalExecutor"}) {
-            String s = read(cls);
-            int at = 0;
-            while ((at = s.indexOf("Artifact.labelFor(", at)) >= 0) {
-                int end = s.indexOf(");", at);
-                assertTrue(end > at, cls + ": labelFor call is not terminated");
-                String call = s.substring(at, end);
-                at = end;
-                assertFalse(call.contains("attachmentIds()"),
-                        cls + ": a labelFor call weighs attachments again. The attachment "
-                                + "artifact is labelled where it is recorded and the reference "
-                                + "clause carries it from there; a second rule here either "
-                                + "cannot fire or takes \"summarise this file\" away:\n" + call);
-            }
-        }
-    }
-
-    @Test
     @DisplayName("the cloud path resolves once, refuses and returns before running, and labels from what moved")
     void theCloudPathUsesTheOneResolver() throws IOException {
         // The delegation's side of this is driven for real in DelegationBehaviourTest. AgentLoop
@@ -91,9 +67,9 @@ class LivePathGuardsTest {
     @DisplayName("attachments are claimed where they are registered, by no step")
     void attachmentsAreClaimedAtRegistration() throws IOException {
         String s = read("com.ownclaw.agent.AgentLoop");
-        int start = s.indexOf("private void registerAttachments(");
+        int start = s.indexOf("static void registerAttachments(");
         assertTrue(start > 0, "registerAttachments was renamed");
-        int end = s.indexOf("\n    private ", start + 10);
+        int end = s.indexOf("\n    }\n", start);
         String body = end > start ? s.substring(start, end) : s.substring(start);
         assertTrue(body.contains("claimAllArtifacts()"),
                 "an attachment artifact is recorded by no step, so the mark was still 0 when "
