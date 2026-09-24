@@ -37,7 +37,7 @@ public class ThinkingEngine {
      * on this marker to create two system content blocks — only the static prefix gets
      * cache_control, so the Anthropic prompt cache actually hits across requests.
      */
-    static final String CACHE_BOUNDARY_MARKER = "\n<!-- CACHE_BOUNDARY -->\n";
+    static final String CACHE_BOUNDARY_MARKER = com.ownclaw.llm.LlmMessage.CACHE_BOUNDARY;
 
     /**
      * Ceiling on a single tool output sent to the cloud at full detail.
@@ -360,7 +360,7 @@ public class ThinkingEngine {
             // the whole first message.
             LlmMessage lastMsg = messages.get(messages.size() - 1);
             messages.set(messages.size() - 1, LlmMessage.user(
-                    lastMsg.content() + CACHE_BOUNDARY_MARKER + "---\n" + buildDynamicContext(context, mode)));
+                    lastMsg.content() + CACHE_BOUNDARY_MARKER + "\n\n---\n" + buildDynamicContext(context, mode)));
             return;
         }
 

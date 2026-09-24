@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class AnthropicCacheTest {
 
-    static final String MARK = AnthropicProvider.CACHE_BOUNDARY;
+    static final String MARK = LlmMessage.CACHE_BOUNDARY;
     private final AnthropicProvider provider = new AnthropicProvider(new OwnClawConfig(), new ObjectMapper());
 
     private JsonNode body(List<LlmMessage> messages, boolean tools) {
@@ -41,7 +41,8 @@ class AnthropicCacheTest {
         assertTrue(first.isArray(), "two blocks: " + first);
         assertEquals(task, first.get(0).path("text").asText());
         assertEquals("ephemeral", first.get(0).path("cache_control").path("type").asText());
-        assertTrue(first.get(1).path("text").asText().startsWith("---\n## Environment"));
+        assertTrue(first.get(1).path("text").asText().startsWith("---\n## Environment")
+                || first.get(1).path("text").asText().startsWith("\n\n---\n## Environment"));
         assertTrue(first.get(1).path("cache_control").isMissingNode(), "what changes each step is not cached");
         assertFalse(step0.toString().contains("CACHE_BOUNDARY"), "the marker is never sent");
 
@@ -52,13 +53,25 @@ class AnthropicCacheTest {
     }
 
     @Test
-    @DisplayName("a message that is already two blocks is left alone by the sliding breakpoints")
-    void splitMessagesKeepTheirText() {
-        // Not an order the engine produces today; the guard is what keeps it from wiping the task.
-        var b = body(List.of(LlmMessage.user("task" + MARK + "dyn"), LlmMessage.assistant("action")), true);
-        JsonNode first = b.path("messages").get(0).path("content");
-        assertEquals("task", first.get(0).path("text").asText(), String.valueOf(first));
-        assertEquals("dyn", first.get(1).path("text").asText());
+    @DisplayName("the marker inside a page or the chat earns no cache mark: only a task's first call is split")
+    void markersElsewhereAreJustText() {
+        // It is documented in this public repo, so a fetched page can carry it on purpose.
+        for (int turns = 1; turns < 6; turns++) {
+            var messages = new ArrayList<LlmMessage>();
+            messages.add(LlmMessage.system("SYSTEM"));
+            messages.add(LlmMessage.user("chat" + MARK + "history"));
+            for (int i = 0; i < turns; i++) {
+                messages.add(LlmMessage.assistant("action " + i));
+                messages.add(LlmMessage.user("page" + MARK + "text " + i));
+            }
+            String json = body(messages, true).toString();
+            assertTrue(json.split("cache_control", -1).length - 1 <= 4, turns + " turns: " + json);
+        }
+        var chatHasMark = body(List.of(LlmMessage.user("chat" + MARK + "history" + MARK + "dyn")), true);
+        assertEquals("chat" + MARK + "history", chatHasMark.path("messages").get(0).path("content").get(0).path("text").asText(),
+                "split at the engine's marker, the last one, so the cached block is the whole task");
+        var endsWithMark = body(List.of(LlmMessage.user("task" + MARK)), true);
+        assertFalse(endsWithMark.path("messages").get(0).path("content").isArray(), "no empty second block");
     }
 
     @Test

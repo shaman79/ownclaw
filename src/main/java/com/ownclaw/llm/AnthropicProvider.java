@@ -57,12 +57,6 @@ class AnthropicProvider implements LlmProvider {
             Pattern.compile("claude-([a-z]+)-(\\d+)(?:-(\\d{1,2})(?!\\d))?");
 
     private final OwnClawConfig.Mentor config;
-    /**
-     * Where a prompt's cached prefix ends: in the system prompt, and in the first message of a
-     * task's first call (see ThinkingEngine.CACHE_BOUNDARY_MARKER).
-     */
-    static final String CACHE_BOUNDARY = "\n<!-- CACHE_BOUNDARY -->\n";
-
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
@@ -189,6 +183,7 @@ class AnthropicProvider implements LlmProvider {
         // We use structured content blocks with cache_control to enable prompt caching.
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
+        boolean firstCall = messages.stream().filter(m -> m.role() != LlmMessage.Role.SYSTEM).count() == 1;
         for (LlmMessage msg : messages) {
             if (msg.role() == LlmMessage.Role.SYSTEM) {
                 systemPrompt = (systemPrompt == null)
@@ -198,8 +193,11 @@ class AnthropicProvider implements LlmProvider {
                 ObjectNode m = msgs.addObject();
                 m.put("role", msg.role().apiValue());
                 String content = msg.content();
-                int cut = content == null ? -1 : content.indexOf(CACHE_BOUNDARY);
-                if (cut > 0) {
+                // Only on a task's first call -- the one message the engine marks -- and at the
+                // last marker: the same text inside a fetched page or the chat would otherwise earn
+                // a fifth cache mark, and the API refuses a request with more than four.
+                int cut = firstCall && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
+                if (cut > 0 && !content.substring(cut + LlmMessage.CACHE_BOUNDARY.length()).isBlank()) {
                     // The task, then what changes on every step, as two blocks with the cache
                     // mark on the first. On the next step the task is the whole first message,
                     // byte for byte, so it is read from the cache instead of paid for again --
@@ -211,7 +209,7 @@ class AnthropicProvider implements LlmProvider {
                     stable.putObject("cache_control").put("type", "ephemeral");
                     ObjectNode rest = blocks.addObject();
                     rest.put("type", "text");
-                    rest.put("text", content.substring(cut + CACHE_BOUNDARY.length()));
+                    rest.put("text", content.substring(cut + LlmMessage.CACHE_BOUNDARY.length()));
                 } else {
                     m.put("content", content);
                 }
@@ -222,7 +220,7 @@ class AnthropicProvider implements LlmProvider {
             // fully static (no dynamic content) — the no-marker path caches it as
             // one block. The marker path is kept for backward compatibility.
             ArrayNode systemArray = body.putArray("system");
-            String marker = CACHE_BOUNDARY;
+            String marker = LlmMessage.CACHE_BOUNDARY;
             int markerIdx = systemPrompt.indexOf(marker);
             if (markerIdx > 0) {
                 // Static part — cached across requests
@@ -299,8 +297,6 @@ class AnthropicProvider implements LlmProvider {
      */
     private void setMessageCacheBreakpoint(ArrayNode msgs, int index) {
         ObjectNode msg = (ObjectNode) msgs.get(index);
-        // Already blocks, with its own mark: a second would exceed the four the API allows.
-        if (msg.path("content").isArray()) return;
         String rawContent = msg.path("content").asText("");
         msg.remove("content");
         ArrayNode contentArray = msg.putArray("content");
