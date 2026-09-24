@@ -31,7 +31,8 @@ class ChatContextTest {
         jdbc.execute("""
             CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
                 role TEXT NOT NULL, content TEXT NOT NULL, compressed_content TEXT, tokens_used INTEGER DEFAULT 0,
-                timestamp TEXT DEFAULT (datetime('now')), metadata TEXT, compressed INTEGER NOT NULL DEFAULT 0)""");
+                timestamp TEXT DEFAULT (datetime('now')), metadata TEXT, compressed INTEGER NOT NULL DEFAULT 0,
+                private_content TEXT)""");
         jdbc.execute("""
             CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'New Chat',
                 preview TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
@@ -72,13 +73,15 @@ class ChatContextTest {
     }
 
     @Test
-    @DisplayName("a later turn is told a file was attached, by type and size, never by name")
+    @DisplayName("a later turn is told a file was attached and an answer was private, never what either held")
     void laterTurnNamesNoFile(@TempDir Path tmp) throws Exception {
         var db = db(tmp);
         String session = db.conversations().createSession("u1", "Statements");
         String pdf = db.files().store("u1", "vypis_123456789.pdf", "application/pdf",
                 new ByteArrayInputStream("%PDF-1.7 binary".getBytes(StandardCharsets.UTF_8)));
         db.conversations().saveMessage("u1", session, "user", "summarise this statement", List.of(pdf));
+        db.conversations().saveMessage("u1", session, "assistant", AgentLoop.PRIVATE_NOTE, List.of(),
+                "a1b2c3d4", AgentLoop.PRIVATE_HEADER + "Closing balance SECRET-48213 CZK.");
         db.conversations().saveMessage("u1", session, "assistant", "Done.");
 
         var next = new AgentContext("u1", "t2", "and last month's?");
@@ -89,5 +92,8 @@ class ChatContextTest {
         assertFalse(summary.contains("vypis") || summary.contains("123456789"),
                 "a statement's file name carries its account number, and this goes to the cloud: "
                         + summary);
+        assertTrue(summary.contains("ASSISTANT: " + AgentLoop.PRIVATE_NOTE), summary);
+        assertFalse(summary.contains("SECRET"), "the private answer went into the next prompt: " + summary);
+        assertTrue(summary.contains("ASSISTANT: Done."), "a row with no private text is read as it was");
     }
 }

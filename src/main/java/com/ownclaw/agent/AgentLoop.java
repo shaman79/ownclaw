@@ -186,6 +186,17 @@ public class AgentLoop {
         // Load conversation history so the LLM sees prior exchanges -- a chat task only.
         loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage);
         registerAttachments(context, attachmentIds, fileStorage, eventLog);
+        AgentResult stopped = stopWithoutLocalModel(context, () -> {
+            LlmProvider local = llmRouter.local();
+            return local != null && local.isAvailable();
+        });
+        if (stopped != null) {
+            // Before any cloud call and with no episode: nothing was done, so there is nothing
+            // to remember, and the owner is told why in the result itself.
+            stopped = stopped.withTaskId(taskId);
+            emitResult(context, stopped);
+            return stopped;
+        }
 
         // Recall relevant past experiences to enrich context
         try {
@@ -427,6 +438,102 @@ public class AgentLoop {
      * having done nothing.
      */
     static final String ANSWERED_WITHOUT_WORKING = "Answered without doing the work";
+
+    /** Above a private answer on the owner's screen: who wrote it, and who never saw it. */
+    static final String PRIVATE_HEADER = "**Private — from this machine, not seen by the cloud:**\n\n";
+
+    /**
+     * What every reader but the owner's screen gets in place of a private answer. It holds no
+     * handle, so nothing that stores or forwards it can ever resolve it back to the text.
+     */
+    static final String PRIVATE_NOTE =
+            "[Private answer: kept on this machine and shown only in the web chat.]";
+
+    static final String LOCAL_DOWN_FOR_FILES = "I can't read your file right now. Files you send "
+            + "are read only by the local model on this machine, and it is not answering. Nothing "
+            + "was sent to the cloud. Send the file again when the local model is back.";
+
+    /**
+     * An answer as the cloud wrote it, and what it becomes.
+     *
+     * @param response  the cloud-safe text: history, memory, Telegram and the scheduler read it
+     * @param ownerText what the owner's own screen shows instead, or null when it is the same
+     * @param refusal   why it cannot be delivered, in words the cloud can act on; null when it can
+     */
+    record Answer(String response, String ownerText, String refusal) {}
+
+    /**
+     * Turn what the cloud wrote as its answer into what is delivered.
+     * <p>
+     * Through the same resolver as every tool argument, so the rules are the same ones: a
+     * reference counts only as the whole message, and one that cannot resolve is refused rather
+     * than sent as literal text. A whole PRIVATE handle is how the cloud gives the owner an
+     * answer it was never shown -- the local model's, from a file -- so its text is filled in
+     * here, on this machine, and kept apart as the owner's text; the response is a note that it
+     * exists. A handle with nothing in it is refused: a PDF's {{1}} is empty, and delivering it
+     * would be an empty answer.
+     * <p>
+     * On a task holding a file, the local model's answer reaches the owner even when the cloud
+     * does not place its handle -- "Done, see above" is a likely reply from a model that never
+     * saw the answer -- because relying on the cloud to remember is an instruction, and this is
+     * the one answer the task exists for.
+     */
+    static Answer answerFor(String written, AgentContext ctx) {
+        String text = written == null ? "" : written;
+        References.Resolved r = References.resolve(Map.of("message", text), ctx.artifacts());
+        if (!r.ok()) return new Answer(null, null, r.reason());
+
+        String response = text;
+        String ownerText = null;
+        Artifact placed = r.used().isEmpty() ? null : r.used().get(0);
+        if (placed != null) {
+            String value = String.valueOf(r.params().get("message"));
+            if (value.isBlank()) {
+                return new Answer(null, null, ArtifactRef.parse(text) + " has no text to show"
+                        + (ctx.files().contains(placed)
+                                ? " — a file that is not text has none. Delegate to read it, then "
+                                        + "give the user the delegation's answer."
+                                : "."));
+            }
+            if (placed.isPrivate()) {
+                response = PRIVATE_NOTE;
+                ownerText = PRIVATE_HEADER + value;
+            } else {
+                // The cloud was shown this text already; nothing here is new to it.
+                response = value;
+            }
+        }
+
+        if (!ctx.files().isEmpty()) {
+            Artifact said = null;
+            for (Artifact a : ctx.artifacts()) {
+                if ("local_answer".equals(a.tool())) said = a;
+            }
+            if (said != null && (placed == null || placed.n() != said.n())) {
+                ownerText = (ownerText != null ? ownerText : response)
+                        + "\n\n" + PRIVATE_HEADER + said.output();
+                if (!response.contains(PRIVATE_NOTE)) response = response + "\n\n" + PRIVATE_NOTE;
+            }
+        }
+        return new Answer(response, ownerText, null);
+    }
+
+    /**
+     * The result that ends a task holding a file when the local model is not answering, or null
+     * to go on.
+     * <p>
+     * Only the local model may read a file, so without it the task could only send the cloud
+     * descriptions of results it cannot use, and the owner would wait for an answer that cannot
+     * come. Probed only when there is a file: every other task goes on as before, without the
+     * cost of the probe.
+     */
+    static AgentResult stopWithoutLocalModel(AgentContext ctx,
+                                             java.util.function.BooleanSupplier localAvailable) {
+        if (ctx.files().isEmpty() || localAvailable.getAsBoolean()) return null;
+        log.warn("Task {}: a file was sent and the local model is not answering; stopping "
+                + "before any cloud call.", ctx.taskId());
+        return AgentResult.error(LOCAL_DOWN_FOR_FILES, ctx.trajectory(), ctx.elapsedMs());
+    }
 
     private AgentResult runLoop(AgentContext context) {
         int maxSteps = config.getTasks().getMaxPlanSteps();
@@ -723,11 +830,18 @@ public class AgentLoop {
                     consecutiveFallbacks = 0; // Reset on any successful action
                 }
 
+                Answer answer = answerFor(action.responseText(), context);
+                if (answer.refusal() != null) {
+                    recordAndEmitObservation(context, action, AgentObservation.failure(
+                            action.tool(), "Not delivered: " + answer.refusal(), 0), step + 1);
+                    context.markProgress();
+                    continue;
+                }
                 return AgentResult.completed(
-                        action.responseText(),
+                        answer.response(),
                         context.trajectory(),
                         context.elapsedMs()
-                );
+                ).withOwnerText(answer.ownerText());
             }
 
             if (action.isAskUser()) {
@@ -755,11 +869,18 @@ public class AgentLoop {
                     context.markProgress();
                     continue;
                 }
+                Answer question = answerFor(action.responseText(), context);
+                if (question.refusal() != null) {
+                    recordAndEmitObservation(context, action, AgentObservation.failure(
+                            action.tool(), "Not delivered: " + question.refusal(), 0), step + 1);
+                    context.markProgress();
+                    continue;
+                }
                 return AgentResult.needsInput(
-                        action.responseText(),
+                        question.response(),
                         context.trajectory(),
                         context.elapsedMs()
-                );
+                ).withOwnerText(question.ownerText());
             }
 
             // === SKILL MANAGEMENT (special actions — always available) ===
@@ -1653,10 +1774,7 @@ public class AgentLoop {
         // other way. Nothing is recorded until the task actually ends.
         if (result.awaitingUser()) return;
         try {
-            String summary = "Task: " + truncate(context.originalMessage(), 200) +
-                    "\nSteps: " + result.totalSteps() +
-                    "\nOutcome: " + result.terminationReason() +
-                    "\nResponse: " + truncate(result.response(), 500);
+            String summary = episodeSummary(context.originalMessage(), result);
 
             // Extract tool names used as tags
             List<String> tags = context.trajectory().turns().stream()
@@ -1675,6 +1793,17 @@ public class AgentLoop {
         } catch (Exception e) {
             log.debug("Failed to store episode for task {}: {}", context.taskId(), e.getMessage());
         }
+    }
+
+    /**
+     * The text an episode is remembered by. It is recalled into later cloud prompts as Past
+     * Experience, so it reads {@code response()}, never the owner's private text.
+     */
+    static String episodeSummary(String originalMessage, AgentResult result) {
+        return "Task: " + truncate(originalMessage, 200) +
+                "\nSteps: " + result.totalSteps() +
+                "\nOutcome: " + result.terminationReason() +
+                "\nResponse: " + truncate(result.response(), 500);
     }
 
     private void emitResult(AgentContext context, AgentResult result) {
@@ -1728,7 +1857,7 @@ public class AgentLoop {
         }
     }
 
-    private String truncate(String s, int maxLen) {
+    private static String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }

@@ -9,6 +9,10 @@ package com.ownclaw.agent;
  * @param totalSteps     number of action-observation cycles
  * @param totalDurationMs wall-clock time of the entire execution
  * @param terminationReason why the agent stopped (COMPLETED, CANCELLED, MAX_STEPS, TIMEOUT, ERROR)
+ * @param ownerText      what the owner's own screen shows in place of {@code response}, or null
+ *                       when that is the same text. Set only for an answer that holds private
+ *                       data: {@code response} is then a note that the answer exists, and it is
+ *                       what every other reader gets -- history, memory, Telegram, the scheduler.
  */
 public record AgentResult(
         boolean success,
@@ -17,12 +21,13 @@ public record AgentResult(
         int totalSteps,
         long totalDurationMs,
         TerminationReason terminationReason,
-        String taskId
+        String taskId,
+        String ownerText
 ) {
     /** Without an id — every factory below builds this shape and the loop stamps it after. */
     public AgentResult(boolean success, String response, AgentTrajectory trajectory,
                        int totalSteps, long totalDurationMs, TerminationReason terminationReason) {
-        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, null);
+        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, null, null);
     }
 
     public enum TerminationReason {
@@ -102,10 +107,30 @@ public record AgentResult(
         return taskId;
     }
 
-    /** Stamp the id of the task that produced this. */
+    /**
+     * Stamp the id of the task that produced this.
+     * <p>
+     * Carries {@code ownerText}: the loop stamps the id after the answer is made, so dropping it
+     * here would lose the owner's answer silently, with the note that it exists delivered in
+     * its place.
+     */
     public AgentResult withTaskId(String taskId) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId);
+                terminationReason, taskId, ownerText);
+    }
+
+    /** The same result, with the text only the owner's own screen shows. */
+    public AgentResult withOwnerText(String ownerText) {
+        return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
+                terminationReason, taskId, ownerText);
+    }
+
+    /**
+     * What the owner's screen shows: the private answer when there is one, otherwise the
+     * response. Only for that screen; anything that stores or forwards reads {@link #response}.
+     */
+    public String shown() {
+        return ownerText != null ? ownerText : response;
     }
 
     /** Whether the task stopped to ask the user something, rather than succeeding or failing. */

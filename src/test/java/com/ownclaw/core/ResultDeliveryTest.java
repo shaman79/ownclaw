@@ -4,9 +4,16 @@ import com.ownclaw.agent.AgentAction;
 import com.ownclaw.agent.AgentObservation;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
+import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.observability.ChatStatusEmitter;
+import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -47,6 +54,45 @@ class ResultDeliveryTest {
                 Map.of("n", 1, "tool", "daily_news_digest", "label", "PUBLIC", "chars", 3000))));
         assertTrue(line.contains("1 result, 0 withheld from the cloud"), line);
         assertFalse(line.contains("("), "nothing to name");
+    }
+
+    @Test
+    @DisplayName("a private answer is saved and sent beside the safe text, never as it")
+    void privateAnswerIsSavedAndEmittedSafely(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc, null);
+        var emitter = new ChatStatusEmitter();
+        var messages = new ArrayList<StatusMessage>();
+        var formatted = new ArrayList<String>();
+        emitter.subscribe("u1", "web", messages::add);
+        // What Telegram's subscriber sends: the formatted text, and nothing from the data.
+        emitter.subscribe("u1", "telegram", m -> formatted.add(m.formatted()));
+        String secret = "Closing balance 48,213.07 CZK";
+        var answer = AgentResult.completed("[Private answer: kept on this machine.]", new AgentTrajectory(), 1)
+                .withOwnerText("**Private:**\n\n" + secret);
+
+        // With a task id and without one: the two are emitted by different calls.
+        var delivery = new ResultDelivery(conversations, emitter);
+        delivery.deliver("u1", "Background task", answer.withTaskId("a1b2c3d4"));
+        delivery.deliver("u1", "Background task", answer);
+
+        var rows = jdbc.queryForList("SELECT content, private_content FROM conversations");
+        assertEquals(2, rows.size());
+        for (var row : rows) {
+            assertFalse(String.valueOf(row.get("content")).contains(secret), "content feeds later prompts");
+            assertTrue(String.valueOf(row.get("private_content")).contains(secret), "the owner's reload shows it");
+            assertTrue(String.valueOf(row.get("private_content")).startsWith("**Background task**"),
+                    "with the header that says what it answers");
+        }
+
+        assertEquals(2, messages.size());
+        for (StatusMessage m : messages) {
+            assertEquals(StatusMessage.Type.RESULT, m.type());
+            assertFalse(m.text().contains(secret), m.text());
+            assertTrue(String.valueOf(m.data().get("ownerText")).contains(secret), "for the web chat alone");
+        }
+        assertEquals(2, formatted.size());
+        assertTrue(formatted.stream().noneMatch(f -> f.contains(secret)), "Telegram is sent the safe text: " + formatted);
     }
 
     @Test

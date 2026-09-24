@@ -52,7 +52,9 @@ public class ResultDelivery {
         } else {
             header = label + " — did not finish (" + result.terminationReason() + ")";
         }
-        deliver(userId, header, result.response() + withheldLine(result), result.taskId());
+        String withheld = withheldLine(result);
+        deliver(userId, header, result.response() + withheld, result.taskId(),
+                result.ownerText() == null ? null : result.ownerText() + withheld);
     }
 
     /**
@@ -106,20 +108,37 @@ public class ResultDelivery {
      *               reload.
      */
     public void deliver(String userId, String header, String text, String taskId) {
+        deliver(userId, header, text, taskId, null);
+    }
+
+    /**
+     * @param ownerText what the owner's web chat shows in place of {@code text}, or null. Saved
+     *                  as the row's private text and sent only in the message's data, for the web
+     *                  chat to show; the message's text stays the safe one, and that is what
+     *                  Telegram formats and what history, search and later prompts read.
+     */
+    public void deliver(String userId, String header, String text, String taskId, String ownerText) {
         if (text == null || text.isBlank()) {
             // Nothing useful to show. Saying so beats an empty bubble, which reads like a bug.
             text = "(the task produced no output)";
         }
-        String message = header == null || header.isBlank() ? text : "**" + header + "**\n\n" + text;
+        String message = withHeader(header, text);
+        String owner = ownerText == null ? null : withHeader(header, ownerText);
 
         try {
             String sessionId = conversations.getCurrentSession(userId);
-            conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(), taskId);
+            conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(),
+                    taskId, owner);
         } catch (Exception e) {
             // Persisting is the more important half, but failing it must not also lose the push.
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
         }
-        if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message);
-        else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message);
+        java.util.Map<String, Object> data = owner == null ? null : java.util.Map.of("ownerText", owner);
+        if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message, data);
+        else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message, data);
+    }
+
+    private static String withHeader(String header, String text) {
+        return header == null || header.isBlank() ? text : "**" + header + "**\n\n" + text;
     }
 }

@@ -21,7 +21,7 @@ class ConversationTaskIdTest {
         jdbc.execute("""
             CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
                 role TEXT NOT NULL, content TEXT NOT NULL, compressed_content TEXT, tokens_used INTEGER DEFAULT 0,
-                timestamp TEXT DEFAULT (datetime('now')), metadata TEXT)""");
+                timestamp TEXT DEFAULT (datetime('now')), metadata TEXT, private_content TEXT)""");
         jdbc.execute("CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, updated_at TEXT, preview TEXT)");
         var conversations = new ConversationService(jdbc, null);
 

@@ -62,13 +62,25 @@ public class ConversationService {
      */
     public String saveMessage(String userId, String sessionId, String role, String content,
                               List<String> attachmentIds, String taskId) {
+        return saveMessage(userId, sessionId, role, content, attachmentIds, taskId, null);
+    }
+
+    /**
+     * @param content        the cloud-safe text. Everything that feeds a prompt reads this
+     *                       column: the recent messages, the compressor, search, the preview.
+     * @param privateContent what only the owner's chat shows in its place, or null. Read back by
+     *                       {@link #getSessionMessages} alone, so a reader added later gets the
+     *                       safe text unless it asks for this one by name.
+     */
+    public String saveMessage(String userId, String sessionId, String role, String content,
+                              List<String> attachmentIds, String taskId, String privateContent) {
         String messageId = UUID.randomUUID().toString();
         String metadata = taskId != null && taskId.matches("[0-9a-f]{8}")
                 ? "{\"taskId\":\"" + taskId + "\"}" : null;
         jdbc.update("""
-            INSERT INTO conversations (id, user_id, session_id, role, content, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """, messageId, userId, sessionId, role, content, metadata);
+            INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, messageId, userId, sessionId, role, content, metadata, privateContent);
 
         // Link file attachments to this message
         if (attachmentIds != null) {
@@ -175,11 +187,15 @@ public class ConversationService {
     }
 
     /**
-     * Get all messages in a session, chronological.
+     * Get all messages in a session, chronological -- for the owner's own chat, on reload.
+     * <p>
+     * The one reader of private_content: a private answer shows here as it did live, and
+     * nowhere else. A row without one, including every row from before the column, shows its
+     * content.
      */
     public List<Map<String, Object>> getSessionMessages(String userId, String sessionId) {
         return jdbc.queryForList("""
-            SELECT role, content, timestamp,
+            SELECT role, COALESCE(private_content, content) AS content, timestamp,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id
             FROM conversations
             WHERE user_id = ? AND session_id = ? AND role != 'status'

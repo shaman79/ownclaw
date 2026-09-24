@@ -579,7 +579,7 @@ public class ScheduledTaskService {
                         String agentTaskId = result.taskId();
                         if (result.success()) {
                             onTaskCompleted(taskId, userId, taskType, description,
-                                    result.response(), used, agentTaskId,
+                                    result.response(), result.ownerText(), used, agentTaskId,
                                     ResultDelivery.withheldLine(result));
                         } else if (result.terminationReason()
                                 == com.ownclaw.agent.AgentResult.TerminationReason.PRIVACY_BLOCKED) {
@@ -662,10 +662,15 @@ public class ScheduledTaskService {
      *                 AgentResult overload that computes this never ran for a scheduled task --
      *                 the line reached /bg runs only, and the morning digest, which is the run
      *                 with private results in it, said nothing.
+     * @param ownerText the owner's private answer, or null. Delivered beside the response and
+     *                  nowhere else: the run's record and last_result keep the response, as every
+     *                  reader but the owner's chat does -- ops and the schedule list read them,
+     *                  and last_result is shortened by a model.
      */
     private void onTaskCompleted(long taskId, String userId, String taskType,
-                                 String description, String response, String skillsUsed,
-                                 String agentTaskId, String withheld) {
+                                 String description, String response, String ownerText,
+                                 String skillsUsed, String agentTaskId, String withheld) {
+        String owner = ownerText == null ? null : ownerText + withheld;
         // Bookkeeping must not be able to rewrite the outcome. This method used to run
         // unguarded inside the completion callback, so anything that threw here -- most easily
         // incrementRunCount finding no row, because the owner deleted the schedule while it was
@@ -679,7 +684,7 @@ public class ScheduledTaskService {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
             resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld, agentTaskId);
+                response + withheld, agentTaskId, owner);
             return;
         }
 
@@ -687,7 +692,7 @@ public class ScheduledTaskService {
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
         resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld, agentTaskId);
+                response + withheld, agentTaskId, owner);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,

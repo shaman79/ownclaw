@@ -53,3 +53,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/018-run-agent-task-id.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/019-conversation-private-content.sql
+      relativeToChangelogFile: false

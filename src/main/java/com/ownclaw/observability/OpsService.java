@@ -56,7 +56,11 @@ public class OpsService {
             "password_hash", "encryption_salt", "encrypted_value", "iv",
             // system_settings.value holds the vault master key, the JWT secret and the
             // provider API keys. Its "key" column is only a name and stays readable.
-            "value");
+            "value",
+            // conversations.private_content is an answer written on this machine from the
+            // owner's file and kept from the cloud; the ops API is read by sessions whose
+            // model runs in the cloud.
+            "private_content");
 
     /** Columns whose name says they hold secret material. Deliberately excludes a bare "key". */
     private static final Pattern SECRET_VALUE_COLUMN = Pattern.compile(
@@ -65,7 +69,7 @@ public class OpsService {
     /** Identifiers that may not appear in ops SQL at all (blocks aliasing around the above). */
     private static final Pattern SQL_FORBIDDEN = Pattern.compile(
             "(?i)\\b(password_hash|encryption_salt|encrypted_value|jwt_secret|vault_master_key"
-                    + "|pragma|attach|detach|vacuum)\\b");
+                    + "|private_content|pragma|attach|detach|vacuum)\\b");
 
     private static final Pattern SQL_ALLOWED_START = Pattern.compile("(?is)^\\s*(select|with)\\b.*");
 

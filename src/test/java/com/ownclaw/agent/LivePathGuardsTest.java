@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -125,6 +126,90 @@ class LivePathGuardsTest {
         assertTrue(s.contains("firstHitInNormalised(normalised, from)"),
                 "the per-hit loop must reuse the part's normalised text");
         assertFalse(s.contains("firstHitIn(part.text(), from)"));
+    }
+
+    /** One branch of runLoop: from its opening line to the next top-level {@code if (action.}. */
+    private static String runLoopBranch(String s, String opening) {
+        int loop = s.indexOf("private AgentResult runLoop(");
+        assertTrue(loop > 0, "runLoop was renamed; this test no longer guards it");
+        int start = s.indexOf(opening, loop);
+        assertTrue(start > 0, "runLoop no longer has " + opening);
+        int end = s.indexOf("\n            if (action.", start + opening.length());
+        return end > start ? s.substring(start, end) : s.substring(start);
+    }
+
+    @Test
+    @DisplayName("respond and ask_user deliver only what answerFor made of the message")
+    void answersGoThroughAnswerFor() throws IOException {
+        // answerFor itself is driven in AnswerForTest; this pins that the two exits of the loop
+        // use it. Either one returning action.responseText() delivers a private handle as the
+        // literal "{{3}}" and drops the owner's answer.
+        String s = read("com.ownclaw.agent.AgentLoop");
+        for (String[] b : List.of(new String[]{"if (action.isResponse()) {", "AgentResult.completed("},
+                new String[]{"if (action.isAskUser()) {", "AgentResult.needsInput("})) {
+            String branch = runLoopBranch(s, b[0]);
+            int answer = branch.indexOf("answerFor(action.responseText(), context)");
+            int ret = branch.indexOf(b[1]);
+            assertTrue(answer > 0, b[0] + " does not go through answerFor");
+            assertTrue(ret > answer, b[0] + " returns before answerFor");
+            assertEquals(ret, branch.lastIndexOf(b[1]), b[0] + " has a second way out");
+            String refusal = branch.substring(answer, ret);
+            assertTrue(refusal.contains("refusal() != null") && refusal.contains("continue;"),
+                    b[0] + ": a refused answer must go back to the cloud, not out: " + refusal);
+            String returned = branch.substring(ret, branch.indexOf(";", ret));
+            assertFalse(returned.contains("responseText()"), "the message as written is returned: " + returned);
+            assertTrue(returned.contains(".withOwnerText(") && returned.contains(".ownerText())"),
+                    "the owner's text is dropped: " + returned);
+        }
+    }
+
+    @Test
+    @DisplayName("a file task stops before the loop when the local model is not answering")
+    void theLocalModelIsProbedBeforeTheLoop() throws IOException {
+        // stopWithoutLocalModel is driven in StopWithoutLocalModelTest; this pins that executeFull
+        // calls it after the files are registered and returns before the loop can call the cloud.
+        String s = read("com.ownclaw.agent.AgentLoop");
+        int start = s.indexOf("public AgentResult executeFull(String userId, String message, boolean unattended,\n");
+        assertTrue(start > 0, "executeFull was renamed");
+        String body = s.substring(start, s.indexOf("\n    }\n", start));
+        int register = body.indexOf("registerAttachments(");
+        int stop = body.indexOf("stopWithoutLocalModel(context,");
+        int loop = body.indexOf("runLoop(context)");
+        assertTrue(register > 0 && stop > register && loop > stop, body);
+        String between = body.substring(stop, loop);
+        int guard = between.indexOf("if (stopped != null) {");
+        assertTrue(guard > 0 && between.indexOf("return stopped;", guard) > guard,
+                "and returns whenever it stops: " + between);
+    }
+
+    /** The whole statement a call starts, whitespace collapsed, from the call to its semicolon. */
+    private static String call(String source, String from) {
+        int start = source.indexOf(from);
+        assertTrue(start > 0, "not found: " + from);
+        return source.substring(start, source.indexOf(";", start)).replaceAll("\\s+", " ");
+    }
+
+    @Test
+    @DisplayName("an answer is saved as two texts, and only the web chat is sent the private one")
+    void saveSitesKeepTheTwoTexts() throws IOException {
+        // The row's content feeds every later prompt, the compressor and search; saving the
+        // owner's text there, or sending it to Telegram's servers, undoes the whole label.
+        String web = read("com.ownclaw.interfaces.web.ChatWebSocketHandler");
+        String telegram = read("com.ownclaw.interfaces.telegram.TelegramBotService");
+        for (String s : List.of(web, telegram)) {
+            assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
+                            + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
+                    call(s, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
+        }
+        assertTrue(call(telegram, "sendMessage(chatId, result.").endsWith("result.response())"),
+                "Telegram is sent the safe text");
+        assertFalse(telegram.contains("result.shown()") || telegram.contains("\"ownerText\""),
+                "nothing in the Telegram path reads the owner's text");
+
+        String scheduler = read("com.ownclaw.core.ScheduledTaskService");
+        assertTrue(call(scheduler, "onTaskCompleted(taskId, userId, taskType, description,")
+                        .contains("result.response(), result.ownerText(),"),
+                "a scheduled run's private answer is delivered, not dropped");
     }
 
     @Test

@@ -140,7 +140,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // plain response, so a background digest landing during a six-minute question
                 // ended that question's working state -- the same confusion the taskId fix
                 // removed for statuses. "result" renders identically and touches nothing.
-                sendToSession(session, "result", msg.text(), null, msg.taskId());
+                // A private answer travels beside the safe text, for this screen only: Telegram
+                // formats the text, and the text is the note that the answer exists.
+                Object owner = msg.data() == null ? null : msg.data().get("ownerText");
+                sendToSession(session, "result", owner != null ? owner.toString() : msg.text(),
+                        null, msg.taskId());
             } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT
                     && msg.taskId() == null) {
                 // Only a LIVE prompt becomes a question bubble.
@@ -333,14 +337,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // sendSystemToUser already does.
         taskQueue.submit(userId, userMessage, 1, currentMessageId, attachmentIds)
                 .thenAccept(result -> {
-                    String response = result.response();
-                    // Persist the assistant response for conversation history
-                    conversationService.saveMessage(userId, currentSessionId, "assistant", response,
-                            java.util.List.of(), result.taskId());
+                    // Two texts. The history every later prompt is built from gets the safe one;
+                    // a private answer is kept beside it, for this chat and its reload only.
+                    conversationService.saveMessage(userId, currentSessionId, "assistant",
+                            result.response(), java.util.List.of(), result.taskId(),
+                            result.ownerText());
                     // A question is routed as a question, so the client can offer a reply box
                     // instead of presenting it as the finished answer.
-                    sendToUser(userId, result.awaitingUser() ? "input_request" : "response", response,
-                                currentSessionId, result.taskId());
+                    sendToUser(userId, result.awaitingUser() ? "input_request" : "response",
+                                result.shown(), currentSessionId, result.taskId());
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToUser(userId, "session_updated", currentSessionId);
                 })
