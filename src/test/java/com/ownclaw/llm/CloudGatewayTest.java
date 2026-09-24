@@ -154,23 +154,59 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("the allowance is for registry parts only: a MESSAGE quoting the same run is refused")
-    void registryAllowanceDoesNotCoverMessages() {
+    @DisplayName("registry text is allowed wherever it appears — but only that text")
+    void theAllowanceFollowsTheTextNotThePart() {
+        // The unattended prompt renders the skill catalogue TWICE, from one method: into
+        // delegate's description, and into the dynamic block glued onto the last user message.
+        // Scoping this allowance to the tool part refused the second copy — over bytes the
+        // cloud receives anyway, in the same request, a few kilobytes further down. Messages
+        // are scanned first, so on the production unattended path the allowance never fired.
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         String output = prose(5_000, 2);
         var index = new PrivateIndex(); index.addPrivate(4, output);
-        var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + output.substring(200, 240),
+        String described = output.substring(200, 240);
+        var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + described,
                 Map.of("type", "object"));
-
         var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
-        var ex = assertThrows(EgressRefused.class,
-                () -> gw.chat(messages("the mailbox said: " + output.substring(200, 240)), cfg));
 
-        assertTrue(provider.calls.isEmpty(), "a message is written after the result exists");
+        gw.chat(messages("the catalogue again: " + described), cfg);
+        assertEquals(1, provider.calls.size(),
+                "the identical bytes are in the tools array of this very request; refusing the "
+                        + "second copy withholds nothing from anyone");
+
+        // ...and ONLY that text. The rest of the private result has no such excuse.
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages("the mailbox said: " + output.substring(900, 1200)), cfg));
+        assertTrue(provider.calls.size() == 1, "refused before the socket opens");
         assertEquals(4, ex.handle());
-        // Mutation: allow the registry text for every part -> sent.
+        // Mutation: allow every hit once any registry part exists -> the second call is sent.
+    }
+
+    @Test
+    @DisplayName("in OBSERVE, a call that then fails still records what was observed")
+    void observedLeakSurvivesAProviderFailure() {
+        // Consolidating the ledger to one row moved it after the send, and a provider error
+        // then discarded it: the bytes had gone out and the only note saying they should not
+        // have went with the exception. OBSERVE exists to measure exactly those calls.
+        var provider = new Recording(); var rows = new Rows();
+        provider.failWith = new IllegalStateException("socket reset");
+        var gw = new CloudGateway(provider, new Recording(),
+                config("anthropic", CloudGateway.Mode.OBSERVE), rows, null);
+        String output = prose(5_000, 7);
+        var index = new PrivateIndex(); index.addPrivate(4, output);
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+
+        assertThrows(IllegalStateException.class,
+                () -> gw.chat(messages("the mailbox said: " + output.substring(900, 1200)), cfg));
+
+        var row = rows.last();
+        assertEquals(EgressLedger.Decision.ERROR, row.decision());
+        assertTrue(row.refusalRef().startsWith("$4"), row.refusalRef());
+        assertTrue(row.refusalRef().contains("IllegalStateException"), row.refusalRef());
+        // Mutation: write only the exception name -> the observation is lost and OBSERVE
+        // undercounts precisely the calls that failed.
     }
 
     @Test
@@ -240,7 +276,10 @@ class CloudGatewayTest {
 
         assertTimeoutPreemptively(java.time.Duration.ofSeconds(5),
                 () -> gw.chat(messages("the value is vault:PASS here"), cfg));
-        assertEquals("the value is «vault:PASS» here", provider.calls.get(0).get(1).content());
+        // ...and the marker must not carry the secret out either. «vault:PASS» contains the
+        // literal value "vault:PASS", so scrubbing it into its own key name would have sent the
+        // secret in the shape of a redaction -- one scrub recorded, nothing actually withheld.
+        assertEquals("the value is «vault:redacted» here", provider.calls.get(0).get(1).content());
         assertEquals(1, rows.last().scrubs());
     }
 

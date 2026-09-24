@@ -219,13 +219,15 @@ public class AgentLoop {
             if (!secretKeys.isEmpty()) {
                 context.setSecretValues(credentialVault.getCredentials(userId, secretKeys));
             }
-            // A skill's own source is not a disclosure of what that skill returned: a Python
-            // traceback quotes the line that threw, so without this a credentialed skill's
-            // failure made its own repair prompt unsendable.
-            context.setSkillSource(skillManager::readSkillCode);
         } catch (Exception e) {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
+
+        // A skill's own source is not a disclosure of what that skill returned: a Python
+        // traceback quotes the line that threw, so without this a credentialed skill's failure
+        // made its own repair prompt unsendable. Outside the vault's try, because it has nothing
+        // to do with credentials and a vault error must not silently leave it unwired.
+        context.setSkillSource(skillManager::readSkillCode);
 
         // Deterministic capability gap detection — if the task requires a known
         // capability (network scanning, media processing, etc.) and no existing
@@ -1170,6 +1172,20 @@ public class AgentLoop {
         // cloud wrote would have reached a skill as the literal two characters.
         Map<String, Object> resolved =
                 LocalExecutor.substituteRefs(action.params(), context.artifacts());
+        // ...and the guard that makes substitution safe, which the delegation already had. A
+        // reference that resolves to nothing is refused rather than passed on: as an argument to
+        // smtp_send_email, "$9" is an email whose entire body is two characters, sent
+        // successfully and recorded green.
+        String unresolved = LocalExecutor.unresolvedRef(resolved);
+        if (unresolved != null) {
+            log.warn("Task {}: '{}' references a result that does not exist — refused.",
+                    context.taskId(), unresolved);
+            return AgentObservation.failure(action.tool(),
+                    "'" + unresolved + "' refers to a result that does not exist, so it would "
+                            + "have been passed on as literal text. Results are numbered $1, $2 "
+                            + "… in the order they were produced; this task has "
+                            + context.artifacts().size() + ".", 0);
+        }
 
         long startMs = System.currentTimeMillis();
         ToolResult result;
@@ -2215,7 +2231,7 @@ public class AgentLoop {
         obs = compressIfUnattended(context, obs);
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
-        persistStep(context, action, obs, step, context.artifacts().size());
+        persistStep(context, action, obs, step);
     }
 
     /**
@@ -2289,15 +2305,6 @@ public class AgentLoop {
      */
     private void persistStep(AgentContext context, AgentAction action,
                              AgentObservation obs, int step) {
-        persistStep(context, action, obs, step, 0);
-    }
-
-    /**
-     * @param artifactCount the task's artifact count AFTER this step; a step that recorded one
-     *                      has count == the store's size, and one that recorded none does not
-     */
-    private void persistStep(AgentContext context, AgentAction action,
-                             AgentObservation obs, int step, int artifactCount) {
         try {
             var details = new LinkedHashMap<String, Object>();
             details.put("step", step);
@@ -2310,12 +2317,18 @@ public class AgentLoop {
             if (action.isDelegate()) {
                 Object arts = obs.structured() == null ? null : obs.structured().get("artifacts");
                 if (arts != null) details.put("artifacts", arts);
-            } else if (!action.isSpecialAction() && artifactCount > 0
-                    && context.artifacts().size() == artifactCount) {
+                // The delegation listed its own; no later step may claim them again.
+                context.claimAllArtifacts();
+            } else if (!action.isSpecialAction()) {
                 // Only when THIS step recorded one. A refused, not-found or critic-blocked step
                 // records nothing, and attributing the previous step's handle, label and hash to
                 // it made the ops page say a tool ran that never did.
-                context.lastArtifact().ifPresent(a -> {
+                //
+                // Claimed, not counted. The first attempt compared the store's size against a
+                // count the caller had just derived from that same store on the same thread:
+                // one expression evaluated twice, always equal, so the guard excluded nothing
+                // and the misattribution it was written to stop carried on unchanged.
+                context.lastArtifact().filter(a -> context.claimArtifact(a.n())).ifPresent(a -> {
                     details.put("artifact", a.handle());
                     details.put("label", a.label().name());
                     details.put("chars", a.output().length());

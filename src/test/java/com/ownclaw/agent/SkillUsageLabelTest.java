@@ -25,12 +25,21 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class SkillUsageLabelTest {
 
+    private static Path repoRoot() {
+        Path p = Path.of("").toAbsolutePath();
+        while (p != null && !Files.isDirectory(p.resolve("src/main/java"))) p = p.getParent();
+        if (p == null) throw new IllegalStateException(
+                "src/main/java not found above " + Path.of("").toAbsolutePath());
+        return p;
+    }
+
     private static JdbcTemplate db(Path tmp) throws Exception {
         var ds = new DriverManagerDataSource("jdbc:sqlite:" + tmp.resolve("t.db"));
         var jdbc = new JdbcTemplate(ds);
         for (String f : List.of("007-skill-usage.sql", "016-skill-usage-repro.sql", "017-skill-usage-label.sql")) {
-            Path sql = Path.of("src/main/resources/db/changelog", f);
-            if (!Files.exists(sql)) sql = Path.of("../../..").resolve(sql);
+            // Found by walking up, not by a relative guess: the suite is launched from more
+            // than one working directory and a fixed "../../.." silently became NoSuchFile.
+            Path sql = repoRoot().resolve("src/main/resources/db/changelog").resolve(f);
             String text = Files.readString(sql).lines()
                     .filter(l -> !l.strip().startsWith("--")).reduce("", (a, b) -> a + "\n" + b);
             Arrays.stream(text.split(";")).map(String::strip).filter(st -> !st.isEmpty())

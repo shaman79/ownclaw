@@ -19,8 +19,8 @@ import java.util.regex.Pattern;
  * stay here, in memory, for the task's lifetime. What enters the trajectory, the chat rows and
  * every cloud prompt is decided ONCE, at record time, by {@link #asObservation}: a PUBLIC result
  * goes in as it is, exactly as today; a PRIVATE one goes in as its {@link #describe descriptor}
- * — the handle, the tool, the label and why, the size and shape, and the values of any top-level
- * booleans and numbers so that {@code ok=false} is never hidden inside an envelope. Nothing
+ * — the handle, the tool, the label and why, the size and shape, and the value of any top-level
+ * boolean so that {@code ok=false} is never hidden inside an envelope. Nothing
  * downstream needs to know about labels, because nothing downstream ever holds the bytes.
  * <p>
  * The label comes from facts the code already has, in {@link #labelFor}: the skill declared
@@ -128,10 +128,11 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     /**
      * What may be said about a PRIVATE artifact: everything except its content.
      * <p>
-     * Top-level booleans and numbers are shown WITH their values. A success envelope around a
-     * failure — {@code {"ok": false, "error": "..."}} — is the normal shape of a skill result,
-     * and a descriptor that hid {@code ok=false} would have the cloud report a send that never
-     * happened. Strings are shown as a kind and a size; a string is where the data is.
+     * Top-level booleans are shown WITH their values. A success envelope around a failure —
+     * {@code {"ok": false, "error": "..."}} — is the normal shape of a skill result, and a
+     * descriptor that hid {@code ok=false} would have the cloud report a send that never
+     * happened. Everything else is shown as a kind and a size: a string is where the data is,
+     * and a number can BE the data — a balance, a count of unread messages.
      */
     public String describe() {
         var sb = new StringBuilder(handle()).append(' ').append(tool)
@@ -165,16 +166,30 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                 r.structured() == null ? Map.of() : r.structured(), durationMs);
     }
 
-    /** The top-level field names ANNOTATED with kind and size, for a descriptor. */
-    public static List<String> jsonFields(String text) {
-        return shapeOf(text).fields();
-    }
-
-    /** The bare top-level field names, for telling a model what it may reference. */
+    /**
+     * The top-level field names EXACTLY as the JSON spells them, for telling a model what it
+     * may reference.
+     * <p>
+     * Parsed here rather than unwrapped from the descriptor's list. That list truncates a name
+     * longer than {@link #MAX_FIELD_NAME} and marks the cut with an ellipsis, and a model told
+     * to reference a name exactly copies the ellipsis with it: {@code $1.rendered_html_for_ema…}
+     * resolves to nothing, and the unresolved-reference guard does not recognise it as a
+     * reference either, so the literal travels on as the argument. Untruncated here, bounded
+     * there; the two lists answer different questions.
+     */
     public static List<String> jsonFieldNames(String text) {
-        return shapeOf(text).fields().stream()
-                .map(f -> { int sp = f.indexOf(" ("); return sp < 0 ? f : f.substring(0, sp); })
-                .toList();
+        if (text == null || text.isBlank()) return List.of();
+        String t = text.strip();
+        if (!(t.startsWith("{") && t.endsWith("}"))) return List.of();
+        try {
+            JsonNode node = MAPPER.readTree(t);
+            if (node == null || !node.isObject()) return List.of();
+            var names = new ArrayList<String>();
+            node.fieldNames().forEachRemaining(names::add);
+            return List.copyOf(names);
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     /** kind ("json" | "text" | "error"), field names, and primitive values, of a result. */

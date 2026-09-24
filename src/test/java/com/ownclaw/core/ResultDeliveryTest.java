@@ -34,7 +34,10 @@ class ResultDeliveryTest {
                 Map.of("n", 2, "tool", "smtp_send_email", "label", "PRIVATE", "chars", 180),
                 Map.of("n", 3, "tool", "smtp_send_email", "label", "PRIVATE", "chars", 180))));
 
-        assertTrue(line.contains("3 results, 1 withheld from the cloud (smtp_send_email)"), line);
+        // TWO results were withheld, from ONE tool. The first version printed the size of the
+        // name set as the count, so calling one skill twice read as "1 withheld" while two
+        // results were being held back -- the line exists to tell the owner exactly that number.
+        assertTrue(line.contains("3 results, 2 withheld from the cloud (smtp_send_email)"), line);
     }
 
     @Test

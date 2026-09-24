@@ -628,7 +628,7 @@ public class OpsService {
                 "SELECT timestamp, event_type, severity, task_id, summary, details, tokens_used "
                         + "FROM events WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));
         out.put("toolCalls", jdbc.queryForList(
-                "SELECT created_at, tool_name, task_id, success, duration_ms "
+                "SELECT created_at, tool_name, task_id, success, duration_ms, label "
                         + "FROM skill_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
         out.put("memory", jdbc.queryForList(
                 "SELECT created_at, memory_type, outcome, tags, substr(content,1,400) AS content "
@@ -780,7 +780,12 @@ public class OpsService {
                 "SELECT timestamp, user_id, event_type, severity, summary, details, tokens_used "
                         + "FROM events WHERE task_id = ? ORDER BY timestamp", taskId));
         out.put("toolCalls", jdbc.queryForList(
-                "SELECT created_at, user_id, tool_name, success, duration_ms "
+                // label and error included: a PRIVATE descriptor ends with "text withheld;
+                // skill_usage row via ops", and this is that row. Without the error column the
+                // pointer named a page that did not show it, leaving the owner no way at all to
+                // read what a private step had actually returned.
+                "SELECT created_at, user_id, tool_name, success, duration_ms, label, "
+                        + "substr(error,1,4000) AS error "
                         + "FROM skill_usage WHERE task_id = ? ORDER BY created_at", taskId));
         out.put("memory", jdbc.queryForList(
                 "SELECT created_at, user_id, memory_type, outcome, substr(content,1,400) AS content "

@@ -140,7 +140,11 @@ public final class PrivateIndex {
         for (int k = 0; k < shortHashes.length; k++) {
             int len = shortLengths[k];
             if (len > n.length()) continue;
-            if (best != null && best.offset() == from) break;
+            // This registration cannot improve on what we have -- the best is already at the
+            // earliest possible offset and is at least as long. Skip THIS one, not the rest:
+            // registrations are in insertion order, not sorted by length, so a later one may
+            // still be longer at that same offset.
+            if (best != null && best.offset() == from && best.length() >= len) continue;
             long pow = pow(BASE, len);
             long h = 0;
             for (int i = 0; i < n.length(); i++) {
@@ -148,7 +152,11 @@ public final class PrivateIndex {
                 if (i >= len) h -= n.charAt(i - len) * pow;
                 int start = i - len + 1;
                 if (start < from) continue;
-                if (best != null && start >= best.offset()) break;
+                // At the same offset the LONGER registration wins. "ORDER-4471" and
+                // "ORDER-4471 petr@example.com" both start at the same place; allowing the
+                // short one must not hide the long one, which is the specific thing.
+                if (best != null && (start > best.offset()
+                        || (start == best.offset() && len <= best.length()))) break;
                 if (h == shortHashes[k]) {
                     best = new Hit(shortHandles[k], start, len);
                     break;

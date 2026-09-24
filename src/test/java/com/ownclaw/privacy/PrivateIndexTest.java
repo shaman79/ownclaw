@@ -126,6 +126,24 @@ class PrivateIndexTest {
     }
 
     @Test
+    @DisplayName("at one offset the longest registration wins, so allowing a prefix hides nothing")
+    void theLongestRegistrationAtAnOffsetWins() {
+        // An order number is registered on its own, and again inside the line that carries the
+        // customer's address. Both start at the same character. If the scan reports the short
+        // one and the caller allows it, the scan must not have moved past the long one — the
+        // long one is the specific thing, and it is nobody's to send.
+        var idx = new PrivateIndex();
+        idx.addPrivate(1, "ORDER-4471/BQ");
+        idx.addPrivate(2, "ORDER-4471/BQ petr@example.com");
+
+        var hit = idx.firstHitIn("see ORDER-4471/BQ petr@example.com now");
+        assertNotNull(hit);
+        assertEquals(2, hit.handle(),
+                "the earliest offset is the same for both; length breaks the tie");
+        assertEquals(30, hit.length());
+    }
+
+    @Test
     @DisplayName("normalisation folds case, compatibility forms and whitespace runs")
     void normalisation() {
         assertEquals("kancelář novák 42", PrivateIndex.normalise("  Kancelář\n\tNOVÁK   42 "));

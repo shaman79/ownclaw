@@ -127,17 +127,23 @@ public final class CloudGateway implements LlmProvider {
         // wrote (skill_create) or the owner did, and it was in the prompt before any artifact
         // existed. A skill description that says what its output looks like would otherwise
         // collide with that output's first window and refuse every call after the skill ran.
+        // The registry text OF THIS REQUEST: tool descriptions and schemas, which are authored
+        // by the cloud at skill_create or by the owner, and were in the prompt before any
+        // artifact existed. A run of one matching a later result is a collision, not a
+        // disclosure -- skills routinely describe their own output shape.
+        //
+        // Allowed wherever it appears, not only in the tool part. A first version scoped it to
+        // registry parts and that was incoherent: the unattended prompt renders the skill
+        // catalogue TWICE from the same method -- into delegate's description and into the
+        // dynamic block glued onto the last user message -- so refusing the user copy while
+        // sending the tools-array copy refuses a call over bytes the cloud is receiving anyway,
+        // in the same request, a few kilobytes further down.
+        String registryText = PrivateIndex.normalise(parts.stream()
+                .filter(p -> p.kind().startsWith("tool:") || p.kind().startsWith("schema:"))
+                .map(Part::text).collect(java.util.stream.Collectors.joining("\n")));
         boolean leaked = false;
         for (Part part : parts) {
             if (leaked) break;
-            // A tool description or schema is authored by the cloud at skill_create, or by the
-            // owner, and it was in the prompt on every step before the artifact existed -- so a
-            // run of it matching a later result is a coincidence, not a disclosure. Skills
-            // routinely describe their own output shape, which collided with that output's
-            // first window and refused every call after the skill had run. The allowance is for
-            // THESE parts only: a message that happens to quote the same text is still checked,
-            // because a message is written after the result exists.
-            boolean registry = part.kind().startsWith("tool:") || part.kind().startsWith("schema:");
             String normalised = PrivateIndex.normalise(part.text());
             int from = 0;
             PrivateIndex.Hit hit;
@@ -149,7 +155,9 @@ public final class CloudGateway implements LlmProvider {
                 from = hit.offset() + 1;
                 String window = normalised.substring(hit.offset(),
                         Math.min(hit.offset() + hit.length(), normalised.length()));
-                if (registry || egress.allowed().test(hit.handle(), window)) continue;
+                if (registryText.contains(window) || egress.allowed().test(hit.handle(), window)) {
+                    continue;
+                }
             String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
                     + ") at " + hit.offset();
             if (mode() == Mode.ENFORCE) {
@@ -179,8 +187,13 @@ public final class CloudGateway implements LlmProvider {
                     parts, scrubs, response, tools == null ? 0 : tools.size(), observed));
             return response;
         } catch (RuntimeException e) {
+            // The leak record survives a failing call. Consolidating to one row moved it after
+            // the send, so a provider error used to discard it: the bytes had gone out and the
+            // only note that they should not have went with the exception.
             ledger.record(row(egress, providerName, model, EgressLedger.Decision.ERROR, parts,
-                    scrubs, null, tools == null ? 0 : tools.size(), e.getClass().getSimpleName()));
+                    scrubs, null, tools == null ? 0 : tools.size(),
+                    observed == null ? e.getClass().getSimpleName()
+                            : observed + " (call then failed: " + e.getClass().getSimpleName() + ")"));
             throw e;
         }
     }
@@ -235,6 +248,10 @@ public final class CloudGateway implements LlmProvider {
             String value = e.getValue();
             if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
             String marker = "«vault:" + e.getKey() + "»";
+            // A key whose name embeds the value -- or a value that is literally "vault:PASS" --
+            // would leave the secret inside its own replacement. Fall back to a marker that
+            // cannot contain it.
+            if (marker.contains(value)) marker = "«vault:redacted»";
             // Scan forward from after each replacement. Restarting from zero never terminated
             // when the value was a substring of its own marker -- a vault value of "vault:pass"
             // rewrote itself for ever and hung the call, holding the task's only worker thread.

@@ -63,7 +63,7 @@ public class ResultDelivery {
      */
     static String withheldLine(AgentResult result) {
         if (result == null || result.trajectory() == null) return "";
-        int total = 0;
+        int total = 0, withheldCount = 0;
         var withheld = new java.util.LinkedHashSet<String>();
         for (var turn : result.trajectory().turns()) {
             if (turn.observation() == null || turn.observation().structured() == null) continue;
@@ -73,12 +73,16 @@ public class ResultDelivery {
                 if (!(o instanceof java.util.Map<?, ?> a)) continue;
                 total++;
                 if ("PRIVATE".equals(String.valueOf(a.get("label")))) {
+                    // The COUNT of withheld results, and separately the NAMES of the tools that
+                    // produced them. Printing the size of a name set beside a result count read
+                    // as "3 results, 1 withheld" when one skill had been called twice.
+                    withheldCount++;
                     withheld.add(String.valueOf(a.get("tool")));
                 }
             }
         }
         if (total == 0) return "";
-        return "\n\n_" + total + " result" + (total == 1 ? "" : "s") + ", " + withheld.size()
+        return "\n\n_" + total + " result" + (total == 1 ? "" : "s") + ", " + withheldCount
                 + " withheld from the cloud" + (withheld.isEmpty() ? "" : " (" + String.join(", ", withheld) + ")")
                 + "_";
     }

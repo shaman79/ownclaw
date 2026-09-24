@@ -355,7 +355,11 @@ public class LocalExecutor {
             Tool ran = toolRegistry.find(action.tool).orElse(null);
             Artifact.Decision decision = Artifact.labelFor(
                     ran == null ? List.of() : ran.requiredCredentials(),
-                    !parentContext.attachmentIds().isEmpty(), tainted, action.params, stepResults);
+                    // Unattended only -- and this is the site actually reachable with an
+                    // attachment, because files arrive on attended chat and an attended task is
+                    // what delegates. The gate went onto the two unreachable sites first.
+                    parentContext.isUnattended() && !parentContext.attachmentIds().isEmpty(),
+                    tainted, action.params, stepResults);
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);
             tainted |= artifact.isPrivate();
@@ -855,10 +859,11 @@ public class LocalExecutor {
             if (i > 0) sb.append("; ");
             Artifact a = done.get(i);
             sb.append(a.handle()).append(" = ").append(a.tool());
-            // The bare names. jsonFields annotates them for the DESCRIPTOR ("body_text
-            // (string, 4 chars)"), and a model reading this writes exactly what it is shown --
-            // "$1.body_text (string, 4 chars)", which resolveRef cannot parse and unresolvedRef
-            // does not recognise as a reference, so it would have been sent as literal text.
+            // The real keys, untruncated and unannotated. The DESCRIPTOR renders them for
+            // reading -- "body_text (string, 4 chars)", and a long name cut short with an
+            // ellipsis -- and a model reading this list writes back exactly what it is shown.
+            // Either decoration produces a reference resolveRef cannot parse and unresolvedRef
+            // does not recognise as one, so it used to travel on as literal text.
             List<String> fields = Artifact.jsonFieldNames(a.output());
             if (!fields.isEmpty()) sb.append(" (fields: ").append(String.join(", ", fields)).append(")");
         }
@@ -1044,7 +1049,7 @@ public class LocalExecutor {
      * description of a stack trace — on the one path where verbatim error text is worth more
      * than any summary.
      */
-    private static String verbatimFailures(List<Artifact> results) {
+    static String verbatimFailures(List<Artifact> results) {
         var failed = results.stream().filter(r -> !r.success()).toList();
         if (failed.isEmpty()) return "";
         var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");

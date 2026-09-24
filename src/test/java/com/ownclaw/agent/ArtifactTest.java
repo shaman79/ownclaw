@@ -203,12 +203,40 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("jsonFields is the one parser: names of a JSON object, none for anything else")
-    void jsonFields() {
-        assertEquals(List.of("ok", "body_text (string, 4 chars)"),
-                Artifact.jsonFields("{\"ok\": true, \"body_text\": \"text\"}"));
-        assertTrue(Artifact.jsonFields("not json").isEmpty());
-        assertTrue(Artifact.jsonFields("[1,2]").isEmpty());
-        assertTrue(Artifact.jsonFields(null).isEmpty());
+    @DisplayName("jsonFieldNames: the real keys of a JSON object, none for anything else")
+    void jsonFieldNames() {
+        assertEquals(List.of("ok", "body_text"),
+                Artifact.jsonFieldNames("{\"ok\": true, \"body_text\": \"text\"}"));
+        assertTrue(Artifact.jsonFieldNames("not json").isEmpty());
+        assertTrue(Artifact.jsonFieldNames("[1,2]").isEmpty());
+        assertTrue(Artifact.jsonFieldNames(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a name the model is told to reference is never truncated")
+    void referenceNamesAreNeverTruncated() {
+        // The descriptor abbreviates a long key and marks the cut with an ellipsis. Deriving
+        // the reference list from it handed the model "$1.rendered_html_for_ema…", which
+        // resolves to nothing and is not recognised as a reference either, so it reached the
+        // tool as the literal argument.
+        String key = "rendered_html_for_email_body_with_inline_css";
+        assertTrue(key.length() > Artifact.MAX_FIELD_NAME, "the case only exists above the cut");
+        String json = "{\"" + key + "\": \"x\"}";
+
+        assertEquals(List.of(key), Artifact.jsonFieldNames(json),
+                "this list is what the model types back; it has to be the real key");
+        assertTrue(new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of())
+                        .describe().contains("…"),
+                "while the descriptor still bounds what it prints — they differ on purpose");
+    }
+
+    @Test
+    @DisplayName("a truncated field name can never be long enough to be a canary window")
+    void fieldNamesStayUnderTheCanaryWindow() {
+        assertTrue(Artifact.MAX_FIELD_NAME < com.ownclaw.privacy.PrivateIndex.WINDOW,
+                "the descriptor prints the field names of a PRIVATE result; if one could reach "
+                        + com.ownclaw.privacy.PrivateIndex.WINDOW + " characters it would itself "
+                        + "be a window of the private text — the descriptor would leak, and then "
+                        + "refuse the call carrying it");
     }
 }

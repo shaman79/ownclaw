@@ -586,4 +586,27 @@ class DelegationSafetyTest {
                 "a summary that says 'Done.' over a failed send is exactly what the ledger is "
                         + "there to contradict");
     }
+
+    @Test
+    @DisplayName("a failed PRIVATE step contributes neither its output nor its arguments")
+    void privateFailuresWithholdTheirArgumentsToo() {
+        var pub = new Artifact(1, "daily_news_digest", Map.of("topic", "rust"), Map.of(),
+                "ERROR: feed timed out", false, com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var priv = new Artifact(2, "smtp_send_email",
+                Map.of("to", "ucetni@firma.cz", "body", "Faktura 2026-09 od Novák s.r.o."),
+                Map.of(), "Traceback: smtplib.SMTPAuthenticationError", false,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+
+        String text = LocalExecutor.verbatimFailures(List.of(pub, priv));
+
+        assertTrue(text.contains("feed timed out"), "a public failure IS the repair evidence");
+        assertTrue(text.contains("topic"), "together with the arguments that produced it");
+        assertTrue(text.contains("(arguments withheld)"));
+        assertFalse(text.contains("ucetni@firma.cz"),
+                "a tainted step's arguments are what the local model wrote AFTER reading private "
+                        + "content — the recipient it was given, the body it forwarded — so "
+                        + "printing them hands the cloud exactly what the descriptor two lines "
+                        + "further up is withholding");
+        assertFalse(text.contains("Faktura 2026-09"));
+    }
 }

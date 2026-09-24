@@ -155,6 +155,38 @@ class AgentContextArtifactsTest {
     }
 
     @Test
+    @DisplayName("an artifact is claimed by exactly one step, and never by a later one")
+    void artifactsAreClaimedOnce() {
+        var ctx = task("send it");
+        add(ctx, "imap_fetch", "x", PUBLIC);           // $1, recorded by step 1
+
+        assertTrue(ctx.claimArtifact(1), "step 1 recorded it, so step 1 reports it");
+        assertFalse(ctx.claimArtifact(1),
+                "step 2 was a not-found tool and recorded nothing; without this it inherited "
+                        + "$1's handle, label and hash and the ops page named a tool that had "
+                        + "never run");
+
+        add(ctx, "smtp_send_email", "y", PRIVATE);     // $2
+        assertTrue(ctx.claimArtifact(2));
+        assertFalse(ctx.claimArtifact(2));
+    }
+
+    @Test
+    @DisplayName("a delegation claims everything it reported, so no later step can re-report it")
+    void delegationClaimsItsOwn() {
+        var ctx = task("send it");
+        add(ctx, "imap_fetch", "x", PRIVATE);
+        add(ctx, "smtp_send_email", "y", PRIVATE);
+
+        ctx.claimAllArtifacts();
+        assertFalse(ctx.claimArtifact(1));
+        assertFalse(ctx.claimArtifact(2));
+
+        add(ctx, "later", "z", PUBLIC);
+        assertTrue(ctx.claimArtifact(3), "but a step after it still reports its own");
+    }
+
+    @Test
     @DisplayName("the egress context carries the task's identity, index, secrets and the predicate")
     void egressContext() {
         var ctx = task("send it");
