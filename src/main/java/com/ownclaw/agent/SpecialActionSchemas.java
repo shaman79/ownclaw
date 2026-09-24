@@ -117,7 +117,8 @@ public final class SpecialActionSchemas {
                     params(
                             "action", ToolParam.required("string",
                                     "schedule_once | schedule_recurring | list | cancel | pause | resume"),
-                            "description", ToolParam.optional("string", "The task to run, as a message."),
+                            "description", ToolParam.optional("string",
+                                    "The task to run, as a self-contained message: the run does not see this chat."),
                             "time", ToolParam.optional("string", "When, in natural language."),
                             "schedule", ToolParam.optional("string", "Recurrence, natural language or cron."),
                             "max_runs", ToolParam.optional("integer", "Stop after this many runs."),

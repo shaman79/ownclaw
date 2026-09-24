@@ -270,15 +270,6 @@ public class AgentLoop {
     }
 
     /**
-     * Load conversation history from the database and set it as the conversation
-     * summary on the AgentContext. This gives the LLM visibility into prior
-     * exchanges so it doesn't re-ask questions the user already answered.
-     *
-     * Includes:
-     *   - Rolling summary of older messages (compressed by ConversationCompressor)
-     *   - Last N recent messages in full (the active conversation window)
-     */
-    /**
      * The files sent with this turn become PRIVATE artifacts: in the canary index, so the cloud
      * cannot receive their bytes by any route, and named by handle so a delegation can hand one
      * to a skill without the cloud reading it.
