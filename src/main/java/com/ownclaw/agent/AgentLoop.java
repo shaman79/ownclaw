@@ -364,21 +364,22 @@ public class AgentLoop {
             }
 
             // Recent messages in chronological order, each in FULL -- cutting mid-sentence can
-            // make the model misread what was said -- but only as many as the summariser's own
-            // window holds (ConversationCompressor.keptNewest): older ones are in the summary
-            // above, or about to be, and sending them all made one chat task cost $1.30 before it
-            // had done anything. The row this task answers is skipped -- it is already the task
+            // make the model misread what was said -- but only those the summariser may still
+            // leave uncompressed (ConversationCompressor.shownToTheAgent); anything older is in the
+            // summary above. Twenty in full were 65 KB in a chat of long answers, about half of a
+            // 70k-token first call. The row this task answers is skipped -- it is already the task
             // text -- and only that one: a scheduled or background run has no current row.
             List<Map<String, Object>> others = recent.stream()
                     .filter(row -> currentMessageId == null || !currentMessageId.equals(row.get("id")))
                     .toList();
-            int shown = com.ownclaw.conversation.ConversationCompressor.keptNewest(others.stream()
+            int shown = com.ownclaw.conversation.ConversationCompressor.shownToTheAgent(others.stream()
                     .map(row -> String.valueOf(row.get("content")).length()).toList());
             if (shown > 0) {
                 sb.append("### Recent conversation\n");
                 if (shown < others.size()) {
-                    sb.append("(").append(others.size() - shown)
-                      .append(" earlier messages are not shown here; the summary above covers what has been compressed.)\n");
+                    // Only while the summariser is behind (the local model is busy or down):
+                    // what is left out here is uncompressed, so not in the summary either.
+                    sb.append("(Earlier messages are not shown here and are not in the summary yet.)\n");
                 }
                 for (int i = shown - 1; i >= 0; i--) {
                     Map<String, Object> row = others.get(i);

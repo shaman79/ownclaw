@@ -62,11 +62,44 @@ class ChatContextTest {
         var chat = new AgentContext("u1", "t1", "and next?");
         AgentLoop.loadConversationContext(chat, "u1", null, db.conversations(), db.files());
         String summary = chat.conversationSummary();
-        for (int i = 4; i < 8; i++) assertTrue(summary.contains("MSG" + i + " "), "newest kept: MSG" + i);
-        for (int i = 0; i < 4; i++) assertFalse(summary.contains("MSG" + i + " "), "older left out: MSG" + i);
-        assertTrue(summary.contains("4 earlier messages are not shown"), summary.substring(0, 200));
-        assertTrue(summary.length() < ConversationCompressor.ACTIVE_CHARS + 1_000, "bounded: " + summary.length());
-        assertTrue(summary.indexOf("MSG4 ") < summary.indexOf("MSG7 "), "in order, oldest shown first");
+        for (int i = 3; i < 8; i++) assertTrue(summary.contains("MSG" + i + " "), "newest kept: MSG" + i);
+        for (int i = 0; i < 3; i++) assertFalse(summary.contains("MSG" + i + " "), "older left out: MSG" + i);
+        assertTrue(summary.contains("(Earlier messages are not shown here and are not in the summary yet.)"),
+                summary.substring(0, 200));
+        assertTrue(summary.length() < ConversationCompressor.ACTIVE_CHARS + ConversationCompressor.COMPRESS_CHARS + 1_000,
+                "bounded: " + summary.length());
+        assertTrue(summary.indexOf("MSG3 ") < summary.indexOf("MSG7 "), "in order, oldest shown first");
+    }
+
+    @Test
+    @DisplayName("over a long chat, with the summariser running after each message, no message is in neither place")
+    void noMessageIsInNeither(@TempDir Path tmp) throws Exception {
+        var jdbc = com.ownclaw.conversation.MigratedDatabase.at(tmp.resolve("m.db"));
+        var local = new com.ownclaw.llm.OllamaProvider(new OwnClawConfig(), new com.fasterxml.jackson.databind.ObjectMapper(), null) {
+            @Override public com.ownclaw.llm.LlmResponse chat(List<com.ownclaw.llm.LlmMessage> m, com.ownclaw.llm.LlmRequestConfig c) {
+                return new com.ownclaw.llm.LlmResponse("Summary: the owner and the assistant talked about earlier things.", 1, 1);
+            }
+        };
+        var compressor = new ConversationCompressor(jdbc, local, new com.ownclaw.llm.OllamaSemaphore());
+        var conversations = new ConversationService(jdbc, compressor);
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("m.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        var files = new FileStorageService(jdbc, config);
+        String session = conversations.createSession("u1", "Chat");
+        int[] lengths = {60, 250, 120, 1_800, 120, 3_000, 90, 7_000, 60, 12_000};
+        for (int i = 0; i < 40; i++) {
+            jdbc.update("INSERT INTO conversations (id, user_id, session_id, role, content) VALUES (?, 'u1', ?, ?, ?)",
+                    "c" + i, session, i % 2 == 0 ? "user" : "assistant", "M" + i + "M " + "z".repeat(lengths[i % lengths.length]));
+            compressor.compressIfNeeded("u1", session);
+            var ctx = new AgentContext("u1", "t" + i, "next");
+            AgentLoop.loadConversationContext(ctx, "u1", null, conversations, files);
+            String shown = ctx.conversationSummary();
+            for (String id : jdbc.queryForList("SELECT id FROM conversations WHERE compressed = 0", String.class)) {
+                String marker = "M" + id.substring(1) + "M ";
+                assertTrue(shown.contains(marker), "after message " + i + ", " + id + " is neither shown nor summarised");
+            }
+        }
     }
 
     @Test

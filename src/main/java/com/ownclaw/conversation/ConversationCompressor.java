@@ -32,18 +32,20 @@ public class ConversationCompressor {
     private static final int MIN_SUMMARY_CHARS = 40;
 
     /** Messages to keep uncompressed (the "active window"), at most. */
-    private static final int ACTIVE_WINDOW = 10;
+    public static final int ACTIVE_WINDOW = 10;
     /**
-     * ...and at most this much text. Every chat task sends the window to the cloud model in full,
-     * and a count alone let a few long answers make it 65 KB -- about 70k tokens, $1.30 before the
-     * task had done anything. Past this, older messages go into the summary the local model writes.
+     * ...and at most this much text. Every chat task sends its recent messages to the cloud model
+     * in full, and a count alone let a few long answers make them 65 KB -- about half of a
+     * 70k-token first call. Past this, older messages go into the summary the local model writes.
      */
     public static final int ACTIVE_CHARS = 24_000;
     /** The newest messages are kept however long they are: the exchange being continued. */
     public static final int ACTIVE_MIN = 2;
     /** Compress once this many messages, or this much text, sit outside the window. */
-    private static final int COMPRESS_THRESHOLD = 6;
-    private static final int COMPRESS_CHARS = 8_000;
+    public static final int COMPRESS_THRESHOLD = 6;
+    public static final int COMPRESS_CHARS = 8_000;
+    /** How much of each message the summariser reads; its whole input is capped below. */
+    private static final int EXCERPT_CHARS = 1_500;
     private final JdbcTemplate jdbc;
     private final OllamaProvider ollama;
     private final OllamaSemaphore semaphore;
@@ -71,7 +73,7 @@ public class ConversationCompressor {
                     ORDER BY timestamp DESC, rowid DESC
                     """, userId, sessionId);
             int kept = keptNewest(uncompressed.stream()
-                    .map(m -> String.valueOf(m.get("content")).length()).toList());
+                    .map(m -> String.valueOf(m.get("content")).length()).toList(), ACTIVE_WINDOW, ACTIVE_CHARS);
             List<Map<String, Object>> oldMessages = new java.util.ArrayList<>(
                     uncompressed.subList(kept, uncompressed.size()));
             java.util.Collections.reverse(oldMessages);          // oldest first, for the summary
@@ -98,7 +100,7 @@ public class ConversationCompressor {
                 String role = (String) msg.get("role");
                 String content = (String) msg.get("content");
                 textToCompress.append(role.toUpperCase()).append(": ")
-                        .append(truncate(content, 500)).append("\n");
+                        .append(truncate(content, EXCERPT_CHARS)).append("\n");
             }
 
             // Compress via local LLM
@@ -140,20 +142,33 @@ public class ConversationCompressor {
     }
 
     /**
-     * How many of the newest messages are kept in full -- the rule both this summariser and the
-     * agent's chat context use, so what one leaves out the other has summarised or is about to.
+     * How many of the newest messages fit in a window of at most {@code maxCount} messages and
+     * {@code maxChars} characters, never fewer than {@link #ACTIVE_MIN}. The summariser keeps
+     * (ACTIVE_WINDOW, ACTIVE_CHARS) uncompressed; the agent shows what it may leave -- the window
+     * plus the slack before it summarises (see {@link #shownToTheAgent}) -- so no message is in
+     * neither.
      *
      * @param lengthsNewestFirst each message's length, newest first
      */
-    public static int keptNewest(List<Integer> lengthsNewestFirst) {
+    public static int keptNewest(List<Integer> lengthsNewestFirst, int maxCount, int maxChars) {
         int kept = 0, chars = 0;
         for (int len : lengthsNewestFirst) {
-            boolean fits = kept < ACTIVE_WINDOW && chars + len <= ACTIVE_CHARS;
+            boolean fits = kept < maxCount && chars + len <= maxChars;
             if (kept >= ACTIVE_MIN && !fits) break;
             kept++;
             chars += len;
         }
         return kept;
+    }
+
+    /**
+     * How many of the newest uncompressed messages a chat task shows the cloud: every one the
+     * summariser may still leave uncompressed -- its window, plus up to COMPRESS_THRESHOLD - 1
+     * messages and COMPRESS_CHARS of text waiting to be summarised -- so a message is always
+     * shown or in the summary, never neither.
+     */
+    public static int shownToTheAgent(List<Integer> lengthsNewestFirst) {
+        return keptNewest(lengthsNewestFirst, ACTIVE_WINDOW + COMPRESS_THRESHOLD - 1, ACTIVE_CHARS + COMPRESS_CHARS);
     }
 
     /**

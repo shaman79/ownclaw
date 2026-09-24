@@ -24,10 +24,14 @@ class ChatWindowTest {
     @Test
     @DisplayName("the window: the newest messages up to 24,000 characters, never fewer than two, never more than ten")
     void keptNewest() {
-        assertEquals(4, ConversationCompressor.keptNewest(Collections.nCopies(8, 6_000)));
-        assertEquals(2, ConversationCompressor.keptNewest(List.of(30_000, 100, 100)), "the exchange being continued");
-        assertEquals(10, ConversationCompressor.keptNewest(Collections.nCopies(15, 100)));
-        assertEquals(0, ConversationCompressor.keptNewest(List.of()));
+        int n = ConversationCompressor.ACTIVE_WINDOW, c = ConversationCompressor.ACTIVE_CHARS;
+        assertEquals(4, ConversationCompressor.keptNewest(Collections.nCopies(8, 6_000), n, c));
+        assertEquals(2, ConversationCompressor.keptNewest(List.of(30_000, 100, 100), n, c), "the exchange being continued");
+        assertEquals(10, ConversationCompressor.keptNewest(Collections.nCopies(15, 100), n, c));
+        assertEquals(0, ConversationCompressor.keptNewest(List.of(), n, c));
+        // The agent shows the window plus what the summariser may still leave: 15 and 32,000.
+        assertEquals(5, ConversationCompressor.shownToTheAgent(Collections.nCopies(8, 6_000)));
+        assertEquals(15, ConversationCompressor.shownToTheAgent(Collections.nCopies(30, 100)));
     }
 
     @Test
