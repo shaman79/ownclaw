@@ -128,9 +128,11 @@ public final class SpecialActionSchemas {
                             + "full tool set and your credentials, and costs nothing. Best for work "
                             + "on this machine, the LAN, servers and private data. About a minute "
                             + "per step, so prefer it when nobody is waiting. Give it a goal; it "
-                            + "works out the steps. Observations name earlier results as $N; a "
-                            + "later delegation can pass $N or $N.field on verbatim without you "
-                            + "reading it.",
+                            + "works out the steps. A delegation starts with no results and "
+                            + "cannot see earlier ones, so say in words what it should fetch. "
+                            + "Observations name results as {{N}}; to pass one on verbatim "
+                            + "without reading it, put {{N}} or {{N.field}} as the whole value of "
+                            + "a tool argument yourself.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));

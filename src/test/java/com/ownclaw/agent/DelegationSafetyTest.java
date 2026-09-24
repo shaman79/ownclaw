@@ -29,6 +29,18 @@ class DelegationSafetyTest {
         return new Artifact(tool, params, output, true);
     }
 
+    /** Resolve and require success: the substituted arguments. */
+    private static Map<String, Object> sub(Map<String, Object> written, List<Artifact> done) {
+        var r = References.resolve(written, done);
+        assertTrue(r.ok(), "refused: " + r.reason());
+        return r.params();
+    }
+
+    /** The parameter the resolver refused, or null when the call may run. */
+    private static String refusedParam(Map<String, Object> written, List<Artifact> done) {
+        return References.resolve(written, done).refused();
+    }
+
     /** A PUBLIC artifact with a task-wide handle — the shape the store produces. */
     private static Artifact numbered(int n, String tool, String output) {
         return new Artifact(n, tool, Map.of(), Map.of(), output, true,
@@ -120,11 +132,11 @@ class DelegationSafetyTest {
     // ── passing a result on without retyping it ──
 
     @Test
-    @DisplayName("a parameter that is exactly $1 becomes step 1's output")
+    @DisplayName("a parameter that is exactly {{1}} becomes step 1's output")
     void referenceIsSubstituted() {
         var done = List.of(step("daily_news_digest", Map.of(), "DIGEST 2026-09-22\nline two"));
-        var out = LocalExecutor.substituteRefs(
-                Map.of("to", "petr@example.com", "body", "$1"), done);
+        var out = sub(
+                Map.of("to", "petr@example.com", "body", "{{1}}"), done);
 
         assertEquals("DIGEST 2026-09-22\nline two", out.get("body"),
                 "the text the owner reads must never pass through the model as output tokens");
@@ -132,85 +144,84 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("$1.field takes one field out of a JSON result")
+    @DisplayName("{{1.field}} takes one field out of a JSON result")
     void fieldReferenceIsResolved() {
         // Exactly what daily_news_digest returns, and exactly what smtp_send_email needs out
         // of it: the text, not the envelope around the text.
         var done = List.of(step("daily_news_digest", Map.of(),
                 "{\"ok\":true,\"date\":\"2026-09-22\",\"body_text\":\"Digest line one\\nline two\"}"));
 
-        var out = LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), done);
+        var out = sub(Map.of("body", "{{1.body_text}}"), done);
         assertEquals("Digest line one\nline two", out.get("body"),
                 "whole-output substitution would email the owner raw JSON, and retyping is the "
                         + "failure everything here exists to prevent");
 
         assertEquals("2026-09-22",
-                LocalExecutor.substituteRefs(Map.of("subject", "$1.date"), done).get("subject"));
+                sub(Map.of("subject", "{{1.date}}"), done).get("subject"));
     }
 
     @Test
-    @DisplayName("$1 still gives the whole output when no field is named")
+    @DisplayName("{{1}} still gives the whole output when no field is named")
     void wholeOutputStillWorks() {
         String json = "{\"ok\":true,\"body_text\":\"text\"}";
         var done = List.of(step("x", Map.of(), json));
-        assertEquals(json, LocalExecutor.substituteRefs(Map.of("c", "$1"), done).get("c"));
+        assertEquals(json, sub(Map.of("c", "{{1}}"), done).get("c"));
     }
 
     @Test
     @DisplayName("a non-string field is serialised rather than dropped")
     void nonStringFieldsSurvive() {
         var done = List.of(step("x", Map.of(), "{\"count\":7,\"items\":[1,2]}"));
-        assertEquals("7", LocalExecutor.substituteRefs(Map.of("n", "$1.count"), done).get("n"));
+        assertEquals("7", sub(Map.of("n", "{{1.count}}"), done).get("n"));
         assertEquals("[1,2]",
-                LocalExecutor.substituteRefs(Map.of("n", "$1.items"), done).get("n"));
+                sub(Map.of("n", "{{1.items}}"), done).get("n"));
     }
 
     @Test
-    @DisplayName("an unresolvable field is left visible, not silently emptied")
-    void missingFieldIsLeftAsWritten() {
+    @DisplayName("an unresolvable field is refused, not sent as text and not silently emptied")
+    void missingFieldIsRefused() {
+        // It used to be left as the literal "$1.body_text" on the theory that a visible token
+        // is better than an empty email. It is -- and a refusal is better than both: the literal
+        // went out as the body, the tool reported success, and the run was recorded green.
         var done = List.of(step("x", Map.of(), "{\"ok\":true}"));
-        assertEquals("$1.body_text",
-                LocalExecutor.substituteRefs(Map.of("b", "$1.body_text"), done).get("b"),
-                "substituting empty would send an empty email and report success; an "
-                        + "unresolved token at least shows up in what it reaches");
-
+        assertEquals("b", refusedParam(Map.of("b", "{{1.body_text}}"), done));
         var plain = List.of(step("x", Map.of(), "not json at all"));
-        assertEquals("$1.body_text",
-                LocalExecutor.substituteRefs(Map.of("b", "$1.body_text"), plain).get("b"));
-        assertEquals("$1.",
-                LocalExecutor.substituteRefs(Map.of("b", "$1."), done).get("b"));
+        assertEquals("b", refusedParam(Map.of("b", "{{1.body_text}}"), plain));
+        assertEquals("b", refusedParam(Map.of("b", "{{1.}}"), done), "an empty field");
     }
 
     @Test
-    @DisplayName("$1 inside a larger string is left alone")
+    @DisplayName("shell text is never touched, and a reference inside text is refused")
     void onlyWholeValuesAreReferences() {
         var done = List.of(step("x", Map.of(), "OUTPUT"));
-        var out = LocalExecutor.substituteRefs(
-                Map.of("command", "for f in *; do echo \"$1\"; done"), done);
-
-        assertEquals("for f in *; do echo \"$1\"; done", out.get("command"),
+        assertEquals("for f in *; do echo \"$1\"; done",
+                sub(Map.of("command", "for f in *; do echo \"$1\"; done"), done).get("command"),
                 "shell is full of $1, and rewriting one inside a script would be a far worse "
-                        + "bug than the one this fixes");
+                        + "bug than the one this fixes -- the marker is {{N}} now, which shell is not");
+        assertEquals("body", refusedParam(Map.of("body", "Here is the menu: {{1}}"), done),
+                "substituting inside text is how a summary becomes a quotation; leaving it is how "
+                        + "an email arrives with a template token in it");
     }
 
     @Test
-    @DisplayName("a reference to a step that has not run is left as written")
-    void outOfRangeReferenceIsNotSubstituted() {
+    @DisplayName("a reference to a step that has not run is refused")
+    void outOfRangeReferenceIsRefused() {
         var done = List.of(step("x", Map.of(), "OUTPUT"));
-        assertEquals("$7", LocalExecutor.substituteRefs(Map.of("body", "$7"), done).get("body"),
-                "silently substituting the wrong step would be worse than an obvious literal");
-        assertEquals("$1", LocalExecutor.substituteRefs(Map.of("body", "$1"), List.of())
-                        .get("body"),
+        assertEquals("body", refusedParam(Map.of("body", "{{7}}"), done),
+                "silently substituting the wrong step would be worse, and sending the literal is "
+                        + "what used to happen");
+        assertEquals("body", refusedParam(Map.of("body", "{{1}}"), List.of()),
                 "and on the first step there is nothing to reference yet");
     }
 
     @Test
-    @DisplayName("$0 and $abc are not references")
-    void malformedReferencesAreLeftAlone() {
+    @DisplayName("dollar signs are money again; a malformed {{…}} is refused")
+    void malformedReferences() {
         var done = List.of(step("x", Map.of(), "OUTPUT"));
-        assertEquals("$0", LocalExecutor.substituteRefs(Map.of("b", "$0"), done).get("b"));
-        assertEquals("$abc", LocalExecutor.substituteRefs(Map.of("b", "$abc"), done).get("b"));
-        assertEquals("$", LocalExecutor.substituteRefs(Map.of("b", "$"), done).get("b"));
+        for (String money : List.of("$0", "$abc", "$", "$50", "$5.50", "$1")) {
+            assertEquals(money, sub(Map.of("b", money), done).get("b"), money);
+        }
+        assertEquals("b", refusedParam(Map.of("b", "{{0}}"), done), "handles start at 1");
     }
 
     // ── what the model is shown of a result ──
@@ -236,7 +247,7 @@ class DelegationSafetyTest {
         assertTrue(shown.startsWith("HEAD-"), "it still needs to know what it got");
         assertTrue(shown.endsWith("]"), "and how to move it");
         assertTrue(shown.contains("-TAIL"), "the tail says whether the result was complete");
-        assertTrue(shown.contains("$1"), "the reference is the whole point");
+        assertTrue(shown.contains("{{1}}"), "the reference is the whole point");
         assertTrue(shown.contains(LocalExecutor.OMISSION_MARKER),
                 "the marker is what makes a retyped excerpt detectable rather than silent");
     }
@@ -258,7 +269,7 @@ class DelegationSafetyTest {
     void normalParamsAreNotFlagged() {
         assertNull(LocalExecutor.retypedExcerpt(
                 Map.of("body", "Here is the digest, see attached.", "to", "petr@example.com")));
-        assertNull(LocalExecutor.retypedExcerpt(Map.of("body", "$1")));
+        assertNull(LocalExecutor.retypedExcerpt(Map.of("body", "{{1}}")));
         assertNull(LocalExecutor.retypedExcerpt(Map.of()));
         assertNull(LocalExecutor.retypedExcerpt(null));
     }
@@ -277,11 +288,11 @@ class DelegationSafetyTest {
     @DisplayName("the reference number is the step that produced it")
     void referenceNumberMatchesTheStep() {
         String big = "y".repeat(3000);
-        assertTrue(LocalExecutor.feedback(big, 3).contains("$3"));
-        // ...and that is the number substituteRefs resolves against the same list.
+        assertTrue(LocalExecutor.feedback(big, 3).contains("{{3}}"));
+        // ...and that is the number the resolver uses against the same list.
         var done = List.of(step("a", Map.of(), "first"), step("b", Map.of(), "second"),
                 step("c", Map.of(), big));
-        assertEquals(big, LocalExecutor.substituteRefs(Map.of("body", "$3"), done).get("body"));
+        assertEquals(big, sub(Map.of("body", "{{3}}"), done).get("body"));
     }
 
     // ── finishing has to work in both protocols ──
@@ -324,13 +335,13 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("an unresolved reference is caught before it reaches a tool")
     void unresolvedReferenceIsDetected() {
-        // The symmetrical failure to the retyped excerpt, and it had no guard: the owner gets
-        // an email whose entire body is the seven characters "$1.body", sent successfully and
-        // recorded green.
-        assertEquals("body", LocalExecutor.unresolvedRef(
-                Map.of("to", "petr@example.com", "body", "$1.body"), 4));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.body_text"), 4));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$3"), 4));
+        // The symmetrical failure to the retyped excerpt, and it had no guard: the owner got an
+        // email whose entire body was the seven characters "$1.body", sent and recorded green.
+        var done = List.of(step("a", Map.of(), "{\"body_text\":\"x\"}"), step("b", Map.of(), "y"),
+                step("c", Map.of(), "z"), step("d", Map.of(), "w"));
+        assertEquals("body", refusedParam(Map.of("to", "petr@example.com", "body", "{{1.body}}"), done));
+        assertEquals("body", refusedParam(Map.of("body", "{{2.body_text}}"), done));
+        assertEquals("body", refusedParam(Map.of("body", "{{9}}"), done));
     }
 
     @Test
@@ -338,15 +349,12 @@ class DelegationSafetyTest {
     void resolvedReferencesAreClean() {
         var done = List.of(step("daily_news_digest", Map.of(),
                 "{\"ok\":true,\"body_text\":\"the digest\"}"));
-        var resolved = LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), done);
-        assertNull(LocalExecutor.unresolvedRef(resolved, done.size()),
+        assertNull(refusedParam(Map.of("body", "{{1.body_text}}"), done),
                 "it resolved, so what is left is content, not a reference");
-
-        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "Costs $5 and $10"), 1),
-                "money is not a reference");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("command", "echo \"$1\" | wc -c"), 1));
-        assertNull(LocalExecutor.unresolvedRef(Map.of(), 1));
-        assertNull(LocalExecutor.unresolvedRef(null, 1));
+        assertNull(refusedParam(Map.of("body", "Costs $5 and $10"), done), "money is not a reference");
+        assertNull(refusedParam(Map.of("command", "echo \"$1\" | wc -c"), done));
+        assertNull(refusedParam(Map.of(), done));
+        assertNull(refusedParam(null, done));
     }
 
     // ── a failed delegation must not invite the work to be done twice ──
@@ -393,10 +401,10 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a reference is short, so it is never mistaken for composed prose")
     void referencesAreBelowTheThreshold() {
-        // The refusal keys on length, and every intended path is far under it: "$1" is two
-        // characters and "$1.body_text" is thirteen.
-        assertTrue("$1.body_text".length() < 600);
-        assertTrue("$1".length() < 600);
+        // The refusal keys on length, and every intended path is far under it: "{{1}}" is five
+        // characters and "{{1.body_text}}" is fifteen.
+        assertTrue("{{1.body_text}}".length() < 600);
+        assertTrue("{{1}}".length() < 600);
     }
 
     @Test
@@ -461,22 +469,22 @@ class DelegationSafetyTest {
     @DisplayName("the results survive the trim, because they never lived in the transcript")
     void trimKeepsTheReferences() {
         var m = conversation(8);
-        // Handles are the artifact's own task-wide number now, not its position in a list.
+        // To the local model a handle is a position in its own delegation's list.
         var done = List.of(numbered(1, "daily_news_digest", "D".repeat(3000)),
                 numbered(2, "smtp_send_email", "sent"));
 
         LocalExecutor.trimHistory(m, done);
         String ledger = m.get(1).content();
 
-        assertTrue(ledger.contains("$1 = daily_news_digest"), "it must know what $1 is");
-        assertTrue(ledger.contains("$2 = smtp_send_email"));
+        assertTrue(ledger.contains("{{1}} = daily_news_digest"), "it must know what {{1}} is");
+        assertTrue(ledger.contains("{{2}} = smtp_send_email"));
         assertTrue(ledger.contains("3000 chars"), "and how much is behind the reference");
         assertTrue(ledger.contains("have not"),
                 "a model that believes the results are gone will try to reconstruct them");
 
-        // The point: $1 still resolves after the conversation carrying it was dropped.
+        // The point: {{1}} still resolves after the conversation carrying it was dropped.
         assertEquals("D".repeat(3000),
-                LocalExecutor.substituteRefs(Map.of("body", "$1"), done).get("body"));
+                sub(Map.of("body", "{{1}}"), done).get("body"));
     }
 
     @Test
@@ -504,14 +512,15 @@ class DelegationSafetyTest {
 
         assertTrue(outcome.ok());
         assertTrue(outcome.text().contains("📰 Digest — 2026-09-23"), "the public result, in full");
-        assertTrue(outcome.text().contains("$2 smtp_send_email"), "the private one by handle");
+        assertTrue(outcome.text().contains("{{2}} smtp_send_email"), "the private one by its task handle");
         assertTrue(outcome.text().contains("PRIVATE"));
         assertFalse(outcome.text().contains("message id 42"), "and never by content");
         assertFalse(outcome.text().contains("Local prose"),
                 "the local model's prose is a paraphrase of what it read, and a paraphrase is the "
                         + "one thing the canary cannot see");
         assertTrue(outcome.text().contains("withheld"));
-        assertTrue(outcome.text().contains("forward one by reference"));
+        assertTrue(outcome.text().contains("To pass one on"),
+                "and the cloud is told how to move it without reading it");
     }
 
     @Test
@@ -537,7 +546,7 @@ class DelegationSafetyTest {
         var outcome = LocalExecutor.completed("", "fetch", List.of(priv, pub));
 
         assertFalse(outcome.text().contains("petr@x"));
-        assertTrue(outcome.text().contains("$1"));
+        assertTrue(outcome.text().contains("{{1}}"));
         assertTrue(outcome.text().contains("✗"));
         assertTrue(outcome.text().contains("KeyError 'menu'"),
                 "the public traceback is the self-repair loop's evidence and stays verbatim");
@@ -546,14 +555,14 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("failed steps print the arguments as written, never the substituted bytes")
     void failuresPrintWrittenParams() {
-        var a = new Artifact(2, "smtp_send_email", Map.of("body", "$1.body_text"),
+        var a = new Artifact(2, "smtp_send_email", Map.of("body", "{{1.body_text}}"),
                 Map.of("body", "THE WHOLE SUBSTITUTED DIGEST"), "ERROR: auth", false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
         var outcome = LocalExecutor.completed("", "send", List.of(a));
-        assertTrue(outcome.text().contains("$1.body_text"));
+        assertTrue(outcome.text().contains("{{1.body_text}}"));
         assertFalse(outcome.text().contains("THE WHOLE SUBSTITUTED DIGEST"),
-                "the resolved map carries the bytes of whatever $N pointed at");
+                "the resolved map carries the bytes of whatever {{N}} pointed at");
     }
 
     @Test
@@ -561,19 +570,37 @@ class DelegationSafetyTest {
     void privateStillResolvesLocally() {
         var priv = privateStep(1, "imap_fetch", "{\"body_text\":\"the mail\"}", true);
         assertEquals("the mail",
-                LocalExecutor.substituteRefs(Map.of("body", "$1.body_text"), List.of(priv)).get("body"),
+                sub(Map.of("body", "{{1.body_text}}"), List.of(priv)).get("body"),
                 "private means withheld from the cloud, not from the machine it lives on");
     }
 
     @Test
-    @DisplayName("an identical side-effecting call from an earlier delegation is found by task-wide numbering")
-    void repeatsSpanDelegations() {
-        var earlier = new Artifact(3, "smtp_send_email", Map.of("to", "petr@example.com"),
-                Map.of("to", "petr@example.com"), "Sent", true, com.ownclaw.privacy.Label.PRIVATE, List.of());
-        assertEquals("Sent", LocalExecutor.priorIdenticalOutput("smtp_send_email",
-                        Map.of("to", "petr@example.com"), List.of(earlier)),
-                "the store is the task's, so the cross-delegation double send is blocked by "
-                        + "the same guard that blocks it within one");
+    @DisplayName("a side effect that succeeded anywhere in the task is found — and only a success")
+    void sideEffectsAreNeverRepeatedInATask() {
+        // The within-delegation repeat shows the model what the earlier call returned. Across
+        // delegations it must not: that is how a PRIVATE result from outside a delegation reached
+        // the local model and then, paraphrased, the cloud. So the task-wide check only answers
+        // "already done", and it is the same check the cloud path uses.
+        var smtp = new com.ownclaw.agent.tools.Tool() {
+            public String name() { return "smtp_send_email"; }
+            public String description() { return "send"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public boolean hasSideEffects() { return true; }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
+                    com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
+        };
+        var args = Map.<String, Object>of("to", "petr@example.com", "body", "menu");
+        var sent = new Artifact(3, "smtp_send_email", args, args, "Sent", true,
+                com.ownclaw.privacy.Label.PRIVATE, List.of());
+        var failed = new Artifact(4, "smtp_send_email", args, args, "ERROR: 421", false,
+                com.ownclaw.privacy.Label.PRIVATE, List.of());
+
+        assertSame(sent, LocalExecutor.sideEffectAlreadyDone(smtp, args, List.of(failed, sent)));
+        assertNull(LocalExecutor.sideEffectAlreadyDone(smtp, args, List.of(failed)),
+                "a send that failed is exactly what a retry is for");
+        assertNull(LocalExecutor.sideEffectAlreadyDone(smtp,
+                Map.of("to", "someone@else.cz", "body", "menu"), List.of(sent)),
+                "different arguments are a different change");
     }
 
     @Test
@@ -596,48 +623,28 @@ class DelegationSafetyTest {
         var done = List.of(step("render", Map.of(),
                 "{\"rendered_html_for_email_body_with_css\":\"<p>Polévka</p>\"}"));
         assertEquals(Map.of("body", "<p>Polévka</p>"),
-                LocalExecutor.substituteRefs(
-                        Map.of("body", "$1.rendered_html_for_email…"), done));
+                sub(Map.of("body", "{{1.rendered_html_for_email…}}"), done));
 
         // Only when it is unambiguous — a guess here picks somebody's data.
         var twin = List.of(step("render", Map.of(),
                 "{\"rendered_html_for_email\":\"A\",\"rendered_html_for_export\":\"B\"}"));
-        assertEquals(Map.of("body", "$1.rendered_html_for_e…"),
-                LocalExecutor.substituteRefs(Map.of("body", "$1.rendered_html_for_e…"), twin),
-                "two keys share the prefix, so it stays unresolved and is refused downstream");
+        assertEquals("body", refusedParam(Map.of("body", "{{1.rendered_html_for_e…}}"), twin),
+                "two keys share the prefix, so it is refused");
     }
 
     @Test
-    @DisplayName("a reference copied from the truncated descriptor is refused, not sent as text")
-    void anEllipsisReferenceIsStillAReference() {
-        // The descriptor abbreviates a field name over 24 characters and marks the cut with "…".
-        // The cloud copies what it is shown. The old pattern required word characters after the
-        // dot, so "$1.rendered_html_for_ema…" was neither substituted nor recognised as a
-        // dangling reference — it went out as the literal body of an email, and the run was
-        // recorded green. That is the exact failure the guard exists to stop.
-        // A NAMED FIELD is a reference whatever the task has produced — including on a first
-        // step, where substitution does nothing at all and the literal characters used to
-        // travel on as the body of an email.
-        assertEquals("body", LocalExecutor.unresolvedRef(
-                Map.of("body", "$1.rendered_html_for_ema…"), 0));
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$2.no_such_field"), 3));
-
-        // A BARE HANDLE is a reference only within range. Out of range it is the fifty dollars
-        // the model meant, and refusing it failed steps that were perfectly correct.
-        assertEquals("body", LocalExecutor.unresolvedRef(Map.of("body", "$9"), 12));
-        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$50"), 0),
-                "a price on a first step");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$50"), 3),
-                "and a price on any later step");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("amount", "$5.50"), 3),
-                "a decimal amount is not handle 5 field '50'");
-
-        // A value that RESOLVED and merely begins like a reference is not one.
-        assertNull(LocalExecutor.unresolvedRef(
-                Map.of("body", "$5.50 Polévka" + System.lineSeparator() + "Hlavní chod"), 9),
-                "this is a menu; refusing it told the model to use the reference it just used");
-        assertNull(LocalExecutor.unresolvedRef(Map.of("body", "the price is $50 today"), 3));
-        assertNull(LocalExecutor.unresolvedRef(Map.of("subject", "Menu"), 3));
+    @DisplayName("prices are not references and references are not prices")
+    void pricesAndReferencesCannotBeConfused() {
+        // Five review rounds went into telling "$5.50" from "$1.body_text". The marker ended it.
+        var done = List.of(step("a", Map.of(), "{\"body_text\":\"x\"}"));
+        for (String money : List.of("$50", "$5.50", "$1.99", "$1.234,56", "$5.00/kg",
+                "$5.50 Polévka" + System.lineSeparator() + "Hlavní chod")) {
+            assertNull(refusedParam(Map.of("amount", money), done), money);
+        }
+        assertEquals("body", refusedParam(Map.of("body", "{{1.rendered_html_for_ema…}}"), done),
+                "a cut name with no match is refused, not sent");
+        assertEquals("body", refusedParam(Map.of("body", "$1.body_text"), done),
+                "the old syntax, from habit or a stored lesson, is refused rather than sent");
     }
 
     @Test
@@ -648,7 +655,7 @@ class DelegationSafetyTest {
         String text = LocalExecutor.buildConsolidatedResult("fetch mail", List.of(priv));
         assertEquals(1, text.split("imap_unread_summarizer", -1).length - 1,
                 "the descriptor already names the handle and the tool: " + text);
-        assertTrue(text.contains("### $1 imap_unread_summarizer ✓ — PRIVATE"), text);
+        assertTrue(text.contains("### {{1}} imap_unread_summarizer ✓ — PRIVATE"), text);
     }
 
     @Test

@@ -126,7 +126,7 @@ class CloudGatewayTest {
         assertEquals(3, ex.handle());
         assertEquals(1, ex.partIndex(), "the user turn, not the system prompt");
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
-        assertTrue(rows.last().refusalRef().startsWith("$3 in part 1"));
+        assertTrue(rows.last().refusalRef().startsWith("{{3}} in part 1"));
         // Mutation: scan after the call -> provider.calls not empty.
     }
 
@@ -279,7 +279,7 @@ class CloudGatewayTest {
 
         var row = rows.last();
         assertEquals(EgressLedger.Decision.ERROR, row.decision());
-        assertTrue(row.refusalRef().startsWith("$4"), row.refusalRef());
+        assertTrue(row.refusalRef().startsWith("{{4}}"), row.refusalRef());
         assertTrue(row.refusalRef().contains("IllegalStateException"), row.refusalRef());
         // Mutation: write only the exception name -> the observation is lost and OBSERVE
         // undercounts precisely the calls that failed.

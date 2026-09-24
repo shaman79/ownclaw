@@ -181,7 +181,7 @@ public final class CloudGateway implements LlmProvider {
                         Math.min(hit.offset() + hit.length(), normalised.length()));
                 if (registry || egress.allowed().test(hit.handle(), window)) continue;
 
-                String ref = "$" + hit.handle() + " in part " + part.index() + " (" + part.kind()
+                String ref = "{{" + hit.handle() + "}} in part " + part.index() + " (" + part.kind()
                         + ") at " + hit.offset();
                 if (mode() == Mode.ENFORCE) {
                     ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,

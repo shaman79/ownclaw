@@ -1171,29 +1171,31 @@ public class AgentLoop {
                 context.attachmentIds()
         );
 
-        // The same reference mechanism the delegation uses. The delegate tool's description
-        // tells the cloud that results are named $N and can be forwarded without reading them;
-        // on this path nothing resolved them, so the promise was only half true — and a $N the
-        // cloud wrote would have reached a skill as the literal two characters.
-        Map<String, Object> resolved =
-                LocalExecutor.substituteRefs(action.params(), context.artifacts());
-        // ...and the guard that makes substitution safe, which the delegation already had. A
-        // reference that resolves to nothing is refused rather than passed on: as an argument to
-        // smtp_send_email, "$9" is an email whose entire body is two characters, sent
-        // successfully and recorded green.
-        // The count is what tells a reference from a price; see unresolvedRef. Skipping the
-        // check entirely when the task had no results was wrong in the other direction: it is
-        // exactly then that "$1.body_text" -- the form the descriptor now teaches -- resolves to
-        // nothing, and twelve literal characters went out as the body of an email.
-        String unresolved = LocalExecutor.unresolvedRef(resolved, context.artifacts().size());
-        if (unresolved != null) {
-            log.warn("Task {}: '{}' references a result that does not exist — refused.",
-                    context.taskId(), unresolved);
-            return AgentObservation.failure(action.tool(),
-                    "'" + unresolved + "' refers to a result that does not exist, so it would "
-                            + "have been passed on as literal text. Results are numbered $1, $2 "
-                            + "… in the order they were produced; this task has "
-                            + context.artifacts().size() + ".", 0);
+        // The same resolver the delegation uses, against the task's results -- the cloud sees
+        // task-wide handles in every descriptor, so {{3}} here is the task's third result. One
+        // pass substitutes and refuses: a reference that does not resolve, names a failed result,
+        // or is not the whole value would otherwise reach the skill as literal text -- as an
+        // argument to smtp_send_email, an email whose whole body is five characters, sent and
+        // recorded green.
+        References.Resolved refs = References.resolve(action.params(), context.artifacts());
+        if (!refs.ok()) {
+            log.warn("Task {}: '{}' — reference refused.", context.taskId(), refs.refused());
+            return AgentObservation.failure(action.tool(), "Not run: the value of '"
+                    + refs.refused() + "' would have been sent as literal text. " + refs.reason(), 0);
+        }
+        Map<String, Object> resolved = refs.params();
+
+        // A change that already happened in this task is not made again -- including one a
+        // delegation made before it failed on a later step and the fallback handed the tools
+        // back. Without this the cloud, told to finish the job, sent a second morning email.
+        Artifact alreadyDone = LocalExecutor.sideEffectAlreadyDone(tool, resolved, context.artifacts());
+        if (alreadyDone != null) {
+            log.warn("Task {}: {} with identical arguments already succeeded as {} — not repeated.",
+                    context.taskId(), action.tool(), alreadyDone.handle());
+            return AgentObservation.failure(action.tool(), "Not run: this exact " + action.tool()
+                    + " call already succeeded earlier in this task (" + alreadyDone.handle()
+                    + "). It changes something, so it is never done twice. If the goal is met, "
+                    + "respond.", 0);
         }
 
         long startMs = System.currentTimeMillis();
@@ -1213,10 +1215,8 @@ public class AgentLoop {
         // store; what goes on is either the bytes (PUBLIC) or the descriptor (PRIVATE), and
         // nothing downstream -- the renderers, the progress summary, the episode, the events
         // rows, the repair evidence -- ever sees the other.
-        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(), false,
-                action.params(), context.artifacts());
-        // labelFor reads the arguments as WRITTEN, so a $N reference to a private artifact is
-        // seen before substitution turns it into content.
+        // The label from what the resolver actually pulled in, so it describes what moved.
+        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(), refs.used());
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
 

@@ -1,0 +1,181 @@
+package com.ownclaw.agent;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Resolving the references in a tool call — the one function both paths call.
+ * <p>
+ * Three pieces of code used to share this job: one substituted, one decided the label by
+ * parsing the arguments again, one refused dangling references by parsing the substituted
+ * values a third time. Every disagreement between them was a defect, and there were many. Here
+ * the substitution happens once, and what it pulled in is returned as {@link Resolved#used}:
+ * the label is computed from that list, so it describes what actually moved and cannot
+ * disagree with it. The refusal is part of the same pass, over the values as the model WROTE
+ * them — never over substituted content, which may legitimately begin with anything.
+ */
+final class References {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private References() {}
+
+    /**
+     * The outcome of resolving one call.
+     *
+     * @param params  the arguments with every reference replaced by the bytes it names
+     * @param used    the results those bytes came from — what the label is decided from
+     * @param refused the parameter that could not be resolved, or null when the call may run
+     * @param reason  why, in words the model can act on; null when nothing was refused
+     */
+    record Resolved(Map<String, Object> params, List<Artifact> used, String refused,
+                    String reason) {
+        boolean ok() {
+            return refused == null;
+        }
+    }
+
+    /**
+     * Resolve {@code written} against {@code namespace}, where {@code {{n}}} is the n-th
+     * element.
+     * <p>
+     * Everything a model plausibly meant as a reference is either substituted or refused;
+     * nothing reference-shaped is ever passed on as literal text, which is how an email whose
+     * whole body was "$1.body" went out and was recorded as a success. Refused, specifically:
+     * a handle beyond the list; a field the result does not have; a reference to a result that
+     * FAILED, whose output is an error message and never what anyone meant to send; and a
+     * reference that is not the whole top-level value — inside a sentence, in quotes, or nested
+     * in a list or an object — because substituting inside text is how a summary silently
+     * becomes a quotation.
+     */
+    static Resolved resolve(Map<String, Object> written, List<Artifact> namespace) {
+        if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
+        var out = new LinkedHashMap<String, Object>(written);
+        var used = new ArrayList<Artifact>();
+        for (var e : out.entrySet()) {
+            Object v = e.getValue();
+            if (v instanceof String s) {
+                ArtifactRef ref = ArtifactRef.parse(s);
+                if (ref == null) {
+                    if (ArtifactRef.looksLikeReference(s)) {
+                        return refuse(written, e.getKey(), "'" + s.strip() + "' looks like a "
+                                + "reference, but a reference has to be the WHOLE value of a "
+                                + "parameter, written exactly {{N}} or {{N.field}}. It is never "
+                                + "substituted inside other text.", namespace);
+                    }
+                    continue;
+                }
+                if (ref.handle() > namespace.size()) {
+                    return refuse(written, e.getKey(), ref + " refers to a result that does not "
+                            + "exist.", namespace);
+                }
+                Artifact a = namespace.get(ref.handle() - 1);
+                if (!a.success()) {
+                    return refuse(written, e.getKey(), ref + " is a FAILED result — its output "
+                            + "is an error message, not something to pass on.", namespace);
+                }
+                String value = ref.field() == null ? a.output() : field(a.output(), ref.field());
+                if (value == null) {
+                    return refuse(written, e.getKey(), ref + " names a field that result does "
+                            + "not have.", namespace);
+                }
+                e.setValue(value);
+                if (!used.contains(a)) used.add(a);
+            } else if (v instanceof Map<?, ?> || v instanceof Collection<?>) {
+                String nested = nestedReference(v);
+                if (nested != null) {
+                    return refuse(written, e.getKey(), "'" + nested + "' is inside a list or an "
+                            + "object. A reference only works as the whole value of a top-level "
+                            + "parameter.", namespace);
+                }
+            }
+        }
+        return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /** The results that can be referenced, so a refusal is actionable rather than just a no. */
+    static String available(List<Artifact> namespace) {
+        if (namespace.isEmpty()) {
+            return "Nothing has produced a result yet, so there is nothing to reference.";
+        }
+        var sb = new StringBuilder("Results you can reference: ");
+        for (int i = 0; i < namespace.size(); i++) {
+            if (i > 0) sb.append("; ");
+            Artifact a = namespace.get(i);
+            sb.append(ArtifactRef.handle(i + 1)).append(" = ").append(a.tool())
+              .append(a.success() ? " (ok" : " (FAILED — not referenceable");
+            if (a.success()) {
+                List<String> fields = Artifact.jsonFieldNames(a.output());
+                if (!fields.isEmpty()) sb.append("; fields: ").append(String.join(", ", fields));
+            }
+            sb.append(')');
+        }
+        return sb.append(". Use one exactly, e.g. {{1}} or {{1.body_text}}, as the whole value.")
+                .toString();
+    }
+
+    private static Resolved refuse(Map<String, Object> written, String param, String why,
+                                   List<Artifact> namespace) {
+        return new Resolved(written, List.of(), param, why + " " + available(namespace));
+    }
+
+    /** One field of a JSON result, or null. A name the descriptor cut short matches by prefix. */
+    private static String field(String output, String field) {
+        try {
+            JsonNode node = MAPPER.readTree(output);
+            if (node == null || !node.isObject()) return null;
+            JsonNode value = node.get(field);
+            // Only for a name the descriptor visibly cut. On every miss it turned a refusal into
+            // a silent wrong answer: "body" matched body_html, "o" matched ok, and the owner got
+            // an email whose whole body was "true".
+            if (value == null && field.endsWith("…")) value = byPrefix(node, field);
+            if (value == null || value.isNull()) return null;
+            return value.isTextual() ? value.asText() : value.toString();
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    /**
+     * The field whose name the descriptor abbreviated, matched by its visible prefix — only
+     * when exactly one key matches. Two would be a guess, and a guess here picks somebody's
+     * data. The cut itself cannot go: a 32-character field name would be a window of the
+     * private text, so the descriptor would leak and then refuse the call carrying it.
+     */
+    private static JsonNode byPrefix(JsonNode node, String field) {
+        String prefix = field.substring(0, field.length() - 1);
+        if (prefix.isBlank()) return null;
+        JsonNode found = null;
+        var names = node.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if (!name.startsWith(prefix)) continue;
+            if (found != null) return null;
+            found = node.get(name);
+        }
+        return found;
+    }
+
+    /** The first reference-shaped string anywhere inside a list or an object, or null. */
+    private static String nestedReference(Object v) {
+        if (v instanceof String s) return ArtifactRef.looksLikeReference(s) ? s.strip() : null;
+        if (v instanceof Map<?, ?> m) {
+            for (Object x : m.values()) {
+                String r = nestedReference(x);
+                if (r != null) return r;
+            }
+        } else if (v instanceof Collection<?> c) {
+            for (Object x : c) {
+                String r = nestedReference(x);
+                if (r != null) return r;
+            }
+        }
+        return null;
+    }
+}

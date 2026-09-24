@@ -96,6 +96,66 @@ public class LocalExecutor {
      * @return consolidated result string (success or error description)
      */
     public Outcome execute(DelegationPlan plan, AgentContext parentContext) {
+        // A delegation sees only its own results. If the goal names an earlier one, the local
+        // model would read {{3}} as ITS OWN third step -- which is exactly how a second
+        // delegation once forwarded the first one's traceback as the body of the morning email.
+        // So the references are taken out of what it is given, and the cloud is told why.
+        int[] removed = {0};
+        Outcome outcome = run(withoutOutsideReferences(plan, removed), parentContext);
+        if (removed[0] == 0) return outcome;
+        log.warn("Delegation goal named {} earlier result(s); removed — a delegation cannot see them.",
+                removed[0]);
+        return new Outcome(OUTSIDE_REFERENCE_NOTE + outcome.text(), outcome.toolsRun(),
+                outcome.stepCount(), outcome.ok(), outcome.produced());
+    }
+
+    private static final String OUTSIDE_REFERENCE_NOTE = "NOTE: the delegation's goal named "
+            + "earlier results. A delegation starts with no results and cannot see earlier ones, "
+            + "so those references were removed from what it was given. To pass an earlier result "
+            + "on, put {{N}} or {{N.field}} into a tool call yourself; otherwise say in words "
+            + "what the delegation should fetch.\n\n";
+
+    /** The plan with every reference replaced by a note; {@code removed[0]} counts them. */
+    static DelegationPlan withoutOutsideReferences(DelegationPlan plan, int[] removed) {
+        java.util.function.UnaryOperator<String> scrub = text -> {
+            if (text == null) return null;
+            var m = ArtifactRef.TOKEN.matcher(text);
+            var sb = new StringBuilder();
+            while (m.find()) {
+                removed[0]++;
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(
+                        "(an earlier result this delegation cannot see — get it again if needed)"));
+            }
+            m.appendTail(sb);
+            return sb.toString();
+        };
+        var steps = new ArrayList<DelegationPlan.Step>();
+        for (var st : plan.steps()) {
+            steps.add(new DelegationPlan.Step(scrub.apply(st.description()), st.tool(),
+                    scrubValues(st.params(), scrub)));
+        }
+        var checkpoints = plan.checkpoints() == null ? List.<String>of()
+                : plan.checkpoints().stream().map(scrub).toList();
+        return new DelegationPlan(scrub.apply(plan.goal()), steps, checkpoints, plan.maxSteps());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T scrubValues(T value, java.util.function.UnaryOperator<String> scrub) {
+        if (value instanceof String s) return (T) scrub.apply(s);
+        if (value instanceof Map<?, ?> m) {
+            var out = new LinkedHashMap<Object, Object>();
+            m.forEach((k, v) -> out.put(k, scrubValues(v, scrub)));
+            return (T) out;
+        }
+        if (value instanceof List<?> l) {
+            var out = new ArrayList<Object>();
+            for (Object v : l) out.add(scrubValues(v, scrub));
+            return (T) out;
+        }
+        return value;
+    }
+
+    private Outcome run(DelegationPlan plan, AgentContext parentContext) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
             return Outcome.failed(
@@ -111,14 +171,17 @@ public class LocalExecutor {
                 specs == null ? toolRegistry.all().size() : specs.size());
 
         int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
-        // The task's store, live: numbering is task-wide, so $N means one thing to this ledger,
-        // the cloud's descriptor and the events row, and a later delegation can forward what
-        // an earlier one produced. What THIS delegation produced is the tail from `from`.
-        List<Artifact> stepResults = parentContext.artifacts();
-        int from = stepResults.size();
-        // Once a step of this delegation is PRIVATE, every later step of it is: the local model
-        // has read private content, and anything it writes from then on -- a public tool's
-        // arguments included -- may carry it.
+        // This delegation's own results, and the only ones the local model can name: {{1}} is
+        // its first step, {{2}} its second -- which is what the system prompt tells it, and
+        // what a small model does unprompted anyway. Numbering them task-wide instead made that
+        // sentence false the moment a run delegated twice, and the second delegation's {{1}}
+        // forwarded the first one's traceback as the body of the morning email. Every result is
+        // still recorded on the task too, under the task-wide handle the cloud and the ledger see.
+        List<Artifact> mine = new ArrayList<>();
+        // Whether the local model has read private content yet. It no longer changes the label
+        // of what a public tool returns -- that marked a public web page private and then
+        // refused the cloud's own fetch of the same page. It governs what the MODEL writes: the
+        // arguments it types after this point, and its summary, never reach the cloud.
         boolean tainted = false;
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -129,7 +192,6 @@ public class LocalExecutor {
         String opening = plan.steps().isEmpty()
                 ? "Begin. Make the first tool call that moves toward the goal."
                 : "Begin executing the plan. Start with step 1.";
-        if (from > 0) opening += "\n\n" + describeAvailableRefs(stepResults);
         messages.add(LlmMessage.user(opening));
 
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
@@ -140,11 +202,11 @@ public class LocalExecutor {
                 // Partial work is not worthless: it is the only record of what the local model
                 // managed before the plug was pulled, and throwing it away is why a timed-out
                 // delegation used to leave nothing behind at all.
-                return partial("Task cancelled during delegation.", stepResults.subList(from, stepResults.size()));
+                return partial("Task cancelled during delegation.", mine);
             }
 
             // Keep the conversation from outgrowing the window it has to answer in.
-            trimHistory(messages, stepResults);
+            trimHistory(messages, mine);
 
             // THINK: ask local LLM for next action
             LlmResponse response;
@@ -177,7 +239,7 @@ public class LocalExecutor {
                 }
                 log.error("Local LLM call failed during delegation step {}: {}{}",
                         step + 1, msg, hint, e);
-                return partial("Local LLM call failed: " + msg + hint, stepResults.subList(from, stepResults.size()));
+                return partial("Local LLM call failed: " + msg + hint, mine);
             }
 
             parentContext.addLocalTokens(response.totalTokens());
@@ -200,7 +262,7 @@ public class LocalExecutor {
                 raw = renderCall(call);
             } else {
                 if (raw == null || raw.isBlank()) {
-                    return partial("Local LLM returned empty response", stepResults.subList(from, stepResults.size()));
+                    return partial("Local LLM returned empty response", mine);
                 }
                 // A tools-capable model can still answer in prose; the text parser is the
                 // fallback, not dead code.
@@ -229,7 +291,7 @@ public class LocalExecutor {
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.
                 return completed(action.summary, plan.goal(),
-                        stepResults.subList(from, stepResults.size()));
+                        mine);
             }
 
             if (action.tool == null || action.tool.isBlank()) {
@@ -265,7 +327,8 @@ public class LocalExecutor {
             // One resolution of the arguments first, used by every check below and by the call
             // itself. It was being computed twice, which is how a guard and the thing it
             // guards drift apart.
-            Map<String, Object> params = substituteRefs(action.params, stepResults);
+            References.Resolved refs = References.resolve(action.params, mine);
+            Map<String, Object> params = refs.params();
 
             // If the model retyped an excerpt instead of referencing it, refuse before anything
             // is written or sent -- and before the status line claims the tool is running.
@@ -273,37 +336,31 @@ public class LocalExecutor {
             String retyped = retypedExcerpt(params);
             if (retyped != null) {
                 log.warn("Delegation step {}: '{}' was retyped from an excerpt — refused.",
-                        stepResults.size() + 1, retyped);
+                        mine.size() + 1, retyped);
                 messages.add(LlmMessage.assistant(raw));
                 messages.add(LlmMessage.user("STOP. The '" + retyped + "' value you just wrote "
                         + "contains the marker saying the middle was omitted, which means you "
                         + "copied what was shown to you instead of the real text — most of it is "
-                        + "missing. Make the WHOLE value of '" + retyped + "' the reference $N "
+                        + "missing. Make the WHOLE value of '" + retyped + "' the reference {{N}} "
                         + "for the step that produced it. Nothing else, no quotes around it, no "
                         + "text before or after it."));
                 continue;
             }
 
-            // (The repeat check the comment above describes.)
-            // A reference that did not resolve. The symmetrical failure to the retyped excerpt,
-            // and until now it had no guard at all: "$1.body" (wrong field), "$2.body_text"
-            // (counting plan steps instead of results) or a reference made before the step it
-            // names all survive substituteRefs as literal text, carry no OMISSION_MARKER, and
-            // are far too short for warnIfComposed. The owner would receive an email whose
-            // entire body is the seven characters "$1.body", sent successfully, recorded green,
-            // with not one line in the log to explain it.
-            String unresolved = unresolvedRef(params, stepResults.size());
-            if (unresolved != null) {
-                log.warn("Delegation step {}: '{}' is a reference that does not resolve — refused.",
-                        stepResults.size() + 1, unresolved);
+            // A reference that could not be resolved: out of range, a missing field, a failed
+            // result, or reference-shaped text that is not the whole value. Each of these used to
+            // survive as literal text -- "$1.body" as the entire body of an email, sent, recorded
+            // green, with not one line in the log. Refused here, before anything runs.
+            if (!refs.ok()) {
+                log.warn("Delegation step {}: '{}' — reference refused.", mine.size() + 1,
+                        refs.refused());
                 messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("The value of '" + unresolved + "' is a reference "
-                        + "that does not exist, so it would have been sent as literal text. "
-                        + describeAvailableRefs(stepResults)));
+                messages.add(LlmMessage.user("Not run: the value of '" + refs.refused()
+                        + "' would have been sent as literal text. " + refs.reason()));
                 continue;
             }
 
-            String repeated = repeatedSideEffect(action, params, stepResults);
+            String repeated = repeatedSideEffect(action, params, mine);
             if (repeated != null) {
                 messages.add(LlmMessage.assistant(raw));
                 messages.add(LlmMessage.user("You already called " + action.tool
@@ -314,24 +371,38 @@ public class LocalExecutor {
                         + "finish."));
                 continue;
             }
+            // ...and anywhere else in the task, without showing what it returned. Showing an
+            // earlier delegation's output is how a PRIVATE result from outside this delegation
+            // reached the local model and then, paraphrased in its summary, the cloud -- a wifi
+            // password and an alarm code, in a reviewer's probe. Refusing is all the guard needs:
+            // the point is that the email does not go out twice.
+            Artifact alreadyDone = sideEffectAlreadyDone(
+                    toolRegistry.find(action.tool).orElse(null), params, parentContext.artifacts());
+            if (alreadyDone != null) {
+                messages.add(LlmMessage.assistant(raw));
+                messages.add(LlmMessage.user("Not run: an identical " + action.tool + " call "
+                        + "already succeeded earlier in this task. It changes something, so it "
+                        + "is never done twice. Move to the next step, or finish."));
+                continue;
+            }
 
             // One thing neither guard catches: a value the model WROTE ITSELF, that is neither
             // a reference nor a quoted excerpt -- its own paraphrase of a result, sent as if it
             // were the result. There is no honest test for that (composing text is often
             // exactly the job), so this does not block it. It leaves evidence, which is the
             // difference between a quality regression someone can find and one nobody can.
-            String composed = composedPayload(action.tool, action.params, stepResults);
+            String composed = composedPayload(action.tool, action.params, mine);
             if (composed != null) {
                 log.warn("Delegation step {}: '{}' is {} characters the model wrote itself — "
                                 + "refused; a result must be forwarded, not rewritten.",
-                        stepResults.size() + 1, composed,
+                        mine.size() + 1, composed,
                         String.valueOf(action.params.get(composed)).length());
                 messages.add(LlmMessage.assistant(raw));
                 messages.add(LlmMessage.user("STOP. The '" + composed + "' value is text you "
                         + "wrote out yourself. A result must be forwarded exactly as it came, "
                         + "never rewritten — rewriting is how a date, a line or a whole section "
                         + "goes missing, and you cannot see what you dropped. "
-                        + describeAvailableRefs(stepResults)
+                        + References.available(mine)
                         + " If none of them is what belongs here, this needs composing rather "
                         + "than forwarding, which is not your job: stop calling this tool and "
                         + "let the step fail."));
@@ -354,22 +425,24 @@ public class LocalExecutor {
             // printed.
             Tool ran = toolRegistry.find(action.tool).orElse(null);
             Artifact.Decision decision = Artifact.labelFor(
-                    ran == null ? List.of() : ran.requiredCredentials(),
-                    tainted, action.params, stepResults);
+                    ran == null ? List.of() : ran.requiredCredentials(), refs.used());
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);
+            mine.add(artifact);
+            // These arguments were typed by a model that had, or had not, read private content.
+            boolean wroteAfterPrivate = tainted;
             tainted |= artifact.isPrivate();
 
             // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
             // here, a skill used every single morning looks untouched to maintenance -- which
             // retires skills for being unused. The telemetry has to follow the work.
             // The arguments as WRITTEN, as the cloud path records them. `params` is the resolved
-            // map, with every $N already replaced by the artifact's bytes, so a failed step wrote
+            // map, with every {{N}} already replaced by the artifact's bytes, so a failed step wrote
             // up to 500 characters of the mailbox into a row whose label is the only thing
             // keeping it out of the repair prompt -- and that label has been wrong before.
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, toolOk ? null : action.params, toolOk ? null : toolResult,
-                    artifact.label());
+                    toolOk, toolMs, toolOk || wroteAfterPrivate ? null : action.params,
+                    toolOk ? null : toolResult, artifact.label());
 
             log.info("Delegation step {} — {} {} (result: {} chars, {})",
                     step + 1, artifact.handle() + " " + action.tool, toolOk ? "OK" : "FAIL",
@@ -378,8 +451,11 @@ public class LocalExecutor {
             // OBSERVE: feed result back to local LLM
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(
-                    "Tool result [" + action.tool + "] " + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
-                    feedback(toolResult, artifact.n()) + "\n\n" +
+                    // The handle every time -- a short result used to arrive without one, so the
+                    // model had to count for itself, and counting is where {{1}} went wrong.
+                    "Tool result " + ArtifactRef.handle(mine.size()) + " [" + action.tool + "] "
+                    + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
+                    feedback(toolResult, mine.size()) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
                     (nativeTools
                             ? "call done and say what you did — the result above is passed on "
@@ -390,7 +466,7 @@ public class LocalExecutor {
         // Hit max steps without "done"
         log.warn("Delegation hit max steps ({}) for goal: {}", maxSteps, plan.goal());
         return partial("Delegation reached max steps (" + maxSteps + ")",
-                stepResults.subList(from, stepResults.size()));
+                mine);
     }
 
     /**
@@ -531,10 +607,10 @@ public class LocalExecutor {
         // verbatim underneath the summary, so there is nothing to gain by copying them and a
         // whole class of fabrication to lose.
         sb.append("- To pass an earlier step's output on unchanged, make the WHOLE value of the\n");
-        sb.append("  parameter $1 for step 1's output, $2 for step 2's, and so on. It is\n");
+        sb.append("  parameter {{1}} for step 1's output, {{2}} for step 2's, and so on. It is\n");
         sb.append("  replaced with that step's exact text. If the result is JSON and you need\n");
-        sb.append("  one field, use $1.fieldname — e.g. $1.body_text to put the text from an\n");
-        sb.append("  envelope into an email body rather than the whole envelope.\n");
+        sb.append("  one field, use {{1.fieldname}} — e.g. {{1.body_text}} to put the text from\n");
+        sb.append("  an envelope into an email body rather than the whole envelope.\n");
         sb.append("  Never retype a result: retyping is where a wrong date or a dropped line\n");
         sb.append("  comes from, and it costs you the whole output again.\n");
         sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
@@ -657,8 +733,8 @@ public class LocalExecutor {
      * is to think freely and keep its full output budget — and VRAM rules out a bigger window,
      * so what has to shrink is the part nobody chose: the transcript.
      * <p>
-     * Nothing is lost that matters, because results do not live here. {@code stepResults} holds
-     * every output in full, {@code $N} still resolves against it, and the ledger says which
+     * Nothing is lost that matters, because results do not live here. The delegation's list
+     * holds every output in full, {@code {{N}}} still resolves against it, and the ledger says which
      * numbers exist. That is the quiet dividend of passing by reference: the transcript can be
      * cut without cutting the data.
      */
@@ -673,13 +749,13 @@ public class LocalExecutor {
 
         var ledger = new StringBuilder("Results available:\n");
         for (int i = 0; i < done.size(); i++) {
-            ledger.append("  ").append(done.get(i).handle()).append(" = ").append(done.get(i).tool())
+            ledger.append("  ").append(ArtifactRef.handle(i + 1)).append(" = ").append(done.get(i).tool())
                   .append(done.get(i).success() ? " (ok, " : " (FAILED, ")
                   .append(done.get(i).output() == null ? 0 : done.get(i).output().length())
                   .append(" chars)\n");
         }
-        ledger.append("Their full output is still available by reference — $1, $2, and so on, or "
-                + "$N.field for a JSON result. The conversation above them has been dropped to "
+        ledger.append("Their full output is still available by reference — {{1}}, {{2}}, and so "
+                + "on, or {{N.field}} for a JSON result. The conversation above them has been dropped to "
                 + "leave room to answer in; the results themselves have not.");
 
         // The ledger joins the opening instruction rather than following it, so the roles keep
@@ -735,7 +811,7 @@ public class LocalExecutor {
      * excerpt plus the reference that moves the real thing.
      * <p>
      * Capping what the model reads is only half of it. The other half is that it no longer has
-     * a reason to retype the result, because {@code $N} carries the exact bytes — so the same
+     * a reason to retype the result, because {@code {{N}}} carries the exact bytes — so the same
      * change relieves the context window and removes the corruption it was fabricating dates
      * into.
      * <p>
@@ -756,10 +832,11 @@ public class LocalExecutor {
                 + "\n\n" + OMISSION_MARKER + stepNumber + "⟧\n\n"
                 + result.substring(result.length() - tail)
                 + "\n\n[That is the beginning and the end of " + result.length() + " characters. "
-                + "The complete, exact text is $" + stepNumber + ": make $" + stepNumber
-                + " the WHOLE value of a parameter and it is substituted verbatim. If the result "
-                + "is JSON and you want one field of it, use $" + stepNumber + ".fieldname the "
-                + "same way — e.g. $" + stepNumber + ".body_text for the text inside an envelope. "
+                + "The complete, exact text is " + ArtifactRef.handle(stepNumber) + ": make "
+                + ArtifactRef.handle(stepNumber) + " the WHOLE value of a parameter and it is "
+                + "substituted verbatim. If the result is JSON and you want one field of it, use "
+                + "{{" + stepNumber + ".fieldname}} the same way — e.g. {{" + stepNumber
+                + ".body_text}} for the text inside an envelope. "
                 + "You have not been shown the middle, so anything you type yourself will be "
                 + "missing it.]";
     }
@@ -814,11 +891,11 @@ public class LocalExecutor {
      */
     private String composedPayload(String tool, Map<String, Object> written,
                                    List<Artifact> done) {
-        // The arguments as the MODEL WROTE them, before substitution. $1.body_text is the
+        // The arguments as the MODEL WROTE them, before substitution. {{1.body_text}} is the
         // correct way to forward a field, and the substituted value never equals a whole step
         // output, so checking the resolved map reported every correct forward as a paraphrase --
         // which is how the one signal for a real paraphrase turns into noise. Raw, the two cases
-        // separate themselves: "$1.body_text" is thirteen characters and falls under the
+        // separate themselves: "{{1.body_text}}" is fifteen characters and falls under the
         // threshold, while a composed two-thousand-character body is identical either way.
         if (written == null || done.isEmpty()) return null;
         var t = toolRegistry.find(tool).orElse(null);
@@ -834,76 +911,6 @@ public class LocalExecutor {
         return null;
     }
 
-    /** Anything still shaped like a reference after substitution did not resolve. */
-    /**
-     * The parameter holding a reference that resolved to nothing, or null when none does.
-     * <p>
-     * {@code produced} is how many results the task has, which is what separates a reference
-     * from a price. {@code $1.body_text} names a field and is a reference whatever the count —
-     * including on a first step, where substitution silently does nothing and the twelve
-     * literal characters used to travel on as the body of an email. A bare {@code $50} names no
-     * field and is out of range, so it is the fifty dollars the model meant; a bare {@code $2}
-     * that IS in range never reaches here, because substitution already replaced it.
-     */
-    static String unresolvedRef(Map<String, Object> params, int produced) {
-        if (params == null) return null;
-        for (var e : params.entrySet()) {
-            if (!(e.getValue() instanceof String v)) continue;
-            ArtifactRef ref = ArtifactRef.parse(v);
-            if (ref == null) continue;
-            // A bare handle out of range is a dollar amount; a NAMED field is a reference whatever
-            // the count -- on a first step substitution does nothing and the literal travelled on.
-            if (!ref.hasField() && ref.handle() > produced) continue;
-            return e.getKey();
-        }
-        return null;
-    }
-
-    /** What the model could have referenced, so the correction is actionable rather than a no. */
-    private String describeAvailableRefs(List<Artifact> done) {
-        if (done.isEmpty()) {
-            return "No step has produced a result yet, so there is nothing to reference.";
-        }
-        var sb = new StringBuilder("Results you can reference: ");
-        for (int i = 0; i < done.size(); i++) {
-            if (i > 0) sb.append("; ");
-            Artifact a = done.get(i);
-            sb.append(a.handle()).append(" = ").append(a.tool());
-            // The real keys, untruncated and unannotated. The DESCRIPTOR renders them for
-            // reading -- "body_text (string, 4 chars)", and a long name cut short with an
-            // ellipsis -- and a model reading this list writes back exactly what it is shown.
-            // Either decoration produces a reference resolveRef cannot parse and unresolvedRef
-            // does not recognise as one, so it used to travel on as literal text.
-            List<String> fields = Artifact.jsonFieldNames(a.output());
-            if (!fields.isEmpty()) sb.append(" (fields: ").append(String.join(", ", fields)).append(")");
-        }
-        return sb.append(". Use one of those exactly, as the whole value.").toString();
-    }
-
-    /**
-     * The field whose name the descriptor abbreviated, matched by its visible prefix.
-     * <p>
-     * A key longer than {@code Artifact.MAX_FIELD_NAME} is printed cut short with an ellipsis,
-     * and that cut is not optional: a field name of 32 characters would itself be a window of
-     * the private text, so the descriptor would leak and then refuse the call carrying it. The
-     * cloud copies what it is shown, so what it is shown has to resolve. Only when exactly one
-     * key matches — two would be a guess, and a guess here picks somebody's data.
-     */
-    private static com.fasterxml.jackson.databind.JsonNode byTruncatedName(
-            com.fasterxml.jackson.databind.JsonNode node, String field) {
-        String prefix = field.endsWith("…") ? field.substring(0, field.length() - 1) : field;
-        if (prefix.isBlank()) return null;
-        com.fasterxml.jackson.databind.JsonNode found = null;
-        var names = node.fieldNames();
-        while (names.hasNext()) {
-            String name = names.next();
-            if (!name.startsWith(prefix)) continue;
-            if (found != null) return null;
-            found = node.get(name);
-        }
-        return found;
-    }
-
     /** The parameter that is quoting an excerpt back at us, or null when none is. */
     static String retypedExcerpt(Map<String, Object> params) {
         if (params == null) return null;
@@ -916,70 +923,25 @@ public class LocalExecutor {
     }
 
     /**
-     * Replace a parameter whose whole value is {@code $1}, {@code $2}... with that step's exact
-     * output.
+     * An earlier call anywhere in the task that already SUCCEEDED in doing exactly this, or null.
      * <p>
-     * The scheduled digest chains {@code daily_news_digest} into {@code smtp_send_email}, so the
-     * text the owner reads passes through the model as output tokens — three thousand characters
-     * it has to retype perfectly, every morning. It does not: the first delegated digest was
-     * headed 2025-07-10 for a run made on 2026-09-22, a date the skill had returned correctly.
-     * A model cannot corrupt what it never retypes.
-     * <p>
-     * Only when the value is <em>exactly</em> the reference, never a substring. Shell commands
-     * are full of {@code $1} and rewriting one inside a script would be a far worse bug than the
-     * one this fixes.
+     * Both paths use it. A delegation that fails on one step can still have sent the email on
+     * another, and the fallback then hands the tools back to the cloud, which retries the job --
+     * a second morning email, with nothing mechanical in the way. Only a success counts: a send
+     * that failed is exactly what a retry is for. Only a tool that declares side effects: a
+     * second read costs nothing but time.
      */
-    static Map<String, Object> substituteRefs(Map<String, Object> params,
-                                              List<Artifact> done) {
-        if (params == null || params.isEmpty() || done.isEmpty()) {
-            return params == null ? Map.of() : params;
+    static Artifact sideEffectAlreadyDone(com.ownclaw.agent.tools.Tool tool,
+                                          Map<String, Object> resolved, List<Artifact> task) {
+        if (tool == null || !tool.hasSideEffects()) return null;
+        Map<String, Object> args = resolved == null ? Map.of() : resolved;
+        for (Artifact a : task) {
+            if (a.success() && a.tool().equals(tool.name())
+                    && Objects.equals(a.resolved() == null ? Map.of() : a.resolved(), args)) {
+                return a;
+            }
         }
-        var out = new LinkedHashMap<String, Object>(params);
-        for (var e : out.entrySet()) {
-            if (!(e.getValue() instanceof String v)) continue;
-            String resolved = resolveRef(v.strip(), done);
-            if (resolved != null) e.setValue(resolved);
-        }
-        return out;
-    }
-
-    /**
-     * {@code $1} or {@code $1.field}, resolved against a step's output, or null if this is not
-     * a reference.
-     * <p>
-     * The field form exists because whole-output substitution is all-or-nothing, and skills
-     * return JSON. {@code daily_news_digest} returns
-     * {@code {"ok":true,"date":"...","body_text":"📰 Daily News Digest — ..."}}, and the thing
-     * that belongs in an email is {@code body_text}, not the envelope around it. Without this
-     * the local model's only choices are to send the owner raw JSON or to retype the digest by
-     * hand — and retyping is the failure everything here exists to prevent.
-     * <p>
-     * One level, no path syntax, no wildcards. A nested structure is not worth a query language
-     * the model would then get wrong.
-     */
-    private static String resolveRef(String token, List<Artifact> done) {
-        ArtifactRef ref = ArtifactRef.parse(token);
-        if (ref == null) return null;
-        String field = ref.field();
-        int n = ref.handle();
-        if (n > done.size()) return null;
-        String output = done.get(n - 1).output();
-        if (field == null) return output;
-        try {
-            var node = mapper.readTree(output);
-            var value = node.get(field);
-            // Only for a name the descriptor cut short. On every miss it turned a visible refusal
-            // into a silent wrong answer: "$1.body" matched body_html, "$1.o" matched ok, and the
-            // owner got an email whose entire body was "true".
-            if (value == null && field.endsWith("…")) value = byTruncatedName(node, field);
-            // An absent field is left as the literal "$1.field". Substituting null or "" would
-            // send an empty email and call it a success; an unresolved token is at least visible
-            // in whatever it reaches.
-            if (value == null || value.isNull()) return null;
-            return value.isTextual() ? value.asText() : value.toString();
-        } catch (Exception ex) {
-            return null;
-        }
+        return null;
     }
 
     /** The output of an earlier call with the same name and the same arguments, or null. */
@@ -1013,8 +975,9 @@ public class LocalExecutor {
         }
         sb.append("]");
         if (results.stream().anyMatch(Artifact::isPrivate)) {
-            sb.append("\nPrivate results are not shown. A later delegation can forward one by "
-                    + "reference ($N or $N.field as the whole value of a parameter).");
+            sb.append("\nPrivate results are not shown. To pass one on, put its handle ({{N}} or "
+                    + "{{N.field}}) as the whole value of a tool argument yourself; a new "
+                    + "delegation cannot see it.");
         }
         return sb.toString();
     }
@@ -1077,20 +1040,24 @@ public class LocalExecutor {
      * than any summary.
      */
     static String verbatimFailures(List<Artifact> results) {
-        var failed = results.stream().filter(r -> !r.success()).toList();
-        if (failed.isEmpty()) return "";
+        if (results.stream().allMatch(Artifact::success)) return "";
         var sb = new StringBuilder("\n\n--- Failed steps (verbatim) ---");
-        for (Artifact r : failed) {
-            // The arguments as WRITTEN, never as resolved: the resolved map carries the
-            // substituted bytes of whatever $N pointed at.
-            sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
-              // The arguments too, when the step is private. A tainted step's arguments are
-              // what the local model wrote AFTER reading private content -- the recipient it
-              // was given, the body it forwarded -- so printing them here handed the cloud
-              // exactly what the descriptor two lines up is withholding.
-              .append(r.isPrivate() ? "(arguments withheld)" : String.valueOf(r.written()))
-              .append("\n")
-              .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
+        boolean readPrivate = false;
+        for (Artifact r : results) {
+            if (!r.success()) {
+                // The arguments as WRITTEN, never as resolved: the resolved map carries the
+                // substituted bytes of whatever {{N}} pointed at. And not even those once the
+                // model has read something private: whatever it typed after that -- a recipient,
+                // a search, a body -- may carry it, and a public tool does not make the typing
+                // public. This is where the private-marking belongs; the tool's own output is
+                // labelled on its own facts and shown if it is PUBLIC.
+                boolean withhold = r.isPrivate() || readPrivate;
+                sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
+                  .append(withhold ? "(arguments withheld)" : String.valueOf(r.written()))
+                  .append("\n")
+                  .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
+            }
+            readPrivate |= r.isPrivate();
         }
         return sb.toString();
     }

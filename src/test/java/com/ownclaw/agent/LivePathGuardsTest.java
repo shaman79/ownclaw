@@ -57,17 +57,29 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("the reference refusal only applies once the task has results to reference")
-    void theRefusalDoesNotFireOnAFirstStep() throws IOException {
+    @DisplayName("the cloud path resolves once, refuses before running, and labels from what moved")
+    void theCloudPathUsesTheOneResolver() throws IOException {
+        // The delegation's side of this is driven for real in DelegationBehaviourTest. AgentLoop
+        // is too heavy to construct in a unit test, so its ordering is pinned here: resolve,
+        // refuse on failure, refuse a repeated side effect, and only then run -- with the label
+        // taken from the resolver's own record of what it pulled in.
         String s = read("com.ownclaw.agent.AgentLoop");
-        int at = s.indexOf("LocalExecutor.unresolvedRef(resolved");
-        assertTrue(at > 0, "the guard moved; this test no longer checks it");
-        String call = s.substring(at, Math.min(s.length(), at + 120));
-        assertTrue(call.contains("artifacts().size()"),
-                "the count is what separates a reference from a price, and it has to be passed. "
-                        + "Skipping the check when the task had none was wrong the other way: it "
-                        + "is exactly then that \"$1.body_text\" resolves to nothing and twelve "
-                        + "literal characters went out as the body of an email:\n" + call);
+        int start = s.indexOf("private AgentObservation executeTool(");
+        assertTrue(start > 0, "executeTool was renamed; this test no longer guards anything");
+        int end = s.indexOf("\n    private ", start + 10);
+        String body = end > start ? s.substring(start, end) : s.substring(start);
+
+        int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
+        int refuse = body.indexOf("if (!refs.ok())");
+        int repeat = body.indexOf("LocalExecutor.sideEffectAlreadyDone(");
+        int run = body.indexOf("tool.execute(");
+        int label = body.indexOf("Artifact.labelFor(tool.requiredCredentials(), refs.used())");
+        assertTrue(resolve > 0, "executeTool no longer resolves through References");
+        assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
+        assertTrue(body.substring(refuse, run).contains("return "), "...and actually return");
+        assertTrue(repeat > refuse && repeat < run, "a repeated side effect must be refused before it runs");
+        assertTrue(label > run, "the label must come from the resolver's record, not a re-parse");
+        assertFalse(body.contains("resolved = LocalExecutor"), "a second resolver is back");
     }
 
     @Test
@@ -107,40 +119,6 @@ class LivePathGuardsTest {
                         + "tool that never ran");
         assertTrue(body.indexOf("claimArtifact(", last) > last,
                 "the claim has to filter the artifact, not run beside it");
-    }
-
-    @Test
-    @DisplayName("neither refusal call site throws away the count, or skips the check")
-    void bothRefusalCallSitesPassTheCount() throws IOException {
-        // Both of these could be reverted with the whole suite staying green, a reviewer showed:
-        // AgentLoop re-gaining "artifacts().isEmpty() ? null :" (which sends a first step's
-        // "$1.body_text" out as twelve literal characters), and LocalExecutor passing 0 (which
-        // treats every bare "$3" as a price and sends that instead).
-        String loop = read("com.ownclaw.agent.AgentLoop");
-        int at = loop.indexOf("String unresolved = ");
-        assertTrue(at > 0, "the guard in executeTool moved");
-        String stmt = loop.substring(at, loop.indexOf(';', at));
-        assertFalse(stmt.contains("isEmpty()"), "the check is skipped again: " + stmt);
-        assertTrue(stmt.contains("unresolvedRef(resolved, context.artifacts().size())"), stmt);
-
-        String exec = read("com.ownclaw.agent.LocalExecutor");
-        assertTrue(exec.contains("unresolvedRef(params, stepResults.size())"),
-                "the delegation's copy of the guard must pass what it has produced");
-    }
-
-    @Test
-    @DisplayName("a failed delegated step records its arguments as written, not as resolved")
-    void usageRowsGetTheWrittenArguments() throws IOException {
-        // The resolved map has every $N replaced by the artifact's bytes, so a failure wrote up
-        // to 500 characters of the mailbox into skill_usage -- kept out of the repair prompt
-        // only by the row's label, which has been wrong before. The cloud path already records
-        // the written form; the two must match.
-        String exec = read("com.ownclaw.agent.LocalExecutor");
-        int at = exec.indexOf("curatorService.recordUsage(");
-        assertTrue(at > 0, "the usage record moved");
-        String call = exec.substring(at, exec.indexOf(';', at));
-        assertTrue(call.contains("toolOk ? null : action.params"), call);
-        assertFalse(call.contains("toolOk ? null : params,"), call);
     }
 
     @Test
@@ -187,23 +165,4 @@ class LivePathGuardsTest {
         assertEquals(2, selects, "the task page and the forensics page");
     }
 
-    @Test
-    @DisplayName("executeTool refuses an unresolved reference before the tool runs")
-    void unresolvedReferencesAreRefusedOnTheAttendedPath() throws IOException {
-        String s = read("com.ownclaw.agent.AgentLoop");
-        int start = s.indexOf("private AgentObservation executeTool(");
-        assertTrue(start > 0, "executeTool was renamed; this test no longer guards anything");
-        int end = s.indexOf("\n    private ", start + 10);
-        String body = end > start ? s.substring(start, end) : s.substring(start);
-
-        int substituted = body.indexOf("substituteRefs(");
-        int guard = body.indexOf("unresolvedRef(");
-        int ran = body.indexOf("tool.execute(");
-        assertTrue(substituted > 0, "executeTool no longer substitutes references");
-        assertTrue(ran > 0, "executeTool no longer runs the tool");
-        assertTrue(guard > substituted && guard < ran,
-                "unresolvedRef has to be checked after substitution and BEFORE the tool runs. "
-                        + "An unresolvable $9 otherwise reaches the skill as those two literal "
-                        + "characters — as a mail body, sent, and recorded as a success");
-    }
 }

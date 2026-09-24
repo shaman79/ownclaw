@@ -66,7 +66,7 @@ class PrivateObservationRenderingTest {
     private static AgentContext taskWith(String tool, List<String> credentials, String output) {
         var ctx = new AgentContext("u1", "t1", "Summarise my mailbox and email me the result.");
         ctx.setUnattended(true);
-        var decision = Artifact.labelFor(credentials, false, Map.of(), ctx.artifacts());
+        var decision = Artifact.labelFor(credentials, List.of());
         var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, decision);
         var obs = Artifact.asObservation(a, ToolResult.success(output, Map.of("k", "v")), 10);
         ctx.trajectory().record(new AgentAction(tool, Map.of(), "fetching"), obs);
@@ -113,7 +113,7 @@ class PrivateObservationRenderingTest {
                         "a window of the private text at " + i + " is in a prompt");
             }
         }
-        assertTrue(texts.stream().anyMatch(t -> t.contains("$1 imap_fetch")),
+        assertTrue(texts.stream().anyMatch(t -> t.contains("{{1}} imap_fetch")),
                 "and the descriptor IS there, so the cloud knows the result exists");
         assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (credentials (1))")));
 
@@ -157,6 +157,6 @@ class PrivateObservationRenderingTest {
 
         var ex = assertThrows(EgressRefused.class,
                 () -> gw.chat(leaking, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
-        assertEquals(1, ex.handle(), "$1 is the artifact whose bytes were found");
+        assertEquals(1, ex.handle(), "{{1}} is the artifact whose bytes were found");
     }
 }

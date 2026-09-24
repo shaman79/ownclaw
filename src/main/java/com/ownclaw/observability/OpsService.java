@@ -861,7 +861,7 @@ public class OpsService {
                 if (d.has("artifacts")) {
                     for (var x : d.get("artifacts")) {
                         var a = new LinkedHashMap<String, Object>();
-                        a.put("handle", "$" + x.path("n").asInt());
+                        a.put("handle", "{{" + x.path("n").asInt() + "}}");
                         a.put("tool", x.path("tool").asText());
                         a.put("label", x.path("label").asText());
                         a.put("chars", x.path("chars").asLong());

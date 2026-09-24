@@ -43,13 +43,13 @@ class AgentContextArtifactsTest {
     @DisplayName("artifacts are numbered task-wide, in order, and never renumbered")
     void numbering() {
         var ctx = task("send the digest");
-        assertEquals("$1", add(ctx, "a", "x", PUBLIC).handle());
-        assertEquals("$2", add(ctx, "b", "y", PRIVATE).handle());
-        assertEquals("$3", add(ctx, "c", "z", PUBLIC).handle());
+        assertEquals("{{1}}", add(ctx, "a", "x", PUBLIC).handle());
+        assertEquals("{{2}}", add(ctx, "b", "y", PRIVATE).handle());
+        assertEquals("{{3}}", add(ctx, "c", "z", PUBLIC).handle());
         assertEquals(List.of(1, 2, 3), ctx.artifacts().stream().map(Artifact::n).toList(),
-                "$3 has to mean one thing to the local ledger, the cloud descriptor and the "
-                        + "events row, and a later delegation must be able to name an earlier "
-                        + "delegation's result");
+                "{{3}} has to mean one thing to the cloud's descriptor, the egress ledger and the "
+                        + "events row. (Inside a delegation the local model counts its own steps "
+                        + "from {{1}}; it never sees these task-wide handles.)");
     }
 
     @Test
@@ -163,7 +163,7 @@ class AgentContextArtifactsTest {
         assertTrue(ctx.claimArtifact(1), "step 1 recorded it, so step 1 reports it");
         assertFalse(ctx.claimArtifact(1),
                 "step 2 was a not-found tool and recorded nothing; without this it inherited "
-                        + "$1's handle, label and hash and the ops page named a tool that had "
+                        + "{{1}}'s handle, label and hash and the ops page named a tool that had "
                         + "never run");
 
         add(ctx, "smtp_send_email", "y", PRIVATE);     // $2

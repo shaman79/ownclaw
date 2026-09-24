@@ -26,7 +26,7 @@ public final class EgressRefused extends LlmException {
     public EgressRefused(String provider, int handle, String tool, int partIndex, String partKind,
                          int offset) {
         super(provider, String.format(
-                "prompt part %d (%s) contains PRIVATE artifact $%d (%s) at offset %,d; nothing was sent",
+                "prompt part %d (%s) contains PRIVATE artifact {{%d}} (%s) at offset %,d; nothing was sent",
                 partIndex, partKind, handle, tool, offset));
         this.handle = handle;
         this.partIndex = partIndex;

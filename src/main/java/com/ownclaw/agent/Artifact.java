@@ -13,7 +13,7 @@ import java.util.Map;
  * One tool result, as the task keeps it: the bytes, and what may be said about them.
  * <p>
  * Every result a task produces — by the cloud directly, or by the local model inside a
- * delegation — becomes one of these, numbered {@code $1, $2, ...} for the whole task. The bytes
+ * delegation — becomes one of these, numbered {@code {{1}}, {{2}}, ...} for the whole task. The bytes
  * stay here, in memory, for the task's lifetime. What enters the trajectory, the chat rows and
  * every cloud prompt is decided ONCE, at record time, by {@link #asObservation}: a PUBLIC result
  * goes in as it is, exactly as today; a PRIVATE one goes in as its {@link #describe descriptor}
@@ -26,7 +26,7 @@ import java.util.Map;
  * PRIVATE; or an earlier step of the same delegation was. Not from a model, and not from a rule
  * list — the moment the label needs a taxonomy of tool names, this design has failed.
  *
- * @param n        the task-wide handle number; {@code $n} in every prompt and ledger
+ * @param n        the task-wide handle number; {@code {{n}}} in every cloud prompt and ledger
  * @param tool     the tool or skill that produced it
  * @param written  the arguments exactly as the model typed them — references intact
  * @param resolved the arguments after reference substitution, which is what actually ran;
@@ -78,9 +78,13 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         this(0, tool, params, params, output, success, Label.PUBLIC, List.of());
     }
 
-    /** {@code $3} */
+    /**
+     * {@code {{3}}} — the task-wide name, which is what the cloud, the ledger and the ops page
+     * see. The local model never sees it: inside a delegation results are numbered from
+     * {@code {{1}}} again, counting only that delegation's own steps.
+     */
     public String handle() {
-        return "$" + n;
+        return ArtifactRef.handle(n);
     }
 
     public boolean isPrivate() {
@@ -88,20 +92,23 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     }
 
     /**
-     * The label, from the facts at hand.
+     * The label, from the facts at hand — two of them, and nothing a model decides.
+     * <p>
+     * There used to be a third: once a delegation had touched anything private, every later
+     * result of it was PRIVATE too. That marked the restaurant page a delegation fetched after
+     * sending an email as private, and when the cloud later fetched the same public page itself
+     * the canary refused the call — so the run reported "did not finish" after the email had
+     * already gone. The worry behind it was real, but it is about what the local model WRITES
+     * after reading private content, not about what a public tool returns; the local model's
+     * own words are withheld from the cloud by {@code LocalExecutor.completed} instead.
      *
      * @param requiredCredentials what the skill declared; non-empty means it reached something
      *                            that needed a secret, and its output is that something
-     * @param contextTainted      an earlier step of this delegation was PRIVATE, so the local
-     *                            model has read private content and anything it writes now
-     *                            may carry it — into a public tool's arguments included
-     * @param written             the arguments as typed; a {@code $N} reference to a PRIVATE
-     *                            artifact makes the result PRIVATE, because it is derived from it
-     * @param store               the task's artifacts so far, for resolving those references
+     * @param used                the results this call's arguments actually pulled in, as the
+     *                            resolver substituted them — so the label describes what moved
+     *                            rather than re-reading the arguments and guessing
      */
-    public static Decision labelFor(List<String> requiredCredentials,
-                                    boolean contextTainted, Map<String, Object> written,
-                                    List<Artifact> store) {
+    public static Decision labelFor(List<String> requiredCredentials, List<Artifact> used) {
         var why = new ArrayList<String>();
         if (requiredCredentials != null && !requiredCredentials.isEmpty()) {
             // The COUNT, not the names. A vault miss is worded "Missing required credentials:
@@ -112,28 +119,12 @@ public record Artifact(int n, String tool, Map<String, Object> written,
             // cloud holds, and the raw text is in the skill_usage row the owner reads.
             why.add("credentials (" + requiredCredentials.size() + ")");
         }
-        // There was an "attachment" reason here. It could not fire: a file reaches a task only
-        // through attended chat (priority 1), and on an attended task the attachment artifact is
-        // deliberately PUBLIC so that "summarise this" still works. Gating it on unattended made
-        // it unreachable everywhere rather than at two sites; removing the gate would have taken
-        // that capability away instead. What covers the case is already here -- an unattended
-        // attachment artifact is PRIVATE where it is recorded, and anything referencing it is
-        // PRIVATE by the clause below. A reason that cannot fire is not a safeguard.
-        if (contextTainted) why.add("after a private step");
-        if (written != null && store != null) {
-            for (Object v : written.values()) {
-                if (!(v instanceof String s)) continue;
-                // The one grammar, shared with the resolver and the refusal. Three private
-                // copies of this question used to give three answers, and every gap between
-                // them moved private bytes under a PUBLIC label.
-                ArtifactRef ref = ArtifactRef.parse(s);
-                if (ref == null) continue;
-                for (Artifact a : store) {
-                    if (a.n() == ref.handle() && a.isPrivate()) {
-                        why.add("references " + a.handle());
-                        break;
-                    }
-                }
+        // An attachment is covered here too: an unattended one is recorded PRIVATE, and a call
+        // that pulls it in is PRIVATE by this clause. (A separate attachment rule could never
+        // fire -- files only arrive on attended chat, where they are deliberately PUBLIC.)
+        if (used != null) {
+            for (Artifact a : used) {
+                if (a.isPrivate()) why.add("references " + a.handle());
             }
         }
         return new Decision(why.isEmpty() ? Label.PUBLIC : Label.PRIVATE, List.copyOf(why));
@@ -170,9 +161,9 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         // How to USE it, as COMPLETE tokens. Without this the descriptor is a dead end: the cloud
         // is shown that 4,210 characters of menu exist and told no way to put them in an email,
         // so it writes the email from the description and the owner gets a confident message
-        // with no menu in it. A template ("pass $1.<field>") was worse, beside a field list that
-        // annotates its names: the cloud composed "$1.body_text (string, 48 chars)", which
-        // resolves to nothing, and the literal went out as the body. So: the exact strings, in
+        // with no menu in it. A template ("pass <handle>.<field>") was worse, beside a field list
+        // that annotates its names: the cloud composed "body_text (string, 48 chars)" into the
+        // reference, which resolved to nothing, and the literal went out as the body. So: the exact strings, in
         // one list, for every field -- including those past the annotated twelve, since an imap
         // envelope puts body_text well beyond them. Cut short like the annotated names, because a
         // full-length name would be a window of the private text; the resolver takes a cut name
@@ -182,7 +173,7 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         for (String name : referenceOrder(output)) {
             String cut = name.length() > MAX_FIELD_NAME
                     ? name.substring(0, MAX_FIELD_NAME) + "…" : name;
-            String token = ", " + handle() + "." + cut;
+            String token = ", " + new ArtifactRef(n, cut);
             if (budget - token.length() < 0) break;
             budget -= token.length();
             sb.append(token);
@@ -273,7 +264,7 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      * <p>
      * Parsed here rather than unwrapped from the descriptor's list. That list truncates a name
      * longer than {@link #MAX_FIELD_NAME} and marks the cut with an ellipsis, and a model told
-     * to reference a name exactly copies the ellipsis with it: {@code $1.rendered_html_for_ema…}
+     * to reference a name exactly copies the ellipsis with it: {@code {{1.rendered_html_for_ema…}}}
      * resolves to nothing, and the unresolved-reference guard does not recognise it as a
      * reference either, so the literal travels on as the argument. Untruncated here, bounded
      * there; the two lists answer different questions.

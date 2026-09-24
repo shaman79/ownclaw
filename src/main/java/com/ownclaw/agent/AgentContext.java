@@ -55,7 +55,7 @@ public class AgentContext {
 
     // ── the task's results, and what may be said about them ──
 
-    /** Every result this task has produced, numbered $1, $2 ... — the bytes live here only. */
+    /** Every result this task has produced, numbered {{1}}, {{2}} ... — the bytes live here only. */
     private final List<Artifact> artifacts = new java.util.ArrayList<>();
     /** The canary index over every PRIVATE artifact's bytes. */
     private final com.ownclaw.privacy.PrivateIndex privateIndex = new com.ownclaw.privacy.PrivateIndex();

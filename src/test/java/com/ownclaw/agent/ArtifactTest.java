@@ -35,7 +35,7 @@ class ArtifactTest {
     @Test
     @DisplayName("a skill that declared credentials produces a PRIVATE result")
     void credentialsMakeItPrivate() {
-        var d = Artifact.labelFor(List.of("IMAP_PASS"), false, Map.of(), List.of());
+        var d = Artifact.labelFor(List.of("IMAP_PASS"), List.of());
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("credentials (1)"), d.why(),
                 "the COUNT, not the names: the skill harness words a vault miss as 'Missing "
@@ -54,57 +54,44 @@ class ArtifactTest {
         // PRIVATE because it is derived from it.
         var attachment = new Artifact(1, "attachment:statement.csv", Map.of(), Map.of(),
                 "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("attachment"));
-        var d = Artifact.labelFor(List.of(), false, Map.of("text", "$1"), List.of(attachment));
+        var used = References.resolve(Map.of("text", "{{1}}"), List.of(attachment)).used();
+        var d = Artifact.labelFor(List.of(), used);
         assertEquals(Label.PRIVATE, d.label());
-        assertEquals(List.of("references $1"), d.why());
+        assertEquals(List.of("references {{1}}"), d.why());
     }
 
     @Test
-    @DisplayName("after a private step, everything the same delegation produces is PRIVATE")
-    void taintMakesItPrivate() {
-        // The local model has read private content; whatever it writes now — including a
-        // public tool's arguments — may carry it.
-        var d = Artifact.labelFor(List.of(), true, Map.of(), List.of());
-        assertEquals(Label.PRIVATE, d.label());
+    @DisplayName("a public tool's result stays PUBLIC after a private step")
+    void aPrivateStepDoesNotMarkWhatPublicToolsReturn() {
+        // It used to: once a delegation touched anything private, every later result of it was
+        // PRIVATE. A reviewer's probe followed the consequence — the restaurant page fetched
+        // after the email went out was marked private, the cloud's own later fetch of the same
+        // public page then tripped the canary, and a run whose email had been sent reported
+        // "did not finish". What the model WRITES after reading private content is withheld
+        // elsewhere (LocalExecutor.completed, verbatimFailures); the label has two facts only.
+        var d = Artifact.labelFor(List.of(), List.of());
+        assertEquals(Label.PUBLIC, d.label());
     }
 
     @Test
-    @DisplayName("a $N reference to a PRIVATE artifact makes the result PRIVATE")
+    @DisplayName("pulling in a PRIVATE result makes the result PRIVATE; a PUBLIC one does not")
     void referenceToPrivateMakesItPrivate() {
-        var store = List.of(privateResult("imap_fetch", "{}", true));
-        var d = Artifact.labelFor(List.of(), false, Map.of("body", "$2.body_text"), store);
+        var priv = privateResult("imap_fetch", "{\"body_text\":\"x\"}", true);   // handle {{2}}
+        var used = References.resolve(Map.of("body", "{{1.body_text}}"), List.of(priv)).used();
+        var d = Artifact.labelFor(List.of(), used);
         assertEquals(Label.PRIVATE, d.label(), "derived from private is private");
-        assertTrue(d.why().contains("references $2"));
+        assertEquals(List.of("references {{2}}"), d.why(),
+                "named by its TASK handle, which is what the cloud reads in the descriptor");
 
-        var pub = List.of(new Artifact(2, "x", Map.of(), Map.of(), "{}", true, Label.PUBLIC, List.of()));
-        assertEquals(Label.PUBLIC,
-                Artifact.labelFor(List.of(), false, Map.of("body", "$2"), pub).label(),
-                "a reference to a PUBLIC artifact is not a reason");
-    }
-
-    @Test
-    @DisplayName("a field name the resolver accepts is a reference to the label as well")
-    void theLabelSeesEveryFieldNameTheResolverDoes() {
-        // resolveRef accepts ANY non-blank field name. While this pattern required word
-        // characters, a key with a hyphen or an accent — or the descriptor's own truncated
-        // "rendered_html_for_ema…" — moved a PRIVATE artifact's text into the arguments and the
-        // result was then labelled PUBLIC, so it went to the cloud as content.
-        var store = List.of(privateResult("imap_fetch", "{}", true));   // $2, PRIVATE
-        for (String ref : List.of("$2.body-text", "$2.polévka", "$2.Content-Type",
-                                  "$2.rendered_html_for_ema…", "$2.menu.body", "$2")) {
-            assertEquals(Label.PRIVATE,
-                    Artifact.labelFor(List.of(), false, Map.of("body", ref), store).label(),
-                    "moving it makes the result derived from it: " + ref);
-        }
-        assertEquals(Label.PUBLIC,
-                Artifact.labelFor(List.of(), false, Map.of("body", "$5.50 Polévka"), store).label(),
-                "but a price is not a reference, whatever it looks like");
+        var pub = new Artifact(2, "x", Map.of(), Map.of(), "{}", true, Label.PUBLIC, List.of());
+        assertEquals(Label.PUBLIC, Artifact.labelFor(List.of(), List.of(pub)).label(),
+                "a PUBLIC result is not a reason");
     }
 
     @Test
     @DisplayName("with none of the facts, a result is PUBLIC — exactly as today")
     void nothingMakesItPublic() {
-        var d = Artifact.labelFor(List.of(), false, Map.of("url", "https://x"), List.of());
+        var d = Artifact.labelFor(List.of(), List.of());
         assertEquals(Label.PUBLIC, d.label());
         assertTrue(d.why().isEmpty());
     }
@@ -116,7 +103,7 @@ class ArtifactTest {
     void descriptorCarriesShapeNotContent() {
         String d = privateResult("smtp_send_email", PRIVATE_JSON, false).describe();
 
-        assertTrue(d.startsWith("$2 smtp_send_email ✗ — PRIVATE (credentials (1))"), d);
+        assertTrue(d.startsWith("{{2}} smtp_send_email ✗ — PRIVATE (credentials (1))"), d);
         assertTrue(d.contains("json"), d);
         assertTrue(d.contains("ok=false"),
                 "a success envelope around a failure is the normal shape of a skill result; a "
@@ -215,7 +202,7 @@ class ArtifactTest {
         assertTrue(a.written().containsKey("cc"));
         assertNull(a.written().get("cc"));
         assertDoesNotThrow(a::describe);
-        assertDoesNotThrow(() -> Artifact.labelFor(List.of(), false, withNull, List.of()));
+        assertDoesNotThrow(() -> References.resolve(withNull, List.of()));
     }
 
     @Test
@@ -253,7 +240,7 @@ class ArtifactTest {
     @DisplayName("a name the model is told to reference is never truncated")
     void referenceNamesAreNeverTruncated() {
         // The descriptor abbreviates a long key and marks the cut with an ellipsis. Deriving
-        // the reference list from it handed the model "$1.rendered_html_for_ema…", which
+        // the reference list from it handed the model "{{1.rendered_html_for_ema…}}", which
         // resolves to nothing and is not recognised as a reference either, so it reached the
         // tool as the literal argument.
         String key = "rendered_html_for_email_body_with_inline_css";
@@ -279,10 +266,10 @@ class ArtifactTest {
                 List.of("credentials (2)"));
         String d = a.describe();
 
-        // Complete tokens, not a template. "pass $1.<field>" beside a list that annotates its
-        // names made the cloud compose "$1.body_text (string, 48 chars)", which resolves to
+        // Complete tokens, not a template. "pass <handle>.<field>" beside a list that annotates
+        // its names made the cloud compose "body_text (string, 48 chars)" into it, which resolves to
         // nothing — and the literal went out as the body of the email.
-        assertTrue(d.contains("use: $1, $1.body_text"), d);
+        assertTrue(d.contains("use: {{1}}, {{1.body_text}}"), d);
         assertFalse(d.contains("<field>"), "nothing left for the cloud to compose: " + d);
         assertTrue(d.contains("substituted here"), d);
         assertFalse(d.contains("česneková"), "still never the content");
@@ -323,9 +310,9 @@ class ArtifactTest {
         sb.append("\"body_text\":\"").append("Polévka dne: česneková. ".repeat(120)).append("\"}");
         String d = privateResult("imap_fetch", sb.toString(), true).describe();
 
-        assertTrue(d.contains("$2.body_text"),
+        assertTrue(d.contains("{{2.body_text}}"),
                 "the biggest text in the result is what a task forwards: " + d);
-        assertTrue(d.indexOf("$2.body_text") < d.indexOf("$2.from"),
+        assertTrue(d.indexOf("{{2.body_text}}") < d.indexOf("{{2.from}}"),
                 "and it is offered before the envelope, not after it runs the budget out");
         assertFalse(d.contains("česneková"), "still never the content");
     }
