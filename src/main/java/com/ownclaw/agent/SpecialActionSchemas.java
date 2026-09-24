@@ -138,8 +138,8 @@ public final class SpecialActionSchemas {
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
-                                    + "the tools it will need. Only these, and any the goal or a "
-                                    + "scheduled task names, are loaded: the local model's context is small, and every "
+                                    + "the tools it will need. Only these, and any the goal or an "
+                                    + "unattended (scheduled or /bg) task names, are loaded: the local model's context is small, and every "
                                     + "tool definition takes room it needs for the work."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
 }
