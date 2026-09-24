@@ -289,6 +289,16 @@ class SkillJailModeTest {
             assertTrue(l.argv().isEmpty());
         }
         assertEquals("OWNCLAW_OPS_TOKEN=canary-env-secret\n", Files.readString(m.env()));
+
+        // A link to nothing yet is not a missing file: creating requirements.txt through it would
+        // make its target, wherever the skill pointed it.
+        Files.delete(m.skillDir().resolve("requirements.txt"));
+        Path target = tmp.resolve("made-through-the-link");
+        Files.createSymbolicLink(m.skillDir().resolve("requirements.txt"), target);
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(l.refusal());
+        }
+        assertFalse(Files.exists(target, LinkOption.NOFOLLOW_LINKS), "requirements.txt was created through a link");
     }
 
     @Test

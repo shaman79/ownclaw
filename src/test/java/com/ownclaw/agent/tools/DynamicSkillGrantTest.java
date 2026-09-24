@@ -185,6 +185,41 @@ class DynamicSkillGrantTest {
     }
 
     @Test
+    @DisplayName("a path outside uploads is dropped even when the store hands it over")
+    void aPathOutsideUploadsIsDroppedWhateverTheStoreSays() throws Exception {
+        Store s = store(Files.createDirectories(tmp.resolve("data")));
+        String handed = s.store("u1", "statement.txt", "handed-content");
+        Path handedPath = s.files().getFilePath(handed).toRealPath();
+        Files.writeString(Files.createDirectories(s.uploads().resolve("sub")).resolve("nested.pdf"), "nested");
+        String traversal = s.row("../ownclaw.db");
+        String nested = s.row("sub/nested.pdf");
+
+        // A store that trusts the row, as getFilePath did before it checked stored_name: what is
+        // left between the row and the jail is the skill's own check of the real path.
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(s.db().toString());
+        var trusting = new FileStorageService(s.jdbc(), config) {
+            @Override
+            public Path getFilePath(String fileId) {
+                return getUploadsDir().resolve(s.jdbc().queryForObject(
+                        "SELECT stored_name FROM file_attachments WHERE id = ?", String.class, fileId));
+            }
+        };
+        assertTrue(Files.isRegularFile(trusting.getFilePath(traversal)), "the stand-in must hand back the database");
+
+        var sandbox = new Recording();
+        var skill = skill(tmp.resolve("skills/generated/pdf_text"), sandbox,
+                environment(null, new ArrayList<>()), trusting);
+        var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false, null,
+                List.of(traversal, nested, handed)));
+
+        assertTrue(result.success(), result.output());
+        assertEquals(List.of(List.of(handedPath)), sandbox.readOnly,
+                "only a regular file directly in uploads, by its real path, is handed over");
+        assertEquals(List.of(handedPath.toString()), attachedPaths(sandbox.stdin.get(0)));
+    }
+
+    @Test
     @DisplayName("a data directory reached through a link is handed by its real path, told and bound alike")
     void aLinkedDataDirectoryIsHandedByItsRealPath() throws Exception {
         Path realData = Files.createDirectories(tmp.resolve("disk/ownclaw-data"));

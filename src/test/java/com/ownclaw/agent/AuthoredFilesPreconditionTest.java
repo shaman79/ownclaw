@@ -103,6 +103,31 @@ class AuthoredFilesPreconditionTest {
         assertEquals(SECRET, Files.readString(secret), "patchCredentials wrote through the link");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
+    @DisplayName("a link a skill leaves at an authored file while it is checked is not written through by the restore")
+    void theRestoreNeverWritesThroughALink(String file) throws Exception {
+        setUp(SkillJail.off());
+        assertFalse(create(CODE, null).startsWith("ERROR"));
+        // Unjailed -- as every skill runs until bubblewrap is installed -- the load check runs the
+        // module's top level in the skill's own directory. This one swaps the file for a link and
+        // then fails to import, so the previous version is written back over that very name.
+        String swaps = "import os\n"
+                + "os.remove('" + file + "')\n"
+                + "os.symlink(" + pyString(secret) + ", '" + file + "')\n"
+                + "raise RuntimeError('does not load')\n"
+                + CODE;
+
+        String result = create(swaps, null);
+
+        assertTrue(result.startsWith("ERROR"), result);
+        assertEquals(SECRET, Files.readString(secret), "the restore wrote through the link");
+    }
+
+    private static String pyString(Path p) {
+        return "'" + p.toString().replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
     @Test
     @DisplayName("a skill with no requirements gets an empty regular requirements.txt, and runs on system Python")
     void noRequirementsMeansAnEmptyFile() throws Exception {
@@ -126,6 +151,13 @@ class AuthoredFilesPreconditionTest {
         // So does restoring a version that had none, after a broken update.
         assertTrue(create("import missing_package_xyz\n" + CODE, null).startsWith("ERROR"));
         assertTrue(Files.isRegularFile(req, LinkOption.NOFOLLOW_LINKS), "the restore deleted requirements.txt");
+        assertEquals(0, Files.size(req));
+
+        // And one that had no file at all -- a skill written before every skill got one.
+        Files.delete(req);
+        assertTrue(create("import missing_package_xyz\n" + CODE, null).startsWith("ERROR"));
+        assertTrue(Files.isRegularFile(req, LinkOption.NOFOLLOW_LINKS),
+                "restoring a version without requirements.txt left the name free");
         assertEquals(0, Files.size(req));
     }
 

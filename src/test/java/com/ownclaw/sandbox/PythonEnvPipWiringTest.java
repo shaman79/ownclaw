@@ -118,7 +118,8 @@ class PythonEnvPipWiringTest {
         int before = launched().size();
         for (String crafted : List.of("../x", "/tmp/x", "x/y", "-e", "--index-url=https://example.invalid/simple",
                 "-r", "a b", ".hidden", "..", "git+https://example.invalid/x",
-                "https://example.invalid/pkg.tar.gz", "requests==2.0", "pkg.whl", "", "requests\n")) {
+                "https://example.invalid/pkg.tar.gz", "requests==2.0", "pkg.whl", "", "requests\n",
+                "a".repeat(65))) {
             assertFalse(svc.installPackages(m.skillDir(), "probe_skill", List.of(crafted)), crafted);
         }
         assertFalse(svc.installPackages(m.skillDir(), "probe_skill", List.of("requests", "-e")),

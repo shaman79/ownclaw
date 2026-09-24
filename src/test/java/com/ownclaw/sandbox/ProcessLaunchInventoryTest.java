@@ -29,11 +29,14 @@ class ProcessLaunchInventoryTest {
 
     private static final Path MAIN = Path.of("src/main/java");
 
-    private static final Pattern NEW_PROCESS_BUILDER = Pattern.compile("new\\s+ProcessBuilder\\s*\\(");
+    // Also spelled out in full: this code base names classes by their package inline often enough.
+    private static final Pattern NEW_PROCESS_BUILDER =
+            Pattern.compile("new\\s+(?:java\\s*\\.\\s*lang\\s*\\.\\s*)?ProcessBuilder\\s*\\(");
 
     /** Other ways to start a process, or to change what a ProcessBuilder starts. None allowed. */
     private static final Pattern OTHER_LAUNCH = Pattern.compile(
-            "\\.\\s*exec\\s*\\(|ProcessBuilder\\s*\\.\\s*startPipeline|\\.\\s*command\\s*\\(");
+            "\\.\\s*exec\\s*\\(|ProcessBuilder\\s*\\.\\s*startPipeline|\\.\\s*command\\s*\\("
+            + "|ProcessBuilder\\s*::\\s*new");
 
     // What each file may pass to `new ProcessBuilder(...)`, whitespace collapsed.
     //  - ProcessSandbox, PythonEnvironmentService: every Python a skill or pip runs -- only the argv

@@ -4,10 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.skills.PythonEnvironmentService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -34,12 +34,17 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Every claim is checked twice with the same probe: unjailed first, where it must see all of it
  * -- otherwise "cannot see" would prove nothing -- and then jailed. Skipped where bubblewrap is
  * absent or cannot create namespaces (CI, a host with user namespaces blocked).
+ * <p>
+ * The copy is kept under /var/tmp, not in a JUnit temp directory: those are under /tmp, which the
+ * jail replaces as a whole with the run's own, so everything kept there is out of sight whether or
+ * not the tmpfs over the hidden roots did its job. /var/tmp the jail shows read-only, as it shows
+ * /opt, and only the tmpfs can hide what is in it.
  */
 class SkillJailIntegrationTest {
 
     private static final Path BWRAP = Path.of("/usr/bin/bwrap");
 
-    @TempDir Path tmp;
+    private Path base;
 
     private JailTestKit.Mirror m;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -111,7 +116,15 @@ class SkillJailIntegrationTest {
                 "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--", "/bin/true"),
                 "bubblewrap cannot create namespaces on this host");
         assumeTrue(exitsZero("python3", "--version"), "python3 is not available");
-        m = JailTestKit.Mirror.create(tmp);
+        Path outside = Path.of("/var/tmp");
+        assumeTrue(Files.isDirectory(outside) && Files.isWritable(outside), "/var/tmp is not writable");
+        base = Files.createTempDirectory(outside, "ownclaw-it-");
+        m = JailTestKit.Mirror.create(base);
+    }
+
+    @AfterEach
+    void removeTheCopy() {
+        if (base != null) SkillJail.deleteTree(base);
     }
 
     private static boolean exitsZero(String... cmd) {
@@ -228,6 +241,83 @@ class SkillJailIntegrationTest {
             Files.deleteIfExists(jvmCanary);
             Files.deleteIfExists(scratch);
         }
+    }
+
+    // Prints, for each path it is given, whether it could read a byte of it -- never the byte.
+    private static final String READABLE = """
+            import json, sys
+            def readable(path):
+                try:
+                    with open(path, 'rb') as f:
+                        f.read(1)
+                    return True
+                except Exception:
+                    return False
+            print(json.dumps({p: readable(p) for p in json.loads(sys.stdin.read())}))
+            """;
+
+    /** A service directory holding .env and one skill; its data lives wherever the test puts it. */
+    private static Path skillUnder(Path root) throws IOException {
+        Files.writeString(Files.createDirectories(root).resolve(".env"), "OWNCLAW_OPS_TOKEN=canary-env-secret\n");
+        Path skillDir = Files.createDirectories(root.resolve("skills/generated/probe_skill"));
+        Files.writeString(skillDir.resolve("SKILL.yaml"), "name: probe_skill\n");
+        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        return skillDir;
+    }
+
+    /** For each of {@code paths}, whether a skill run from {@code skillDir} through {@code jail} can read it. */
+    private JsonNode readableFrom(SkillJail jail, Path skillDir, List<Path> paths) throws Exception {
+        Path script = skillDir.resolve("_runner_readable.py");
+        Files.deleteIfExists(script);
+        Files.writeString(script, READABLE);
+        var result = new ProcessSandbox(null, mapper, jail).execute("python3", script, skillDir,
+                mapper.writeValueAsString(paths.stream().map(Path::toString).toList()), Map.of(), 30);
+        assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
+        return mapper.readTree(result.stdout());
+    }
+
+    @Test
+    @DisplayName("a data directory linked outside the service directory is hidden at its real path too")
+    void aLinkedDataDirectoryIsHiddenAtBothEnds() throws Exception {
+        // Two hidden roots, the service directory sorting first. The self-check probes the paths
+        // the service is configured with, which the first root already hides; only a tmpfs over
+        // the second keeps the database unreadable at its real path.
+        Path root = base.resolve("linked/opt-ownclaw");
+        Path skillDir = skillUnder(root);
+        Path realData = Files.createDirectories(base.resolve("linked/second-disk/ownclaw-data"));
+        Files.writeString(realData.resolve("ownclaw.db"), "canary-db-secret");
+        Files.createSymbolicLink(root.resolve("data"), realData);
+        var layout = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
+        List<Path> db = List.of(root.resolve("data/ownclaw.db"), realData.resolve("ownclaw.db"));
+
+        JsonNode open = readableFrom(SkillJail.off(), skillDir, db);
+        for (Path p : db) assertTrue(open.get(p.toString()).asBoolean(), "control run should read " + p);
+
+        var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        assertEquals(List.of(root.toRealPath(), realData.toRealPath()), jail.status().hiddenRoots());
+        JsonNode jailed = readableFrom(jail, skillDir, db);
+        for (Path p : db) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
+    }
+
+    @Test
+    @DisplayName("a data directory that appears after the jail came up is hidden from the next launch")
+    void aDataDirectoryMadeLaterIsHidden() throws Exception {
+        // The roots are worked out again for every launch: roots kept from the check that made
+        // the jail READY would not include a directory that did not exist then.
+        Path root = base.resolve("late/opt-ownclaw");
+        Path skillDir = skillUnder(root);
+        Path data = base.resolve("late/ownclaw-data");
+        var layout = new SkillJail.Layout(root, data.resolve("ownclaw.db"), root.resolve("skills/generated"), null);
+        var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        assertEquals(List.of(root.toRealPath()), jail.status().hiddenRoots(), "the data directory is not there yet");
+
+        Path db = Files.writeString(Files.createDirectories(data).resolve("ownclaw.db"), "canary-db-secret");
+        assertTrue(readableFrom(SkillJail.off(), skillDir, List.of(db)).get(db.toString()).asBoolean(),
+                "control run should read the database");
+        assertFalse(readableFrom(jail, skillDir, List.of(db)).get(db.toString()).asBoolean(),
+                "a data directory made after the jail's check is readable inside the jail");
     }
 
     @Test
