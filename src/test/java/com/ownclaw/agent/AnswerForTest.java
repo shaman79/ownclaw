@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class AnswerForTest {
 
     static final List<String> PDF = List.of("uploaded file",
-            "application/pdf, 84211 bytes, not text or too large");
+            "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
     static final String ANSWER = "Closing balance 48,213.07 CZK on 30 September.";
 
     private static Artifact.Decision label(Label label) {
@@ -103,14 +103,33 @@ class AnswerForTest {
     }
 
     @Test
-    @DisplayName("an earlier local answer the cloud chose is the answer: the newer one is not added beneath it")
-    void onlyOneLocalAnswer() {
+    @DisplayName("every local answer reaches the owner, oldest first; the one the cloud placed is not repeated")
+    void everyLocalAnswerArrives() {
         var ctx = fileTask();                                    // {{3}} the first answer
-        ctx.addArtifact("local_answer", Map.of(), Map.of(), "A second, later answer.", true,
+        ctx.addArtifact("local_answer", Map.of(), Map.of(), "The second half.", true,
                 label(Label.PRIVATE));                           // {{4}}
-        var a = AgentLoop.answerFor("{{3}}", ctx);
-        assertEquals(PRIVATE_HEADER + ANSWER, a.ownerText());
-        assertFalse(a.ownerText().contains("second, later"));
+        var done = AgentLoop.answerFor("Done.", ctx);
+        assertEquals("Done.\n\n" + PRIVATE_HEADER + ANSWER + "\n\n" + PRIVATE_HEADER + "The second half.",
+                done.ownerText());
+        var placed = AgentLoop.answerFor("{{3}}", ctx);
+        assertEquals(PRIVATE_HEADER + ANSWER + "\n\n" + PRIVATE_HEADER + "The second half.", placed.ownerText());
+    }
+
+    @Test
+    @DisplayName("a task that ends without respond -- step limit, cloud errors -- still gives the owner the local answer")
+    void everyExitCarriesTheLocalAnswer() {
+        var ctx = fileTask();
+        var stopped = AgentResult.maxSteps("Reached the step limit. Last result: {{2}}", new AgentTrajectory(), 5);
+        var r = AgentLoop.withLocalAnswers(stopped, ctx);
+        assertTrue(r.ownerText().endsWith(PRIVATE_HEADER + ANSWER), r.ownerText());
+        assertTrue(r.response().endsWith(PRIVATE_NOTE) && !r.response().contains(ANSWER), r.response());
+        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason());
+
+        var answered = AgentLoop.withLocalAnswers(stopped.withOwnerText("already given"), ctx);
+        assertEquals("already given", answered.ownerText(), "answerFor already handled it");
+        var noFile = new AgentContext("u1", "t2", "x");
+        noFile.addArtifact("local_answer", Map.of(), Map.of(), ANSWER, true, label(Label.PRIVATE));
+        assertNull(AgentLoop.withLocalAnswers(stopped, noFile).ownerText());
     }
 
     @Test

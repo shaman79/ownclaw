@@ -12,7 +12,8 @@ package com.ownclaw.agent;
  * @param ownerText      what the owner's own screen shows in place of {@code response}, or null
  *                       when that is the same text. Set only for an answer that holds private
  *                       data: {@code response} is then a note that the answer exists, and it is
- *                       what every other reader gets -- history, memory, Telegram, the scheduler.
+ *                       what every other reader gets -- history, memory, search, the
+ *                       scheduler's records. The web chat and Telegram show ownerText.
  */
 public record AgentResult(
         boolean success,
@@ -126,8 +127,8 @@ public record AgentResult(
     }
 
     /**
-     * What the owner's screen shows: the private answer when there is one, otherwise the
-     * response. Only for that screen; anything that stores or forwards reads {@link #response}.
+     * What the owner is shown -- web chat and Telegram: the private answer when there is one,
+     * otherwise the response. Anything that stores it or passes it on reads {@link #response}.
      */
     public String shown() {
         return ownerText != null ? ownerText : response;

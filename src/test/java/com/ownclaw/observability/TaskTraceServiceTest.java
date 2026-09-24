@@ -167,7 +167,7 @@ class TaskTraceServiceTest {
     void anAttachmentKeepsItsName() {
         row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
                 + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,"
-                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, not text or too large\"]}");
+                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)\"]}");
         row("egress", egress("SENT", 1, 1, 0, null));
         row("step", "{\"step\":1,\"tool\":\"delegate\",\"success\":true,\"localTokens\":900,\"cloudTokens\":2,"
                 + "\"artifacts\":[{\"n\":2,\"tool\":\"pdf_text\",\"label\":\"PRIVATE\",\"chars\":12400,"
@@ -183,7 +183,7 @@ class TaskTraceServiceTest {
         assertEquals("statement.pdf", file.get("name"));
         assertEquals("PRIVATE", file.get("label"));
         assertEquals(0L, file.get("chars"));
-        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, not text or too large"), file.get("why"));
+        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)"), file.get("why"));
         assertNull(file.get("canary"), "a file with no text cannot be looked for");
         assertEquals(1, file.get("requestsAfter"));
 
@@ -191,8 +191,9 @@ class TaskTraceServiceTest {
         for (var a : arts.subList(1, 3)) assertNull(a.get("name"), "only the file has a name: " + a);
         @SuppressWarnings("unchecked")
         var limits = (List<String>) t.get("notObserved");
-        assertTrue(limits.stream().anyMatch(l -> l.contains("open files on this machine by itself")),
-                "the page states that a file opened by path, in a task it was not sent to, is not private");
+        assertTrue(limits.stream().anyMatch(l -> l.contains("is not private when a later task reads it back")
+                        && l.contains("opens files on this machine by itself")),
+                "the page states that what a task saves, or a skill opens by path, is not private later");
     }
 
     @Test
@@ -253,6 +254,18 @@ class TaskTraceServiceTest {
         rows.clear();
         row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":9}");
         assertEquals(false, TaskTraceService.build(rows).get("recorded"), "a row from before");
+    }
+
+    @Test
+    @DisplayName("a file task stopped before any cloud call is recorded: nothing left, and the page says so")
+    void aStoppedFileTaskIsRecorded() {
+        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
+                + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,\"why\":[\"uploaded file\"]}");
+        row("task_completed", "{\"cloudTokens\":0,\"localTokens\":0,\"steps\":0,\"durationMs\":5,"
+                + "\"reason\":\"ERROR\"}", "summarise this statement");
+        var t = TaskTraceService.build(rows);
+        assertEquals(true, t.get("recorded"));
+        assertEquals(0, list(t, "artifacts").get(0).get("requestsAfter"));
     }
 
     @Test

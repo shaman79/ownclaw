@@ -264,13 +264,13 @@ public class AgentContext {
             }
             return own;
         }
-        // Not indexed on a file task, credentials apart: text read out of a PDF is nothing the
+        // Not indexed on a file task, credentials or not: text read out of a PDF is nothing the
         // canary holds, so indexing it guards nothing -- and an indexed result's descriptor shows
-        // its JSON key names and booleans, which for a statement parser are the statement. A
-        // credentialed result keeps both: its field names are the skill's schema, and the cloud
-        // needs them to forward {{N.body_text}}.
-        boolean unindexed = !credentials && (!files.isEmpty() || (used != null
-                && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed)));
+        // its JSON key names and booleans, which for a statement parser are the statement. Every
+        // skill is handed the file, a credentialed one too, so its keys can be the file's data.
+        // References still resolve; the cloud forwards the whole {{N}} instead of a field.
+        boolean unindexed = !files.isEmpty() || (!credentials && used != null
+                && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed));
         return unindexed ? new Artifact.Decision(own.label(), own.why(), false) : own;
     }
 

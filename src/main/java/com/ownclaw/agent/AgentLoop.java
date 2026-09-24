@@ -269,7 +269,7 @@ public class AgentLoop {
         AgentResult result;
         inFlight.put(taskId, context);
         try {
-            result = runLoop(context).withTaskId(taskId);
+            result = withLocalAnswers(runLoop(context), context).withTaskId(taskId);
         } finally {
             inFlight.remove(taskId);
         }
@@ -310,7 +310,7 @@ public class AgentLoop {
                 // The type and the size, never the name: a statement's file name carries its
                 // account number, and the why is part of every descriptor the cloud reads.
                 var why = List.of("uploaded file",
-                        ct + ", " + size + " bytes" + (text == null ? ", not text or too large" : ""));
+                        ct + ", " + size + " bytes" + (text == null ? ", no text read (not text, over 100 KB, or not UTF-8)" : ""));
                 Artifact a = context.addFile(id, text, why);
                 // A row per file, metadata only. No step ever names an attachment, so without
                 // this nothing recorded that a task had one -- the task page could not show the
@@ -440,24 +440,27 @@ public class AgentLoop {
     static final String ANSWERED_WITHOUT_WORKING = "Answered without doing the work";
 
     /** Above a private answer on the owner's screen: who wrote it, and who never saw it. */
-    static final String PRIVATE_HEADER = "**Private — from this machine, not seen by the cloud:**\n\n";
+    static final String PRIVATE_HEADER = "**Private — written by your local model, not seen by the cloud:**\n\n";
 
     /**
-     * What every reader but the owner's screen gets in place of a private answer. It holds no
-     * handle, so nothing that stores or forwards it can ever resolve it back to the text.
+     * What history, memory, search, the scheduler's records and every later prompt get in place
+     * of a private answer; the web chat and Telegram show the answer itself. It names no channel,
+     * so it stays true, and holds no handle, so nothing that stores or forwards it can ever
+     * resolve it back to the text.
      */
     static final String PRIVATE_NOTE =
-            "[Private answer: kept on this machine and shown only in the web chat.]";
+            "[Private answer: sent to you only, never to the cloud model.]";
 
     static final String LOCAL_DOWN_FOR_FILES = "I can't read your file right now. Files you send "
-            + "are read only by the local model on this machine, and it is not answering. Nothing "
-            + "was sent to the cloud. Send the file again when the local model is back.";
+            + "are read only by your local model, and it is not answering. Nothing was sent to "
+            + "the cloud. Send the file again when the local model is back.";
 
     /**
      * An answer as the cloud wrote it, and what it becomes.
      *
-     * @param response  the cloud-safe text: history, memory, Telegram and the scheduler read it
-     * @param ownerText what the owner's own screen shows instead, or null when it is the same
+     * @param response  the cloud-safe text: history, memory, search and the scheduler read it
+     * @param ownerText what the owner is shown instead -- web chat and Telegram -- or null when
+     *                  it is the same
      * @param refusal   why it cannot be delivered, in words the cloud can act on; null when it can
      */
     record Answer(String response, String ownerText, String refusal) {}
@@ -504,21 +507,38 @@ public class AgentLoop {
             }
         }
 
-        if (!ctx.files().isEmpty()) {
-            Artifact said = null;
-            for (Artifact a : ctx.artifacts()) {
-                if ("local_answer".equals(a.tool())) said = a;
-            }
-            // Only when the cloud placed no local answer at all: one it chose, even an earlier
-            // one, is the answer, and adding the newest beneath it gave the owner two.
-            boolean placedAnAnswer = placed != null && "local_answer".equals(placed.tool());
-            if (said != null && !placedAnAnswer) {
-                ownerText = (ownerText != null ? ownerText : response)
-                        + "\n\n" + PRIVATE_HEADER + said.output();
-                if (!response.contains(PRIVATE_NOTE)) response = response + "\n\n" + PRIVATE_NOTE;
+        return withLocalAnswers(new Answer(response, ownerText, null), placed, ctx);
+    }
+
+    /**
+     * On a task holding a file, every local answer the owner has not been given goes beneath the
+     * text, oldest first: two delegations can be two halves of the answer, and the cloud, which
+     * saw neither, cannot choose between them. The one it placed is not repeated.
+     */
+    static Answer withLocalAnswers(Answer a, Artifact placed, AgentContext ctx) {
+        if (ctx.files().isEmpty()) return a;
+        var owed = new StringBuilder();
+        for (Artifact x : ctx.artifacts()) {
+            if ("local_answer".equals(x.tool()) && (placed == null || placed.n() != x.n())) {
+                owed.append("\n\n").append(PRIVATE_HEADER).append(x.output());
             }
         }
-        return new Answer(response, ownerText, null);
+        if (owed.length() == 0) return a;
+        String response = a.response().contains(PRIVATE_NOTE) ? a.response() : a.response() + "\n\n" + PRIVATE_NOTE;
+        return new Answer(response, (a.ownerText() != null ? a.ownerText() : a.response()) + owed, a.refusal());
+    }
+
+    /**
+     * The same, for every way a task ends: respond and ask_user go through answerFor, but a task
+     * that stops at its step limit, on three cloud errors or on a privacy block after the local
+     * model answered still owes the owner that answer.
+     */
+    static AgentResult withLocalAnswers(AgentResult r, AgentContext ctx) {
+        if (r.ownerText() != null) return r;
+        Answer a = withLocalAnswers(new Answer(r.response() == null ? "" : r.response(), null, null), null, ctx);
+        if (a.ownerText() == null) return r;
+        return new AgentResult(r.success(), a.response(), r.trajectory(), r.totalSteps(),
+                r.totalDurationMs(), r.terminationReason(), r.taskId(), a.ownerText());
     }
 
     /**

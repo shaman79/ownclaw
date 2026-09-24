@@ -245,8 +245,8 @@ public class LocalExecutor {
         // How much private text the local model may still be shown in full, for this whole
         // delegation. On a file task it is the one reader of the file, so a 400-character excerpt
         // would leave it answering from the first paragraph of a statement; but the budget is
-        // per delegation rather than per result, so the transcript it carries (HISTORY_TAIL) can
-        // never hold more than this, however many results it reads.
+        // per delegation rather than per result: once it is spent, later results get the usual
+        // 1,500-character view, so the transcript (HISTORY_TAIL=8) holds at most about 20,500.
         int readBudget = fileTask ? PRIVATE_READ_CHARS : 0;
         // What the model was NOT shown, in the code's words, for the end of its answer: a model
         // that read half a statement cannot be relied on to say so.
@@ -305,6 +305,15 @@ public class LocalExecutor {
                     hint = " The prompt nearly filled the context window, so almost nothing was"
                             + " left to answer with and the model spent it reasoning. Same fix:"
                             + " raise the local context window.";
+                }
+                // After a private read the error can quote it -- a tool-call parse error echoes
+                // the model's raw output -- so then neither the cloud nor the log gets the
+                // message, only its type and the hint above, which the code wrote.
+                if (tainted) {
+                    String kept = e.getClass().getSimpleName()
+                            + " (its text is kept out: this delegation had read private data)";
+                    log.error("Local LLM call failed during delegation step {}: {}{}", step + 1, kept, hint);
+                    return partial("Local LLM call failed: " + kept + hint, mine);
                 }
                 log.error("Local LLM call failed during delegation step {}: {}{}",
                         step + 1, msg, hint, e);
@@ -797,8 +806,9 @@ public class LocalExecutor {
         int jsonStart = cleaned.indexOf('{');
         int jsonEnd = cleaned.lastIndexOf('}');
         if (jsonStart < 0 || jsonEnd <= jsonStart) {
-            log.warn("LocalExecutor: no JSON found in local LLM response: {}",
-                    truncate(cleaned, 200));
+            // Its length, not its text: on a task holding a file this prose is the answer, and
+            // the log is read back through the ops API.
+            log.warn("LocalExecutor: no JSON found in local LLM response ({} chars)", cleaned.length());
             return ExecutorAction.invalid();
         }
         cleaned = cleaned.substring(jsonStart, jsonEnd + 1);

@@ -293,7 +293,7 @@ public class DynamicSkill implements Tool {
             // If the current message has file attachments, inject their paths so the skill can access them.
             Map<String, Object> effectiveParams = params != null ? new HashMap<>(params) : new HashMap<>();
             var attachedFiles = new java.util.ArrayList<Map<String, String>>();
-            if (context.attachmentIds() != null && !context.attachmentIds().isEmpty()) {
+            if (!context.attachmentIds().isEmpty()) {
                 for (String fileId : context.attachmentIds()) {
                     if (fileStorage != null) {
                         var info = fileStorage.getFileInfo(fileId);

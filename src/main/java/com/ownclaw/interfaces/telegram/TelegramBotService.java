@@ -208,8 +208,10 @@ public class TelegramBotService {
         }
         String userId = linkedUser.get();
 
-        // Track chatId for this user, and remember it across restarts.
-        rememberChat(userId, chatId);
+        // Track chatId for this user, and remember it across restarts -- a private chat only
+        // (its id is the sender's own): results, private answers included, go to this chat, and
+        // a group he once wrote from would hand them to everyone in it.
+        if (chatId == telegramUserId) rememberChat(userId, chatId);
 
         // Subscribe to status messages for this user → send to Telegram with stats
         statusEmitter.subscribe(userId, this, msg -> {
@@ -233,7 +235,9 @@ public class TelegramBotService {
             // this subscription. The lambda used to capture that message's chatId, so once a
             // user had written from a second chat everything kept going to the first.
             Long target = userChatIds.get(userId);
-            if (target != null) sendMessage(target, sb.toString());
+            if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id))) {
+                sendMessage(target, sb.toString());
+            }
         });
 
         // ── /cancel — stop the running task ──
@@ -294,9 +298,8 @@ public class TelegramBotService {
             // the private answer, if there is one, which the web chat shows on reload.
             conversationService.saveMessage(userId, currentSessionId, "assistant",
                     result.response(), java.util.List.of(), result.taskId(), result.ownerText());
-            // The safe text only. A private answer arrives here as the note that it is kept on
-            // this machine: Telegram's servers are not this machine.
             // The owner's own answer, private text included: he decided Telegram gets it in full.
+            // What is stored above for later turns is still the safe text.
             sendMessage(chatId, result.shown());
         });
     }
@@ -371,10 +374,42 @@ public class TelegramBotService {
         return msg.formatted();
     }
 
+    /**
+     * Whether a remembered chat may still be sent this user's results: it must be the private
+     * chat of a Telegram id that is linked to this user now. Checked at delivery, so unlinking or
+     * relinking stops the old chat at once, and a group remembered before this check never gets
+     * one.
+     */
+    static boolean isOwnersChat(String userId, Long chat,
+                                java.util.function.LongFunction<java.util.Optional<String>> linkedUser) {
+        return chat != null && linkedUser.apply(chat).filter(userId::equals).isPresent();
+    }
+
+    /** Telegram refuses a message over 4,096 characters; a long answer goes in parts. */
+    static final int TELEGRAM_MAX_CHARS = 4096;
+
+    /** The text in parts Telegram accepts, split at a line break where one is near the limit. */
+    static List<String> telegramParts(String text, int max) {
+        var parts = new java.util.ArrayList<String>();
+        String rest = text == null ? "" : text;
+        while (rest.length() > max) {
+            int cut = rest.lastIndexOf('\n', max);
+            if (cut < max / 2) cut = max;
+            parts.add(rest.substring(0, cut));
+            rest = rest.substring(cut).stripLeading();
+        }
+        parts.add(rest);
+        return parts;
+    }
+
     private void sendMessage(long chatId, String text) {
-        if (!sendMessage(chatId, text, "Markdown")) {
-            log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
-            sendMessage(chatId, text, null);
+        // One part at a time: a long answer used to be refused whole, and after the plain-text
+        // retry was refused too it was dropped without a word.
+        for (String part : telegramParts(text, TELEGRAM_MAX_CHARS)) {
+            if (!sendMessage(chatId, part, "Markdown")) {
+                log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
+                sendMessage(chatId, part, null);
+            }
         }
     }
 

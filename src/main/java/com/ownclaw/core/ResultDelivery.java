@@ -112,10 +112,10 @@ public class ResultDelivery {
     }
 
     /**
-     * @param ownerText what the owner's web chat shows in place of {@code text}, or null. Saved
-     *                  as the row's private text and sent only in the message's data, for the web
-     *                  chat to show; the message's text stays the safe one, and that is what
-     *                  Telegram formats and what history, search and later prompts read.
+     * @param ownerText what the owner is shown in place of {@code text} -- web chat and
+     *                  Telegram -- or null. Saved as the row's private text and sent only in the
+     *                  message's data; the message's text stays the safe one, and that is what
+     *                  history, search and later prompts read.
      */
     public void deliver(String userId, String header, String text, String taskId, String ownerText) {
         if (text == null || text.isBlank()) {

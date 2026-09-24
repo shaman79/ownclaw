@@ -54,7 +54,9 @@ public class FileStorageService {
         if (safeName.isBlank()) safeName = "upload";
 
         // Generate stored name to avoid collisions: id_originalname
-        String storedName = id + "_" + safeName;
+        // No ':' on disk: a container gets the file as "-v host:container:ro", and a colon in the
+        // name splits that into too many fields. The name the owner gave is kept in the row.
+        String storedName = id + "_" + safeName.replace(':', '_');
 
         Path dest = uploadsDir.resolve(storedName);
         long bytes = Files.copy(data, dest, StandardCopyOption.REPLACE_EXISTING);

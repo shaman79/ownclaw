@@ -27,7 +27,7 @@ class ThinkingEngineFilesSectionTest {
         AgentLoop.registerAttachments(ctx, List.of(pdf), h.files(), h.events());
 
         String section = ThinkingEngine.filesSection(ctx);
-        assertTrue(section.contains("- {{1}}: application/pdf, 15 bytes, not text or too large"), section);
+        assertTrue(section.contains("- {{1}}: application/pdf, 15 bytes, no text read (not text, over 100 KB, or not UTF-8)"), section);
         assertTrue(section.contains("_attached_files"), "where a skill finds the file");
         assertTrue(section.contains("delegate"), "and who can read what it returns");
         assertFalse(section.contains("vypis") || section.contains("123456789"), section);

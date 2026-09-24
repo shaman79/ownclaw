@@ -38,8 +38,10 @@ public class TaskTraceService {
             "Private text the cloud already had from elsewhere (your own message, a public "
                     + "result, a tool's description) is not counted as found.",
             "The local model's server is assumed to be private; nothing checks that.",
-            "A skill can open files on this machine by itself. What it returns in a task you did "
-                    + "not attach the file to is not marked private.");
+            "What a task saves through a skill -- notes, a file, a sheet -- is not private when a "
+                    + "later task reads it back, scheduled runs included. That covers the local "
+                    + "model's answer passed on by handle, text it types from your file, and a skill "
+                    + "that opens files on this machine by itself. The check does not look there.");
 
     /** The canary cannot look for anything shorter (PrivateIndex's minimum). */
     private static final int MIN_CHECKABLE_CHARS = 8;
@@ -72,9 +74,12 @@ public class TaskTraceService {
      * cloud chose a step if its cloud tokens rose.
      */
     static Map<String, Object> build(List<Map<String, Object>> rows) {
-        // Requests are recorded from the day step rows began carrying reportedFailure, so a task
-        // with such a row and no egress rows made no cloud request -- which is worth saying.
+        // Requests are recorded from the day step rows began carrying reportedFailure, and
+        // attachment rows arrived with this page after that; so a task with either and no egress
+        // rows made no cloud request -- which is worth saying. A file task stopped because the
+        // local model was down has only attachment rows, and its whole point is that nothing left.
         boolean recorded = rows.stream().anyMatch(r -> "egress".equals(r.get("event_type"))
+                || "attachment".equals(r.get("event_type"))
                 || "step".equals(r.get("event_type")) && String.valueOf(r.get("details")).contains("\"reportedFailure\""));
         var steps = new ArrayList<Map<String, Object>>();
         var calls = new ArrayList<Map<String, Object>>();

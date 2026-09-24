@@ -23,7 +23,7 @@ class OpsServiceTest {
     static final String SECRET = "Closing balance 48,213.07 CZK";
 
     @Test
-    @DisplayName("private_content is redacted from SELECT * and refused when named or aliased")
+    @DisplayName("the conversations table is refused whole: no renaming reaches the private text")
     void privateContentNeverLeavesThroughOps(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         var conversations = new ConversationService(jdbc, null);
@@ -31,17 +31,18 @@ class OpsServiceTest {
         conversations.saveMessage("u1", session, "assistant", "[Private answer]", List.of(), "a1b2c3d4", SECRET);
         var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper());
 
-        Map<String, Object> all = ops.query("SELECT * FROM conversations", null);
-        assertNull(all.get("error"), String.valueOf(all));
-        assertFalse(String.valueOf(all).contains("48,213.07"), String.valueOf(all));
-        assertEquals(true, all.get("redactedColumns"));
-        assertTrue(String.valueOf(all).contains("[Private answer]"), "the safe text stays readable");
-
-        for (String sql : List.of("SELECT private_content FROM conversations",
-                "SELECT COALESCE(private_content, content) AS c FROM conversations",
-                "SELECT substr(PRIVATE_CONTENT, 1, 40) AS x FROM conversations")) {
+        // Guarding the column was not enough: a CTE column list renames it without naming it.
+        for (String sql : List.of("SELECT * FROM conversations",
+                "SELECT private_content FROM conversations",
+                "WITH c(a,b,c,d,e,f,g,h,i,j,k) AS (SELECT * FROM conversations) SELECT k FROM c",
+                "SELECT * FROM main.\"Conversations\"",
+                "SELECT x FROM (SELECT 1 AS x UNION SELECT * FROM [conversations])")) {
             Map<String, Object> refused = ops.query(sql, null);
             assertTrue(String.valueOf(refused.get("error")).contains("forbidden identifier"), sql + " -> " + refused);
         }
+        // The search index holds only the safe text, and stays readable.
+        Map<String, Object> fts = ops.query("SELECT content FROM conversations_fts", null);
+        assertNull(fts.get("error"), String.valueOf(fts));
+        assertFalse(String.valueOf(fts).contains("48,213.07"), String.valueOf(fts));
     }
 }

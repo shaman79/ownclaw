@@ -1280,7 +1280,9 @@ public class ThinkingEngine {
           .append("private results. To answer from a file, delegate and name the skill that reads it ")
           .append("(if none does, skill_create one that reads params._attached_files). The ")
           .append("delegation's answer comes back as a handle; make that handle the whole of ")
-          .append("respond's message and its text is filled in on this machine for the user.\n");
+          .append("respond's message and its text is filled in on this machine for the user. ")
+          .append("A file is handed only to this task: asking the user a question ends it, and ")
+          .append("the reply is a new task without the file -- read it first.\n");
         return sb.toString();
     }
 

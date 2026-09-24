@@ -190,7 +190,7 @@ class AgentContextArtifactsTest {
 
     private static final List<String> CSV_WHY = List.of("uploaded file", "text/csv, 412 bytes");
     private static final List<String> PDF_WHY =
-            List.of("uploaded file", "application/pdf, 84211 bytes, not text or too large");
+            List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
 
     @Test
     @DisplayName("on a file task every result is PRIVATE and unindexed, so its descriptor shows no keys")
@@ -232,7 +232,7 @@ class AgentContextArtifactsTest {
     }
 
     @Test
-    @DisplayName("on a file task, a credentialed result keeps its indexed, full descriptor")
+    @DisplayName("on a file task, a credentialed result gets the short descriptor too")
     void credentialsOnAFileTaskKeepTheirDescriptor() {
         var ctx = task("email this statement to my accountant");
         ctx.addFile("f1", "", PDF_WHY);
@@ -240,9 +240,9 @@ class AgentContextArtifactsTest {
         var d = ctx.decide(List.of("SMTP_PASS"), List.of(), false);
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("credentials (1)"), d.why());
-        assertTrue(d.indexed(),
-                "its field names are the skill's schema, and the cloud needs them to forward "
-                        + "{{N.body_text}}");
+        assertFalse(d.indexed(),
+                "every skill is handed the file, a credentialed one too, so its key names can be "
+                        + "the file's data");
     }
 
     @Test

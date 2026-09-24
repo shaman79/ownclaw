@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ConversationPrivateContentTest {
 
-    static final String NOTE = "[Private answer: kept on this machine and shown only in the web chat.]";
+    static final String NOTE = "[Private answer: sent to you only, never to the cloud model.]";
     static final String SECRET = "Closing balance 48,213.07 CZK; rent 12,500.00 CZK on the 1st.";
 
     @Test

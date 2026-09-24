@@ -426,7 +426,7 @@ class DelegationBehaviourTest {
     // ── a task holding the user's file ──
 
     static final List<String> PDF = List.of("uploaded file",
-            "application/pdf, 84211 bytes, not text or too large");
+            "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
 
     /** A statement-shaped text: every line differs, so a window of it names one place in it. */
     static String statement(int length) {

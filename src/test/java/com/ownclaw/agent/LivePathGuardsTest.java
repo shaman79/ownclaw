@@ -163,25 +163,6 @@ class LivePathGuardsTest {
         }
     }
 
-    @Test
-    @DisplayName("a file task stops before the loop when the local model is not answering")
-    void theLocalModelIsProbedBeforeTheLoop() throws IOException {
-        // stopWithoutLocalModel is driven in StopWithoutLocalModelTest; this pins that executeFull
-        // calls it after the files are registered and returns before the loop can call the cloud.
-        String s = read("com.ownclaw.agent.AgentLoop");
-        int start = s.indexOf("public AgentResult executeFull(String userId, String message, boolean unattended,\n");
-        assertTrue(start > 0, "executeFull was renamed");
-        String body = s.substring(start, s.indexOf("\n    }\n", start));
-        int register = body.indexOf("registerAttachments(");
-        int stop = body.indexOf("stopWithoutLocalModel(context,");
-        int loop = body.indexOf("runLoop(context)");
-        assertTrue(register > 0 && stop > register && loop > stop, body);
-        String between = body.substring(stop, loop);
-        int guard = between.indexOf("if (stopped != null) {");
-        assertTrue(guard > 0 && between.indexOf("return stopped;", guard) > guard,
-                "and returns whenever it stops: " + between);
-    }
-
     /** The whole statement a call starts, whitespace collapsed, from the call to its semicolon. */
     private static String call(String source, String from) {
         int start = source.indexOf(from);
@@ -190,28 +171,36 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("an answer is saved as two texts, and only the web chat is sent the private one")
+    @DisplayName("Telegram saves the two texts apart and is sent the owner's")
     void saveSitesKeepTheTwoTexts() throws IOException {
-        // The row's content feeds every later prompt, the compressor and search; saving the
-        // owner's text there, or sending it to Telegram's servers, undoes the whole label.
-        String web = read("com.ownclaw.interfaces.web.ChatWebSocketHandler");
+        // Only Telegram: no test runs TelegramBotService, while the web chat and the scheduler are
+        // driven by PrivateAnswerInTheWebChatTest and ScheduledPrivateAnswerTest. The row's content
+        // feeds every later prompt, the compressor and search, so it must be the safe text.
         String telegram = read("com.ownclaw.interfaces.telegram.TelegramBotService");
-        for (String s : List.of(web, telegram)) {
-            assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
-                            + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
-                    call(s, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
-        }
+        assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
+                        + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
+                call(telegram, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
         // Telegram is the owner's own channel and he decided it gets private answers in full;
         // what it stores for later turns is still the safe text (asserted above).
         assertTrue(call(telegram, "sendMessage(chatId, result.").endsWith("result.shown())"),
                 "Telegram is sent the owner's text");
         assertTrue(telegram.contains("new StringBuilder(telegramText(msg))"),
                 "a delivered result is sent through telegramText, which reads the owner's text");
+        assertTrue(telegram.contains("if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id)))"),
+                "results go only to the owner's own, still-linked chat");
+        assertTrue(telegram.contains("for (String part : telegramParts(text, TELEGRAM_MAX_CHARS))"),
+                "a long answer is sent in parts instead of being refused whole");
+    }
 
-        String scheduler = read("com.ownclaw.core.ScheduledTaskService");
-        assertTrue(call(scheduler, "onTaskCompleted(taskId, userId, taskType, description,")
-                        .contains("result.response(), result.ownerText(),"),
-                "a scheduled run's private answer is delivered, not dropped");
+    @Test
+    @DisplayName("every way a task ends passes through the local-answer fallback")
+    void everyExitGivesTheLocalAnswer() throws IOException {
+        // withLocalAnswers is driven in AnswerForTest; no test runs executeFull to its end, so
+        // this pins the one line that applies it to whatever runLoop returned.
+        assertTrue(read("com.ownclaw.agent.AgentLoop")
+                        .contains("result = withLocalAnswers(runLoop(context), context).withTaskId(taskId);"),
+                "executeFull applies the fallback to every result");
+
     }
 
     @Test

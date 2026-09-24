@@ -140,8 +140,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // plain response, so a background digest landing during a six-minute question
                 // ended that question's working state -- the same confusion the taskId fix
                 // removed for statuses. "result" renders identically and touches nothing.
-                // A private answer travels beside the safe text, for this screen only: Telegram
-                // formats the text, and the text is the note that the answer exists.
+                // A private answer travels beside the safe text, for the owner's own screens --
+                // this chat and Telegram (see TelegramBotService.telegramText); the text itself is
+                // the note that the answer exists, for everything that stores or forwards it.
                 Object owner = msg.data() == null ? null : msg.data().get("ownerText");
                 sendToSession(session, "result", owner != null ? owner.toString() : msg.text(),
                         null, msg.taskId());

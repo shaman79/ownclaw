@@ -28,7 +28,7 @@ class StopWithoutLocalModelTest {
 
     private static AgentContext fileTask() {
         var ctx = new AgentContext("u1", "t1", "summarise this statement");
-        ctx.addFile("f1", "", List.of("uploaded file", "application/pdf, 84211 bytes, not text or too large"));
+        ctx.addFile("f1", "", List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)"));
         return ctx;
     }
 

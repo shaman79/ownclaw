@@ -106,7 +106,7 @@ class AttachmentRegistrationTest {
 
         Artifact a = ctx.files().get(0);
         assertEquals("", a.output(), "the bytes are read by a skill, not carried here");
-        assertEquals(List.of("uploaded file", "application/pdf, 15 bytes, not text or too large"), a.why());
+        assertEquals(List.of("uploaded file", "application/pdf, 15 bytes, no text read (not text, over 100 KB, or not UTF-8)"), a.why());
         assertEquals(Map.of("fileId", pdf), a.written());
     }
 }
