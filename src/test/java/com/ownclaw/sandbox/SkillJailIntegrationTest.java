@@ -2,6 +2,8 @@ package com.ownclaw.sandbox;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -11,7 +13,9 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -223,6 +227,68 @@ class SkillJailIntegrationTest {
         } finally {
             Files.deleteIfExists(jvmCanary);
             Files.deleteIfExists(scratch);
+        }
+    }
+
+    @Test
+    @DisplayName("a venv built through PythonEnvironmentService lands on the host; nothing else it tries to write does")
+    void provisioningWritesOnlyItsOwnEnvironment() throws Exception {
+        // A stand-in python, so no index is needed. It has to be visible inside the jail, and
+        // /tmp there is the run's own, so it lives under /var/tmp. It notes, in its working
+        // directory, what it could reach -- facts only, never contents.
+        Path outside = Path.of("/var/tmp");
+        assumeTrue(Files.isDirectory(outside) && Files.isWritable(outside), "/var/tmp is not writable");
+        Path dir = Files.createTempDirectory(outside, "ownclaw-it-python-");
+        try {
+            Path data = m.db().getParent();
+            String script = "#!/bin/sh\n"
+                    + "if [ \"$1\" = --version ]; then echo 'Python 3.0-test'; exit 0; fi\n"
+                    + "{\n"
+                    + "  for p in '" + m.db() + "' '" + m.env() + "' '" + m.otherUpload() + "' '"
+                    + m.otherSkill() + "'; do [ -e \"$p\" ] && echo \"visible=$p\"; done\n"
+                    + "  [ -r '" + m.skillDir().resolve("requirements.txt") + "' ] && echo requirements=readable\n"
+                    + "  (echo x > '" + data.resolve("planted") + "') 2>/dev/null && echo data=writable\n"
+                    + "  (echo x > '" + m.skillDir().resolve("planted") + "') 2>/dev/null && echo skilldir=writable\n"
+                    + "  (echo x >> '" + m.skillDir().resolve("requirements.txt") + "') 2>/dev/null"
+                    + " && echo requirements=writable\n"
+                    + "  echo \"ppid=$PPID\"\n"
+                    + "} >> observed\n"
+                    + "if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then mkdir -p \"$3/bin\" && cp \"$0\" \"$3/bin/python\"; fi\n"
+                    + "exit 0\n";
+            Path python = Files.writeString(dir.resolve("python"), script);
+            Files.setPosixFilePermissions(python, PosixFilePermissions.fromString("rwxr-xr-x"));
+            Files.writeString(m.skillDir().resolve("requirements.txt"), "requests\n");
+
+            var jail = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+            assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+            var cfg = new OwnClawConfig();
+            cfg.getSkills().setGeneratedPath(m.generated().toString());
+            cfg.getDatabase().setPath(m.db().toString());
+            cfg.getSandbox().setPythonPath(python.toString());
+            var svc = new PythonEnvironmentService(cfg, jail);
+            svc.init();
+
+            var res = svc.resolveExecution(m.skillDir(), "probe_skill");
+
+            Path venv = m.root().resolve("skills/_envs/probe_skill");
+            assertEquals(venv, res.envDir(), String.valueOf(svc.getLastProvisionError(m.skillDir(), "probe_skill")));
+            assertTrue(Files.isRegularFile(venv.resolve("bin/python")), "the venv must land on the host");
+            assertTrue(Files.isRegularFile(venv.resolve(".req_hash"), LinkOption.NOFOLLOW_LINKS));
+            List<String> seen = Files.readAllLines(venv.resolve("observed"));
+            assertEquals(3, seen.stream().filter(l -> l.startsWith("ppid=")).count(),
+                    "venv, pip --version and pip install, each jailed: " + seen);
+            assertTrue(seen.stream().filter(l -> l.startsWith("ppid=")).allMatch(l -> l.equals("ppid=1")),
+                    "a fresh PID namespace makes the parent pid 1: " + seen);
+            assertTrue(seen.contains("requirements=readable"), seen.toString());
+            for (String line : seen) {
+                assertFalse(line.startsWith("visible="), "provisioning saw " + line);
+                assertFalse(line.endsWith("=writable"), "provisioning could write: " + line);
+            }
+            assertFalse(Files.exists(data.resolve("planted")), "a provisioning write reached data/");
+            assertFalse(Files.exists(m.skillDir().resolve("planted")), "a provisioning write reached the skill");
+            assertEquals("requests\n", Files.readString(m.skillDir().resolve("requirements.txt")));
+        } finally {
+            SkillJail.deleteTree(dir);
         }
     }
 

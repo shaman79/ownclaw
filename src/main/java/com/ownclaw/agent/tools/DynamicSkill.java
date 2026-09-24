@@ -586,8 +586,15 @@ public class DynamicSkill implements Tool {
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
-    /** Extract the missing module name from a Python error message, or null. */
-    private static String extractMissingModule(String outputText) {
+    /**
+     * Extract the missing module name from a Python error message, or null.
+     * <p>
+     * The message is the skill's own output, so the skill decides what it says: a crafted
+     * "No module named '-e git+https://...'" or "'../../some/dir'" would otherwise reach pip as
+     * an option, a URL or a path to build. Only a plain name survives -- the same test
+     * installPackages applies before pip starts.
+     */
+    static String extractMissingModule(String outputText) {
         if (outputText == null || outputText.isBlank()) return null;
         Matcher m = MODULE_NOT_FOUND.matcher(outputText);
         if (!m.find()) return null;
@@ -596,6 +603,7 @@ public class DynamicSkill implements Tool {
         // Top-level package only (e.g. "bs4.element" → "bs4")
         int dot = mod.indexOf('.');
         if (dot > 0) mod = mod.substring(0, dot);
-        return mod.strip();
+        mod = mod.strip();
+        return PythonEnvironmentService.isPlainName(mod) ? mod : null;
     }
 }

@@ -1,8 +1,10 @@
 package com.ownclaw.skills;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
@@ -24,11 +26,15 @@ import java.util.Comparator;
 import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Manages Python virtual environments for skill execution.
  * Auto-creates venvs and installs requirements.txt on first use.
  * Caches a hash of requirements to skip re-install when unchanged.
+ * <p>
+ * Every Python it starts -- venv, pip, the version probes -- goes through {@link SkillJail},
+ * like a skill's own run: see {@link #run}.
  */
 @Service
 public class PythonEnvironmentService {
@@ -50,6 +56,25 @@ public class PythonEnvironmentService {
     private final Map<String, String> lastProvisionErrors = new ConcurrentHashMap<>();
 
     private final OwnClawConfig config;
+    private final SkillJail jail;
+
+    /**
+     * What a package name handed to pip may look like: letters, digits, '_' and '-', not
+     * starting with '-', at most 64 characters.
+     * <p>
+     * The self-heal takes the name from a skill's own error output, and pip reads far more than
+     * names from its command line: a path builds that directory (running its setup code), a URL
+     * fetches and builds whatever is there, and a leading '-' is an option ({@code -e},
+     * {@code --index-url}). None of those can pass this, and every name the self-heal produces
+     * for a real missing module does. The self-heal checks the name it read with the same
+     * pattern pip's caller checks here, so the two cannot drift apart.
+     */
+    private static final Pattern PLAIN_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,63}");
+
+    /** True when {@code name} is one pip can only take as a package from the index. */
+    public static boolean isPlainName(String name) {
+        return name != null && PLAIN_NAME.matcher(name).matches();
+    }
 
     /**
      * An environment directory whose skill no longer exists.
@@ -128,8 +153,15 @@ public class PythonEnvironmentService {
         return d.getParent() != null && d.getParent().equals(r) && !d.equals(r);
     }
 
+    /** Without a jail: for tests that build the service by hand. */
     public PythonEnvironmentService(OwnClawConfig config) {
+        this(config, SkillJail.off());
+    }
+
+    @Autowired
+    public PythonEnvironmentService(OwnClawConfig config, SkillJail jail) {
         this.config = config;
+        this.jail = jail;
         this.systemPython = config.getSandbox().getPythonPath();
         // Defer env directory resolution to init() so we can pick a writable location.
     }
@@ -204,12 +236,12 @@ public class PythonEnvironmentService {
     private void probeSystemPackageInstallCapabilities() {
         try {
             // Check pip on system Python
-            ProcessResult pip = run(10, new ProcessBuilder(systemPython, "-m", "pip", "--version"));
+            ProcessResult pip = run(10, List.of(systemPython, "-m", "pip", "--version"), null, List.of());
             systemPipAvailable = pip.exitCode == 0;
 
             // Check ensurepip module existence without modifying environment
             if (!systemPipAvailable) {
-                ProcessResult ensure = run(10, new ProcessBuilder(systemPython, "-c", "import ensurepip"));
+                ProcessResult ensure = run(10, List.of(systemPython, "-c", "import ensurepip"), null, List.of());
                 systemEnsurePipAvailable = ensure.exitCode == 0;
             } else {
                 systemEnsurePipAvailable = true;
@@ -239,11 +271,11 @@ public class PythonEnvironmentService {
      */
     public boolean canInstallPackagesForSkill(String skillName) {
         try {
-            Path venvDir = envsDir.resolve(skillName);
+            Path venvDir = ownDir(envsDir, skillName);
             Path venvPython = venvDir.resolve(pythonRelative());
             if (Files.exists(venvPython)) {
-                ProcessResult pip = run(10, new ProcessBuilder(
-                        venvPython.toAbsolutePath().toString(), "-m", "pip", "--version"));
+                ProcessResult pip = run(10, List.of(
+                        venvPython.toAbsolutePath().toString(), "-m", "pip", "--version"), venvDir, List.of());
                 if (pip.exitCode == 0) {
                     return true;
                 }
@@ -257,13 +289,7 @@ public class PythonEnvironmentService {
     /** Quick check if a Python command is executable. */
     private boolean isPythonAvailable(String pythonCmd) {
         try {
-            Process p = new ProcessBuilder(pythonCmd, "--version")
-                    .redirectErrorStream(true).start();
-            boolean ok = p.waitFor(5, TimeUnit.SECONDS);
-            if (ok && p.exitValue() == 0) {
-                p.getInputStream().readAllBytes(); // drain
-                return true;
-            }
+            return run(5, List.of(pythonCmd, "--version"), null, List.of()).exitCode == 0;
         } catch (Exception ignored) {}
         return false;
     }
@@ -279,8 +305,11 @@ public class PythonEnvironmentService {
      * <p>Normally this returns a per-skill venv python. On minimal Linux installs
      * (missing python3-venv / ensurepip), it falls back to installing into a
      * per-skill target directory and returns system Python with PYTHONPATH set.</p>
+     *
+     * @param envDir the venv or target directory the skill imports from -- what an isolated run
+     *               must be given to read; null when it runs on system Python alone
      */
-    public record PythonResolution(String python, Map<String, String> extraEnv) {}
+    public record PythonResolution(String python, Map<String, String> extraEnv, Path envDir) {}
 
     // ── environments that outlived their skill ──
 
@@ -428,15 +457,12 @@ public class PythonEnvironmentService {
      */
     public PythonResolution resolveExecution(Path skillDir, String skillName) {
         Path reqFile = skillDir.resolve("requirements.txt");
-        if (!Files.exists(reqFile)) {
-            return new PythonResolution(systemPython, Map.of());
-        }
-
         try {
-            String reqContent = Files.readString(reqFile, StandardCharsets.UTF_8).strip();
-            if (reqContent.isEmpty()) {
-                return new PythonResolution(systemPython, Map.of());
+            String declared = readRequirements(reqFile);
+            if (declared == null || declared.isBlank()) {
+                return new PythonResolution(systemPython, Map.of(), null);
             }
+            String reqContent = declared.strip();
 
             // Try venv path first.
             String python = resolvePython(skillDir, skillName);
@@ -456,7 +482,7 @@ public class PythonEnvironmentService {
                 String path = inherited == null || inherited.isBlank()
                         ? venvBin
                         : venvBin + java.io.File.pathSeparator + inherited;
-                return new PythonResolution(python, Map.of("PATH", path));
+                return new PythonResolution(python, Map.of("PATH", path), ownDir(envsDir, skillName));
             }
 
             // Venv unavailable or provisioning failed; try a target install + PYTHONPATH.
@@ -464,14 +490,14 @@ public class PythonEnvironmentService {
             if (target != null) {
                 return new PythonResolution(systemPython, Map.of(
                         "PYTHONPATH", target.toAbsolutePath().toString()
-                ));
+                ), target.toAbsolutePath());
             }
         } catch (Exception e) {
             String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
             log.warn("Failed to resolve execution environment for skill '{}': {}", skillName, msg);
         }
 
-        return new PythonResolution(systemPython, Map.of());
+        return new PythonResolution(systemPython, Map.of(), null);
     }
 
     /**
@@ -485,47 +511,41 @@ public class PythonEnvironmentService {
     public String resolvePython(Path skillDir, String skillName) {
         Path reqFile = skillDir.resolve("requirements.txt");
 
-        if (!Files.exists(reqFile)) {
-            // No dependencies — use system Python directly
-            return systemPython;
-        }
-
         try {
-            String reqContent = Files.readString(reqFile, StandardCharsets.UTF_8).strip();
-            if (reqContent.isEmpty()) {
+            String declared = readRequirements(reqFile);
+            if (declared == null || declared.isBlank()) {
+                // No dependencies — use system Python directly
                 return systemPython;
             }
+            String reqContent = declared.strip();
 
             String reqHash = hash(reqContent);
             String cacheKey = skillName + ":" + skillDir;
+            Path venvDir = ownDir(envsDir, skillName);
 
             // Already provisioned this session with same hash?
             // ...and the interpreter still exists: the cache outlived a prune once and handed a
             // restored skill the path of a deleted python until the next restart.
             if (reqHash.equals(provisionedHashes.get(cacheKey))
-                    && Files.exists(envsDir.resolve(skillName).resolve(pythonRelative()))) {
+                    && Files.exists(venvDir.resolve(pythonRelative()))) {
                 lastProvisionErrors.remove(cacheKey);
                 return venvPython(skillName);
             }
 
-            Path venvDir = envsDir.resolve(skillName);
             Path hashFile = venvDir.resolve(".req_hash");
 
             // Check on-disk hash — skip install if unchanged
-            if (Files.exists(hashFile)) {
-                String storedHash = Files.readString(hashFile, StandardCharsets.UTF_8).strip();
-                if (reqHash.equals(storedHash) && Files.exists(venvDir.resolve(pythonRelative()))) {
-                    provisionedHashes.put(cacheKey, reqHash);
-                    lastProvisionErrors.remove(cacheKey);
-                    return venvPython(skillName);
-                }
+            if (reqHash.equals(storedHash(hashFile)) && Files.exists(venvDir.resolve(pythonRelative()))) {
+                provisionedHashes.put(cacheKey, reqHash);
+                lastProvisionErrors.remove(cacheKey);
+                return venvPython(skillName);
             }
 
             // Create or update venv
             log.info("Provisioning Python venv for skill '{}' ...", skillName);
-            createVenv(venvDir);
-            installRequirements(venvDir, reqFile);
-            Files.writeString(hashFile, reqHash, StandardCharsets.UTF_8);
+            createVenv(venvDir, skillDir);
+            installRequirements(venvDir, reqFile, skillDir);
+            writeFresh(hashFile, reqHash);
             provisionedHashes.put(cacheKey, reqHash);
             lastProvisionErrors.remove(cacheKey);
 
@@ -553,18 +573,27 @@ public class PythonEnvironmentService {
      */
     public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
         if (packages == null || packages.isEmpty()) return false;
+        for (String pkg : packages) {
+            if (!isPlainName(pkg)) {
+                // Refused before anything starts or is written: see PLAIN_NAME for what pip
+                // would have done with it.
+                String msg = "Refusing to install '" + pkg + "': not a plain package name";
+                lastProvisionErrors.put(skillName + ":" + skillDir, msg);
+                log.warn("Skill '{}': {}", skillName, msg);
+                return false;
+            }
+        }
         try {
-            Path venvDir = envsDir.resolve(skillName);
+            Path venvDir = ownDir(envsDir, skillName);
             try {
-                createVenv(venvDir);
-                ensurePipAvailable(venvDir);
+                createVenv(venvDir, skillDir);
+                ensurePipAvailable(venvDir, skillDir);
             } catch (Exception venvErr) {
                 // Minimal Python installs often cannot create venvs.
                 // Fall back to target installs + PYTHONPATH.
                 persistRequirements(skillDir, packages);
-                String reqContent = Files.exists(skillDir.resolve("requirements.txt"))
-                        ? Files.readString(skillDir.resolve("requirements.txt"), StandardCharsets.UTF_8).strip()
-                        : "";
+                String declared = readRequirements(skillDir.resolve("requirements.txt"));
+                String reqContent = declared == null ? "" : declared.strip();
                 Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
                 if (target == null) {
                     throw new IOException("No target dependency directory produced");
@@ -575,8 +604,8 @@ public class PythonEnvironmentService {
 
             String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
 
-            ProcessResult install = run(600, new ProcessBuilder(
-                    packagesInstallArgs(venvPython, packages, gpuPresent())));
+            ProcessResult install = run(600, packagesInstallArgs(venvPython, packages, gpuPresent()),
+                    venvDir, List.of(skillDir));
             if (install.exitCode != 0) {
                 throw new IOException("pip install failed: " + install.output);
             }
@@ -585,15 +614,12 @@ public class PythonEnvironmentService {
             persistRequirements(skillDir, packages);
 
             // Refresh hash cache so resolvePython() uses venv without re-install.
-            Path reqFile = skillDir.resolve("requirements.txt");
-            if (Files.exists(reqFile)) {
-                String reqContent = Files.readString(reqFile, StandardCharsets.UTF_8).strip();
-                if (!reqContent.isBlank()) {
-                    String reqHash = hash(reqContent);
-                    Files.createDirectories(venvDir);
-                    Files.writeString(venvDir.resolve(".req_hash"), reqHash, StandardCharsets.UTF_8);
-                    provisionedHashes.put(skillName + ":" + skillDir, reqHash);
-                }
+            String declared = readRequirements(skillDir.resolve("requirements.txt"));
+            if (declared != null && !declared.isBlank()) {
+                String reqHash = hash(declared.strip());
+                Files.createDirectories(venvDir);
+                writeFresh(venvDir.resolve(".req_hash"), reqHash);
+                provisionedHashes.put(skillName + ":" + skillDir, reqHash);
             }
 
             lastProvisionErrors.remove(skillName + ":" + skillDir);
@@ -616,62 +642,65 @@ public class PythonEnvironmentService {
         if (reqContent == null || reqContent.isBlank()) return null;
 
         String reqHash = hash(reqContent);
-        Path targetDir = targetsDir.resolve(skillName);
+        Path targetDir = ownDir(targetsDir, skillName);
         Path hashFile = targetDir.resolve(".req_hash");
 
-        if (Files.exists(hashFile)) {
-            String stored = Files.readString(hashFile, StandardCharsets.UTF_8).strip();
-            if (reqHash.equals(stored)) {
-                return targetDir;
-            }
+        if (reqHash.equals(storedHash(hashFile))) {
+            return targetDir;
         }
 
         Files.createDirectories(targetDir);
 
-        ensurePipForPython(systemPython, /*isVenv=*/false, skillName);
+        ensurePipForPython(systemPython, /*isVenv=*/false, skillName, targetDir, skillDir);
 
         Path reqFile = skillDir.resolve("requirements.txt");
-        ProcessResult install = run(900, new ProcessBuilder(
-                targetInstallArgs(systemPython, reqFile, targetDir, gpuPresent())));
+        ProcessResult install = run(900, targetInstallArgs(systemPython, reqFile, targetDir, gpuPresent()),
+                targetDir, List.of(skillDir));
 
         if (install.exitCode != 0) {
             throw new IOException("pip --target install failed: " + install.output);
         }
 
-        Files.writeString(hashFile, reqHash, StandardCharsets.UTF_8);
+        writeFresh(hashFile, reqHash);
         return targetDir;
     }
 
-    private void ensurePipAvailable(Path venvDir) throws IOException, InterruptedException {
+    private void ensurePipAvailable(Path venvDir, Path skillDir) throws IOException, InterruptedException {
         String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
-        ensurePipForPython(venvPython, /*isVenv=*/true, venvDir.getFileName().toString());
+        ensurePipForPython(venvPython, /*isVenv=*/true, venvDir.getFileName().toString(), venvDir, skillDir);
     }
 
-    private void ensurePipForPython(String pythonExe, boolean isVenv, String contextName)
+    /**
+     * @param envDir   the directory being provisioned, the only one the commands may write
+     * @param skillDir the skill's directory, readable to them
+     */
+    private void ensurePipForPython(String pythonExe, boolean isVenv, String contextName,
+                                    Path envDir, Path skillDir)
             throws IOException, InterruptedException {
-        ProcessResult pipCheck = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+        List<Path> readOnly = List.of(skillDir);
+        ProcessResult pipCheck = run(30, List.of(pythonExe, "-m", "pip", "--version"), envDir, readOnly);
         if (pipCheck.exitCode == 0) {
             return;
         }
 
         // 1) Try ensurepip if available
-        ProcessResult ensure = run(120, new ProcessBuilder(pythonExe, "-m", "ensurepip", "--upgrade"));
+        ProcessResult ensure = run(120, List.of(pythonExe, "-m", "ensurepip", "--upgrade"), envDir, readOnly);
         if (ensure.exitCode == 0) {
-            ProcessResult pipAfter = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+            ProcessResult pipAfter = run(30, List.of(pythonExe, "-m", "pip", "--version"), envDir, readOnly);
             if (pipAfter.exitCode == 0) return;
         }
 
         // 2) Fall back to get-pip.py bootstrap
         log.warn("Bootstrapping pip via get-pip.py for {} (ensurepip unavailable)", contextName);
-        bootstrapPipWithGetPip(pythonExe, isVenv);
+        bootstrapPipWithGetPip(pythonExe, isVenv, envDir, skillDir);
 
-        ProcessResult pipAfter = run(30, new ProcessBuilder(pythonExe, "-m", "pip", "--version"));
+        ProcessResult pipAfter = run(30, List.of(pythonExe, "-m", "pip", "--version"), envDir, readOnly);
         if (pipAfter.exitCode != 0) {
             throw new IOException("pip bootstrapping failed: " + pipAfter.output);
         }
     }
 
-    private void bootstrapPipWithGetPip(String pythonExe, boolean isVenv)
+    private void bootstrapPipWithGetPip(String pythonExe, boolean isVenv, Path envDir, Path skillDir)
             throws IOException, InterruptedException {
         Path getPip = downloadGetPipIfNeeded();
 
@@ -684,7 +713,8 @@ public class PythonEnvironmentService {
             args.add("--user");
         }
 
-        ProcessResult res = run(600, new ProcessBuilder(args));
+        // get-pip.py lives under _bootstrap, which an isolated command does not otherwise see.
+        ProcessResult res = run(600, args, envDir, List.of(skillDir, getPip));
         if (res.exitCode != 0) {
             throw new IOException("get-pip.py failed: " + res.output);
         }
@@ -728,9 +758,12 @@ public class PythonEnvironmentService {
         Path reqFile = skillDir.resolve("requirements.txt");
         Files.createDirectories(skillDir);
 
+        // A link here is refused, not followed: what is read is written back, into a file the
+        // skill can read, so following a link to .env would hand the skill its contents.
+        String current = readRequirements(reqFile);
         java.util.Set<String> existing = new java.util.LinkedHashSet<>();
-        if (Files.exists(reqFile)) {
-            for (String line : Files.readString(reqFile, StandardCharsets.UTF_8).split("\\R")) {
+        if (current != null) {
+            for (String line : current.split("\\R")) {
                 String trimmed = line.strip();
                 if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
                 existing.add(trimmed);
@@ -744,39 +777,37 @@ public class PythonEnvironmentService {
             if (existing.add(trimmed)) changed = true;
         }
 
-        if (!Files.exists(reqFile) || changed) {
+        if (current == null || changed) {
             String content = String.join("\n", existing) + "\n";
-            Files.writeString(reqFile, content, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            writeFresh(reqFile, content);
         }
     }
 
-    private void createVenv(Path venvDir) throws IOException, InterruptedException {
+    private void createVenv(Path venvDir, Path skillDir) throws IOException, InterruptedException {
         if (Files.exists(venvDir.resolve(pythonRelative()))) {
             return; // venv already exists
         }
-        Files.createDirectories(venvDir.getParent());
+        // Made here, not by venv: an isolated command can write only a directory that exists
+        // on the host, bound at its own path. venv fills an empty directory as it would a new one.
+        Files.createDirectories(venvDir);
 
-        ProcessBuilder pb = new ProcessBuilder(systemPython, "-m", "venv", venvDir.toAbsolutePath().toString());
-        pb.redirectErrorStream(true);
-        Process p = pb.start();
-        boolean ok = p.waitFor(120, TimeUnit.SECONDS);
-        String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-
-        if (!ok || p.exitValue() != 0) {
-            throw new IOException("Failed to create venv: " + output);
+        ProcessResult created = run(120, List.of(systemPython, "-m", "venv", venvDir.toAbsolutePath().toString()),
+                venvDir, List.of(skillDir));
+        if (created.exitCode != 0) {
+            throw new IOException("Failed to create venv: " + created.output);
         }
     }
 
-    private void installRequirements(Path venvDir, Path reqFile) throws IOException, InterruptedException {
+    private void installRequirements(Path venvDir, Path reqFile, Path skillDir)
+            throws IOException, InterruptedException {
         String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
 
         // Ensure pip is available in this venv (some Python installs omit it)
-        ensurePipAvailable(venvDir);
+        ensurePipAvailable(venvDir, skillDir);
 
         // Install requirements using `python -m pip` (more portable than pip.exe path)
-        ProcessResult install = run(300, new ProcessBuilder(
-                requirementsInstallArgs(venvPython, reqFile, gpuPresent())));
+        ProcessResult install = run(300, requirementsInstallArgs(venvPython, reqFile, gpuPresent()),
+                venvDir, List.of(skillDir));
         if (install.exitCode != 0) {
             throw new IOException("pip install failed: " + install.output);
         }
@@ -790,20 +821,118 @@ public class PythonEnvironmentService {
         return venvDir.resolve(isWindows() ? "Scripts/pip.exe" : "bin/pip").toAbsolutePath().toString();
     }
 
-    private static ProcessResult run(int timeoutSeconds, ProcessBuilder pb) throws IOException, InterruptedException {
-        pb.redirectErrorStream(true);
-        Process p = pb.start();
-        boolean ok = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-
-        if (!ok) {
-            p.destroyForcibly();
-            return new ProcessResult(-1, output + "\n(timeout)");
+    /**
+     * Start one of this service's Python commands and wait for it.
+     * <p>
+     * Every Python the service starts comes through here, and so through the jail, as a skill's
+     * own run does: pip downloads packages a model named and runs their build code, and what it
+     * writes is code the skill will import. When the jail is active the command sees the host
+     * read-only, writes only {@code envDir}, reads {@code readOnly}, and sees none of the
+     * service's state -- a link the skill left in its directory resolves inside the jail, where
+     * its target is hidden. When the jail is inactive the command runs directly, as before.
+     * <p>
+     * Either way the environment is the jail's allow-list. pip and venv used to inherit the
+     * service's whole environment -- every API key and token .env holds -- while running that
+     * same build code; that part does not wait for bubblewrap to be installed.
+     *
+     * @param envDir   the only directory the command may write: the venv or target directory
+     *                 being provisioned, which must already exist. Null for a probe that builds
+     *                 nothing; it gets an empty directory of its own for the run.
+     * @param readOnly host paths the command may read besides the read-only host
+     * @throws IOException when the jail refuses the launch. Thrown, not returned as a failed
+     *                     command: a refusal is not "pip is missing", and the fallbacks behind a
+     *                     failed pip -- ensurepip, then downloading get-pip.py -- must not run
+     *                     on it.
+     */
+    private ProcessResult run(int timeoutSeconds, List<String> command, Path envDir, List<Path> readOnly)
+            throws IOException, InterruptedException {
+        Path scratch = null;
+        Path workDir = envDir;
+        if (workDir == null) {
+            scratch = Files.createTempDirectory("ownclaw-python-");
+            workDir = scratch;
+        } else if (!Files.isDirectory(workDir, LinkOption.NOFOLLOW_LINKS)) {
+            // A link in its place would be bound read-write wherever it points.
+            throw new IOException(workDir + " is not a directory (missing, or a link); not provisioning into it");
         }
-        return new ProcessResult(p.exitValue(), output);
+        try (SkillJail.Launch launch = jail.prepare(command, workDir, readOnly)) {
+            if (launch.refusal() != null) {
+                throw new IOException(launch.refusal());
+            }
+            ProcessBuilder pb = new ProcessBuilder(launch.argv());
+            pb.redirectErrorStream(true);
+            SkillJail.applyEnvironment(pb, Map.of());
+            Process p = pb.start();
+            boolean ok = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            jail.afterRun(launch, output);
+
+            if (!ok) {
+                p.destroyForcibly();
+                return new ProcessResult(-1, output + "\n(timeout)");
+            }
+            return new ProcessResult(p.exitValue(), output);
+        } finally {
+            if (scratch != null) deleteTree(scratch);
+        }
     }
 
     private record ProcessResult(int exitCode, String output) {}
+
+    /**
+     * A skill's own directory under an environment root: the one directory its pip may write.
+     * The name comes from SKILL.yaml, which the boot scan takes verbatim, so it must be a plain
+     * name -- "../generated/other" would hand pip another skill's code, read-write -- and not
+     * one of the service's own directories under the root.
+     */
+    private static Path ownDir(Path root, String skillName) throws IOException {
+        Path dir = root.resolve(skillName);
+        if (!isDirectChild(root, dir) || skillName.equals("_targets") || skillName.equals("_bootstrap")) {
+            throw new IOException("'" + skillName + "' is not a plain skill name; not provisioning it");
+        }
+        return dir.toAbsolutePath().normalize();
+    }
+
+    /**
+     * requirements.txt as the skill declared it, or null when there is none. It is read from a
+     * directory the skill can write, so anything but a regular file -- a link to .env, a FIFO
+     * that would hang the read -- is refused rather than followed.
+     */
+    private static String readRequirements(Path reqFile) throws IOException {
+        if (!Files.exists(reqFile, LinkOption.NOFOLLOW_LINKS)) return null;
+        if (!Files.isRegularFile(reqFile, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException(reqFile + " is not a regular file (a link or something else): refusing to read it");
+        }
+        return readNoFollow(reqFile);
+    }
+
+    /**
+     * The hash an earlier provisioning left, or null when there is none to trust. Its directory
+     * is one a jailed pip writes, so only a regular file counts: a link is not followed, and
+     * the fresh write that follows replaces it.
+     */
+    private static String storedHash(Path hashFile) throws IOException {
+        if (!Files.isRegularFile(hashFile, LinkOption.NOFOLLOW_LINKS)) return null;
+        return readNoFollow(hashFile).strip();
+    }
+
+    private static String readNoFollow(Path file) throws IOException {
+        try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Write a file the service owns into a directory a jailed process can write. Whatever is at
+     * the name goes first -- a link is removed, not followed -- and the file is then created
+     * new, which fails rather than follows if something reappears in between. A planted link
+     * cannot turn the write into one over .env or the database.
+     */
+    private static void writeFresh(Path file, String content) throws IOException {
+        Files.deleteIfExists(file);
+        Files.writeString(file, content, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+    }
 
     /** Relative path to the python executable inside a venv. */
     private String pythonRelative() {
@@ -827,12 +956,9 @@ public class PythonEnvironmentService {
     public Optional<String> detectPython() {
         for (String candidate : new String[]{systemPython, "python3", "python", "py"}) {
             try {
-                Process p = new ProcessBuilder(candidate, "--version")
-                        .redirectErrorStream(true).start();
-                boolean ok = p.waitFor(5, TimeUnit.SECONDS);
-                if (ok && p.exitValue() == 0) {
-                    String version = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
-                    log.debug("Found Python: {} -> {}", candidate, version);
+                ProcessResult r = run(5, List.of(candidate, "--version"), null, List.of());
+                if (r.exitCode == 0) {
+                    log.debug("Found Python: {} -> {}", candidate, r.output.strip());
                     return Optional.of(candidate);
                 }
             } catch (Exception ignored) {
@@ -845,10 +971,9 @@ public class PythonEnvironmentService {
     /** Get the version string of the configured Python. */
     public Optional<String> getPythonVersion() {
         try {
-            Process p = new ProcessBuilder(systemPython, "--version")
-                    .redirectErrorStream(true).start();
-            if (p.waitFor(5, TimeUnit.SECONDS) && p.exitValue() == 0) {
-                return Optional.of(new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip());
+            ProcessResult r = run(5, List.of(systemPython, "--version"), null, List.of());
+            if (r.exitCode == 0) {
+                return Optional.of(r.output.strip());
             }
         } catch (Exception ignored) {}
         return Optional.empty();
