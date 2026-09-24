@@ -1023,7 +1023,7 @@ public class ThinkingEngine {
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
         sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");
-        sb.append("    and any the goal names, are loaded -- its context is small.\n");
+        sb.append("    and any the goal or a scheduled task names, are loaded -- its context is small.\n");
         sb.append("  checkpoints | max_steps (default 10)\n\n");
         }
 
@@ -1197,7 +1197,7 @@ public class ThinkingEngine {
             sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
             sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
             sb.append("delegate(goal, [tools], [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
-            sb.append("  It runs its own loop with the tools you name (all, if none) and your credentials, on this machine.\n");
+            sb.append("  It runs its own loop with the tools you name and your credentials, on this machine.\n");
             sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
             sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
         }

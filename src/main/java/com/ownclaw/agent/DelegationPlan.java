@@ -14,7 +14,7 @@ import java.util.Map;
  * @param steps       ordered list of tool calls to execute
  * @param checkpoints quality criteria to verify before marking as done
  * @param maxSteps    maximum number of executor steps (tool calls + retries)
- * @param tools       the tools the cloud says this delegation needs; empty means all of them
+ * @param tools       the tools the cloud says this delegation needs (see LocalExecutor.offered)
  */
 public record DelegationPlan(
         String goal,

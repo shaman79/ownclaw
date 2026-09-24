@@ -137,6 +137,30 @@ class DelegationToolsTest {
     }
 
     @Test
+    @DisplayName("a tool the task's own message names is offered, whatever the cloud wrote")
+    void taskMessageNamesCount() {
+        var ctx = new AgentContext("u1", "t1",
+                "Fetch daily news digest using daily_news_digest skill, then email it. Use smtp_send_email.");
+        ctx.setUnattended(true);
+        var llm = new Native(done("sent"));
+        executor(llm, new Usage(), FETCH, SMTP, NEWS, tool("daily_news_digest"))
+                .execute(new DelegationPlan("Get the digest and email it", List.of(), List.of(), 4,
+                        List.of("daily_news_digest")), ctx);
+        assertEquals(List.of("done", "daily_news_digest", "smtp_send_email"), llm.offered.get(0),
+                "the cloud listed only the digest and paraphrased the goal");
+    }
+
+    @Test
+    @DisplayName("in chat the message's names do not narrow: it names tools in passing")
+    void chatMessagesDoNotNarrow() {
+        var ctx = new AgentContext("u1", "t1", "Show me today's menus here. Do NOT use smtp_send_email.");
+        var llm = new Native(done("shown"));
+        executor(llm, new Usage(), FETCH, SMTP, NEWS)
+                .execute(new DelegationPlan("Fetch today's lunch menus and return them", List.of(), List.of(), 4), ctx);
+        assertEquals(List.of("done", "daily_menu_fetcher", "news_digest", "smtp_send_email"), llm.offered.get(0));
+    }
+
+    @Test
     @DisplayName("a name counts only as a whole word")
     void wholeWordsOnly() {
         assertTrue(LocalExecutor.namedIn("run web_fetch now", "web_fetch"));

@@ -80,25 +80,27 @@ public class LocalExecutor {
 
     /** What the local model may call: the tools this delegation is given, plus {@link #DONE}. */
     private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan) {
-        return new ArrayList<>(ToolSchemas.build(List.of(DONE), offered(plan),
+        return new ArrayList<>(ToolSchemas.build(List.of(DONE), offered(plan, context),
                 context.credentialKeys()));
     }
 
     /**
      * The tools a delegation is given: the ones the cloud listed, any a plan step names, and any
-     * whose exact name appears in the goal -- or the whole registry when that is none at all.
-     * Never skill_create.
+     * whose exact name appears in the goal or -- for unattended work -- in the task's own
+     * message; or the whole registry when that is none at all. Never skill_create.
      * <p>
      * Every definition sent costs the local model context it needs for the work. With the
      * whole registry (26 skills) the prompt was about 18,000 tokens of a 24,576-token window,
      * and on 2026-09-24 the morning menu delegation died on its second call with
      * done_reason=length after 5,947 tokens of thinking: there was no room left to answer in.
-     * The cloud knows which tools the job needs, so it says. The goal counts too, because that
-     * does not depend on the cloud remembering an optional argument: the scheduled tasks name
-     * their skills ("using daily_menu_fetcher, then ... via smtp_send_email"), and a tool the
-     * goal asks for but the list left out would otherwise be one the model cannot call.
+     * The cloud knows which tools the job needs, so it says. A scheduled task's own message
+     * counts too, because it does not depend on anything the cloud writes: those name their
+     * skills ("using daily_menu_fetcher, then ... via smtp_send_email"), so a list the cloud
+     * forgot, or a goal it paraphrased, still narrows -- and a tool the task asks for is never
+     * one the model cannot call. Only unattended: a chat message names tools in passing ("why
+     * did smtp_send_email fail?", "do NOT use ..."), and there it would narrow to the wrong one.
      */
-    Collection<Tool> offered(DelegationPlan plan) {
+    Collection<Tool> offered(DelegationPlan plan, AgentContext context) {
         var all = toolRegistry.all().stream()
                 .filter(t -> t != null && !"skill_create".equals(t.name()))
                 .collect(Collectors.toList());
@@ -106,9 +108,10 @@ public class LocalExecutor {
         for (var st : plan.steps()) {
             if (st.tool() != null && !st.tool().isBlank()) wanted.add(st.tool());
         }
-        String goal = plan.goal() == null ? "" : plan.goal();
+        String asked = (plan.goal() == null ? "" : plan.goal()) + "\n"
+                + (context.isUnattended() && context.originalMessage() != null ? context.originalMessage() : "");
         var named = all.stream()
-                .filter(t -> wanted.contains(t.name()) || namedIn(goal, t.name()))
+                .filter(t -> wanted.contains(t.name()) || namedIn(asked, t.name()))
                 .collect(Collectors.toList());
         return named.isEmpty() ? all : named;
     }
@@ -150,7 +153,7 @@ public class LocalExecutor {
         List<String> unknown = unknownTools(plan);
         if (!unknown.isEmpty()) {
             log.warn("Delegation asked for tools that do not exist: {}", unknown);
-            boolean gotAll = offered(plan).size() == toolRegistry.all().stream()
+            boolean gotAll = offered(plan, parentContext).size() == toolRegistry.all().stream()
                     .filter(t -> t != null && !"skill_create".equals(t.name())).count();
             notes += "NOTE: no tool is named " + String.join(", ", unknown) + (gotAll
                     ? ", so it was given every tool. "
@@ -208,7 +211,7 @@ public class LocalExecutor {
         boolean nativeTools = localProvider.supportsTools();
         List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
-                offered(plan).size());
+                offered(plan, parentContext).size());
 
         int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
         // This delegation's own results, and the only ones the local model can name: {{1}} is
@@ -638,7 +641,7 @@ public class LocalExecutor {
         // repeating it here would cost the context window twice for the same information.
         if (!nativeTools) {
             sb.append("## Available Tools\n");
-            Collection<Tool> availableTools = offered(plan);
+            Collection<Tool> availableTools = offered(plan, context);
             if (!availableTools.isEmpty()) {
                 String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
                 sb.append(manifest).append("\n");
