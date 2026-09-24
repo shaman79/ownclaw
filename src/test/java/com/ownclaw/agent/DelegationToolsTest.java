@@ -99,11 +99,50 @@ class DelegationToolsTest {
     }
 
     @Test
-    @DisplayName("a list of names none of which exist offers everything rather than nothing")
+    @DisplayName("a list of names none of which exist offers everything rather than nothing, and says so")
     void onlyWrongNamesOffersAll() {
         var llm = new Native(done("sent"));
-        executor(llm, new Usage(), FETCH, SMTP).execute(plan(List.of("emial_sender"), List.of()), task());
+        var outcome = executor(llm, new Usage(), FETCH, SMTP)
+                .execute(plan(List.of("emial_sender"), List.of()), task());
         assertEquals(List.of("done", "daily_menu_fetcher", "smtp_send_email"), llm.offered.get(0));
+        assertTrue(outcome.text().contains("so it was given every tool"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a tool the goal names is offered, whether or not the list has it")
+    void goalNamedToolsAreOffered() {
+        String goal = "Fetch the menus using daily_menu_fetcher, then email them via smtp_send_email.";
+        var listed = new Native(done("sent"));
+        executor(listed, new Usage(), FETCH, SMTP, NEWS)
+                .execute(new DelegationPlan(goal, List.of(), List.of(), 4, List.of("daily_menu_fetcher")), task());
+        assertEquals(List.of("done", "daily_menu_fetcher", "smtp_send_email"), listed.offered.get(0));
+
+        var unlisted = new Native(done("sent"));
+        executor(unlisted, new Usage(), FETCH, SMTP, NEWS)
+                .execute(new DelegationPlan(goal, List.of(), List.of(), 4), task());
+        assertEquals(List.of("done", "daily_menu_fetcher", "smtp_send_email"), unlisted.offered.get(0),
+                "the cloud forgot the list: the goal still narrows it");
+    }
+
+    @Test
+    @DisplayName("no special action declares an array without items: OpenAI rejects the whole request")
+    @SuppressWarnings("unchecked")
+    void everyArrayHasItems() {
+        for (ToolSpec spec : SpecialActionSchemas.ALL) {
+            var props = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+            props.forEach((name, prop) -> assertFalse(
+                    "array".equals(prop.get("type")) && !prop.containsKey("items"),
+                    spec.name() + "." + name + " is an array with no items"));
+        }
+    }
+
+    @Test
+    @DisplayName("a name counts only as a whole word")
+    void wholeWordsOnly() {
+        assertTrue(LocalExecutor.namedIn("run web_fetch now", "web_fetch"));
+        assertTrue(LocalExecutor.namedIn("(web_fetch)", "web_fetch"));
+        assertFalse(LocalExecutor.namedIn("run web_fetcher now", "web_fetch"));
+        assertFalse(LocalExecutor.namedIn("my_web_fetch", "web_fetch"));
     }
 
     @Test
@@ -123,6 +162,9 @@ class DelegationToolsTest {
         assertEquals(List.of("a", "b"),
                 LocalExecutor.parsePlan(Map.of("goal", "g", "tools", List.of("a", " b "))).tools());
         assertEquals(List.of("a", "b"), LocalExecutor.parsePlan(Map.of("goal", "g", "tools", "a, b")).tools());
+        assertEquals(List.of("a", "b"),
+                LocalExecutor.parsePlan(Map.of("goal", "g", "tools", "[\"a\", \"b\"]")).tools(),
+                "a JSON array sent as a string");
         assertEquals(List.of(), LocalExecutor.parsePlan(Map.of("goal", "g")).tools());
     }
 }

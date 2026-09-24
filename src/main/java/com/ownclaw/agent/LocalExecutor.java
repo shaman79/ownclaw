@@ -85,14 +85,18 @@ public class LocalExecutor {
     }
 
     /**
-     * The tools a delegation is given: the ones the cloud named, and any a plan step names --
-     * or the whole registry when it named none that exist. Never skill_create.
+     * The tools a delegation is given: the ones the cloud listed, any a plan step names, and any
+     * whose exact name appears in the goal -- or the whole registry when that is none at all.
+     * Never skill_create.
      * <p>
      * Every definition sent costs the local model context it needs for the work. With the
      * whole registry (26 skills) the prompt was about 18,000 tokens of a 24,576-token window,
      * and on 2026-09-24 the morning menu delegation died on its second call with
      * done_reason=length after 5,947 tokens of thinking: there was no room left to answer in.
-     * The cloud knows which tools the job needs, so it says, and only those are sent.
+     * The cloud knows which tools the job needs, so it says. The goal counts too, because that
+     * does not depend on the cloud remembering an optional argument: the scheduled tasks name
+     * their skills ("using daily_menu_fetcher, then ... via smtp_send_email"), and a tool the
+     * goal asks for but the list left out would otherwise be one the model cannot call.
      */
     Collection<Tool> offered(DelegationPlan plan) {
         var all = toolRegistry.all().stream()
@@ -102,14 +106,24 @@ public class LocalExecutor {
         for (var st : plan.steps()) {
             if (st.tool() != null && !st.tool().isBlank()) wanted.add(st.tool());
         }
-        var named = all.stream().filter(t -> wanted.contains(t.name())).collect(Collectors.toList());
+        String goal = plan.goal() == null ? "" : plan.goal();
+        var named = all.stream()
+                .filter(t -> wanted.contains(t.name()) || namedIn(goal, t.name()))
+                .collect(Collectors.toList());
         return named.isEmpty() ? all : named;
+    }
+
+    /** Whether the text names the tool as a whole word: web_fetch, not web_fetcher. */
+    static boolean namedIn(String text, String name) {
+        return java.util.regex.Pattern.compile("(?<![A-Za-z0-9_-])" + java.util.regex.Pattern.quote(name)
+                + "(?![A-Za-z0-9_-])").matcher(text).find();
     }
 
     /** The names the cloud asked for that no tool has; said back to it, so it can correct them. */
     private List<String> unknownTools(DelegationPlan plan) {
         return plan.tools().stream()
                 .filter(n -> "skill_create".equals(n) || toolRegistry.find(n).isEmpty())
+                .distinct().limit(20)
                 .toList();
     }
 
@@ -136,9 +150,12 @@ public class LocalExecutor {
         List<String> unknown = unknownTools(plan);
         if (!unknown.isEmpty()) {
             log.warn("Delegation asked for tools that do not exist: {}", unknown);
-            notes += "NOTE: no tool is named " + String.join(", ", unknown) + ", so the delegation "
-                    + "ran without " + (unknown.size() == 1 ? "it" : "them") + ". Use the exact "
-                    + "names from your tool list.\n\n";
+            boolean gotAll = offered(plan).size() == toolRegistry.all().stream()
+                    .filter(t -> t != null && !"skill_create".equals(t.name())).count();
+            notes += "NOTE: no tool is named " + String.join(", ", unknown) + (gotAll
+                    ? ", so it was given every tool. "
+                    : ", so the delegation ran without " + (unknown.size() == 1 ? "it" : "them") + ". ")
+                    + "Use the exact names from your tool list.\n\n";
         }
         if (notes.isEmpty()) return outcome;
         return new Outcome(notes + outcome.text(), outcome.toolsRun(),
@@ -542,16 +559,14 @@ public class LocalExecutor {
             } catch (NumberFormatException ignored) {}
         }
 
-        // An array of names, or -- as a model will sometimes write it -- one string of them.
+        // Comma-separated names, as the schema asks -- or a list, or a JSON array written as a
+        // string, as a model will sometimes send. Tool names are [A-Za-z0-9_-], so anything
+        // else separates them.
         List<String> tools = new ArrayList<>();
         Object toolsObj = params.get("tools");
-        if (toolsObj instanceof List<?> toolList) {
-            for (Object item : toolList) {
-                if (item != null && !item.toString().isBlank()) tools.add(item.toString().strip());
-            }
-        } else if (toolsObj instanceof String s) {
-            for (String name : s.split("[,\\s]+")) if (!name.isBlank()) tools.add(name);
-        }
+        String listed = toolsObj instanceof List<?> l ? String.join(",", l.stream().map(String::valueOf).toList())
+                : toolsObj instanceof String s ? s : "";
+        for (String name : listed.split("[^A-Za-z0-9_-]+")) if (!name.isBlank()) tools.add(name);
 
         return new DelegationPlan(goal, steps, checkpoints, maxSteps, tools);
     }

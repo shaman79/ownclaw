@@ -1135,7 +1135,7 @@ public class AgentLoop {
                     "'" + action.tool() + "' is not available to you on this task. Nobody is "
                             + "waiting for it, so the work runs on the local model: call "
                             + "'delegate' with the goal stated in full — including anything you "
-                            + "have already worked out — and it picks the tools itself.", 0);
+                            + "have already worked out — and the skills it needs in 'tools'.", 0);
         }
 
         var toolOpt = toolRegistry.find(action.tool());

@@ -135,9 +135,11 @@ public final class SpecialActionSchemas {
                             + "argument to pass it on verbatim without reading it.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully."),
-                            "tools", ToolParam.optional("array", "The exact names of the tools it "
-                                    + "will need. Only these are loaded: the local model's context "
-                                    + "is small, and every tool definition takes room it needs for "
-                                    + "the work. Omit to load all of them."),
+                            // A string, not an array: OpenAI rejects an array schema with no
+                            // items, and one bad schema fails every request that carries it.
+                            "tools", ToolParam.optional("string", "Comma-separated exact names of "
+                                    + "the tools it will need. Only these, and any the goal names, "
+                                    + "are loaded: the local model's context is small, and every "
+                                    + "tool definition takes room it needs for the work."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
 }

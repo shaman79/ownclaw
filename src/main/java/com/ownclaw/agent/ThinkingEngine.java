@@ -1022,8 +1022,8 @@ public class ThinkingEngine {
         sb.append("  goal* — what to achieve, stated fully; the local model works out the steps.\n");
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
-        sb.append("  tools: the exact names of the tools it will need. Only these are loaded --\n");
-        sb.append("    its context is small and each definition takes room. Omit to load all.\n");
+        sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");
+        sb.append("    and any the goal names, are loaded -- its context is small.\n");
         sb.append("  checkpoints | max_steps (default 10)\n\n");
         }
 
