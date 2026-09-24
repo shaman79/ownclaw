@@ -601,6 +601,32 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("only real references are renumbered; template text is shown as it ran")
+    void onlyReferencesAreRenumbered() {
+        var first = new Artifact(5, "digest", Map.of(), Map.of(), "{\"body_text\":\"x\"}", true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var written = Map.<String, Object>of("body", "{{1.body_text}}",
+                "template", "Hello {{1}}, your order {{2}} ships today");
+        var out = References.argsForTask(written, List.of(first));
+        assertEquals("{{5.body_text}}", out.get("body"));
+        assertEquals("Hello {{1}}, your order {{2}} ships today", out.get("template"),
+                "the failure evidence has to describe the call that actually ran");
+        assertEquals("sent {{5}}, then {{?}}", References.proseForTask("sent {{1}}, then {{3}}", List.of(first)),
+                "a handle the delegation has no result for cannot resolve task-wide to someone else's");
+    }
+
+    @Test
+    @DisplayName("the ledger the cloud reads says FAILED for an ok:false step")
+    void theLedgerUsesTheHonestVerdict() {
+        var send = new Artifact(3, "smtp_send_email", Map.of(), Map.of(),
+                "{\"ok\": false, \"error\": \"timed out\"}", true,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+        var outcome = LocalExecutor.completed("sent", "send", List.of(send));
+        assertTrue(outcome.text().contains("{{3}} smtp_send_email FAILED"), outcome.text());
+        assertFalse(outcome.ok());
+    }
+
+    @Test
     @DisplayName("the local summary reaches the cloud in the task's numbering")
     void theSummaryIsRenumbered() {
         var digest = new Artifact(7, "daily_news_digest", Map.of(), Map.of(), "digest", true,
@@ -680,11 +706,11 @@ class DelegationSafetyTest {
     @DisplayName("a refusal carries no field names — the cloud reads it")
     void refusalsListNothing() {
         var priv = new Artifact(1, "contacts", Map.of(), Map.of(),
-                "{\"petr.kazda.private@example.com\":\"x\"}", true,
+                "{\"jana.novakova.private@example.com\":\"x\"}", true,
                 com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
         var r = References.resolve(Map.of("body", "{{1.nope}}"), List.of(priv));
         assertFalse(r.ok());
-        assertFalse(r.reason().contains("petr.kazda"),
+        assertFalse(r.reason().contains("jana.novakova"),
                 "a key can be data; on the cloud path this listed every one of them, uncut");
     }
 

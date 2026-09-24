@@ -35,10 +35,15 @@ import java.util.Map;
  * @param success  whether the tool reported success
  * @param label    whether the bytes may leave this machine
  * @param why      which facts made it PRIVATE, for the descriptor and the ledger
+ * @param indexed  whether a PRIVATE result's bytes are in the canary's index. False for one that
+ *                 is PRIVATE only because of when it was made (after a delegation read private
+ *                 data) or because it was derived from such a result: withheld all the same, but
+ *                 indexing it is what made the cloud's own later fetch of the same public page
+ *                 trip the canary and end a run whose email had already gone.
  */
 public record Artifact(int n, String tool, Map<String, Object> written,
                        Map<String, Object> resolved, String output, boolean success,
-                       Label label, List<String> why) {
+                       Label label, List<String> why, boolean indexed) {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** How many top-level field names a descriptor shows, and how long each may be. */
@@ -73,6 +78,12 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         why = why == null ? List.of() : List.copyOf(why);
     }
 
+    /** An artifact whose bytes, if PRIVATE, are indexed — every kind except the ones above. */
+    public Artifact(int n, String tool, Map<String, Object> written, Map<String, Object> resolved,
+                    String output, boolean success, Label label, List<String> why) {
+        this(n, tool, written, resolved, output, success, label, why, true);
+    }
+
     /** A PUBLIC artifact with no handle yet — the shape a test or a legacy caller builds. */
     public Artifact(String tool, Map<String, Object> params, String output, boolean success) {
         this(0, tool, params, params, output, success, Label.PUBLIC, List.of());
@@ -92,15 +103,10 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     }
 
     /**
-     * The label, from the facts at hand — two of them, and nothing a model decides.
-     * <p>
-     * There used to be a third: once a delegation had touched anything private, every later
-     * result of it was PRIVATE too. That marked the restaurant page a delegation fetched after
-     * sending an email as private, and when the cloud later fetched the same public page itself
-     * the canary refused the call — so the run reported "did not finish" after the email had
-     * already gone. The worry behind it was real, but it is about what the local model WRITES
-     * after reading private content, not about what a public tool returns; the local model's
-     * own words are withheld from the cloud by {@code LocalExecutor.completed} instead.
+     * The label from the call's own facts — two of them, and nothing a model decides: the skill
+     * declared credentials, or the call pulled in a PRIVATE result. (Inside a delegation there is
+     * a third, about timing: after the local model has read private data, everything it does is
+     * PRIVATE. That one is applied by {@code AgentContext.decide}, which both paths call.)
      *
      * @param requiredCredentials what the skill declared; non-empty means it reached something
      *                            that needed a secret, and its output is that something
@@ -130,7 +136,6 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         return new Decision(why.isEmpty() ? Label.PUBLIC : Label.PRIVATE, List.copyOf(why));
     }
 
-    /** A label and the facts that produced it. */
     /**
      * A label, the facts that produced it, and whether the canary should index the bytes.
      * <p>
@@ -155,8 +160,24 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public boolean succeeded() {
         if (!success) return false;
-        var p = shapeOf(output).primitives();
-        return !"false".equals(p.get("ok")) && !"false".equals(p.get("success"));
+        if (output == null) return true;
+        String t = output.strip();
+        if (!(t.startsWith("{") && t.endsWith("}"))) return true;
+        try {
+            // The whole top level, not the descriptor's first twelve keys: an "ok" in thirteenth
+            // place was read as success. A string "false" counts too; some skills write one.
+            JsonNode node = MAPPER.readTree(t);
+            if (node == null || !node.isObject()) return true;
+            for (String key : List.of("ok", "success")) {
+                JsonNode v = node.get(key);
+                if (v != null && (v.isBoolean() ? !v.asBoolean() : "false".equalsIgnoreCase(v.asText()))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     /**
@@ -173,6 +194,14 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                 .append(succeeded() ? " ✓" : " ✗").append(" — ").append(label);
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
         Shape shape = shapeOf(output);
+        if (isPrivate() && !indexed) {
+            // A result hidden because of WHEN it was made came from a tool fed by what the model
+            // typed after reading private data. Its key names and booleans are not a skill's
+            // schema but possibly that data -- a key-value store or a listing keyed by its input
+            // echoes it straight into a field name. So: that it happened, and how big.
+            return sb.append(" · ").append(shape.kind()).append(" · ")
+                    .append(String.format("%,d", output.length())).append(" chars").toString();
+        }
         sb.append(" · ").append(shape.kind()).append(" · ")
           .append(String.format("%,d", output.length())).append(" chars");
         if (!success && !shape.isJson()) {

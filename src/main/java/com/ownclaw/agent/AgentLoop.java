@@ -1203,7 +1203,9 @@ public class AgentLoop {
         // nothing downstream -- the renderers, the progress summary, the episode, the events
         // rows, the repair evidence -- ever sees the other.
         // The label from what the resolver actually pulled in, so it describes what moved.
-        Artifact.Decision decision = Artifact.labelFor(tool.requiredCredentials(), refs.used());
+        // The same decision the delegation uses. Never tainted here -- the cloud has not read
+        // private bytes -- but a call that pulled in an unindexed result stays unindexed.
+        Artifact.Decision decision = context.decide(tool.requiredCredentials(), refs.used(), false);
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
 

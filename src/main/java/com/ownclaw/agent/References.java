@@ -64,10 +64,16 @@ final class References {
             if (v instanceof String s) {
                 ArtifactRef ref = ArtifactRef.parse(s);
                 if (ref == null) {
+                    String legacy = legacyReference(s, namespace);
+                    if (legacy != null) {
+                        return refuse(written, e.getKey(), "'" + s.strip() + "' is the old way of "
+                                + "writing a reference, and it would have gone out as literal text. "
+                                + "Write " + legacy + " instead.");
+                    }
                     if (ArtifactRef.looksLikeReference(s)) {
                         return refuse(written, e.getKey(), "'" + s.strip() + "' looks like a "
                                 + "reference but is not a valid one. Write exactly {{N}} or "
-                                + "{{N.field}}, with N one of the numbers below.");
+                                + "{{N.field}} as the whole value, with N a result you have.");
                     }
                     continue;
                 }
@@ -97,6 +103,21 @@ final class References {
             }
         }
         return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /**
+     * The new spelling of an old-style {@code $N.field} value, if -- and only if -- it names a
+     * field that result really has. Such a value can only have been meant as a reference; a
+     * value like "$1.jpg" that names nothing is text, a regex replacement perhaps.
+     */
+    private static String legacyReference(String value, List<Artifact> namespace) {
+        var m = ArtifactRef.LEGACY.matcher(ArtifactRef.trim(value));
+        if (!m.matches()) return null;
+        int n = Integer.parseInt(m.group(1));
+        if (n < 1 || n > namespace.size()) return null;
+        String field = m.group(2);
+        return field(namespace.get(n - 1).output(), field) == null ? null
+                : new ArtifactRef(n, field).toString();
     }
 
     /** The results that can be referenced, so a refusal is actionable rather than just a no. */
@@ -131,38 +152,42 @@ final class References {
     }
 
     /**
-     * Rewrite a delegation's own references ({@code {{1}}} = its first step) into the task's
-     * handles, for text the CLOUD will read — a failed step's arguments, the local summary, a
-     * usage row. The two numberings meet in that text, and a cloud that copied a local
-     * {{1.body_text}} into its own call would have resolved it task-wide: a different result,
-     * possibly a private one from another delegation.
+     * A delegation's arguments in the task's numbering, for the cloud and the repair log.
+     * <p>
+     * Only values that ARE references, and only ones in range — the ones the resolver actually
+     * substituted. Rewriting every {{k}} anywhere turned a WhatsApp template's {{1}} into {{5}}
+     * in the failure evidence, so the evidence described a call that never ran.
      */
-    static Object toTaskHandles(Object value, List<Artifact> mine) {
-        if (value instanceof String s) {
-            var m = ArtifactRef.TOKEN.matcher(s);
-            var sb = new StringBuilder();
-            while (m.find()) {
-                ArtifactRef ref = ArtifactRef.parse(m.group());
-                String out = m.group();
-                if (ref != null && ref.handle() <= mine.size()) {
-                    out = new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString();
-                }
-                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(out));
-            }
-            m.appendTail(sb);
-            return sb.toString();
+    static Map<String, Object> argsForTask(Map<String, Object> written, List<Artifact> mine) {
+        if (written == null) return null;
+        var out = new LinkedHashMap<String, Object>(written);
+        for (var e : out.entrySet()) {
+            if (!(e.getValue() instanceof String s)) continue;
+            ArtifactRef ref = ArtifactRef.parse(s);
+            if (ref == null || ref.handle() > mine.size()) continue;
+            e.setValue(new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString());
         }
-        if (value instanceof Map<?, ?> map) {
-            var out = new LinkedHashMap<Object, Object>();
-            map.forEach((k, v) -> out.put(k, toTaskHandles(v, mine)));
-            return out;
+        return out;
+    }
+
+    /**
+     * The local model's own prose in the task's numbering: its summary says "sent {{1}}" meaning
+     * its first step, and the cloud reads task handles everywhere else and may copy one into a
+     * call of its own. A handle it has no result for becomes {{?}}, so a miscount cannot resolve
+     * task-wide to somebody else's result.
+     */
+    static String proseForTask(String text, List<Artifact> mine) {
+        if (text == null) return null;
+        var m = ArtifactRef.TOKEN.matcher(text);
+        var sb = new StringBuilder();
+        while (m.find()) {
+            ArtifactRef ref = ArtifactRef.parse(m.group());
+            String out = ref == null || ref.handle() > mine.size() ? "{{?}}"
+                    : new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString();
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(out));
         }
-        if (value instanceof Collection<?> c) {
-            var out = new ArrayList<Object>();
-            for (Object v : c) out.add(toTaskHandles(v, mine));
-            return out;
-        }
-        return value;
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     /** One field of a JSON result, or null. A name the descriptor cut short matches by prefix. */

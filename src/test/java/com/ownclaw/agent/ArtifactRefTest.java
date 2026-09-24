@@ -47,7 +47,12 @@ class ArtifactRefTest {
             "{{3}}", "{{0}}", "{{1.no_such_field}}", "{{1.body_text (string, 16 chars)}}",
             "{{1.body}}", "{{2}}", "{{2.text}}", "{{1234567890}}",
             "\"{{1.body_text}}\"", "`{{1}}`", "'{{1.body_text}}'",
-            "{{١}}", "{{１}}");
+            "{{١}}", "{{１}}",
+            // slips: nothing but references, braces and punctuation (round 7)
+            "{{{1}}}", "{{1}}}", "{{1}}.", "{{1}}{{2}}", "{{1}} {{1}}", "{{1}}\n\n{{2}}",
+            "{{1}}.body_text", "{{1:body_text}}", "**{{1}}**", "“{{1}}”",
+            // the old form naming a field result 1 really has
+            "$1.body_text", "$1.polévka");
 
     /** Nothing here was meant as a reference: each must pass through untouched. */
     private static final List<String> NOT_ATTEMPTS = List.of(
@@ -60,9 +65,9 @@ class ArtifactRefTest {
             "Hello {{1}}, your order {{2}} ships today", "{{ 0 if is_state('x','on') else 1 }}",
             "rename 's/(.*)\\.jpeg$/$1.jpg/'",
             // a reference INSIDE text is text (the known limit that buys the above)
-            "Menu: {{1.body_text}}", "{{1}} {{1}}",
-            // the old $ form: nothing teaches it any more, and $1.jpg is a regex replacement
-            "$1.body_text", "$2.text", "$12.polévka");
+            "Menu: {{1.body_text}}", "Dobré ráno!\n\n{{1.body_text}}",
+            // the old $ form is text unless it names a real field of a real result
+            "$1.jpg", "$1.no_such_key", "$12.polévka", "$20.Thanks");
 
     @Test
     @DisplayName("PROPERTY: every reference attempt is substituted or refused — none goes out as text")
@@ -127,6 +132,21 @@ class ArtifactRefTest {
             assertTrue(r.ok(), v + ": " + r.reason());
             assertEquals("SECRET body text", r.params().get("body"), v);
         }
+    }
+
+    @Test
+    @DisplayName("succeeded() reads the whole top level, booleans and the string \"false\"")
+    void succeededReadsTheWholeEnvelope() {
+        var sb = new StringBuilder("{");
+        for (int i = 0; i < 15; i++) sb.append("\"k").append(i).append("\":1,");
+        String late = sb.append("\"ok\":false}").toString();
+        for (String out : List.of(late, "{\"ok\":\"false\"}", "{\"success\":false}", "{\"ok\":false}")) {
+            assertFalse(new Artifact("t", Map.of(), out, true).succeeded(), out);
+        }
+        for (String out : List.of("{\"ok\":true}", "plain text", "[1,2]", "{\"status\":\"fine\"}")) {
+            assertTrue(new Artifact("t", Map.of(), out, true).succeeded(), out);
+        }
+        assertFalse(new Artifact("t", Map.of(), "{\"ok\":true}", false).succeeded(), "the harness flag still counts");
     }
 
     @Test

@@ -194,10 +194,50 @@ public class AgentContext {
                                              Map<String, Object> resolved, String output,
                                              boolean success, Artifact.Decision decision) {
         Artifact a = new Artifact(artifacts.size() + 1, tool, written, resolved, output, success,
-                decision.label(), decision.why());
+                decision.label(), decision.why(), decision.indexed());
         artifacts.add(a);
-        if (a.isPrivate() && decision.indexed()) privateIndex.addPrivate(a.n(), a.output());
+        if (a.isPrivate() && a.indexed()) privateIndex.addPrivate(a.n(), a.output());
         return a;
+    }
+
+    /**
+     * The label for a result about to be recorded — one place, for both paths.
+     * <p>
+     * From the call's own facts ({@link Artifact#labelFor}); then, inside a delegation whose local
+     * model has read private data ({@code tainted}), PRIVATE regardless, because anything it
+     * typed from then on can carry what it read. Such a result is not indexed for the canary, and
+     * neither is one that is PRIVATE only because it pulled in such a result: its bytes are the
+     * same public page one hop on, and indexing them is what made the cloud's own later fetch of
+     * that page trip the canary.
+     */
+    public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
+                                    boolean tainted) {
+        Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
+        if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
+            return tainted
+                    ? new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                            List.of("after private data in this delegation"), false)
+                    : own;
+        }
+        boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
+        boolean onlyUnindexedSources = !credentials && used != null
+                && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed);
+        return onlyUnindexedSources ? new Artifact.Decision(own.label(), own.why(), false) : own;
+    }
+
+    /**
+     * Whether a delegation in this task has had its local model read private data. A later
+     * delegation starts from that: the local model can have written what it read into a file or
+     * a note, and the next delegation reading it back would otherwise see a PUBLIC result.
+     */
+    private volatile boolean localTierReadPrivate;
+
+    public boolean localTierReadPrivate() {
+        return localTierReadPrivate;
+    }
+
+    public void markLocalTierReadPrivate() {
+        localTierReadPrivate = true;
     }
 
     /**

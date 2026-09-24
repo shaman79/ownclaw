@@ -74,7 +74,7 @@ class LivePathGuardsTest {
         int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
         int run = body.indexOf("tool.execute(");
-        int label = body.indexOf("Artifact.labelFor(tool.requiredCredentials(), refs.used())");
+        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false)");
         assertTrue(resolve > 0, "executeTool no longer resolves through References");
         assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
         String refusal = body.substring(refuse, body.indexOf("\n        }\n", refuse));

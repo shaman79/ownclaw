@@ -25,27 +25,33 @@ public record ArtifactRef(int handle, String field) {
     /** Beyond this many digits a handle is not a handle, and Integer.parseInt would overflow. */
     private static final int MAX_HANDLE_DIGITS = 9;
 
+    /** Blank, including the invisible kinds {@link #trim} removes. */
+    private static final String SP = "[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFEFF]*";
+
     /**
-     * A WHOLE value that was plausibly meant as a reference: one {@code {{…}}} spanning the entire
-     * value, holding an optional dollar sign, digits of any script, and optionally a dot and a
-     * field. Everything this matches
-     * must be substituted or refused, so {@code {{1.no_such_field}}} or {@code {{١}}} is stopped
-     * instead of being sent as literal text.
-     * <p>
-     * Whole values only. An earlier version refused "{{" followed by a digit ANYWHERE, and a
-     * reviewer listed what that catches: a Python f-string quantifier, a format escape, a C array,
-     * a LaTeX fraction, a WhatsApp template, a Home Assistant expression — ordinary arguments,
-     * refused with no way to send them. A reference inside text is text.
+     * Something written as a reference, well-formed or not: braces around digits of any script,
+     * optionally a field after a dot or a colon, optionally a field hung outside the braces.
      */
-    private static final Pattern LOOKS_LIKE = Pattern.compile(
-            "^\\{\\{\\s*\\$?\\s*\\p{Nd}+\\s*(\\.[^{}]*)?\\}\\}$");
+    private static final Pattern NEAR = Pattern.compile(
+            "\\{\\{" + SP + "\\$?" + SP + "\\p{Nd}+" + SP + "([.:][^{}]*)?\\}\\}"
+                    + "(\\.[\\p{L}_][\\p{L}\\p{N}_]*)?");
+
+    /**
+     * The old form, as a whole value: {@code $1.body_text}. Stored lessons and replayed rows from
+     * before the change can still hold it. It is a reference only if it would resolve -- see
+     * {@code References.resolve} -- because "$1.jpg" is also a regex replacement.
+     */
+    static final Pattern LEGACY = Pattern.compile("^\\$(\\d{1,9})\\.([\\p{L}_][\\p{L}\\p{N}_]*)$");
+
+    /** A letter or a digit: what makes the rest of a value text. */
+    private static final Pattern WORDY = Pattern.compile("[\\p{L}\\p{N}]");
 
     /**
      * A well-formed reference inside prose, for taking one out of a place where it cannot work:
      * a delegation's goal naming results the delegation cannot see.
      */
     static final Pattern TOKEN = Pattern.compile(
-            "\\{\\{\\s*\\$?\\s*\\d{1,9}\\s*(\\.[^{}]*)?\\}\\}");
+            "\\{\\{" + SP + "\\$?" + SP + "\\d{1,9}" + SP + "(\\.[^{}]*)?\\}\\}");
 
     /**
      * The reference that IS the whole value, or null.
@@ -80,9 +86,17 @@ public record ArtifactRef(int handle, String field) {
         return handle < 1 ? null : new ArtifactRef(handle, field);
     }
 
-    /** Whether a model plausibly meant this WHOLE value as a reference; see {@link #LOOKS_LIKE}. */
+    /** Whether a model plausibly meant this whole value as a reference. */
     public static boolean looksLikeReference(String value) {
-        return value != null && LOOKS_LIKE.matcher(unquote(trim(value))).find();
+        if (value == null) return false;
+        String s = trim(value);
+        if (!NEAR.matcher(s).find()) return false;
+        // A value made of nothing but references -- plus braces, punctuation and space -- is an
+        // attempt at one: {{{1}}}, {{1}}., {{1}}{{2}}, {{1}}.body_text, **{{1}}**. Anything with
+        // a word of its own around the braces is text: an f-string, a LaTeX fraction, a C array,
+        // a WhatsApp template, "Menu: {{1.body_text}}". Refusing the second kind was round 6's
+        // finding; letting the first through as literal text was round 7's.
+        return !WORDY.matcher(NEAR.matcher(s).replaceAll("")).find();
     }
 
     /** How the n-th result is named to whoever is reading. */

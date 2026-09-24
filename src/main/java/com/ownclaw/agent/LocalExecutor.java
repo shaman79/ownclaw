@@ -8,7 +8,6 @@ import com.ownclaw.agent.tools.*;
 import com.ownclaw.llm.*;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
-import com.ownclaw.privacy.Label;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -165,9 +164,11 @@ public class LocalExecutor {
         // forwarded the first one's traceback as the body of the morning email. Every result is
         // still recorded on the task too, under the task-wide handle the cloud and the ledger see.
         List<Artifact> mine = new ArrayList<>();
-        // Whether the local model has read private data yet. From then on every result of this
-        // delegation is PRIVATE (and not indexed); see where the label is decided below.
-        boolean tainted = false;
+        // Whether the local model has read private data yet -- in this delegation, or in an
+        // earlier one of this task, which may have written what it read into a file or a note
+        // that this one reads back. From then on every result is PRIVATE and not indexed; see
+        // AgentContext.decide.
+        boolean tainted = parentContext.localTierReadPrivate();
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
@@ -337,21 +338,29 @@ public class LocalExecutor {
                 continue;
             }
 
-            // A change this task already made is not made again -- by this delegation or an
-            // earlier one. The cloud path has CriticAgent, which blocks an identical action after
-            // three tries; delegation never reaches it, so the only bound here was max_steps, and
-            // an unsure model re-sending smtp_send_email sends the owner ten copies. Only a call
-            // that SUCCEEDED counts (by Artifact.succeeded, which reads an "ok": false envelope):
-            // a send that failed is exactly what a retry is for. And the earlier output is not
-            // shown -- showing an earlier delegation's output is how a PRIVATE result reached the
-            // local model and then, reworded in its summary, the cloud.
-            Artifact alreadyDone = sideEffectAlreadyDone(
-                    toolRegistry.find(action.tool).orElse(null), params, parentContext.artifacts());
-            if (alreadyDone != null) {
+            // A change is attempted once per delegation, and made once per task. The cloud path
+            // has CriticAgent, which blocks an identical action after three tries; delegation
+            // never reaches it, so the only bound here was max_steps -- and an SMTP timeout can
+            // arrive AFTER the server accepted the message, so an unbounded retry of a "failed"
+            // send delivered a copy each time. A failed change is retried by the next attempt at
+            // the job (a new delegation, or the cloud once the fallback opens), where it is new;
+            // one that SUCCEEDED (by Artifact.succeeded, which reads an "ok": false envelope) is
+            // never repeated anywhere in the task. The earlier output is not shown: showing an
+            // earlier delegation's output is how a PRIVATE result reached the local model and
+            // then, reworded in its summary, the cloud.
+            Tool target = toolRegistry.find(action.tool).orElse(null);
+            Artifact triedHere = priorSideEffect(target, params, mine, false);
+            Artifact doneInTask = priorSideEffect(target, params, parentContext.artifacts(), true);
+            if (triedHere != null || doneInTask != null) {
                 messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("Not run: an identical " + action.tool + " call "
-                        + "already succeeded earlier in this task. It changes something, so it "
-                        + "is never done twice. Move to the next step, or finish."));
+                messages.add(LlmMessage.user(triedHere != null
+                        ? "Not run: you already made exactly this " + action.tool + " call in this "
+                                + "delegation, and it " + (triedHere.succeeded() ? "succeeded" : "FAILED")
+                                + ". A change is attempted once per delegation. Move on, or finish "
+                                + "and say what happened."
+                        : "Not run: an identical " + action.tool + " call already succeeded earlier "
+                                + "in this task. It changes something, so it is never done twice. "
+                                + "Move to the next step, or finish."));
                 continue;
             }
 
@@ -392,25 +401,26 @@ public class LocalExecutor {
             // where the bytes live from now on. `params` is what actually ran (references
             // substituted); `action.params` is what the model typed, and is the only one ever
             // printed.
-            Tool ran = toolRegistry.find(action.tool).orElse(null);
-            Artifact.Decision decision = Artifact.labelFor(
-                    ran == null ? List.of() : ran.requiredCredentials(), refs.used());
             // After the local model has read private data, nothing more of this delegation is
             // shown to the cloud: whatever it types can carry what it read, and a public tool that
             // echoes its input -- or a file written and then read back -- hands that straight
-            // into the output. So the result is PRIVATE, which every renderer already turns into
-            // a descriptor. It is NOT indexed for the canary: being private only for WHEN it was
-            // made is what made the cloud's own later fetch of the same public page trip the
-            // canary, and a run whose email had gone report "did not finish".
-            if (tainted && decision.label() == Label.PUBLIC) {
-                var why = new ArrayList<>(decision.why());
-                why.add("after private data in this delegation");
-                decision = new Artifact.Decision(Label.PRIVATE, List.copyOf(why), false);
-            }
+            // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
+            Tool ran = toolRegistry.find(action.tool).orElse(null);
+            Artifact.Decision decision = parentContext.decide(
+                    ran == null ? List.of() : ran.requiredCredentials(), refs.used(), tainted);
+            boolean wroteAfterPrivate = tainted;
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);
             mine.add(artifact);
-            tainted |= artifact.isPrivate();
+            if (artifact.isPrivate()) {
+                tainted = true;
+                parentContext.markLocalTierReadPrivate();
+            }
+            // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
+            // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
+            // error wrapped as "ok": false, so the delegation reported ok and the fallback never
+            // handed the job on -- no email, run recorded complete.
+            boolean worked = artifact.succeeded();
 
             // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
             // here, a skill used every single morning looks untouched to maintenance -- which
@@ -420,14 +430,16 @@ public class LocalExecutor {
             // reads these rows next to rows from the cloud path. The row's label is what keeps it
             // out of that prompt, and it is the artifact's label: PRIVATE for anything written
             // after the model read private data.
-            @SuppressWarnings("unchecked")
-            Map<String, Object> writtenForTask = toolOk ? null
-                    : (Map<String, Object>) References.toTaskHandles(action.params, mine);
+            // Arguments typed after the model read private data are not stored at all -- the
+            // label alone kept them out of the repair prompt, and "that label has been wrong
+            // before" is why this was a second defence to begin with.
             curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    toolOk, toolMs, writtenForTask, toolOk ? null : toolResult, artifact.label());
+                    worked, toolMs,
+                    worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
+                    worked ? null : toolResult, artifact.label());
 
             log.info("Delegation step {} — {} {} (result: {} chars, {})",
-                    step + 1, artifact.handle() + " " + action.tool, toolOk ? "OK" : "FAIL",
+                    step + 1, artifact.handle() + " " + action.tool, worked ? "OK" : "FAIL",
                     toolResult.length(), artifact.label());
 
             // OBSERVE: feed result back to local LLM
@@ -436,7 +448,7 @@ public class LocalExecutor {
                     // The handle every time -- a short result used to arrive without one, so the
                     // model had to count for itself, and counting is where {{1}} went wrong.
                     "Tool result " + ArtifactRef.handle(mine.size()) + " [" + action.tool + "] "
-                    + (toolOk ? "SUCCESS" : "FAILED") + ":\n" +
+                    + (worked ? "SUCCESS" : "FAILED") + ":\n" +
                     feedback(toolResult, mine.size()) + "\n\n" +
                     "Continue with the next step, or if all steps are done, " +
                     (nativeTools
@@ -903,10 +915,20 @@ public class LocalExecutor {
      */
     static Artifact sideEffectAlreadyDone(com.ownclaw.agent.tools.Tool tool,
                                           Map<String, Object> resolved, List<Artifact> task) {
+        return priorSideEffect(tool, resolved, task, true);
+    }
+
+    /**
+     * An earlier identical call to a side-effecting tool in {@code among}, or null. Identical
+     * means the same tool and the same RESOLVED arguments; {@code successesOnly} decides whether
+     * a failed attempt counts.
+     */
+    static Artifact priorSideEffect(com.ownclaw.agent.tools.Tool tool, Map<String, Object> resolved,
+                                    List<Artifact> among, boolean successesOnly) {
         if (tool == null || !tool.hasSideEffects()) return null;
         Map<String, Object> args = resolved == null ? Map.of() : resolved;
-        for (Artifact a : task) {
-            if (a.succeeded() && a.tool().equals(tool.name())
+        for (Artifact a : among) {
+            if ((!successesOnly || a.succeeded()) && a.tool().equals(tool.name())
                     && Objects.equals(a.resolved() == null ? Map.of() : a.resolved(), args)) {
                 return a;
             }
@@ -947,7 +969,7 @@ public class LocalExecutor {
      * with the registry withheld, the cloud has no instrument to check it with.
      */
     static Outcome completed(String localSummary, String goal, List<Artifact> results) {
-        boolean anyFailed = results.stream().anyMatch(r -> !r.success());
+        boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
         boolean anyPrivate = results.stream().anyMatch(Artifact::isPrivate);
         // The local model's own prose is withheld when it has read private content: it is a
         // paraphrase of that content, and a paraphrase is the one thing the canary cannot see.
@@ -962,7 +984,7 @@ public class LocalExecutor {
             // In the task's numbering: the summary says "sent {{1}}" meaning the delegation's
             // first step, and the cloud reads task handles everywhere else.
             summary = localSummary == null || localSummary.isBlank() ? ""
-                    : (String) References.toTaskHandles(localSummary, results);
+                    : References.proseForTask(localSummary, results);
         }
         String body = buildConsolidatedResult(goal, results);
         summary = summary.isEmpty() ? body : summary + "\n\n---\n" + body;
@@ -1011,7 +1033,7 @@ public class LocalExecutor {
             // shows neither its arguments nor its output.
             sb.append("\n[").append(r.handle()).append(' ').append(r.tool()).append("] ")
               .append(r.isPrivate() ? "(arguments withheld)"
-                      : String.valueOf(References.toTaskHandles(r.written(), results)))
+                      : String.valueOf(References.argsForTask(r.written(), results)))
               .append("\n")
               .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
         }

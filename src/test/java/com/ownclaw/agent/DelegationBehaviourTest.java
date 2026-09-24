@@ -242,6 +242,8 @@ class DelegationBehaviourTest {
         assertEquals(List.of(Label.PRIVATE), usage.failedLabels,
                 "the repair prompt reads only PUBLIC rows, and this row's arguments and error both "
                         + "carry what the model read");
+        assertNull(usage.failedArgs.get(0),
+                "and the arguments are not stored at all -- the label is the only other defence");
     }
 
     @Test
@@ -305,6 +307,98 @@ class DelegationBehaviourTest {
                 .execute(plan("email the menu"), ctx);
 
         assertEquals(2, smtp.calls.size(), "the retry goes out, as it does on main");
+    }
+
+    @Test
+    @DisplayName("an ok:false send is a FAILED step: the model is told so and the delegation fails")
+    void anOkFalseSendFailsTheDelegation() {
+        // Round 7: the ledger said FAILED but the verdict said ok, so the fallback that hands the
+        // job on never opened -- the morning email depended on the cloud happening to notice.
+        var smtp = new FakeTool("smtp_send_email", true, List.of("SMTP_PASS"),
+                p -> ToolResult.success("{\"ok\": false, \"error\": \"SMTP connection error\"}"));
+        var usage = new Usage();
+        var llm = new Scripted(call("smtp_send_email", Map.of("to", "petr@example.com", "body", "x")),
+                done("sent"));
+
+        var outcome = executor(llm, usage, smtp).execute(plan("email it"), task());
+
+        assertFalse(outcome.ok(), "a failed delegation is what opens the fallback");
+        assertTrue(llm.allSeen().contains("[smtp_send_email] FAILED"), "the model is told the truth");
+        assertEquals(1, usage.failedLabels.size(), "and the repair log records a failure");
+    }
+
+    @Test
+    @DisplayName("a change is attempted once per delegation, even when it failed")
+    void aFailedChangeIsNotRetriedInTheSameDelegation() {
+        // An SMTP timeout can arrive after the server has accepted the message. Retrying a
+        // "failed" send in a loop delivered a copy each time; main allowed one per delegation.
+        var smtp = new FakeTool("smtp_send_email", true, List.of("SMTP_PASS"),
+                p -> ToolResult.success("{\"ok\": false, \"error\": \"timed out\"}"));
+        var args = Map.<String, Object>of("to", "petr@example.com", "body", "menu");
+        var llm = new Scripted(call("smtp_send_email", args), call("smtp_send_email", args),
+                call("smtp_send_email", args), done("gave up"));
+
+        executor(llm, new Usage(), smtp).execute(plan("email it"), task());
+
+        assertEquals(1, smtp.calls.size());
+        assertTrue(llm.allSeen().contains("attempted once per delegation"));
+    }
+
+    @Test
+    @DisplayName("what the local tier read in one delegation hides what the next one reads back")
+    void privateDataCarriesAcrossDelegations() {
+        // Round 7's probe: delegation A read the mail and wrote the PIN into a file; delegation B
+        // read the file, which was PUBLIC, and its summary gave the PIN to the cloud.
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success("{\"body_text\":\"card PIN 4711\"}"));
+        var write = new FakeTool("write_file", true, List.of(), p -> ToolResult.success("written"));
+        var read = new FakeTool("read_file", false, List.of(), p -> ToolResult.success("card PIN 4711"));
+        var ctx = task();
+        executor(new Scripted(call("imap_fetch", Map.of()),
+                        call("write_file", Map.of("path", "/tmp/n", "content", "card PIN 4711")), done("ok")),
+                new Usage(), imap, write).execute(plan("note the PIN"), ctx);
+
+        var outcome = executor(new Scripted(call("read_file", Map.of("path", "/tmp/n")),
+                done("The note says card PIN 4711")), new Usage(), read).execute(plan("read the note"), ctx);
+
+        assertEquals(Label.PRIVATE, ctx.artifacts().get(2).label());
+        assertFalse(outcome.text().contains("4711"), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a result derived from a hidden one stays unindexed, and its descriptor names no fields")
+    void hiddenStaysHiddenOneHopOn() {
+        String page = "{\"title\":\"Restaurant U Fleků — today's menu, soup and goulash\"}";
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success("{\"body_text\":\"lunch at U Fleků?\"}"));
+        var fetch = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(page));
+        var ctx = task();
+        executor(new Scripted(call("imap_fetch", Map.of()), call("web_fetch", Map.of("url", "u")),
+                done("ok")), new Usage(), imap, fetch).execute(plan("mail then menu"), ctx);
+        // The cloud forwards the hidden page into a public tool of its own.
+        var fetched = ctx.artifacts().get(1);
+        var d = ctx.decide(List.of(), List.of(fetched), false);
+
+        assertFalse(fetched.indexed());
+        assertFalse(d.indexed(), "one hop on it is still the same public page");
+        assertNull(ctx.privateIndex().firstHitIn(page));
+        assertFalse(fetched.describe().contains("title"),
+                "a key name can be what the model typed: " + fetched.describe());
+    }
+
+    @Test
+    @DisplayName("a refused reference is answered with what the local model can reference")
+    void theLocalModelIsToldWhatExists() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("{\"reply\":\"pong\"}"));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Scripted(call("ping", Map.of()),
+                call("smtp_send_email", Map.of("body", "{{5.reply}}")), done("ok"));
+
+        executor(llm, new Usage(), ping, smtp).execute(plan("ping and send"), task());
+
+        assertTrue(llm.allSeen().contains("Results you can reference: {{1}} = ping (ok; fields: reply)"),
+                llm.allSeen());
+        assertTrue(smtp.calls.isEmpty());
     }
 
     @Test
