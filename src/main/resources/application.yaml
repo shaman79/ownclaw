@@ -200,6 +200,10 @@ ownclaw:
     #             and when the jail was ready earlier in this process and cannot start now.
     #   required  refuse to start a skill when the jail is not working (fail closed)
     #   off       no jail (development, Windows)
+    # On a dev host running as your own user, HOME is yours, and the jail does not hide HOME (by
+    # design): a skill there reads your dotfiles and reaches your ssh agent under ~/.ssh/agent.
+    # In production HOME is the service directory, which is hidden, and the unit sets
+    # ProtectHome.
     # When jailed, a single launch the jail cannot isolate (a tampered skill directory, a
     # hard link out, a bind reaching protected state, an unreadable directory) is refused.
     # Without bwrap these still apply: pip and venv get the environment allow-list, the runner

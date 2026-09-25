@@ -1,6 +1,7 @@
 package com.ownclaw.conversation;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -111,7 +112,7 @@ public class FileStorageService {
      * is read into a model's context and served for download, and would hand over whatever the
      * link leads to. Nor is a file with a second name, a hard link: {@link #store} writes each
      * upload new, so another name was made later, and to .env or the database it is that file.
-     * The count is read where the file system keeps one the JVM can read (not on Windows).
+     * The count is read where the file system keeps one the JVM can read ({@link SkillJail#nlink}).
      * {@link #delete} takes the name as it is, so it still removes a link there.
      */
     public Path getFilePath(String fileId) {
@@ -120,9 +121,8 @@ public class FileStorageService {
         if (names.isEmpty()) return null;
         Path path = storedPath(names.getFirst());
         if (path == null || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return null;
-        if (!path.getFileSystem().supportedFileAttributeViews().contains("unix")) return path;
         try {
-            return (Integer) Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) == 1 ? path : null;
+            return SkillJail.nlink(path) == 1 ? path : null;
         } catch (IOException e) {
             return null;
         }

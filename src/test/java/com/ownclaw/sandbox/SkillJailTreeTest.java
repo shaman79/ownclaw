@@ -117,6 +117,19 @@ class SkillJailTreeTest {
             Files.writeString(dir.resolve("skill.py"), "x");
             assertFalse(fs.supportedFileAttributeViews().contains("unix"));
             assertNull(SkillJail.linkedOutside(dir));
+            assertEquals(1, SkillJail.nlink(dir.resolve("skill.py")));
+        }
+    }
+
+    @Test
+    @DisplayName("on a file system without secure directory streams (Windows) deleteTree removes a tree by its paths")
+    void deleteTreeWithoutSecureStreams() throws Exception {
+        try (var fs = java.nio.file.FileSystems.newFileSystem(tmp.resolve("fs.zip"), java.util.Map.of("create", "true"))) {
+            Path root = Files.createDirectories(fs.getPath("/skill/a/b"));
+            Files.writeString(root.resolve("f.txt"), "x");
+            Files.writeString(fs.getPath("/skill/top.txt"), "x");
+            assertTrue(SkillJail.deleteTree(fs.getPath("/skill")));
+            assertFalse(Files.exists(fs.getPath("/skill")));
         }
     }
 

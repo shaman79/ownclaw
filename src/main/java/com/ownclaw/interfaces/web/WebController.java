@@ -33,7 +33,8 @@ public class WebController {
     /**
      * Returns whether the agent is currently processing a task.
      * Used by the deploy script to avoid restarting during active work.
-     * Unauthenticated (same as /api/health) — only exposed on localhost.
+     * Unauthenticated (same as /api/health), and answered on every interface the service
+     * listens on: it says only busy or idle.
      */
     @GetMapping("/api/health/busy")
     public ResponseEntity<String> busy() {

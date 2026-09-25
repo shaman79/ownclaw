@@ -72,10 +72,18 @@ import java.util.function.LongSupplier;
  *       host listens on an abstract socket is reachable;</li>
  *   <li>a fresh PID namespace, kept because it hides {@code /proc/<jvm>/environ}: a skill sees
  *       only its own processes, so ps, pgrep and psutil list the jail's few, with no error;</li>
- *   <li>/dev is the host's, and all of /run but the resolver is gone: {@code /dev/log},
- *       which on a systemd host links into /run, no longer reaches the system log (logger
- *       exits 0 while nothing is logged); nothing reaches the mDNS daemon (a {@code .local}
- *       name it would answer does not resolve), and there is no {@code /run/lock} or utmp;</li>
+ *   <li>/dev is the host's but for a private /dev/shm and its own /dev/mqueue, and all of /run
+ *       but the resolver is gone: {@code /dev/log}, which on a systemd host links into /run, no
+ *       longer reaches the system log (logger exits 0 while nothing is logged); nothing reaches
+ *       the mDNS daemon (a {@code .local} name it would answer does not resolve), and there is
+ *       no {@code /run/lock} or utmp;</li>
+ *   <li>/dev/pts is the host's too: a skill can open a terminal its user owns -- none in
+ *       production, where the service user has no terminal, but on a dev host running as the
+ *       owner, the owner's own. {@code --new-session} keeps it from typing into one
+ *       (TIOCSTI);</li>
+ *   <li>the user namespace maps only the service user's own uid and gid, so its supplementary
+ *       groups show as 65534 (nogroup) inside: a skill that looks at its group list concludes
+ *       it lacks a group, while access is still decided by the real groups;</li>
  *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
  *   <li>with /run gone, so are the system bus and systemd's own socket: systemctl, timedatectl,
  *       hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail;</li>
@@ -157,13 +165,21 @@ public class SkillJail {
      * An authored file that is a hard link -- made while nothing was jailed, to .env, say -- is a
      * regular file to every other check, and reading it would hand .env to the model, writing it
      * would overwrite .env. Nothing inside a jail can make one (see {@link #linkedOutside}).
-     * Skipped where the file system keeps no link count the JVM can read (Windows).
+     * Never refused where the file system keeps no link count the JVM can read ({@link #nlink}).
      */
     private static void refuseHardLink(Path file) throws IOException {
-        if (!file.getFileSystem().supportedFileAttributeViews().contains("unix")) return;
-        if ((Integer) Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS) > 1) {
+        if (nlink(file) > 1) {
             throw new IOException(file.getFileName() + " has another name (a hard link): tampered skill");
         }
+    }
+
+    /**
+     * How many names {@code file} has, read without following a link: 1 where the file system
+     * keeps no count the JVM can read (Windows), as if every file had only its own.
+     */
+    public static int nlink(Path file) throws IOException {
+        if (!file.getFileSystem().supportedFileAttributeViews().contains("unix")) return 1;
+        return (Integer) Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS);
     }
 
     /**
@@ -1010,7 +1026,8 @@ public class SkillJail {
      * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
      * are the skill's own business. Returns why, or null -- always null where the file system
      * keeps no link count the JVM can read (Windows, where a container run still checks its
-     * binds), as {@link #refuseHardLink} skips there too.
+     * binds): every file there has one name ({@link #nlink}), so there is nothing to find, and
+     * nothing is walked.
      * <p>
      * It changes nothing, and reads each name's attributes without following a link. A second
      * run of the same skill, writing the tree while this walks, can still swap a directory for
@@ -1035,15 +1052,17 @@ public class SkillJail {
         while (!pending.isEmpty()) {
             Path p = pending.pop();
             try {
-                Map<String, Object> a = Files.readAttributes(p,
-                        "unix:isDirectory,isRegularFile,nlink,fileKey", LinkOption.NOFOLLOW_LINKS);
-                if (Boolean.TRUE.equals(a.get("isDirectory"))) {
+                var a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (a.isDirectory()) {
                     pending.addAll(listed(p));
-                } else if (Boolean.TRUE.equals(a.get("isRegularFile")) && (Integer) a.get("nlink") > 1) {
-                    Object key = a.get("fileKey") != null ? a.get("fileKey") : p;
-                    namesInside.merge(key, 1, Integer::sum);
-                    links.put(key, (Integer) a.get("nlink"));
-                    named.putIfAbsent(key, p);
+                } else if (a.isRegularFile()) {
+                    int names = nlink(p);
+                    if (names > 1) {
+                        Object key = a.fileKey() != null ? a.fileKey() : p;
+                        namesInside.merge(key, 1, Integer::sum);
+                        links.put(key, names);
+                        named.putIfAbsent(key, p);
+                    }
                 }
             } catch (NoSuchFileException gone) {
                 if (p.equals(root)) throw gone;

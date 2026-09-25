@@ -196,8 +196,7 @@ public class CapabilityResolver {
             new CapabilityPattern(
                     "system_monitoring",
                     List.of("system.*info", "cpu.*usage", "memory.*usage", "disk.*usage",
-                            "system.*monitor", "\\bhtop\\b", "\\btop\\b.*process",
-                            "running.*process", "system.*health"),
+                            "system.*monitor", "\\bhtop\\b", "system.*health"),
                     "system_info",
                     "Gather system information: CPU, memory, disk usage, network interfaces, "
                             + "uptime. Uses standard Linux tools.",
@@ -205,7 +204,7 @@ public class CapabilityResolver {
                     List.of("psutil"),
                     "{ \"category\": { \"type\": \"string\", \"description\": \"Category: cpu, memory, disk, network, all\", \"required\": false } }",
                     30,
-                    List.of("system", "info", "cpu", "memory", "disk", "process", "monitor")
+                    List.of("system", "info", "cpu", "memory", "disk", "monitor")
             ),
 
             // ── SSL/TLS certificate check ──
