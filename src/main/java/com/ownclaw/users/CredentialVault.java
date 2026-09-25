@@ -58,9 +58,11 @@ public class CredentialVault {
     /**
      * Whether a credential may have this name: upper-case letters, digits and underscores,
      * starting with a letter. A skill finds its credentials in its own environment under their
-     * names, so each is the name of an environment variable. The one rule for such a name,
-     * checked where one is stored ({@code /cred set}) and declared (skill_create,
-     * SKILL.yaml).
+     * names, so each is the name of an environment variable -- set by the runner in its own
+     * environment once it has started, never in that of a process the service starts around it
+     * (bubblewrap, the container runtime's CLI). So the rule guards nothing outside the skill:
+     * it is hygiene -- a conventional variable name -- and an early, clear refusal, with the
+     * reason, where a name is stored ({@code /cred set}) or declared (skill_create, SKILL.yaml).
      */
     public static boolean validName(String name) {
         return name != null && NAME.matcher(name).matches();
