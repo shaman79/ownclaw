@@ -37,7 +37,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>{@code --network=host} so the skill can access the local network</li>
  *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) by name, {@code -e KEY},
  *       each value in the runtime CLI's own environment and never on its command line; a run
- *       whose variable is one the CLI itself reads ({@link #readByRuntime}) is refused</li>
+ *       with a variable {@link SkillJail#settableName} refuses -- among them every name the CLI
+ *       itself reads -- is not started</li>
  *   <li>JSON input on stdin, JSON output on stdout</li>
  * </ul>
  * Every bind passes the jail's checks first ({@link SkillJail#checkBinds}), and the run is
@@ -517,6 +518,8 @@ public class ContainerSandbox {
      * @param extraVolumes     the files the task was handed, host path to the path inside the
      *                         container, each read-only; null for none
      * @return sandbox result
+     * @throws IllegalArgumentException when a name in {@code envVars} is not
+     *                                  {@link SkillJail#settableName}; nothing is started
      */
     public SandboxResult execute(String imageTag, String python, Path scriptPath,
                                  Path skillDir, String stdinJson,
@@ -583,12 +586,9 @@ public class ContainerSandbox {
         //
         // By name only: the process list shows a command line to every user on the host, so the
         // values -- the skill's credentials among them -- go in the CLI's own environment
-        // (cli), and the runtime passes each named one on.
+        // (cli, which refuses a name the runtime reads itself), and the runtime passes each named
+        // one on.
         for (String key : forwarded(envVars).keySet()) {
-            if (readByRuntime(key)) {
-                throw new IOException("not run: the skill's variable " + key + " is one the container "
-                        + "runtime reads as its own setting; give the credential another name");
-            }
             cmd.add("-e");
             cmd.add(key);
         }
@@ -603,40 +603,36 @@ public class ContainerSandbox {
     }
 
     /**
-     * What the runtime CLI reads from its environment to find its daemon and its configuration.
-     * Every start of it is given these as the JVM has them, so the version check, the image
-     * lookup, the build, the image check and the run all talk to the same daemon.
+     * What the runtime CLI reads from its environment to find its daemon and its configuration,
+     * over a socket or TLS. Every start of it is given these as the service has them, so the
+     * version check, the image lookup, the build, the image check and the run all talk to the
+     * same daemon. A skill cannot set one: {@link SkillJail#settableName} reserves them all.
      */
     static final List<String> RUNTIME_ENV = List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
-            "CONTAINER_HOST", "CONTAINERS_CONF", "XDG_RUNTIME_DIR");
+            "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "CONTAINER_HOST", "CONTAINERS_CONF", "XDG_RUNTIME_DIR");
 
-    /**
-     * Whether the runtime CLI reads {@code name}, in any case, as a setting of its own -- where
-     * its daemon is, its configuration, its registry credentials, its proxy, its home. A skill's
-     * variable of that name would be in the CLI's environment for the run, and redirect it.
-     */
-    static boolean readByRuntime(String name) {
-        String n = name.toUpperCase(Locale.ROOT);
-        return n.startsWith("DOCKER_") || n.startsWith("CONTAINER_") || n.startsWith("CONTAINERS_")
-                || n.startsWith("XDG_")
-                || List.of("REGISTRY_AUTH_FILE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "HOME").contains(n);
+    /** {@link #cli(List, Map, Map)} with the service's own environment. */
+    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars) {
+        return cli(cmd, envVars, System.getenv());
     }
 
     /**
-     * Every start of the runtime CLI. Its environment is the jail's allow-list, the runtime's own
-     * {@link #RUNTIME_ENV} as the JVM has them, and, for a run, the values of the variables
-     * {@link #buildRunCommand} names, which the runtime passes on; nothing else of the JVM's.
+     * Every start of the runtime CLI. Its environment is the jail's allow-list, the values of the
+     * variables {@link #buildRunCommand} names for a run, which the runtime passes on -- each
+     * name held to {@link SkillJail#settableName} -- and the runtime's own {@link #RUNTIME_ENV}
+     * as {@code source} has them; nothing else.
      *
      * @param envVars a run's variables; {@code Map.of()} for every other call
+     * @param source  where the runtime's own settings come from: the service's environment
+     * @throws IllegalArgumentException when a name in {@code envVars} is not settable
      */
-    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars) {
-        var env = new LinkedHashMap<String, String>(forwarded(envVars));
-        for (String name : RUNTIME_ENV) {
-            String value = System.getenv(name);
-            if (value != null) env.put(name, value);
-        }
+    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars, Map<String, String> source) {
         ProcessBuilder pb = new ProcessBuilder(cmd);
-        SkillJail.applyEnvironment(pb, env);
+        SkillJail.applyEnvironment(pb, forwarded(envVars));
+        for (String name : RUNTIME_ENV) {
+            String value = source.get(name);
+            if (value != null) pb.environment().put(name, value);
+        }
         return pb;
     }
 

@@ -329,10 +329,19 @@ public class DynamicSkillRegistry {
     /**
      * Parse the credentials field from SKILL.yaml.
      * Supports both a YAML list and a comma-separated string.
+     *
+     * @throws IOException naming the first credential that is not {@link SkillJail#settableName}:
+     *                     a skill that declares one does not load
      */
-    @SuppressWarnings("unchecked")
-    private List<String> parseCredentials(Map<String, Object> yaml) {
-        Object credObj = yaml.get("credentials");
+    private List<String> parseCredentials(Map<String, Object> yaml) throws IOException {
+        List<String> names = credentialList(yaml.get("credentials"));
+        for (String name : names) {
+            if (!SkillJail.settableName(name)) throw new IOException("SKILL.yaml: " + SkillJail.nameRefusal(name));
+        }
+        return names;
+    }
+
+    private List<String> credentialList(Object credObj) {
         if (credObj == null) return List.of();
         if (credObj instanceof List<?> list) {
             // Flatten nested lists and strip brackets from stringified list elements

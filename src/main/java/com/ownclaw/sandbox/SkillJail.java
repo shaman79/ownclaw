@@ -1316,10 +1316,15 @@ public class SkillJail {
 
     /**
      * Replaces the inherited environment with the allow-listed subset plus the variables the
-     * caller explicitly asked for (the skill's declared credentials). Applied to whatever is
-     * started -- bubblewrap passes its own environment to the skill, so this is the skill's.
+     * caller explicitly asked for: the skill's environment (PATH or PYTHONPATH), the encoding,
+     * and the skill's declared credentials. Applied to whatever is started -- bubblewrap passes
+     * its own environment to the skill, so this is the skill's.
+     *
+     * @throws IllegalArgumentException when a name in {@code envVars} is not
+     *                                  {@link #settableName}; nothing is set
      */
     public static void applyEnvironment(ProcessBuilder pb, Map<String, String> envVars) {
+        if (envVars != null) envVars.keySet().forEach(SkillJail::requireSettable);
         Map<String, String> env = pb.environment();
         Map<String, String> keep = new LinkedHashMap<>();
         for (String name : ENV_ALLOWLIST) {
@@ -1336,6 +1341,49 @@ public class SkillJail {
         if (envVars != null) {
             env.putAll(envVars);
         }
+    }
+
+    private static final java.util.regex.Pattern SETTABLE = java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]*");
+
+    /** Reserved by prefix: the dynamic loader's, the C library's allocator's, the container runtimes'. */
+    static final List<String> RESERVED_PREFIXES = List.of("LD_", "MALLOC_",
+            "DOCKER_", "CONTAINER_", "CONTAINERS_", "XDG_", "STORAGE_", "BUILDAH_", "PODMAN_");
+
+    /**
+     * Reserved whole: the rest of what the C library removes from a setuid program's
+     * environment, and what the container runtime's CLI reads for its registry, its proxy and
+     * its home.
+     */
+    static final List<String> RESERVED_NAMES = List.of("GCONV_PATH", "GETCONF_DIR", "GLIBC_TUNABLES",
+            "HOSTALIASES", "LOCALDOMAIN", "LOCPATH", "NIS_PATH", "NLSPATH", "RESOLV_HOST_CONF",
+            "RES_OPTIONS", "TMPDIR", "TZDIR",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "REGISTRY_AUTH_FILE", "HOME");
+
+    /**
+     * Whether a skill may be given a variable of this name beside the allow-list: the one rule
+     * for such a name, checked where one is stored ({@code /cred set}), declared (skill_create,
+     * SKILL.yaml) and handed to a process ({@link #applyEnvironment}). Upper-case letters,
+     * digits and underscores, starting with a letter -- and none that the dynamic loader, the C
+     * library or the container runtime reads as its own setting: a skill's variables are in the
+     * environment of bubblewrap itself and of the runtime's CLI, which run outside any jail.
+     */
+    public static boolean settableName(String name) {
+        if (name == null || !SETTABLE.matcher(name).matches()) return false;
+        return RESERVED_PREFIXES.stream().noneMatch(name::startsWith) && !RESERVED_NAMES.contains(name);
+    }
+
+    /** Why {@code name} is refused: the one wording, wherever {@link #settableName} says no. */
+    public static String nameRefusal(String name) {
+        return "'" + name + "' cannot name a skill's credential: a name is upper-case letters, digits "
+                + "and underscores, starting with a letter, and names starting "
+                + String.join(", ", RESERVED_PREFIXES) + " and the names " + String.join(", ", RESERVED_NAMES)
+                + " are reserved for the dynamic loader, the C library and the container runtime. "
+                + "Give it another name.";
+    }
+
+    /** Throws {@link #nameRefusal} when {@code name} is not {@link #settableName}. */
+    public static void requireSettable(String name) {
+        if (!settableName(name)) throw new IllegalArgumentException(nameRefusal(name));
     }
 
     // ────────────────────────────── helpers ──────────────────────────────

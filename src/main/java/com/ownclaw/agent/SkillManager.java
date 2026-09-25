@@ -140,6 +140,13 @@ public class SkillManager {
             return "ERROR: parameters field is required.";
         }
 
+        List<String> credentials;
+        try {
+            credentials = credentialNames(str(params, "credentials"));
+        } catch (IllegalArgumentException refused) {
+            return "ERROR: " + refused.getMessage();
+        }
+
         String syntaxError = checkPythonSyntax(code);
         if (syntaxError != null) return "ERROR: Python syntax error:\n" + syntaxError;
 
@@ -147,7 +154,6 @@ public class SkillManager {
         boolean requiresNetwork = Boolean.TRUE.equals(params.get("requires_network"));
         boolean hasSideEffects = Boolean.TRUE.equals(params.get("has_side_effects"));
         int timeout = toInt(params.get("timeout"), 30);
-        String credentials = str(params, "credentials");
         String systemPackagesStr = str(params, "system_packages");
         String containerImage = str(params, "container_image");
 
@@ -305,6 +311,11 @@ public class SkillManager {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
         if (credentials == null || credentials.isBlank()) return "ERROR: Credentials list is required.";
 
+        try {
+            credentialNames(credentials);
+        } catch (IllegalArgumentException refused) {
+            return "ERROR: " + refused.getMessage();
+        }
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
 
@@ -495,9 +506,26 @@ public class SkillManager {
         }
     }
 
+    /**
+     * The credential names in a comma-separated list, upper-cased -- the model may send the list
+     * stringified, as "[IMAP_HOST, IMAP_PORT]".
+     *
+     * @throws IllegalArgumentException at the first that is not {@link SkillJail#settableName}
+     */
+    static List<String> credentialNames(String credentials) {
+        if (credentials == null || credentials.isBlank()) return List.of();
+        List<String> names = Arrays.stream(credentials.replaceAll("[\\[\\]]", "").split(","))
+                .map(String::trim)
+                .map(String::toUpperCase)
+                .filter(s -> !s.isBlank())
+                .toList();
+        names.forEach(SkillJail::requireSettable);
+        return names;
+    }
+
     private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
-                                  String credentials, String systemPackages, String containerImage)
+                                  List<String> credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
@@ -509,18 +537,7 @@ public class SkillManager {
         yaml.put("requires_network", requiresNetwork);
         yaml.put("has_side_effects", hasSideEffects);
         yaml.put("timeout", timeout);
-        if (credentials != null && !credentials.isBlank()) {
-            // Strip brackets (LLM may send list-stringified form like "[IMAP_HOST, IMAP_PORT]")
-            String cleanedCreds = credentials.replaceAll("[\\[\\]]", "");
-            List<String> credList = Arrays.stream(cleanedCreds.split(","))
-                    .map(String::trim)
-                    .map(String::toUpperCase)
-                    .filter(s -> !s.isBlank())
-                    .toList();
-            if (!credList.isEmpty()) {
-                yaml.put("credentials", credList);
-            }
-        }
+        if (!credentials.isEmpty()) yaml.put("credentials", credentials);
         if (systemPackages != null && !systemPackages.isBlank()) {
             // Support comma-separated or space-separated
             String delimiter = systemPackages.contains(",") ? "," : "\\s+";

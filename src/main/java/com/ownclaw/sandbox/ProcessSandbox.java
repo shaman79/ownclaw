@@ -94,6 +94,12 @@ public class ProcessSandbox implements SandboxManager {
         return jail.unavailable();
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException when a name in {@code envVars} is not
+     *                                  {@link SkillJail#settableName}; nothing is started
+     */
     @Override
     public SandboxResult execute(String python, Path scriptPath, Path workingDir,
                                  String stdinJson, Map<String, String> envVars, int timeoutSec,

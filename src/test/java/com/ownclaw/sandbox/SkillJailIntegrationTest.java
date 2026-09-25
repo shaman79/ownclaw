@@ -324,6 +324,48 @@ class SkillJailIntegrationTest {
         }
     }
 
+    @Test
+    @DisplayName("a credential named for the dynamic loader starts nothing; the environment's PATH, PYTHONPATH and VIRTUAL_ENV still arrive")
+    void aLoaderNameStartsNothing() throws Exception {
+        var jail = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        var sandbox = new ProcessSandbox(jail);
+        Path lib = Files.writeString(m.skillDir().resolve("lib.so"), "");
+        Path script = Files.writeString(m.skillDir().resolve("_runner_env.py"), """
+                import json, os
+                open('ran', 'w').close()
+                print(json.dumps({k: os.environ.get(k) for k in ('PATH', 'PYTHONPATH', 'VIRTUAL_ENV', 'SMTP_PASSWORD')}))
+                """);
+
+        // Control: a bubblewrap that is not setuid -- this one -- has the loader act on the name in
+        // its own process, outside any jail.
+        if (((Integer) Files.getAttribute(BWRAP, "unix:mode") & 04000) == 0) {
+            var raw = new ProcessBuilder(BWRAP.toString(), "--version").redirectErrorStream(true);
+            raw.environment().put("LD_PRELOAD", lib.toString());
+            Process p = raw.start();
+            String said = new String(p.getInputStream().readAllBytes());
+            assertTrue(p.waitFor(10, TimeUnit.SECONDS));
+            assertTrue(said.contains(lib.toString()), "the loader did not read the name: " + said);
+        }
+
+        var e = assertThrows(IllegalArgumentException.class, () -> sandbox.execute("python3", script, m.skillDir(),
+                null, Map.of("LD_PRELOAD", lib.toString(), "SMTP_PASSWORD", "cred-canary"), 30, null, List.of()));
+        assertEquals(SkillJail.nameRefusal("LD_PRELOAD"), e.getMessage());
+        assertFalse(Files.exists(m.skillDir().resolve("ran")), "the skill ran");
+
+        // What the service itself puts there for a venv or a --target install is not held back.
+        String path = m.skillDir().resolve("venv/bin") + ":" + System.getenv("PATH");
+        var result = sandbox.execute("python3", script, m.skillDir(), null, Map.of("PATH", path,
+                "PYTHONPATH", m.skillDir().resolve("target").toString(), "VIRTUAL_ENV", m.skillDir().resolve("venv").toString(),
+                "SMTP_PASSWORD", "cred-canary"), 30, null, List.of());
+        assertTrue(result.isSuccess(), result.stderr());
+        JsonNode env = mapper.readTree(result.stdout());
+        assertEquals(path, env.get("PATH").asText());
+        assertEquals(m.skillDir().resolve("target").toString(), env.get("PYTHONPATH").asText());
+        assertEquals(m.skillDir().resolve("venv").toString(), env.get("VIRTUAL_ENV").asText());
+        assertEquals("cred-canary", env.get("SMTP_PASSWORD").asText());
+    }
+
     // Prints, for each path it is given, whether it could read a byte of it -- never the byte.
     private static final String READABLE = """
             import json, sys

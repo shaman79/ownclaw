@@ -151,32 +151,59 @@ class ContainerRunCommandTest {
     void everyStartTalksToTheSameDaemon() {
         // The run and the calls before it -- version, image inspect, build -- alike: an image
         // built on one daemon and run against another is not there.
-        Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), Map.of()).environment();
-        for (String name : ContainerSandbox.RUNTIME_ENV) assertEquals(System.getenv(name), cli.get(name), name);
-        for (String name : cli.keySet()) {
-            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name),
-                    "the runtime CLI was handed " + name);
+        var service = Map.of("DOCKER_HOST", "unix:///x.sock", "DOCKER_TLS_VERIFY", "1",
+                "XDG_RUNTIME_DIR", "/run/user/1000", "OWNCLAW_OPS_TOKEN", "canary-env-secret");
+        for (Map<String, String> run : List.of(Map.<String, String>of(), Map.of("SKILL_CRED", "c"))) {
+            Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), run, service).environment();
+            assertEquals("unix:///x.sock", cli.get("DOCKER_HOST"));
+            assertEquals("1", cli.get("DOCKER_TLS_VERIFY"));
+            assertEquals("/run/user/1000", cli.get("XDG_RUNTIME_DIR"));
+            for (String name : cli.keySet()) {
+                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name)
+                        || run.containsKey(name), "the runtime CLI was handed " + name);
+            }
         }
     }
 
     @Test
-    @DisplayName("a run whose credential the runtime CLI would read as its own setting is refused, not started")
-    void aCredentialTheRuntimeReadsIsRefused() throws Exception {
-        for (String name : List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
-                "CONTAINERS_CONF", "REGISTRY_AUTH_FILE", "XDG_RUNTIME_DIR", "HTTP_PROXY", "https_proxy",
-                "No_Proxy", "HOME")) {
-            var e = assertThrows(IOException.class, () -> container.buildRunCommand("test-image", "python3",
-                    skillDir.resolve("_runner_x.py"), skillDir, Map.of(name, "unix:///elsewhere.sock"), null), name);
-            assertTrue(e.getMessage().contains(name), e.getMessage());
-        }
-        var result = container.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
-                Map.of("DOCKER_HOST", "unix:///elsewhere.sock"), 5, null, null);
-        assertFalse(result.isSuccess());
-        assertTrue(result.stderr().contains("DOCKER_HOST"), result.stderr());
+    @DisplayName("a skill cannot name a variable the runtime CLI reads itself: the name rule reserves each")
+    void theRuntimeSettingsAreReserved() {
+        for (String name : ContainerSandbox.RUNTIME_ENV) assertFalse(SkillJail.settableName(name), name);
+    }
 
-        List<String> cmd = container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"),
-                skillDir, Map.of("DOCKERHUB_TOKEN", "t", "SMTP_HOST", "h"), null);
-        assertTrue(cmd.contains("DOCKERHUB_TOKEN") && cmd.contains("SMTP_HOST"), cmd.toString());
+    @Test
+    @DisplayName("a run whose variable the name rule refuses is not started, and says why")
+    void aRefusedNameStartsNothing() throws Exception {
+        for (String name : List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
+                "CONTAINERS_CONF", "REGISTRY_AUTH_FILE", "XDG_RUNTIME_DIR", "HTTP_PROXY", "HTTPS_PROXY",
+                "NO_PROXY", "HOME", "STORAGE_OPTS", "_CONTAINERS_USERNS_CONFIGURED", "PODMAN_USERNS",
+                "BUILDAH_ISOLATION", "LD_PRELOAD", "GCONV_PATH")) {
+            var e = assertThrows(IllegalArgumentException.class,
+                    () -> ContainerSandbox.cli(List.of("docker", "run"), Map.of(name, "x")), name);
+            assertEquals(SkillJail.nameRefusal(name), e.getMessage());
+        }
+        // Through execute, with a stand-in runtime that notes every start it gets.
+        Path calls = Files.createDirectories(tmp.resolve("calls"));
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\necho \"$1\" >> '" + calls.resolve("log") + "'\nexit 0\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+        assertEquals(runtime.toString(), fake.runtime());
+
+        var e = assertThrows(IllegalArgumentException.class, () -> fake.execute("test-image", "python3",
+                skillDir.resolve("_runner_x.py"), skillDir, null, Map.of("LD_PRELOAD", "/x.so"), 5, null, null));
+        assertEquals(SkillJail.nameRefusal("LD_PRELOAD"), e.getMessage());
+        assertFalse(Files.readAllLines(calls.resolve("log")).contains("run"), "the run was started");
+
+        var ok = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
+                Map.of("DOCKERHUB_TOKEN", "t", "SMTP_HOST", "h"), 5, null, null);
+        assertTrue(ok.isSuccess(), ok.stderr());
+        assertTrue(Files.readAllLines(calls.resolve("log")).contains("run"), "an ordinary credential was refused");
     }
 
     @Test

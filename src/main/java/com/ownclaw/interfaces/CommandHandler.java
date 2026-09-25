@@ -481,7 +481,11 @@ public class CommandHandler {
             if (space < 1) return "Usage: /cred set <KEY> <VALUE>";
             String key = rest.substring(0, space).toUpperCase();
             String value = rest.substring(space + 1).strip();
-            credentialVault.storeCredential(userId, key, value);
+            try {
+                credentialVault.storeCredential(userId, key, value);
+            } catch (IllegalArgumentException refused) {
+                return "Not stored: " + refused.getMessage();
+            }
             return "\u2705 Credential '" + key + "' stored (encrypted).";
         }
 

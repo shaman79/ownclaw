@@ -1,5 +1,6 @@
 package com.ownclaw.users;
 
+import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -85,9 +86,12 @@ public class CredentialVault {
      * @param userId the user ID
      * @param key    credential key (e.g. SMTP_HOST, OPENAI_API_KEY)
      * @param value  plaintext credential value
+     * @throws IllegalArgumentException when the key, upper-cased, is not a name a skill may be
+     *                                  given ({@link SkillJail#settableName}); nothing is stored
      */
     public void storeCredential(String userId, String key, String value) {
         key = key.strip().toUpperCase();
+        SkillJail.requireSettable(key);
         value = value.strip();
         try {
             String salt = getOrCreateUserSalt(userId);
