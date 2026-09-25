@@ -51,8 +51,10 @@ public class SkillManager {
     private static final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 
     /**
-     * Loads the skill exactly as the runner does -- the same loader, from source -- and confirms
-     * {@code run} is callable.
+     * Loads the skill with the runner's own loader ({@link DynamicSkill#SKILL_LOADER}) -- from
+     * source, {@code report_progress} in place -- and confirms {@code run} is callable. The
+     * skill's credentials are absent here: a run is given them, the check is not, so a skill that
+     * needs one while it loads, rather than in {@code run}, fails the check.
      */
     private static final String LOAD_CHECK = DynamicSkill.SKILL_LOADER +
             "try:\n" +

@@ -162,7 +162,8 @@ public class DynamicSkill implements Tool {
 
     /**
      * The opening of every script that loads a skill: the runner below, and SkillManager's load
-     * check, so what the check proves is what runs.
+     * check, so the check loads skill.py as a run does -- the same code, {@code report_progress}
+     * in place. A run has what the check has not: its input and its credentials.
      * <p>
      * The module is made as importlib makes it -- {@code __spec__}, {@code __loader__} and the
      * rest are there, as they were when the runner imported it -- but skill.py is compiled from
@@ -173,6 +174,12 @@ public class DynamicSkill implements Tool {
      * the previous version written back within the same second, at the same size, would go on
      * running the code just rejected.
      * <p>
+     * The module is in {@code sys.modules} as {@code skill} before it runs, as an import would
+     * put it there. A function it defines is pickled by that name, so a skill can hand one to a
+     * multiprocessing worker under any start method: one started by spawn or forkserver imports
+     * skill.py by the name, from the skill's directory, which is on its sys.path as on the
+     * runner's.
+     * <p>
      * This does not pin what runs against the skill itself. Its directory is writable and first
      * on sys.path, so a module it leaves there -- a json.py, say -- is imported before skill.py
      * is, as it always was; the jail bounds what such a module can do.
@@ -181,13 +188,34 @@ public class DynamicSkill implements Tool {
         "import sys, os, io, json, builtins, traceback, inspect, importlib.util",
         "_skill_dir = os.path.dirname(os.path.abspath(__file__))",
         "",
-        "def _load_skill(inject=None):",
+        "# --- Progress reporting API for long-running skills ---",
+        "# Skills call report_progress('Scanning host 12/255', percent=5)",
+        "# The message is emitted as a JSON line on the real stdout and",
+        "# intercepted by the sandbox — it never reaches the final output.",
+        "_real_stdout = sys.__stdout__",
+        "",
+        "def report_progress(message, percent=None):",
+        "    \"\"\"Report progress for a long-running task.",
+        "    ",
+        "    Args:",
+        "        message: Human-readable progress message (e.g. 'Scanning host 12/255').",
+        "        percent: Optional completion percentage (0-100).",
+        "    \"\"\"",
+        "    progress = {'type': 'progress', 'message': str(message)}",
+        "    if percent is not None:",
+        "        progress['percent'] = int(percent)",
+        "    _real_stdout.write(json.dumps(progress) + '\\n')",
+        "    _real_stdout.flush()",
+        "",
+        "builtins.report_progress = report_progress",
+        "",
+        "def _load_skill():",
         "    path = os.path.join(_skill_dir, 'skill.py')",
         "    with open(path, 'rb') as f:",
         "        source = f.read()",
         "    mod = importlib.util.module_from_spec(importlib.util.spec_from_file_location('skill', path))",
-        "    if inject:",
-        "        mod.__dict__.update(inject)",
+        "    mod.report_progress = report_progress",
+        "    sys.modules['skill'] = mod",
         "    exec(compile(source, path, 'exec', dont_inherit=True), mod.__dict__)",
         "    return mod",
         ""
@@ -219,30 +247,11 @@ public class DynamicSkill implements Tool {
      * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
      * from the process-level stdin/stdout contract.
      *
-     * <p>Skills can call {@code report_progress(message, percent=None)} to emit
-     * structured progress updates for long-running tasks.  These are intercepted
+     * <p>Skills can call {@code report_progress(message, percent=None)} ({@link #SKILL_LOADER}) to
+     * emit structured progress updates for long-running tasks.  These are intercepted
      * by the sandbox and forwarded to the user's chat in real time.
      */
     private static final String RUNNER_HARNESS = SKILL_LOADER + String.join("\n",
-        "",
-        "# --- Progress reporting API for long-running skills ---",
-        "# Skills call report_progress('Scanning host 12/255', percent=5)",
-        "# The message is emitted as a JSON line on the real stdout and",
-        "# intercepted by the sandbox — it never reaches the final output.",
-        "_real_stdout = sys.__stdout__",
-        "",
-        "def report_progress(message, percent=None):",
-        "    \"\"\"Report progress for a long-running task.",
-        "    ",
-        "    Args:",
-        "        message: Human-readable progress message (e.g. 'Scanning host 12/255').",
-        "        percent: Optional completion percentage (0-100).",
-        "    \"\"\"",
-        "    progress = {'type': 'progress', 'message': str(message)}",
-        "    if percent is not None:",
-        "        progress['percent'] = int(percent)",
-        "    _real_stdout.write(json.dumps(progress) + '\\n')",
-        "    _real_stdout.flush()",
         "",
         "def _dispatch_run(run_fn, params):",
         "    \"\"\"Smart parameter dispatch: supports both def run(params) and def run(key=val) styles.\"\"\"",
@@ -285,13 +294,11 @@ public class DynamicSkill implements Tool {
         "# forkserver -- the default from Python 3.14 -- imports this script again, as __mp_main__.",
         "if __name__ == '__main__':",
         "    try:",
-        "        params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
+        "        params = json.loads(sys.stdin.read())",
         "        os.environ.update(params.pop('" + CREDENTIALS + "'))",
-        "        builtins.report_progress = report_progress",
         "        _capture = io.StringIO()",
         "        sys.stdout = _capture",
-        "        # Inject report_progress into the skill module so it can be called directly",
-        "        mod = _load_skill({'report_progress': report_progress})",
+        "        mod = _load_skill()",
         "        if not hasattr(mod, 'run'):",
         "            sys.stdout = _real_stdout",
         "            print(json.dumps({'success': False, 'output': 'skill.py does not define a run(params) function'}))",

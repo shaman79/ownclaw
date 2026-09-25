@@ -31,8 +31,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * skill's writable directory -- and the load check judges the same source the run executes. The
  * plant is first shown to work on plain Python -- otherwise "it did not change what ran" would
  * prove nothing -- and then run through the real harness. Apart from that the skill loads as it
- * always did: a module importlib made, its own directory first on sys.path. The result is read
- * from the line the runner prints last.
+ * always did: a module importlib made, its own directory first on sys.path. What the harness
+ * gives it besides is here too: report_progress while it loads, check and run alike, its own
+ * functions for worker processes, and a result read from the line the runner prints last.
  */
 class RunnerHarnessRegressionTest {
 
@@ -209,17 +210,34 @@ class RunnerHarnessRegressionTest {
     }
 
     @Test
-    @DisplayName("a skill may start worker processes: a worker that imports the runner again does not run a skill of its own")
-    void aSpawnedWorkerDoesNotRunTheRunner() throws Exception {
+    @DisplayName("a skill may hand its own function to worker processes, and no worker runs the runner again")
+    void aSkillsOwnFunctionGoesToWorkers() throws Exception {
         // spawn, as forkserver -- the default from Python 3.14 -- also does: each worker imports
-        // the main script again, as __mp_main__, before it takes work.
+        // the main script again, as __mp_main__, before it takes work, and then skill.py by name
+        // to find the function it is handed.
         Files.writeString(skillDir.resolve("skill.py"), """
                 import multiprocessing
+                def square(x):
+                    return x * x
                 def run(params):
-                    with multiprocessing.get_context('spawn').Pool(2) as pool:
-                        return {'output': 'pool=' + str(pool.map(abs, [-1, -2]))}
+                    out = []
+                    for method in ('spawn', 'forkserver'):
+                        with multiprocessing.get_context(method).Pool(2) as pool:
+                            out.append(method + '=' + str(pool.map(square, [2, 3])))
+                    return {'output': ' '.join(out)}
                 """);
-        assertEquals("pool=[1, 2]", runSkill());
+        assertEquals("spawn=[4, 9] forkserver=[4, 9]", runSkill());
+        assertEquals(1, lastStdout.strip().lines().count(),
+                "something besides the result was printed -- a worker ran the runner: " + lastStdout);
+    }
+
+    @Test
+    @DisplayName("a skill that reports progress while it loads passes the load check, as it runs")
+    void progressWhileLoadingPassesTheCheck() throws Exception {
+        String code = "report_progress('warming up')\ndef run(params):\n    return {'output': 'loaded'}\n";
+        String created = skillManager().createSkill(skill("harness_probe", code));
+        assertFalse(created.startsWith("ERROR"), created);
+        assertEquals("loaded", runSkill());
     }
 
     @Test
