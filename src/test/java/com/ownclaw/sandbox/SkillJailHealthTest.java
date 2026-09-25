@@ -166,7 +166,7 @@ class SkillJailHealthTest {
         assertEquals(true, h.get("canRunSkills"));
         assertTrue(String.valueOf(h.get("reason")).contains("not installed"), String.valueOf(h.get("reason")));
         // What the jail will hide once it is on, readable before bubblewrap is installed.
-        assertEquals(SkillJailRootsTest.withJournal(List.of(m.root().toRealPath())).stream().map(Path::toString).toList(),
+        assertEquals(SkillJailRootsTest.withHostStores(List.of(m.root().toRealPath())).stream().map(Path::toString).toList(),
                 h.get("hiddenRoots"));
         assertEquals(absent().toString(), map(h, "bwrap").get("path"));
         assertEquals(false, map(h, "bwrap").get("present"));
@@ -372,7 +372,7 @@ class SkillJailHealthTest {
         assertEquals("OFF", h.get("state"));
         assertEquals(true, h.get("canRunSkills"));
         assertEquals(false, h.get("isolated"));
-        assertEquals(SkillJailRootsTest.withJournal(List.of(m.root().toRealPath())).stream().map(Path::toString).toList(),
+        assertEquals(SkillJailRootsTest.withHostStores(List.of(m.root().toRealPath())).stream().map(Path::toString).toList(),
                 h.get("hiddenRoots"));
         assertTrue(String.valueOf(h.get("installHint")).startsWith("none: isolation is switched off"));
         assertEquals("Skill isolation: OFF (ownclaw.sandbox.isolation=off)", jail.statusLine());

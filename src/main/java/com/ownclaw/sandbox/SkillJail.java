@@ -60,7 +60,9 @@ import java.util.function.LongSupplier;
  * output, and another over all of {@code /run} ({@link #RUN}; docker's socket), with only the
  * resolver's directory put back ({@link #resolver}). Under /run too are the system bus and each user's
  * runtime directory, where the service user's systemd user manager and session bus would start
- * a process outside the jail when asked. A fresh PID namespace removes
+ * a process outside the jail when asked. The crash dumps are hidden as well ({@link #CRASH_DUMPS}):
+ * one of a process of the service user's is readable by it, and holds that process's memory. A skill's
+ * /tmp is its own, and so is /var/tmp -- the same directory. A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
  * the property that matters -- a skill cannot read the database and post it anywhere -- comes
  * from hiding the database, and skills that talk to the LAN, mail servers or Ollama keep
@@ -265,6 +267,7 @@ public class SkillJail {
             // or repo/ linked elsewhere, are roots of their own: what was in them, as the host has
             // it now, is what must be gone.
             for (Path store : JOURNALS) out.addAll(entries(store));
+            for (Path dumps : CRASH_DUMPS) out.addAll(entries(dumps));
             out.addAll(entries(backups()));
             out.addAll(entries(repo()));
             return out;
@@ -272,14 +275,15 @@ public class SkillJail {
 
         /**
          * What neither the owner's expose list nor a caller's bind may contain, by written and
-         * by real path: the service's state, journald's stores, and what the self-check proves
-         * gone from /run.
+         * by real path: the service's state, journald's stores, the crash dumps, and what the
+         * self-check proves gone from /run.
          */
         List<Path> guarded() {
             var paths = new ArrayList<>(List.of(dataDir(), uploads(), database, dotEnv(), skillsRoot(),
                     generated, envsRoot(), backups(), repo()));
             if (logDir != null) paths.add(logDir);
             paths.addAll(JOURNALS);
+            paths.addAll(CRASH_DUMPS);
             paths.addAll(RUN_PROBES);
             var out = new ArrayList<Path>();
             for (Path p : paths) {
@@ -763,7 +767,7 @@ public class SkillJail {
      *   <li>the host's /dev (serial devices keep working; permissions still apply), its own
      *       /dev/mqueue, a private /dev/shm, a /proc for the new PID namespace;</li>
      *   <li>an empty /run, and the resolver's directory put back into it, read-only;</li>
-     *   <li>the run's own /tmp;</li>
+     *   <li>the run's own /tmp, and the same directory at /var/tmp;</li>
      *   <li>a tmpfs over every hidden root;</li>
      *   <li>then, on top of those, the working directory read-write, and the read-only binds;</li>
      *   <li>then each hidden root's tmpfs, and /run's, made read-only -- after the binds, so the
@@ -789,6 +793,9 @@ public class SkillJail {
         a.addAll(List.of("--tmpfs", RUN.toString()));
         if (resolver != null) a.addAll(List.of("--ro-bind-try", resolver.toString(), resolver.toString()));
         a.addAll(List.of("--bind", tmp.toString(), "/tmp"));
+        // Production gives the service a private, writable /var/tmp (PrivateTmp=true), and a
+        // skill may write there as it may write /tmp.
+        a.addAll(List.of("--bind", tmp.toString(), "/var/tmp"));
         for (Path root : hiddenRoots) a.addAll(List.of("--tmpfs", root.toString()));
         a.addAll(List.of("--bind", workDir.toString(), workDir.toString()));
         for (Path p : readOnly) a.addAll(List.of("--ro-bind", p.toString(), p.toString()));
@@ -846,6 +853,13 @@ public class SkillJail {
     /** Both of journald's stores; the volatile one goes with /run. */
     static final List<Path> JOURNALS = List.of(JOURNAL, RUN.resolve("log/journal"));
 
+    /**
+     * Where crash reports and core dumps land: apport's and systemd-coredump's. A report of a
+     * crashed process of the service user's is readable by that user, and holds the process's
+     * memory. Hidden, where present, as journald's store is.
+     */
+    static final List<Path> CRASH_DUMPS = List.of(Path.of("/var/crash"), Path.of("/var/lib/systemd/coredump"));
+
     /** What is directly in {@code dir}: nothing when it is absent or cannot be listed. */
     private static List<Path> entries(Path dir) {
         try (var s = Files.list(dir)) {
@@ -857,7 +871,7 @@ public class SkillJail {
 
     static List<Path> hiddenRoots(Layout l) {
         return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), l.backups(),
-                l.repo(), JOURNAL);
+                l.repo(), JOURNAL, CRASH_DUMPS.get(0), CRASH_DUMPS.get(1));
     }
 
     /**
@@ -903,15 +917,15 @@ public class SkillJail {
      * The owner's read-only exceptions (for example a HOME dotfile a skill needs), minus any
      * that would reach what the jail hides: an entry equal to, inside, or containing a
      * {@link Layout#guarded} path is dropped -- by its written path and by its real path -- as
-     * is anything under the host's /proc, and /tmp or the JVM's temp directory as a whole, which
-     * would lay the JVM's temp files over the run's own /tmp. Entries absent today are kept and
-     * bound with {@code -try}.
+     * is anything under the host's /proc, and /tmp, /var/tmp or the JVM's temp directory as a
+     * whole, which would lay the host's temp files over the run's own. Entries absent today are
+     * kept and bound with {@code -try}.
      */
     static List<Bind> filterExpose(List<String> entries, Layout layout) {
         var guarded = new ArrayList<>(layout.guarded());
         guarded.add(Path.of("/proc"));
         Path jvmTmp = abs(Path.of(System.getProperty("java.io.tmpdir")));
-        List<Path> tmps = List.of(Path.of("/tmp"), jvmTmp, real(jvmTmp));
+        List<Path> tmps = List.of(Path.of("/tmp"), Path.of("/var/tmp"), jvmTmp, real(jvmTmp));
 
         var out = new ArrayList<Bind>();
         for (String entry : entries == null ? List.<String>of() : entries) {

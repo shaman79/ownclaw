@@ -28,6 +28,17 @@ public final class JailTestKit {
                 System::currentTimeMillis);
     }
 
+    /**
+     * A new directory the jail shows read-only, for a test that must see what the jail hides.
+     * Not under /tmp or /var/tmp: the jail replaces both with the run's own, so everything kept
+     * there is out of sight whether or not the tmpfs over the hidden roots did its job. Under
+     * the build directory of the project the tests run from; the caller deletes it.
+     */
+    static Path visibleDir(String prefix) throws IOException {
+        Path parent = Files.createDirectories(Path.of("build", "jail-it").toAbsolutePath());
+        return Files.createTempDirectory(parent, prefix);
+    }
+
     /** A small copy of /opt/ownclaw: the secrets are canaries a test can look for. */
     record Mirror(Path root, Path db, Path env, Path uploads, Path handed, Path otherUpload,
                   Path generated, Path skillDir, Path otherSkill, Path logs) {

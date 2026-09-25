@@ -35,10 +35,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * -- otherwise "cannot see" would prove nothing -- and then jailed. Skipped where bubblewrap is
  * absent or cannot create namespaces (CI, a host with user namespaces blocked).
  * <p>
- * The copy is kept under /var/tmp, not in a JUnit temp directory: those are under /tmp, which the
- * jail replaces as a whole with the run's own, so everything kept there is out of sight whether or
- * not the tmpfs over the hidden roots did its job. /var/tmp the jail shows read-only, as it shows
- * /opt, and only the tmpfs can hide what is in it.
+ * The copy is kept where the jail shows the host read-only ({@link JailTestKit#visibleDir}), as it
+ * shows /opt, so only the tmpfs can hide what is in it -- not in a JUnit temp directory: those are
+ * under /tmp, which the jail replaces as a whole with the run's own, as it replaces /var/tmp.
  */
 class SkillJailIntegrationTest {
 
@@ -102,6 +101,8 @@ class SkillJailIntegrationTest {
             r['journal_readable'] = [q for q in p['journal_files'] if readable(q)]
             r['jvm_tmp_canary'] = os.path.exists(p['jvm_canary'])
             r['tmp_writable'] = appendable(p['scratch'])
+            r['var_tmp_writable'] = appendable(p['var_scratch'])
+            r['crash'] = [q for q in p['crash'] if os.path.exists(q) or os.path.islink(q)]
             s = socket.socket()
             s.settimeout(3)
             try:
@@ -132,9 +133,7 @@ class SkillJailIntegrationTest {
                 "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--", "/bin/true"),
                 "bubblewrap cannot create namespaces on this host");
         assumeTrue(exitsZero("python3", "--version"), "python3 is not available");
-        Path outside = Path.of("/var/tmp");
-        assumeTrue(Files.isDirectory(outside) && Files.isWritable(outside), "/var/tmp is not writable");
-        base = Files.createTempDirectory(outside, "ownclaw-it-");
+        base = JailTestKit.visibleDir("ownclaw-it-");
         m = JailTestKit.Mirror.create(base);
     }
 
@@ -155,6 +154,19 @@ class SkillJailIntegrationTest {
     }
 
     private Path scratch;
+    private Path varScratch;
+
+    /** What is directly in the crash dump directories on this host. */
+    private static List<Path> crashDumps() throws IOException {
+        var out = new ArrayList<Path>();
+        for (Path dumps : SkillJail.CRASH_DUMPS) {
+            if (!Files.isDirectory(dumps) || !Files.isReadable(dumps)) continue;
+            try (Stream<Path> s = Files.list(dumps)) {
+                out.addAll(s.toList());
+            }
+        }
+        return out;
+    }
 
     private JsonNode run(SkillJail jail, Path jvmCanary, int port, boolean spawn,
                          List<String> timing) throws Exception {
@@ -174,6 +186,8 @@ class SkillJailIntegrationTest {
         in.put("port", port);
         in.put("spawn", spawn);
         in.put("scratch", scratch.toString());
+        in.put("var_scratch", varScratch.toString());
+        in.put("crash", crashDumps().stream().map(Path::toString).toList());
         in.put("dns_name", "pypi.org");
         in.put("host_run", HOST_RUN);
         in.put("journal", journal().stream().map(Path::toString).toList());
@@ -233,6 +247,7 @@ class SkillJailIntegrationTest {
     void jailedSkillSeesOnlyWhatItWasGiven() throws Exception {
         Path jvmCanary = Files.createTempFile("ownclaw-jvm-canary-", ".txt");
         scratch = Path.of("/tmp/ownclaw-it-scratch-" + ProcessHandle.current().pid() + ".txt");
+        varScratch = Path.of("/var/tmp/ownclaw-it-scratch-" + ProcessHandle.current().pid() + ".txt");
         try (ServerSocket server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress())) {
             int port = server.getLocalPort();
             var timing = new ArrayList<String>();
@@ -255,6 +270,10 @@ class SkillJailIntegrationTest {
                     "control run should read what the service user can of the journal");
             assertTrue(Files.exists(scratch), "the control run writes the host's /tmp");
             Files.delete(scratch);
+            assertTrue(Files.exists(varScratch), "the control run writes the host's /var/tmp");
+            Files.delete(varScratch);
+            assertEquals(crashDumps().stream().map(Path::toString).toList(),
+                    mapper.convertValue(open.get("crash"), List.class), "control run should see the crash dumps");
             if (open.get("mqueue_made").asBoolean()) {
                 assertTrue(Files.exists(QUEUE), "the control run's message queue is not on the host");
                 Files.delete(QUEUE);
@@ -264,7 +283,7 @@ class SkillJailIntegrationTest {
             var status = jail.status();
             assertEquals(SkillJail.State.READY, status.state(), status.reason());
             assertFalse(status.selfCheck().containsValue(false), status.selfCheck().toString());
-            assertEquals(SkillJailRootsTest.withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
+            assertEquals(SkillJailRootsTest.withHostStores(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
 
             JsonNode jailed = run(jail, jvmCanary, port, true, timing);
 
@@ -300,6 +319,9 @@ class SkillJailIntegrationTest {
             if (open.get("dns").asBoolean()) assertTrue(jailed.get("dns").asBoolean(), "names no longer resolve");
             assertTrue(jailed.get("tmp_writable").asBoolean());
             assertFalse(Files.exists(scratch), "a jailed write to /tmp reached the host's /tmp");
+            assertTrue(jailed.get("var_tmp_writable").asBoolean(), "/var/tmp is not writable inside the jail");
+            assertFalse(Files.exists(varScratch), "a jailed write to /var/tmp reached the host's /var/tmp");
+            assertEquals(List.of(), mapper.convertValue(jailed.get("crash"), List.class), "the crash dumps are visible");
             // Its message queues are its own: made inside, gone with the jail.
             assertTrue(jailed.get("mqueue_made").asBoolean(), "no message queue could be made in the jail");
             assertFalse(Files.exists(QUEUE), "a message queue made in the jail is on the host");
@@ -337,6 +359,7 @@ class SkillJailIntegrationTest {
         } finally {
             Files.deleteIfExists(jvmCanary);
             Files.deleteIfExists(scratch);
+            Files.deleteIfExists(varScratch);
             Files.deleteIfExists(QUEUE);
         }
     }
@@ -473,7 +496,7 @@ class SkillJailIntegrationTest {
 
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath(), realData.toRealPath())),
+        assertEquals(SkillJailRootsTest.withHostStores(List.of(root.toRealPath(), realData.toRealPath())),
                 SkillJail.hiddenRoots(layout));
         JsonNode jailed = readableFrom(jail, skillDir, db);
         for (Path p : db) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
@@ -503,7 +526,7 @@ class SkillJailIntegrationTest {
 
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath(), realBackups.toRealPath(),
+        assertEquals(SkillJailRootsTest.withHostStores(List.of(root.toRealPath(), realBackups.toRealPath(),
                 realRepo.toRealPath())), SkillJail.hiddenRoots(layout));
         JsonNode jailed = readableFrom(jail, skillDir, secrets);
         for (Path p : secrets) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
@@ -541,7 +564,7 @@ class SkillJailIntegrationTest {
         var layout = new SkillJail.Layout(root, data.resolve("ownclaw.db"), root.resolve("skills/generated"), null);
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath())), SkillJail.hiddenRoots(layout),
+        assertEquals(SkillJailRootsTest.withHostStores(List.of(root.toRealPath())), SkillJail.hiddenRoots(layout),
                 "the data directory is not there yet");
 
         Path db = Files.writeString(Files.createDirectories(data).resolve("ownclaw.db"), "canary-db-secret");
@@ -554,12 +577,10 @@ class SkillJailIntegrationTest {
     @Test
     @DisplayName("a venv built through PythonEnvironmentService lands on the host; nothing else it tries to write does")
     void provisioningWritesOnlyItsOwnEnvironment() throws Exception {
-        // A stand-in python, so no index is needed. It has to be visible inside the jail, and
-        // /tmp there is the run's own, so it lives under /var/tmp. It notes, in its working
-        // directory, what it could reach -- facts only, never contents.
-        Path outside = Path.of("/var/tmp");
-        assumeTrue(Files.isDirectory(outside) && Files.isWritable(outside), "/var/tmp is not writable");
-        Path dir = Files.createTempDirectory(outside, "ownclaw-it-python-");
+        // A stand-in python, so no index is needed. It has to be visible inside the jail, where
+        // /tmp and /var/tmp are the run's own. It notes, in its working directory, what it could
+        // reach -- facts only, never contents.
+        Path dir = JailTestKit.visibleDir("ownclaw-it-python-");
         try {
             Path data = m.db().getParent();
             String script = "#!/bin/sh\n"

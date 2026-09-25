@@ -245,7 +245,8 @@ class PythonEnvPipWiringTest {
             var ops = JailTestKit.ops(argv);
             List<String> cmd = JailTestKit.command(argv);
             List<List<String>> rw = ops.stream().filter(o -> o.flag().equals("--bind")
-                    && !o.args().get(1).equals("/tmp")).map(JailTestKit.Op::args).toList();
+                    && !o.args().get(1).equals("/tmp") && !o.args().get(1).equals("/var/tmp"))
+                    .map(JailTestKit.Op::args).toList();
             List<List<String>> ro = ops.stream().filter(o -> o.flag().equals("--ro-bind")
                     && !o.args().get(0).equals("/")).map(JailTestKit.Op::args).toList();
             String chdir = ops.stream().filter(o -> o.flag().equals("--chdir")).findFirst().orElseThrow().args().get(0);

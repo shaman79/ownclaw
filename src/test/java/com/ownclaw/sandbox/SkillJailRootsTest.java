@@ -21,10 +21,14 @@ class SkillJailRootsTest {
 
     @TempDir Path tmp;
 
-    /** {@code roots} and, on a host that has one, journald's store, in the order the jail sorts them. */
-    static List<Path> withJournal(List<Path> roots) {
+    /**
+     * {@code roots} and, where this host has them, journald's store and the crash dumps, in the
+     * order the jail sorts them.
+     */
+    static List<Path> withHostStores(List<Path> roots) {
         var out = new java.util.ArrayList<>(roots);
         if (Files.isDirectory(SkillJail.JOURNAL)) out.add(SkillJail.JOURNAL);
+        for (Path dumps : SkillJail.CRASH_DUMPS) if (Files.isDirectory(dumps)) out.add(dumps);
         return out.stream().sorted().toList();
     }
 
@@ -32,7 +36,7 @@ class SkillJailRootsTest {
     @DisplayName("only the outermost directory is hidden when it contains the rest")
     void outermostOnly() throws Exception {
         var m = JailTestKit.Mirror.create(tmp);
-        assertEquals(withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
+        assertEquals(withHostStores(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
     }
 
     @Test
@@ -49,7 +53,7 @@ class SkillJailRootsTest {
         var roots = SkillJail.hiddenRoots(layout);
         assertTrue(roots.contains(root.toRealPath()), roots.toString());
         assertTrue(roots.contains(elsewhere.toRealPath()), "the real data directory must be hidden: " + roots);
-        assertEquals(withJournal(List.of(root.toRealPath(), elsewhere.toRealPath())), roots);
+        assertEquals(withHostStores(List.of(root.toRealPath(), elsewhere.toRealPath())), roots);
     }
 
     @Test
@@ -61,12 +65,13 @@ class SkillJailRootsTest {
         var l = m.layout();
         // The command line a standard layout gets is the one it got before they were candidates.
         List<String> before = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l.cwd(), l.dataDir(),
-                l.skillsRoot(), l.envsRoot(), l.logDir(), SkillJail.JOURNAL), null, m.skillDir(), List.of(),
+                l.skillsRoot(), l.envsRoot(), l.logDir(), SkillJail.JOURNAL, SkillJail.CRASH_DUMPS.get(0),
+                SkillJail.CRASH_DUMPS.get(1)), null, m.skillDir(), List.of(),
                 List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
         List<String> now = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l), null, m.skillDir(),
                 List.of(), List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
         assertEquals(before, now);
-        assertEquals(withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(l));
+        assertEquals(withHostStores(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(l));
 
         Path root = Files.createDirectories(tmp.resolve("app"));
         Path backups = Files.createDirectories(tmp.resolve("disk2/ownclaw-backups"));
@@ -74,7 +79,7 @@ class SkillJailRootsTest {
         Files.createSymbolicLink(root.resolve("backups"), backups);
         Files.createSymbolicLink(root.resolve("repo"), repo);
         var linked = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
-        assertEquals(withJournal(List.of(root.toRealPath(), backups.toRealPath(), repo.toRealPath())),
+        assertEquals(withHostStores(List.of(root.toRealPath(), backups.toRealPath(), repo.toRealPath())),
                 SkillJail.hiddenRoots(linked));
     }
 
@@ -130,8 +135,18 @@ class SkillJailRootsTest {
         assumeTrue(Files.isDirectory(SkillJail.JOURNAL), "no persistent journal on this host");
         var m = JailTestKit.Mirror.create(tmp);
         var roots = SkillJail.hiddenRoots(m.layout());
-        assertEquals(List.of(SkillJail.JOURNAL, m.root().toRealPath()).stream().sorted().toList(), roots);
+        assertTrue(roots.contains(SkillJail.JOURNAL), roots.toString());
+        assertEquals(withHostStores(List.of(m.root().toRealPath())), roots);
         assertFalse(roots.stream().anyMatch(r -> r.startsWith("/run")), roots.toString());
+    }
+
+    @Test
+    @DisplayName("the crash dumps are hidden wherever they exist")
+    void theCrashDumpsAreHidden() throws Exception {
+        var present = SkillJail.CRASH_DUMPS.stream().filter(Files::isDirectory).toList();
+        assumeTrue(!present.isEmpty(), "no crash dump directory on this host");
+        var roots = SkillJail.hiddenRoots(JailTestKit.Mirror.create(tmp).layout());
+        assertTrue(roots.containsAll(present), roots.toString());
     }
 
     /** The command of the self-check's probe, from a jail over {@code m} that came up READY. */
@@ -172,6 +187,22 @@ class SkillJailRootsTest {
     }
 
     @Test
+    @DisplayName("the self-check proves what is in the crash dump directories gone")
+    void theSelfCheckProbesTheCrashDumps() throws Exception {
+        var inside = new java.util.ArrayList<Path>();
+        for (Path dumps : SkillJail.CRASH_DUMPS) {
+            if (Files.isDirectory(dumps) && Files.isReadable(dumps)) {
+                try (var s = Files.list(dumps)) {
+                    inside.addAll(s.toList());
+                }
+            }
+        }
+        assumeTrue(!inside.isEmpty(), "no crash dumps on this host");
+        List<String> probe = probed(JailTestKit.Mirror.create(tmp));
+        for (Path p : inside) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
+    }
+
+    @Test
     @DisplayName("the self-check proves what is in backups/ and repo/ gone, not the directories a tmpfs leaves")
     void theSelfCheckProbesBackupsAndRepo() throws Exception {
         var m = JailTestKit.Mirror.create(tmp);
@@ -193,7 +224,8 @@ class SkillJailRootsTest {
                 "/opt/ownclaw/data/x", "/opt/ownclaw/data/uploads/a.pdf", "/opt/ownclaw/.env",
                 "/opt/ownclaw/skills/generated/other", "/opt/ownclaw/skills/_envs/x", "/opt/ownclaw/logs",
                 "/opt/ownclaw/backups/b.tar", "/opt/ownclaw/repo/.git", "/opt/ownclaw", "/opt", "/",
-                "/proc/1", "/tmp", "relative/.ssh", "  ",
+                "/proc/1", "/tmp", "/var/tmp", "/var", "relative/.ssh", "  ",
+                "/var/crash", "/var/crash/_usr_bin_x.1000.crash", "/var/lib/systemd/coredump",
                 "/var/log", "/var/log/journal", "/run", "/run/dbus", "/run/user/1000", "/run/log",
                 "/opt/ownclaw/.ssh", "/opt/ownclaw/.config/rclone/", "/run/ownclaw-test-cups"), layout);
         assertEquals(List.of(

@@ -80,7 +80,7 @@ class SkillJailArgsTest {
     }
 
     @Test
-    @DisplayName("the namespaces, /dev, /proc and the run's own /tmp are all there")
+    @DisplayName("the namespaces, /dev, /proc and the run's own /tmp, also at /var/tmp, are all there")
     void requiredFlags() {
         var argv = argv();
         var ops = JailTestKit.ops(argv);
@@ -92,6 +92,7 @@ class SkillJailArgsTest {
         first(ops, "--tmpfs", "/dev/shm");
         first(ops, "--proc", "/proc");
         first(ops, "--bind", TMP.toString(), "/tmp");
+        first(ops, "--bind", TMP.toString(), "/var/tmp");
         first(ops, "--chdir", SKILL.toString());
         assertEquals("/usr/bin/bwrap", argv.get(0));
     }
