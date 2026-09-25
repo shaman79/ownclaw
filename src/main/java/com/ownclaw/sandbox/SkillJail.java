@@ -944,15 +944,17 @@ public class SkillJail {
      * The owner's read-only exceptions (for example a HOME dotfile a skill needs), minus any
      * that would reach what the jail hides: an entry equal to, inside, or containing a
      * {@link Layout#guarded} path is dropped -- by its written path and by its real path -- as
-     * is anything under the host's /proc, and /tmp, /var/tmp or the JVM's temp directory as a
-     * whole, which would lay the host's temp files over the run's own. Entries absent today are
-     * kept and bound with {@code -try}.
+     * is anything under the host's /proc, and any path in {@link #REPLACED} or the JVM's temp
+     * directory as a whole (or anything holding one), which would lay the host's over the run's
+     * own. An entry inside one of them -- one socket under /run -- is the owner's to choose.
+     * Entries absent today are kept and bound with {@code -try}.
      */
     static List<Bind> filterExpose(List<String> entries, Layout layout) {
         var guarded = new ArrayList<>(layout.guarded());
         guarded.add(Path.of("/proc"));
         Path jvmTmp = abs(Path.of(System.getProperty("java.io.tmpdir")));
-        List<Path> tmps = List.of(Path.of("/tmp"), Path.of("/var/tmp"), jvmTmp, real(jvmTmp));
+        var tmps = new ArrayList<Path>(List.of(jvmTmp, real(jvmTmp)));
+        for (Replaced replaced : REPLACED) tmps.add(replaced.at());
 
         var out = new ArrayList<Bind>();
         for (String entry : entries == null ? List.<String>of() : entries) {

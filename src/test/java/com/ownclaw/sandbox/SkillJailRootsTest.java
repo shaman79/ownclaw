@@ -205,7 +205,7 @@ class SkillJailRootsTest {
                 "/opt/ownclaw/data/x", "/opt/ownclaw/data/uploads/a.pdf", "/opt/ownclaw/.env",
                 "/opt/ownclaw/skills/generated/other", "/opt/ownclaw/skills/_envs/x", "/opt/ownclaw/logs",
                 "/opt/ownclaw/backups/b.tar", "/opt/ownclaw/repo/.git", "/opt/ownclaw", "/opt", "/",
-                "/proc/1", "/tmp", "/var/tmp", "/var", "relative/.ssh", "  ",
+                "/proc/1", "/tmp", "/var/tmp", "/var", "/dev/shm", "/dev/mqueue", "/dev", "relative/.ssh", "  ",
                 "/var/crash", "/var/crash/_usr_bin_x.1000.crash", "/var/lib/systemd/coredump",
                 "/var/lib/apport/coredump", "/var/lib/apport",
                 "/var/log", "/var/log/journal", "/run", "/run/dbus", "/run/user/1000", "/run/log",
