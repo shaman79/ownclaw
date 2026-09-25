@@ -108,7 +108,9 @@ public class ProcessSandbox implements SandboxManager {
             SkillJail.applyEnvironment(pb, envVars);
             long startTime = System.currentTimeMillis();
             try {
-                return run(pb, scriptPath, stdinJson, timeoutSec, progressCallback, true);
+                // A jailed run needs nothing more: killing bubblewrap ends its jail, and
+                // Launch.close sees to what is left of it.
+                return run(pb, scriptPath, stdinJson, timeoutSec, progressCallback, true, () -> { });
             } catch (IOException e) {
                 long durationMs = System.currentTimeMillis() - startTime;
                 String errMsg;
@@ -153,10 +155,13 @@ public class ProcessSandbox implements SandboxManager {
      * through it, and are NOT included in the final stdout; without one they stay in it. With
      * {@code watchNeedInput}, a need_input line ends the run at once, reported as stalled.
      *
+     * @param alsoKill run after the process is killed for stalling or for its output: what else
+     *                 must end with it
      * @throws IOException when it cannot be started or given its input
      */
     static SandboxResult run(ProcessBuilder pb, Path scriptPath, String stdinJson, int timeoutSec,
-                             ProgressCallback progressCallback, boolean watchNeedInput) throws IOException {
+                             ProgressCallback progressCallback, boolean watchNeedInput,
+                             Runnable alsoKill) throws IOException {
         long startTime = System.currentTimeMillis();
         Process process = pb.start();
 
@@ -232,6 +237,7 @@ public class ProcessSandbox implements SandboxManager {
         if (!finished) {
             long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
             process.destroyForcibly();
+            alsoKill.run();
             try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
@@ -242,7 +248,10 @@ public class ProcessSandbox implements SandboxManager {
 
         String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
         String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-        if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
+        if (overLimit.get()) {
+            alsoKill.run();
+            return killedOverLimit(scriptPath, stdout, stderr, durationMs);
+        }
 
         // need_input emitted → immediate failure (process was already killed above)
         if (needInputDetected.get()) {

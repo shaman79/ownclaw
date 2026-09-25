@@ -17,6 +17,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -34,7 +35,13 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>The skill directory bind-mounted read-write at {@code /skill}, with its SKILL.yaml,
  *       skill.py and requirements.txt read-only on top</li>
  *   <li>Each file the task was handed, read-only</li>
- *   <li>{@code --network=host} so the skill can access the local network</li>
+ *   <li>{@code --network=host} so the skill can access the local network: it may connect
+ *       anywhere the host can, but not capture -- {@code --cap-drop=NET_RAW} takes the raw and
+ *       packet sockets that would read the host's own traffic -- and with no-new-privileges
+ *       nothing it runs gains a privilege through a setuid bit or file capabilities</li>
+ *   <li>A name of its own, {@code ownclaw-run-<uuid>}, so a run killed for stalling or for its
+ *       output is killed in the runtime too: killing the CLI alone leaves the container
+ *       running under docker's daemon or podman's conmon</li>
  *   <li>No variable of the service's or of the run: the image sets the encoding, and the
  *       skill's credentials come on stdin with its input, for the runner to put into its own
  *       environment inside the container -- never into the runtime CLI's</li>
@@ -452,11 +459,14 @@ public class ContainerSandbox {
             AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
 
             // Read output line-by-line to stream build progress to the user.
-            // Also feeds lastBuildActivity for stall detection.
+            // Also feeds lastBuildActivity for stall detection. Within the output limit, as a
+            // run's is: the base image is the model's choice, and a build that prints without
+            // end would otherwise take the heap.
+            AtomicBoolean overLimit = new AtomicBoolean(false);
             StringBuilder outputBuf = new StringBuilder();
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
-                try (var reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                        ProcessSandbox.limited(p.getInputStream(), p, overLimit), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastBuildActivity.set(System.currentTimeMillis());
@@ -486,6 +496,9 @@ public class ContainerSandbox {
             }
 
             String output = outputFuture.join();
+            if (overLimit.get()) {
+                return "Build output went past the " + (ProcessSandbox.OUTPUT_LIMIT >> 20) + " MB limit";
+            }
 
             if (p.exitValue() != 0) {
                 return "exit " + p.exitValue() + ": " + output;
@@ -504,7 +517,8 @@ public class ContainerSandbox {
      * the skill prints ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
      * through it and left out of stdout; without one they stay in it. Past
      * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream the runtime's CLI is killed, as it is
-     * when the run stalls. The one runner for this and a host run: {@link ProcessSandbox#run}.
+     * when the run stalls, and the container with it ({@link #kill}). The one runner for this and
+     * a host run: {@link ProcessSandbox#run}.
      *
      * @param imageTag         the container image to use (from ensureImage)
      * @param python           python executable (usually "python3" inside the container)
@@ -523,8 +537,10 @@ public class ContainerSandbox {
                                  Map<String, String> extraVolumes) {
         long startTime = System.currentTimeMillis();
         try {
-            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, extraVolumes);
-            return ProcessSandbox.run(cli(cmd), scriptPath, stdinJson, timeoutSec, progressCallback, false);
+            String name = "ownclaw-run-" + UUID.randomUUID();
+            List<String> cmd = buildRunCommand(imageTag, name, python, scriptPath, skillDir, extraVolumes);
+            return ProcessSandbox.run(cli(cmd), scriptPath, stdinJson, timeoutSec, progressCallback, false,
+                    () -> kill(cmd.get(0), name));
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
             log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
@@ -533,16 +549,51 @@ public class ContainerSandbox {
     }
 
     /**
-     * Build the docker/podman run command.
+     * Stop the container {@code name} in {@code runtime}: its CLI has been killed, and the
+     * container would go on without it. Best effort, and logged; the run's own --rm removes it.
      */
-    List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
+    private static void kill(String runtime, String name) {
+        try {
+            Process p = cli(List.of(runtime, "kill", name))
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            p.getOutputStream().close();
+            if (!p.waitFor(10, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                log.warn("Container {} may still be running: '{} kill' did not return in 10 s", name, runtime);
+            } else if (p.exitValue() != 0) {
+                log.warn("'{} kill {}' exited {}: the container had ended already, or is still running",
+                        runtime, name, p.exitValue());
+            }
+        } catch (IOException e) {
+            log.warn("Container {} may still be running: {}", name, e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Build the docker/podman run command.
+     *
+     * @param name the container's name, for {@link #kill}
+     */
+    List<String> buildRunCommand(String imageTag, String name, String python, Path scriptPath,
                                  Path skillDir, Map<String, String> extraVolumes) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(containerRuntime);
         cmd.add("run");
         cmd.add("--rm");            // auto-remove container after exit
         cmd.add("-i");              // interactive (for stdin)
+        cmd.add("--name=" + name);
         cmd.add("--network=host");  // access local network (for scanning, etc.)
+        // On the host's network, connect but not capture: under rootful docker the container's
+        // root keeps CAP_NET_RAW by default, and with it packet sockets on the host's own
+        // interfaces. Not --cap-drop=ALL: the container's root could no longer write /skill,
+        // which the service user owns. Nor --user: under rootless podman that user is not the
+        // service user on the host, and cannot write /skill either.
+        cmd.add("--cap-drop=NET_RAW");
+        cmd.add("--security-opt=no-new-privileges");
 
         // Every bind checked as the jail checks its own: the runtime follows a link to wherever
         // it leads -- docker's daemon as root -- and a hard link out of a bind shows its other

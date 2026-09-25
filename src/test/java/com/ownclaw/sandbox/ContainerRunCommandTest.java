@@ -47,12 +47,13 @@ class ContainerRunCommandTest {
     }
 
     private List<String> command(Path dir) throws IOException {
-        return container.buildRunCommand("test-image", "python3", dir.resolve("_runner_x.py"), dir, null);
+        return container.buildRunCommand("test-image", "ownclaw-run-test", "python3", dir.resolve("_runner_x.py"),
+                dir, null);
     }
 
     private List<String> handing(Map<String, String> volumes) throws IOException {
-        return container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir,
-                volumes);
+        return container.buildRunCommand("test-image", "ownclaw-run-test", "python3",
+                skillDir.resolve("_runner_x.py"), skillDir, volumes);
     }
 
     @Test
@@ -67,6 +68,59 @@ class ContainerRunCommandTest {
         assertTrue(cmd.indexOf(skillDir + ":/skill") < cmd.indexOf(skillDir.resolve("skill.py") + ":/skill/skill.py:ro"));
         assertTrue(Files.isRegularFile(skillDir.resolve("requirements.txt"), LinkOption.NOFOLLOW_LINKS),
                 "a skill without requirements gets an empty one, so it cannot write its own");
+    }
+
+    @Test
+    @DisplayName("on the host's network the container may connect, not capture; it runs under a name of its own")
+    void connectNotCapture() throws Exception {
+        List<String> cmd = command(skillDir);
+        int image = cmd.indexOf("test-image");
+        for (String option : List.of("--network=host", "--cap-drop=NET_RAW", "--security-opt=no-new-privileges",
+                "--name=ownclaw-run-test")) {
+            int at = cmd.indexOf(option);
+            assertTrue(at > 1 && at < image, option + " is not an option of the run: " + cmd);
+        }
+    }
+
+    /**
+     * A stand-in for the runtime's CLI: it answers `version`, notes the name each `kill` is
+     * given (in {@code kills}) and the argv of each `run` (in {@code runArgv}), and runs
+     * {@code runBody} for a run.
+     */
+    private ContainerSandbox fakeRuntime(String runBody) throws IOException {
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "[ \"$1\" = version ] && exit 0\n"
+                + "[ \"$1\" = kill ] && { echo \"$2\" >> '" + tmp.resolve("kills") + "'; exit 0; }\n"
+                + "printf '%s\\n' \"$@\" > '" + tmp.resolve("runArgv") + "'\n"
+                + runBody);
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+        assertEquals(runtime.toString(), fake.runtime());
+        return fake;
+    }
+
+    /** The names the stand-in runtime was told to kill, and the one its run was given. */
+    private void assertTheRunWasKilled() throws IOException {
+        String name = Files.readAllLines(tmp.resolve("runArgv")).stream().filter(a -> a.startsWith("--name="))
+                .map(a -> a.substring("--name=".length())).findFirst().orElseThrow();
+        assertTrue(name.matches("ownclaw-run-[0-9a-f-]{36}"), name);
+        assertEquals(List.of(name), Files.readAllLines(tmp.resolve("kills")), "the container was not killed");
+    }
+
+    @Test
+    @DisplayName("a container run killed for stalling is killed in the runtime too, by its name")
+    void aStalledRunKillsItsContainer() throws Exception {
+        var fake = fakeRuntime("exec sleep 30\n");
+        var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
+                1, null, null);
+        assertTrue(result.timedOut(), result.toString());
+        assertTheRunWasKilled();
     }
 
     @Test
@@ -235,23 +289,12 @@ class ContainerRunCommandTest {
     @CsvSource({"1, false", "2, false", "1, true", "2, true"})
     @DisplayName("a container run printing past the output limit on either stream is killed, and its result says why")
     void pastTheOutputLimitIsKilled(int fd, boolean progress) throws Exception {
-        // A stand-in for the runtime's CLI: it answers `version`, and a run prints without end
-        // on the stream it is told, as a skill in the container would through it.
-        // One process throughout, with no child to hold the streams open once it is killed.
-        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
-        Files.writeString(runtime, "#!/bin/sh\n"
-                + "[ \"$1\" = version ] && exit 0\n"
-                + "c=x; i=0; while [ $i -lt 16 ]; do c=\"$c$c\"; i=$((i+1)); done\n"
+        // A run prints without end on the stream it is told, as a skill in the container would
+        // through the CLI. One process throughout, with no child to hold the streams open once
+        // it is killed.
+        var fake = fakeRuntime("c=x; i=0; while [ $i -lt 16 ]; do c=\"$c$c\"; i=$((i+1)); done\n"
                 + "n=0; while [ $n -le 256 ]; do printf '%s' \"$c\" >&" + fd + "; n=$((n+1)); done\n"
                 + "exec sleep 30\n");
-        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
-        var config = new OwnClawConfig();
-        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
-        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
-        config.getSandbox().setContainerRuntime(runtime.toString());
-        var fake = new ContainerSandbox(config);
-        fake.init();
-        assertEquals(runtime.toString(), fake.runtime());
 
         long start = System.nanoTime();
         var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
@@ -262,6 +305,33 @@ class ContainerRunCommandTest {
         assertTrue(result.stderr().startsWith("Killed: the skill's output went past the 16 MB limit."),
                 result.stderr().substring(0, Math.min(200, result.stderr().length())));
         assertTrue(ms < 20_000, "the run was left to go on for " + ms + " ms");
+        assertTheRunWasKilled();
+    }
+
+    @Test
+    @DisplayName("an image build printing past the output limit is stopped, and fails saying why")
+    void aBuildPastTheOutputLimitFails() throws Exception {
+        // `image inspect` finds nothing, so every candidate base image is built -- and prints
+        // 17 MB of lines, then waits.
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "[ \"$1\" = version ] && exit 0\n"
+                + "[ \"$1\" = image ] && exit 1\n"
+                + "yes building | head -c 17000000\n"
+                + "exec sleep 30\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+
+        long start = System.nanoTime();
+        var e = assertThrows(IOException.class, () -> fake.ensureImage(List.of("nmap"), null, skillDir, null, null));
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(e.getMessage().contains("Build output went past the 16 MB limit"), e.getMessage());
+        assertTrue(ms < 60_000, "the builds were left to go on for " + ms + " ms");
     }
 
     @Test
