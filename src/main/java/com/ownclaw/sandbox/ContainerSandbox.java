@@ -541,7 +541,7 @@ public class ContainerSandbox {
         try {
             String name = "ownclaw-run-" + UUID.randomUUID();
             List<String> cmd = buildRunCommand(imageTag, name, python, scriptPath, skillDir, extraVolumes);
-            return ProcessSandbox.run(cli(cmd), scriptPath, stdinJson, timeoutSec, progressCallback, false,
+            return ProcessSandbox.run(cli(cmd), scriptPath, stdinJson, timeoutSec, progressCallback,
                     () -> kill(cmd.get(0), name));
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;

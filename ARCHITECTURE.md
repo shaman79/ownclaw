@@ -702,7 +702,7 @@ A skill cannot ask the user anything while it runs. Its input is the JSON on std
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
 ```
 
-A line a skill prints is captured into its result like any other output. On the host (`ProcessSandbox`), a skill that returns a `{"type": "need_input", ...}` dict -- or writes one past the capture, to `sys.__stdout__` or from a process it starts -- is killed the moment it appears, and the run fails saying need_input is not supported: no answer would ever come. A container run (`ContainerSandbox`, for `system_packages`) does not look for it: the dict comes back as the run's result, like any other. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
+A line a skill prints is captured into its result like any other output. Its input is read to the end before skill.py is loaded, so no answer could ever reach it: a skill whose result is a `{"type": "need_input", ...}` dict fails, saying need_input is not supported -- on the host and in a container alike (`DynamicSkill`, where the result is parsed). A result that merely has a key or a value named need_input is an ordinary result. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
 
 **Progress reporting** (any skill):
 ```
@@ -956,7 +956,7 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 │  • Java writes JSON params to skill's stdin  │
 │  • Skill writes JSON lines to stdout:        │
 │    - {"type":"progress","message":"..."}     │
-│    - need_input: ends the run (§5.8)         │
+│    - need_input: fails the run (§5.8)        │
 │    - {"type":"result","status":"...","output"}│
 │  • Stderr captured for debugging             │
 │  • Exit code: 0 = success, non-zero = error  │
@@ -1604,7 +1604,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Feedback loop (Mentor reviews, max N rounds)
 - [x] Plan cache (LRU, invalidation on skill changes)
 - [x] User preferences (maintained by Executor, local LLM)
-- [x] Skill interaction: a skill cannot wait on the user; need_input ends the run (§5.8)
+- [x] Skill interaction: a skill cannot wait on the user; a need_input result fails the run (§5.8)
 
 ### Phase 3: Polish & Hardening
 

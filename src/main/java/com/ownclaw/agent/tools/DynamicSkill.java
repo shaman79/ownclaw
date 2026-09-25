@@ -610,9 +610,23 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * Parse the Python script's stdout into a ToolResult.
+     * What a skill whose result asks for input fails with. No answer can reach a skill while it
+     * runs -- its input is read to the end before skill.py is loaded -- so the model is told what
+     * to do instead.
+     */
+    static final String NEED_INPUT_UNSUPPORTED = "need_input is not supported: a skill cannot ask the user "
+            + "while it runs; fail and say what you need";
+
+    /** Whether a skill's result is a need_input request: its "type" says so. */
+    private static boolean asksForInput(Map<String, Object> result) {
+        return "need_input".equals(result.get("type"));
+    }
+
+    /**
+     * Parse the Python script's stdout into a ToolResult, host and container run alike.
      * Expected JSON: {"success": true, "output": "text", "data": {}}
-     * Falls back to treating stdout as plain text if not valid JSON.
+     * Falls back to treating stdout as plain text if not valid JSON. A result whose "type" is
+     * need_input fails, saying it is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
      *
      * @param stdout the script's standard output
      * @param stderr the script's standard error (included in failure messages for diagnostics)
@@ -628,6 +642,7 @@ public class DynamicSkill implements Tool {
 
         try {
             Map<String, Object> parsed = mapper.readValue(stdout.strip(), new TypeReference<>() {});
+            if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
             boolean success = Boolean.TRUE.equals(parsed.get("success"));
             String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : stdout;
 
@@ -666,6 +681,7 @@ public class DynamicSkill implements Tool {
             if (lastLine != null && lastLine.startsWith("{")) {
                 try {
                     Map<String, Object> fallback = mapper.readValue(lastLine, new TypeReference<>() {});
+                    if (asksForInput(fallback)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
                     boolean ok = Boolean.TRUE.equals(fallback.get("success"));
                     String out = fallback.containsKey("output") ? String.valueOf(fallback.get("output")) : lastLine;
                     return ok ? ToolResult.success(out) : ToolResult.failure(out);

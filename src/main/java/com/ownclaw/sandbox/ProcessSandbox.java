@@ -25,8 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Runs a skill's Python as a child process, with stall detection, progress and need_input
- * handling. Every launch goes through {@link SkillJail#prepare}: when the jail is READY the
+ * Runs a skill's Python as a child process, with stall detection and progress forwarding.
+ * Every launch goes through {@link SkillJail#prepare}: when the jail is READY the
  * process runs inside bubblewrap (the host read-only, the service's state hidden, its own
  * directory writable, a private /tmp); when it is inactive or off, unjailed; when it is
  * refusing, or cannot isolate this one launch, not at all. The environment is the jail's
@@ -119,7 +119,7 @@ public class ProcessSandbox implements SandboxManager {
             try {
                 // A jailed run needs nothing more: killing bubblewrap ends its jail, and
                 // Launch.close sees to what is left of it.
-                return run(pb, scriptPath, stdinJson, timeoutSec, progressCallback, true, () -> { });
+                return run(pb, scriptPath, stdinJson, timeoutSec, progressCallback, () -> { });
             } catch (IOException e) {
                 long durationMs = System.currentTimeMillis() - startTime;
                 String errMsg;
@@ -139,22 +139,6 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
-     * What a run that asked for input fails with: no answer can reach a skill while it runs, and
-     * the model is told what to do instead.
-     */
-    static final String NEED_INPUT_UNSUPPORTED = "need_input is not supported: a skill cannot ask the "
-            + "user while it runs. Fail instead, and say what you need.";
-
-    /**
-     * Returns true if a stdout line looks like a need_input JSON message. A skill cannot be
-     * answered while it runs, so such a line ends the run.
-     */
-    private static boolean isNeedInputLine(String line) {
-        String t = line.trim();
-        return t.startsWith("{") && t.contains("\"need_input\"");
-    }
-
-    /**
      * Returns true if a stdout line looks like a progress JSON message.
      */
     private static boolean isProgressLine(String line) {
@@ -168,9 +152,7 @@ public class ProcessSandbox implements SandboxManager {
      * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. With a
      * progress callback, progress lines the skill emits
      * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted and forwarded
-     * through it, and are NOT included in the final stdout; without one they stay in it. With
-     * {@code watchNeedInput}, a need_input line ends the run at once, as a failure that says
-     * need_input is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
+     * through it, and are NOT included in the final stdout; without one they stay in it.
      * <p>
      * Each stream is read on a thread of its own ({@link #OWN_THREAD}), started first; the input
      * is written last, on a thread of its own too: a process that never reads it and never exits
@@ -182,8 +164,7 @@ public class ProcessSandbox implements SandboxManager {
      * @throws IOException when it cannot be started
      */
     static SandboxResult run(ProcessBuilder pb, Path scriptPath, String stdinJson, int timeoutSec,
-                             ProgressCallback progressCallback, boolean watchNeedInput,
-                             Runnable alsoKill) throws IOException {
+                             ProgressCallback progressCallback, Runnable alsoKill) throws IOException {
         long startTime = System.currentTimeMillis();
         Process process = pb.start();
 
@@ -196,13 +177,7 @@ public class ProcessSandbox implements SandboxManager {
                 drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity),
                 OWN_THREAD);
 
-        // Read stdout line-by-line so a progress line is forwarded, and a need_input line
-        // caught, as it arrives. What a skill prints goes into the runner's capture and its
-        // result, not onto this stream; what reaches it is the result itself -- a returned
-        // need_input dict -- or a write past the capture (sys.__stdout__, a process the skill
-        // starts). No answer will ever come, so the process is killed at once and the run
-        // fails, saying so.
-        AtomicBoolean needInputDetected = new AtomicBoolean(false);
+        // Read stdout line-by-line so a progress line is forwarded as it arrives.
         CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
             ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
             try (BufferedReader reader = new BufferedReader(
@@ -226,12 +201,6 @@ public class ProcessSandbox implements SandboxManager {
                         } catch (Exception e) {
                             log.debug("Failed to parse progress line: {}", trimmed);
                         }
-                    }
-
-                    if (watchNeedInput && isNeedInputLine(trimmed)) {
-                        needInputDetected.set(true);
-                        process.destroyForcibly(); // fail fast — user input will never arrive
-                        break;
                     }
 
                     buf.write(line.getBytes(StandardCharsets.UTF_8));
@@ -265,14 +234,6 @@ public class ProcessSandbox implements SandboxManager {
         if (overLimit.get()) {
             alsoKill.run();
             return killedOverLimit(scriptPath, stdout, stderr, durationMs);
-        }
-
-        // need_input emitted → immediate failure (process was already killed above)
-        if (needInputDetected.get()) {
-            log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
-                    scriptPath.getFileName());
-            return new SandboxResult(-1, stdout, NEED_INPUT_UNSUPPORTED + (stderr.isBlank() ? "" : "\n" + stderr),
-                    durationMs, false);
         }
 
         int exitCode = process.exitValue();

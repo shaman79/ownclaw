@@ -256,21 +256,19 @@ class ContainerRunCommandTest {
     }
 
     @Test
-    @DisplayName("one runner for both: progress forwarded from each; a need_input line fails a host run at once, saying it is not supported; a container run hands it back")
+    @DisplayName("one runner for both: progress forwarded from each, and every other line -- a need_input one too -- handed back as it was printed")
     void oneRunnerForAHostAndAContainerRun() throws Exception {
         assumeTrue(Files.isExecutable(Path.of("/usr/bin/python3")), "python3 is not available");
         String progress = "{\"type\":\"progress\",\"message\":\"half\",\"percent\":50}";
-        String ask = "{\"need_input\":\"which one?\"}";
+        String ask = "{\"type\":\"need_input\",\"question\":\"which one?\"}";
         var seen = new java.util.ArrayList<String>();
 
-        Path script = Files.writeString(skillDir.resolve("_runner_ask.py"), "import sys, time\n"
-                + "print('" + progress + "')\nprint('" + ask + "')\nsys.stdout.flush()\ntime.sleep(10)\n");
-        long start = System.nanoTime();
+        Path script = Files.writeString(skillDir.resolve("_runner_ask.py"),
+                "print('" + progress + "')\nprint('" + ask + "')\n");
         var host = new ProcessSandbox(JailTestKit.off()).execute("python3", script, skillDir, null, Map.of(), 60,
                 (msg, pct) -> seen.add(msg), List.of());
-        assertFalse(host.timedOut(), "a need_input line was reported as a stall: " + host);
-        assertTrue(host.stderr().startsWith(ProcessSandbox.NEED_INPUT_UNSUPPORTED), host.toString());
-        assertTrue(System.nanoTime() - start < 8_000_000_000L, "the host run was waited out");
+        assertTrue(host.isSuccess(), host.toString());
+        assertEquals(ask, host.stdout().strip());
 
         Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
         Files.writeString(runtime, "#!/bin/sh\n[ \"$1\" = version ] && exit 0\n"
