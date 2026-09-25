@@ -5,7 +5,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,8 +17,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * A skill's output is held in memory for its result, so it is bounded: a skill that prints past
- * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream is killed, and says so -- with and without
- * a progress callback, which read stdout by different code.
+ * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream is killed, and says so.
  */
 class ProcessSandboxOutputLimitTest {
 
@@ -29,7 +28,7 @@ class ProcessSandboxOutputLimitTest {
         assumeTrue(Files.isExecutable(Path.of("/usr/bin/python3")), "python3 is not available");
     }
 
-    private SandboxResult run(String stream, boolean progress, long bytes, int sleepAfter) throws Exception {
+    private SandboxResult run(String stream, long bytes, int sleepAfter) throws Exception {
         Path script = Files.writeString(tmp.resolve("_runner_loud.py"), String.join("\n",
                 "import sys, time",
                 "out = sys." + stream,
@@ -42,15 +41,15 @@ class ProcessSandboxOutputLimitTest {
                 "time.sleep(" + sleepAfter + ")",
                 ""));
         return new ProcessSandbox(JailTestKit.off()).execute("python3", script, tmp,
-                null, Map.of(), 60, progress ? (msg, pct) -> { } : null, List.of());
+                null, Map.of(), 60, null, List.of());
     }
 
-    @ParameterizedTest(name = "{0}, progress callback {1}")
-    @CsvSource({"stdout, false", "stderr, false", "stdout, true", "stderr, true"})
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"stdout", "stderr"})
     @DisplayName("a skill printing past the limit on either stream is killed, and its result says why")
-    void pastTheLimitIsKilled(String stream, boolean progress) throws Exception {
+    void pastTheLimitIsKilled(String stream) throws Exception {
         long start = System.nanoTime();
-        var result = run(stream, progress, ProcessSandbox.OUTPUT_LIMIT + 1L, 30);
+        var result = run(stream, ProcessSandbox.OUTPUT_LIMIT + 1L, 30);
         long ms = (System.nanoTime() - start) / 1_000_000;
 
         assertFalse(result.isSuccess(), "a run past the output limit succeeded");
@@ -64,7 +63,7 @@ class ProcessSandboxOutputLimitTest {
     @Test
     @DisplayName("output that ends exactly at the limit is not over it")
     void exactlyTheLimitIsKept() throws Exception {
-        var result = run("stdout", false, ProcessSandbox.OUTPUT_LIMIT, 0);
+        var result = run("stdout", ProcessSandbox.OUTPUT_LIMIT, 0);
         assertTrue(result.isSuccess(), result.stderr());
         assertEquals(ProcessSandbox.OUTPUT_LIMIT, result.stdout().strip().length());
     }

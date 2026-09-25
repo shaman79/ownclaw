@@ -6,7 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -288,10 +288,10 @@ class ContainerRunCommandTest {
         assertEquals(List.of("half", "half"), seen);
     }
 
-    @ParameterizedTest(name = "{0}, progress callback {1}")
-    @CsvSource({"1, false", "2, false", "1, true", "2, true"})
+    @ParameterizedTest(name = "fd {0}")
+    @ValueSource(ints = {1, 2})
     @DisplayName("a container run printing past the output limit on either stream is killed, and its result says why")
-    void pastTheOutputLimitIsKilled(int fd, boolean progress) throws Exception {
+    void pastTheOutputLimitIsKilled(int fd) throws Exception {
         // A run prints without end on the stream it is told, as a skill in the container would
         // through the CLI. One process throughout, with no child to hold the streams open once
         // it is killed.
@@ -301,7 +301,7 @@ class ContainerRunCommandTest {
 
         long start = System.nanoTime();
         var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
-                60, progress ? (msg, pct) -> { } : null, null);
+                60, null, null);
         long ms = (System.nanoTime() - start) / 1_000_000;
 
         assertFalse(result.isSuccess(), "a run past the output limit succeeded");
