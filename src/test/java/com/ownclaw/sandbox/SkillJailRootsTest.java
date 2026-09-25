@@ -53,6 +53,32 @@ class SkillJailRootsTest {
     }
 
     @Test
+    @DisplayName("backups/ and repo/ in the working directory change nothing; linked elsewhere, each is hidden at its real path")
+    void linkedBackupsAndRepo() throws Exception {
+        var m = JailTestKit.Mirror.create(tmp);
+        Files.createDirectories(m.root().resolve("backups"));
+        Files.createDirectories(m.root().resolve("repo/.git"));
+        var l = m.layout();
+        // The command line a standard layout gets is the one it got before they were candidates.
+        List<String> before = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l.cwd(), l.dataDir(),
+                l.skillsRoot(), l.envsRoot(), l.logDir(), SkillJail.JOURNAL), null, m.skillDir(), List.of(),
+                List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
+        List<String> now = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l), null, m.skillDir(),
+                List.of(), List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
+        assertEquals(before, now);
+        assertEquals(withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(l));
+
+        Path root = Files.createDirectories(tmp.resolve("app"));
+        Path backups = Files.createDirectories(tmp.resolve("disk2/ownclaw-backups"));
+        Path repo = Files.createDirectories(tmp.resolve("disk2/ownclaw-repo"));
+        Files.createSymbolicLink(root.resolve("backups"), backups);
+        Files.createSymbolicLink(root.resolve("repo"), repo);
+        var linked = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
+        assertEquals(withJournal(List.of(root.toRealPath(), backups.toRealPath(), repo.toRealPath())),
+                SkillJail.hiddenRoots(linked));
+    }
+
+    @Test
     @DisplayName("a log directory outside the working directory is its own root; a missing one hides nothing")
     void separateAndMissingRoots() throws Exception {
         var m = JailTestKit.Mirror.create(tmp);
@@ -143,6 +169,19 @@ class SkillJailRootsTest {
         List<String> probe = probed(JailTestKit.Mirror.create(tmp));
         for (Path p : inside) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
         assertFalse(probe.contains(SkillJail.JOURNAL.toString()), "the store itself stays, as the tmpfs's mount point");
+    }
+
+    @Test
+    @DisplayName("the self-check proves what is in backups/ and repo/ gone, not the directories a tmpfs leaves")
+    void theSelfCheckProbesBackupsAndRepo() throws Exception {
+        var m = JailTestKit.Mirror.create(tmp);
+        Path backup = Files.writeString(Files.createDirectories(m.root().resolve("backups"))
+                .resolve("ownclaw-db-pre-reset.db"), "canary-backup");
+        Path git = Files.createDirectories(m.root().resolve("repo/.git"));
+        List<String> probe = probed(m);
+        for (Path p : List.of(backup, git)) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
+        assertFalse(probe.contains(m.root().resolve("backups").toString()), probe.toString());
+        assertFalse(probe.contains(m.root().resolve("repo").toString()), probe.toString());
     }
 
     @Test

@@ -211,7 +211,8 @@ public class SkillJail {
      *
      * @param cwd       the service's working directory; in production it holds .env, the repo,
      *                  backups and the JDK, and is the one root that covers all the service's
-     *                  others
+     *                  others -- a backups/ or repo/ linked elsewhere is hidden at its real path
+     *                  too
      * @param database  the SQLite file; its directory also holds the uploads
      * @param generated the generated-skills directory; its parent holds the environments
      * @param logDir    where the log file is written
@@ -229,26 +230,31 @@ public class SkillJail {
         Path skillsRoot() { return generated.getParent(); }
         Path envsRoot() { return skillsRoot().resolve("_envs"); }
         Path dotEnv() { return cwd.resolve(".env"); }
+        Path backups() { return cwd.resolve("backups"); }
+        Path repo() { return cwd.resolve("repo"); }
 
         /** What the self-check proves invisible from inside the jail. */
         List<Path> mustBeHidden() {
             var out = new ArrayList<>(List.of(database, dotEnv(), uploads(), generated, envsRoot()));
             if (logDir != null) out.add(logDir);
             out.addAll(RUN_PROBES);
-            // A tmpfs leaves the directory it covers in place: what was in it, as the host has
+            // A tmpfs leaves the directory it covers in place -- journald's stores, and a backups/
+            // or repo/ linked elsewhere, are roots of their own: what was in them, as the host has
             // it now, is what must be gone.
             for (Path store : JOURNALS) out.addAll(entries(store));
+            out.addAll(entries(backups()));
+            out.addAll(entries(repo()));
             return out;
         }
 
         /**
-         * What neither the owner's expose list nor a caller's bind may ever reach, by written and
+         * What neither the owner's expose list nor a caller's bind may contain, by written and
          * by real path: the service's state, journald's stores, and what the self-check proves
          * gone from /run.
          */
         List<Path> guarded() {
             var paths = new ArrayList<>(List.of(dataDir(), uploads(), database, dotEnv(), skillsRoot(),
-                    generated, envsRoot(), cwd.resolve("backups"), cwd.resolve("repo")));
+                    generated, envsRoot(), backups(), repo()));
             if (logDir != null) paths.add(logDir);
             paths.addAll(JOURNALS);
             paths.addAll(RUN_PROBES);
@@ -823,7 +829,8 @@ public class SkillJail {
     }
 
     static List<Path> hiddenRoots(Layout l) {
-        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), JOURNAL);
+        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), l.backups(),
+                l.repo(), JOURNAL);
     }
 
     /**

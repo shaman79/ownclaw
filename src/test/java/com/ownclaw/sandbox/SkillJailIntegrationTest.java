@@ -374,6 +374,36 @@ class SkillJailIntegrationTest {
     }
 
     @Test
+    @DisplayName("a backups/ and a repo/ linked outside the service directory are hidden at their real paths too")
+    void linkedBackupsAndRepoAreHiddenAtBothEnds() throws Exception {
+        // Each is a root of its own at its real path, and the self-check probes what is in them:
+        // without the root the jail would refuse every launch, without the probe it would not
+        // know.
+        Path root = base.resolve("linked/opt-ownclaw");
+        Path skillDir = skillUnder(root);
+        Path realBackups = Files.createDirectories(base.resolve("linked/second-disk/ownclaw-backups"));
+        Path realRepo = Files.createDirectories(base.resolve("linked/second-disk/ownclaw-repo"));
+        Files.writeString(realBackups.resolve("ownclaw-db-pre-reset.db"), "canary-backup-db");
+        Files.writeString(Files.createDirectories(realRepo.resolve(".git")).resolve("config"), "canary-repo-config");
+        Files.createSymbolicLink(root.resolve("backups"), realBackups);
+        Files.createSymbolicLink(root.resolve("repo"), realRepo);
+        var layout = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
+        List<Path> secrets = List.of(root.resolve("backups/ownclaw-db-pre-reset.db"),
+                realBackups.resolve("ownclaw-db-pre-reset.db"), root.resolve("repo/.git/config"),
+                realRepo.resolve(".git/config"));
+
+        JsonNode open = readableFrom(JailTestKit.off(), skillDir, secrets);
+        for (Path p : secrets) assertTrue(open.get(p.toString()).asBoolean(), "control run should read " + p);
+
+        var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath(), realBackups.toRealPath(),
+                realRepo.toRealPath())), SkillJail.hiddenRoots(layout));
+        JsonNode jailed = readableFrom(jail, skillDir, secrets);
+        for (Path p : secrets) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
+    }
+
+    @Test
     @DisplayName("a .env linked outside every hidden root fails the self-check instead of staying readable")
     void aSecretLinkedOutsideFailsTheSelfCheck() throws Exception {
         // The tmpfs over the service directory hides the link, not the file it points at; only the
