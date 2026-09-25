@@ -512,7 +512,7 @@ public class DynamicSkill implements Tool {
     private Path handedFile(String fileId) {
         Path stored = fileStorage.getFilePath(fileId);
         if (stored == null) {
-            log.warn("Skill '{}': attachment {} names no file in the uploads directory; not handing it over",
+            log.warn("Skill '{}': attachment {} names no regular file in the uploads directory; not handing it over",
                     name, fileId);
             return null;
         }

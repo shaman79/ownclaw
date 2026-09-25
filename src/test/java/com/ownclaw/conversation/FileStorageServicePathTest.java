@@ -94,6 +94,23 @@ class FileStorageServicePathTest {
     }
 
     @Test
+    @DisplayName("a link at a real upload's name is neither read nor served, and delete removes the link alone")
+    void aLinkAtAnUploadsNameIsNotFollowed() throws Exception {
+        String id = files.store("u1", "statement.txt", "text/plain",
+                new ByteArrayInputStream("the statement".getBytes(StandardCharsets.UTF_8)));
+        Path stored = files.getFilePath(id);
+        Files.delete(stored);
+        Files.createSymbolicLink(stored, env);
+
+        assertNull(files.getFilePath(id), "a path through the link");
+        assertNull(files.readAsText(id), "the link was read");
+
+        assertTrue(files.delete("u1", id));
+        assertFalse(Files.exists(stored, java.nio.file.LinkOption.NOFOLLOW_LINKS), "the link was left behind");
+        assertEquals("OWNCLAW_OPS_TOKEN=canary-env-secret\n", Files.readString(env));
+    }
+
+    @Test
     @DisplayName("deleting a tampered row removes the row, never the file it points at")
     void deleteNeverFollowsATamperedName() throws Exception {
         String id = row("../ownclaw.db");

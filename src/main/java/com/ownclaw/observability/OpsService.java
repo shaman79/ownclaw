@@ -24,7 +24,9 @@ import java.nio.charset.StandardCharsets;
 import java.io.File;
 import java.net.URI;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
@@ -735,12 +737,13 @@ public class OpsService {
         if (Files.isDirectory(root)) {
             try (var dirs = Files.list(root)) {
                 for (Path dir : dirs.filter(Files::isDirectory).sorted().toList()) {
-                    Path code = dir.resolve("skill.py");
                     var m = new LinkedHashMap<String, Object>();
                     m.put("name", dir.getFileName().toString());
-                    m.put("codeSizeBytes", fileSize(code));
-                    m.put("codeModifiedAt", modifiedAt(code));
-                    m.put("codeSha256", sha256(code));
+                    if (Files.isSymbolicLink(dir)) {
+                        m.put("note", "a link, not followed");
+                    } else {
+                        m.putAll(codeFacts(dir.resolve("skill.py")));
+                    }
                     m.put("registered", skillRegistry.getDynamic(dir.getFileName().toString()).isPresent());
                     rows.add(m);
                 }
@@ -1113,25 +1116,38 @@ public class OpsService {
         }
     }
 
-    private static String modifiedAt(Path p) {
+    /**
+     * skill.py's size, modification time and hash, for the skills listing -- never through a
+     * link. The directory is the skill's own, and a link it left at skill.py would have the
+     * listing measure and hash whatever it leads to. The hash is of the text
+     * {@link SkillJail#readAuthored} reads, encoded as UTF-8 -- the file's own hash whenever it
+     * is valid UTF-8; a file that reader refuses gets a note instead. Absent: -1 and blanks.
+     */
+    private static Map<String, Object> codeFacts(Path code) {
+        var m = new LinkedHashMap<String, Object>();
+        BasicFileAttributes a = null;
         try {
-            return Files.isRegularFile(p) ? Files.getLastModifiedTime(p).toInstant().toString() : "";
+            a = Files.readAttributes(code, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         } catch (IOException e) {
-            return "";
+            // absent, or gone since the listing
         }
-    }
-
-    private static String sha256(Path p) {
+        boolean regular = a != null && a.isRegularFile();
+        m.put("codeSizeBytes", regular ? a.size() : -1);
+        m.put("codeModifiedAt", regular ? a.lastModifiedTime().toInstant().toString() : "");
+        String hash = "";
         try {
-            if (!Files.isRegularFile(p)) return "";
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(Files.readAllBytes(p));
-            var sb = new StringBuilder();
-            for (byte b : hash) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) {
-            return "";
+            String text = SkillJail.readAuthored(code);
+            if (text != null) {
+                hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(text.getBytes(StandardCharsets.UTF_8)));
+            }
+        } catch (IOException e) {
+            m.put("codeNote", "not read: " + e.getMessage());
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
+        m.put("codeSha256", hash);
+        return m;
     }
 
     /**

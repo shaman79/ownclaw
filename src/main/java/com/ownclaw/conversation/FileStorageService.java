@@ -10,6 +10,7 @@ import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
@@ -102,14 +103,20 @@ public class FileStorageService {
     }
 
     /**
-     * Get the disk path for a stored file, or null when there is none -- or when the row does
-     * not name a file directly inside the uploads directory.
+     * Get the disk path for a stored file, or null when there is none -- when the row does not
+     * name a file directly inside the uploads directory, or what is at that name is not a
+     * regular file.
+     * <p>
+     * A link at the name -- left by a skill that ran unjailed, say -- is not followed: the path
+     * is read into a model's context and served for download, and would hand over whatever the
+     * link leads to. {@link #delete} takes the name as it is, so it still removes a link there.
      */
     public Path getFilePath(String fileId) {
         List<String> names = jdbc.queryForList(
                 "SELECT stored_name FROM file_attachments WHERE id = ?", String.class, fileId);
         if (names.isEmpty()) return null;
-        return storedPath(names.getFirst());
+        Path path = storedPath(names.getFirst());
+        return path != null && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ? path : null;
     }
 
     /**

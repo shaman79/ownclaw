@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -36,6 +37,50 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ProcessSandbox implements SandboxManager {
 
     private static final Logger log = LoggerFactory.getLogger(ProcessSandbox.class);
+
+    /**
+     * The most a run's stdout, or its stderr, may hold. Both are kept in memory for the result,
+     * so without a bound a skill that prints without end takes the JVM's heap with it. Past it
+     * the process is killed, and the result says why.
+     */
+    public static final int OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+    /**
+     * {@code in}, ending after {@link #OUTPUT_LIMIT} bytes; when there is more, {@code overLimit}
+     * is set and {@code process} killed.
+     */
+    public static InputStream limited(InputStream in, Process process, AtomicBoolean overLimit) {
+        return new FilterInputStream(in) {
+            private long left = OUTPUT_LIMIT;
+
+            @Override
+            public int read() throws IOException {
+                byte[] one = new byte[1];
+                return read(one, 0, 1) == -1 ? -1 : one[0] & 0xff;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                if (len == 0) return 0;
+                if (left == 0) {
+                    // Output that ends exactly at the limit is not over it: one more byte decides.
+                    if (super.read() == -1) return -1;
+                    overLimit.set(true);
+                    process.destroyForcibly();
+                    return -1;
+                }
+                int n = super.read(b, off, (int) Math.min(len, left));
+                if (n > 0) left -= n;
+                return n;
+            }
+        };
+    }
+
+    private static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
+        log.warn("Sandbox killed {}: its output went past {} MB", scriptPath.getFileName(), OUTPUT_LIMIT >> 20);
+        return new SandboxResult(-1, stdout, "Killed: the skill's output went past the "
+                + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);
+    }
 
     private final PythonEnvironmentService pythonEnv;
     private final ObjectMapper mapper;
@@ -122,8 +167,9 @@ public class ProcessSandbox implements SandboxManager {
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
             // Drain stderr async to prevent pipe-buffer deadlock.
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
+            AtomicBoolean overLimit = new AtomicBoolean(false);
+            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
+                    drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
 
             // Read stdout line-by-line so we can detect need_input immediately.
             // If a skill emits need_input in a non-interactive run it will block forever
@@ -132,7 +178,8 @@ public class ProcessSandbox implements SandboxManager {
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
                 try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(limited(process.getInputStream(), process, overLimit),
+                                StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
@@ -166,6 +213,7 @@ public class ProcessSandbox implements SandboxManager {
 
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+            if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
 
             // need_input emitted → immediate failure (process was already killed above)
             if (needInputDetected.get()) {
@@ -246,15 +294,17 @@ public class ProcessSandbox implements SandboxManager {
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
             // Drain stderr async
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
+            AtomicBoolean overLimit = new AtomicBoolean(false);
+            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
+                    drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
 
             // Read stdout line-by-line; intercept progress and need_input lines.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
                 try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(limited(process.getInputStream(), process, overLimit),
+                                StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
@@ -307,6 +357,7 @@ public class ProcessSandbox implements SandboxManager {
 
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+            if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
 
             if (needInputDetected.get()) {
                 log.warn("Sandbox aborted — need_input in non-interactive execution: {}",

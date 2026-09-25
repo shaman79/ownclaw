@@ -302,6 +302,48 @@ class PythonEnvPipWiringTest {
     }
 
     @Test
+    @DisplayName("a pip printing past the output limit is killed, and the provisioning error says so")
+    void aCommandPastTheOutputLimitIsKilled() throws Exception {
+        // A python whose pip install says more than the limit: held whole, output without end
+        // would take the JVM's heap with it.
+        Path loud = Files.writeString(tmp.resolve("bin/loud-python"), String.join("\n",
+                "#!/bin/sh",
+                "if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then mkdir -p \"$3/bin\" && cp \"$0\" \"$3/bin/python\"; exit 0; fi",
+                "if [ \"$1\" = -m ] && [ \"$2\" = pip ] && [ \"$3\" = install ]; then",
+                "  head -c " + (ProcessSandbox.OUTPUT_LIMIT + 1L) + " /dev/zero | tr '\\0' x",
+                "fi",
+                "exit 0", ""));
+        Files.setPosixFilePermissions(loud, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var cfg = new OwnClawConfig();
+        cfg.getSkills().setGeneratedPath(m.generated().toString());
+        cfg.getDatabase().setPath(m.db().toString());
+        cfg.getSandbox().setPythonPath(loud.toString());
+        var svc = new PythonEnvironmentService(cfg, inactiveJail());
+        svc.init();
+        Files.writeString(requirements(), "requests\n");
+
+        svc.resolveExecution(m.skillDir(), "probe_skill");
+
+        String error = svc.getLastProvisionError(m.skillDir(), "probe_skill").orElseThrow();
+        assertTrue(error.startsWith("pip install failed: (killed: output past the 16 MB limit)"),
+                error.substring(0, Math.min(200, error.length())));
+        assertFalse(Files.exists(venv().resolve(".req_hash")), "provisioning was recorded as done");
+    }
+
+    @Test
+    @DisplayName("while the jail refuses every launch, the startup checks start nothing and blame no missing Python")
+    void aRefusingJailSkipsTheStartupChecks() throws Exception {
+        var jail = new SkillJail("required", tmp.resolve("no/such/bwrap").toString(), m.layout(), List.of(),
+                System::currentTimeMillis);
+        assertEquals(SkillJail.State.REFUSING, jail.status().state());
+
+        service(jail);
+
+        assertEquals(0, jail.status().refusedRuns(), "a startup check tried a launch the jail was refusing");
+        assertTrue(launched().isEmpty());
+    }
+
+    @Test
     @DisplayName("a jail that refuses starts no Python for provisioning, and says why")
     void aRefusingJailStartsNothing() throws Exception {
         var jail = new SkillJail("required", tmp.resolve("no/such/bwrap").toString(), m.layout(), List.of(),

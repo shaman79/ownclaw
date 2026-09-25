@@ -1,6 +1,7 @@
 package com.ownclaw.skills;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,7 @@ import java.util.Comparator;
 import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
@@ -46,8 +48,6 @@ public class PythonEnvironmentService {
     private static final URI GET_PIP_URI = URI.create("https://bootstrap.pypa.io/get-pip.py");
 
     private volatile String systemPython;
-    private volatile boolean systemPipAvailable;
-    private volatile boolean systemEnsurePipAvailable;
     private volatile Path envsDir;
     private volatile Path targetsDir;
     private volatile Path bootstrapDir;
@@ -172,6 +172,14 @@ public class PythonEnvironmentService {
     @PostConstruct
     public void init() {
         resolveWritableEnvDirs();
+        // Every check below starts a Python through the jail. While it refuses them all, each
+        // would fail, and the failures would read as "no Python here" -- a false diagnosis.
+        var down = jail.unavailable();
+        if (down.isPresent()) {
+            log.warn("Python checks skipped, the skill jail refuses every launch: {}. They run at the next start.",
+                    down.get());
+            return;
+        }
 
         // Auto-detect a working Python if the configured one doesn't work
         if (!isPythonAvailable(systemPython)) {
@@ -187,8 +195,6 @@ public class PythonEnvironmentService {
         } else {
             getPythonVersion().ifPresent(v -> log.info("Python ready: {} -> {}", systemPython, v));
         }
-
-        probeSystemPackageInstallCapabilities();
     }
 
     private void resolveWritableEnvDirs() {
@@ -234,59 +240,6 @@ public class PythonEnvironmentService {
         } catch (Exception e) {
             return Path.of("./data/skills");
         }
-    }
-
-    private void probeSystemPackageInstallCapabilities() {
-        try {
-            // Check pip on system Python
-            ProcessResult pip = run(10, List.of(systemPython, "-m", "pip", "--version"), null, List.of());
-            systemPipAvailable = pip.exitCode == 0;
-
-            // Check ensurepip module existence without modifying environment
-            if (!systemPipAvailable) {
-                ProcessResult ensure = run(10, List.of(systemPython, "-c", "import ensurepip"), null, List.of());
-                systemEnsurePipAvailable = ensure.exitCode == 0;
-            } else {
-                systemEnsurePipAvailable = true;
-            }
-
-            if (!systemPipAvailable && !systemEnsurePipAvailable) {
-                log.warn("Python dependency installation is unavailable (no pip, no ensurepip). "
-                        + "Skills that require third-party packages cannot self-heal; prefer stdlib-only skills.");
-            }
-        } catch (Exception e) {
-            // Be conservative: if probing fails, assume we can't install.
-            systemPipAvailable = false;
-            systemEnsurePipAvailable = false;
-        }
-    }
-
-    /**
-     * True if we can (in principle) install Python packages using system Python.
-     * This covers either a working pip module, or an available ensurepip module.
-     */
-    public boolean canInstallPackagesOnSystemPython() {
-        return systemPipAvailable || systemEnsurePipAvailable;
-    }
-
-    /**
-     * True if this skill can install packages via its venv (if present) or via system Python.
-     */
-    public boolean canInstallPackagesForSkill(String skillName) {
-        try {
-            Path venvDir = ownDir(envsDir, skillName);
-            Path venvPython = venvDir.resolve(pythonRelative());
-            if (Files.exists(venvPython)) {
-                ProcessResult pip = run(10, List.of(
-                        venvPython.toAbsolutePath().toString(), "-m", "pip", "--version"), venvDir, List.of());
-                if (pip.exitCode == 0) {
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {
-            // fall through
-        }
-        return canInstallPackagesOnSystemPython();
     }
 
     /** Quick check if a Python command is executable. */
@@ -826,10 +779,6 @@ public class PythonEnvironmentService {
         return envsDir.resolve(skillName).resolve(pythonRelative()).toAbsolutePath().toString();
     }
 
-    private String venvPipPath(Path venvDir) {
-        return venvDir.resolve(isWindows() ? "Scripts/pip.exe" : "bin/pip").toAbsolutePath().toString();
-    }
-
     /**
      * Start one of this service's Python commands and wait for it.
      * <p>
@@ -872,10 +821,12 @@ public class PythonEnvironmentService {
             // Read beside the wait, not after it: a command whose output fills the pipe blocks
             // until it is read, and a hung build hook that holds the output open -- or a process
             // it left running -- never gives the read an end. So a command out of time is killed
-            // first, and its output is waited for only briefly.
+            // first, and its output is waited for only briefly. Its output is bounded as a
+            // skill's is (see ProcessSandbox.limited): past the limit the command is killed.
             var out = new ByteArrayOutputStream();
+            var overLimit = new AtomicBoolean(false);
             Thread drain = Thread.ofVirtual().start(() -> {
-                try (var in = p.getInputStream()) {
+                try (var in = ProcessSandbox.limited(p.getInputStream(), p, overLimit)) {
                     in.transferTo(out);
                 } catch (IOException ignored) {
                     // what was read before is kept
@@ -888,6 +839,10 @@ public class PythonEnvironmentService {
             }
             drain.join(Duration.ofSeconds(5));
             String output = out.toString(StandardCharsets.UTF_8);
+            if (overLimit.get()) {
+                return new ProcessResult(-1, "(killed: output past the " + (ProcessSandbox.OUTPUT_LIMIT >> 20)
+                        + " MB limit)\n" + output);
+            }
             if (!ok) return new ProcessResult(-1, output + "\n(timeout)");
             return new ProcessResult(p.exitValue(), output);
         } finally {
