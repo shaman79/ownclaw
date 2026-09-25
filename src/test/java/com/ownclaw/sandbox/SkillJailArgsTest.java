@@ -22,6 +22,7 @@ class SkillJailArgsTest {
     private static final Path HANDED = ROOT.resolve("data/uploads/9f2c_bank statement.pdf");
     private static final Path TMP = Path.of("/tmp/ownclaw-run-123");
     private static final Path RESOLVER = Path.of("/run/systemd/resolve");
+    private static final Path JOURNAL = Path.of("/var/log/journal");
     private static final List<Path> AUTHORED = List.of(
             SKILL.resolve("SKILL.yaml"), SKILL.resolve("skill.py"), SKILL.resolve("requirements.txt"));
     private static final List<String> COMMAND =
@@ -35,7 +36,7 @@ class SkillJailArgsTest {
         var readOnly = new java.util.ArrayList<>(AUTHORED);
         readOnly.add(VENV);
         readOnly.add(HANDED);
-        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT, SkillJail.JOURNAL), resolver, SKILL, readOnly,
+        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT, JOURNAL), resolver, SKILL, readOnly,
                 List.of(new SkillJail.Bind(ROOT.resolve(".ssh"), ROOT.resolve(".ssh"))), TMP, COMMAND);
     }
 
@@ -65,8 +66,8 @@ class SkillJailArgsTest {
         int work = first(ops, "--bind", SKILL.toString(), SKILL.toString());
         assertTrue(tmpfs < work && work < remount);
         // Every hidden root alike, the journal included.
-        assertTrue(first(ops, "--tmpfs", SkillJail.JOURNAL.toString()) < work);
-        assertTrue(first(ops, "--remount-ro", SkillJail.JOURNAL.toString()) > work);
+        assertTrue(first(ops, "--tmpfs", JOURNAL.toString()) < work);
+        assertTrue(first(ops, "--remount-ro", JOURNAL.toString()) > work);
         for (Op o : ops) {
             boolean skillBind = (o.flag().equals("--ro-bind") || o.flag().equals("--ro-bind-try"))
                     && !o.args().equals(List.of("/", "/")) && !o.args().get(0).equals(RESOLVER.toString());

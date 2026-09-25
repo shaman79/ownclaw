@@ -102,7 +102,7 @@ class SkillJailIntegrationTest {
             r['jvm_tmp_canary'] = os.path.exists(p['jvm_canary'])
             r['tmp_writable'] = appendable(p['scratch'])
             r['var_tmp_writable'] = appendable(p['var_scratch'])
-            r['crash'] = [q for q in p['crash'] if os.path.exists(q) or os.path.islink(q)]
+            r['stores'] = [q for q in p['stores'] if os.path.exists(q) or os.path.islink(q)]
             s = socket.socket()
             s.settimeout(3)
             try:
@@ -156,12 +156,12 @@ class SkillJailIntegrationTest {
     private Path scratch;
     private Path varScratch;
 
-    /** What is directly in the crash dump directories on this host. */
-    private static List<Path> crashDumps() throws IOException {
+    /** What is directly in the host's stores -- journald's and the crash dumps -- on this host. */
+    private static List<Path> hostStores() throws IOException {
         var out = new ArrayList<Path>();
-        for (Path dumps : SkillJail.CRASH_DUMPS) {
-            if (!Files.isDirectory(dumps) || !Files.isReadable(dumps)) continue;
-            try (Stream<Path> s = Files.list(dumps)) {
+        for (Path store : SkillJail.HOST_STORES) {
+            if (!Files.isDirectory(store) || !Files.isReadable(store)) continue;
+            try (Stream<Path> s = Files.list(store)) {
                 out.addAll(s.toList());
             }
         }
@@ -187,7 +187,7 @@ class SkillJailIntegrationTest {
         in.put("spawn", spawn);
         in.put("scratch", scratch.toString());
         in.put("var_scratch", varScratch.toString());
-        in.put("crash", crashDumps().stream().map(Path::toString).toList());
+        in.put("stores", hostStores().stream().map(Path::toString).toList());
         in.put("dns_name", "pypi.org");
         in.put("host_run", HOST_RUN);
         in.put("journal", journal().stream().map(Path::toString).toList());
@@ -221,7 +221,7 @@ class SkillJailIntegrationTest {
     /** What is directly in journald's stores on this host. */
     private static List<Path> journal() throws IOException {
         var out = new ArrayList<Path>();
-        for (Path store : SkillJail.JOURNALS) {
+        for (Path store : List.of(Path.of("/var/log/journal"), Path.of("/run/log/journal"))) {
             if (!Files.isDirectory(store) || !Files.isReadable(store)) continue;
             try (Stream<Path> s = Files.list(store)) {
                 out.addAll(s.toList());
@@ -272,8 +272,8 @@ class SkillJailIntegrationTest {
             Files.delete(scratch);
             assertTrue(Files.exists(varScratch), "the control run writes the host's /var/tmp");
             Files.delete(varScratch);
-            assertEquals(crashDumps().stream().map(Path::toString).toList(),
-                    mapper.convertValue(open.get("crash"), List.class), "control run should see the crash dumps");
+            assertEquals(hostStores().stream().map(Path::toString).toList(),
+                    mapper.convertValue(open.get("stores"), List.class), "control run should see the host's stores");
             if (open.get("mqueue_made").asBoolean()) {
                 assertTrue(Files.exists(QUEUE), "the control run's message queue is not on the host");
                 Files.delete(QUEUE);
@@ -321,7 +321,7 @@ class SkillJailIntegrationTest {
             assertFalse(Files.exists(scratch), "a jailed write to /tmp reached the host's /tmp");
             assertTrue(jailed.get("var_tmp_writable").asBoolean(), "/var/tmp is not writable inside the jail");
             assertFalse(Files.exists(varScratch), "a jailed write to /var/tmp reached the host's /var/tmp");
-            assertEquals(List.of(), mapper.convertValue(jailed.get("crash"), List.class), "the crash dumps are visible");
+            assertEquals(List.of(), mapper.convertValue(jailed.get("stores"), List.class), "the host's stores are visible");
             // Its message queues are its own: made inside, gone with the jail.
             assertTrue(jailed.get("mqueue_made").asBoolean(), "no message queue could be made in the jail");
             assertFalse(Files.exists(QUEUE), "a message queue made in the jail is on the host");

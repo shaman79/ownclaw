@@ -37,6 +37,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.stream.Stream;
 
 /**
  * Puts every Python process OwnClaw starts on the host for skills inside an unprivileged
@@ -56,12 +57,12 @@ import java.util.function.LongSupplier;
  * its state in, and only the skill's own directory (writable), its authored files, and what the
  * caller hands it (read-only) are put back. The jail cannot drop the service user's
  * supplementary groups, so what the groups deploy.sh adds open is hidden too: a tmpfs goes over
- * journald's store ({@link #JOURNAL}; systemd-journal), which holds the service's own console
+ * journald's store ({@link #HOST_STORES}; systemd-journal), which holds the service's own console
  * output, and another over all of {@code /run} ({@link #RUN}; docker's socket), with only the
  * resolver's directory put back ({@link #resolver}). Under /run too are the system bus and each user's
  * runtime directory, where the service user's systemd user manager and session bus would start
  * a process outside the jail when asked. The crash dumps are hidden as well
- * ({@link #CRASH_DUMPS}): one of a process of the service user's is readable by it, and holds
+ * ({@link #HOST_STORES}): one of a process of the service user's is readable by it, and holds
  * that process's memory. A skill's /tmp is its own, and so is /var/tmp -- the same directory.
  * A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
@@ -270,11 +271,10 @@ public class SkillJail {
             var out = new ArrayList<>(List.of(database, dotEnv(), uploads(), generated, envsRoot()));
             if (logDir != null) out.add(logDir);
             out.addAll(RUN_PROBES);
-            // A tmpfs leaves the directory it covers in place -- journald's stores, and a backups/
+            // A tmpfs leaves the directory it covers in place -- the host's stores, and a backups/
             // or repo/ linked elsewhere, are roots of their own: what was in them, as the host has
             // it now, is what must be gone.
-            for (Path store : JOURNALS) out.addAll(entries(store));
-            for (Path dumps : CRASH_DUMPS) out.addAll(entries(dumps));
+            for (Path store : HOST_STORES) out.addAll(entries(store));
             out.addAll(entries(backups()));
             out.addAll(entries(repo()));
             return out;
@@ -282,15 +282,14 @@ public class SkillJail {
 
         /**
          * What neither the owner's expose list nor a caller's bind may contain, by written and
-         * by real path: the service's state, journald's stores, the crash dumps, and what the
-         * self-check proves gone from /run.
+         * by real path: the service's state, the host's stores ({@link #HOST_STORES}), and what
+         * the self-check proves gone from /run.
          */
         List<Path> guarded() {
             var paths = new ArrayList<>(List.of(dataDir(), uploads(), database, dotEnv(), skillsRoot(),
                     generated, envsRoot(), backups(), repo()));
             if (logDir != null) paths.add(logDir);
-            paths.addAll(JOURNALS);
-            paths.addAll(CRASH_DUMPS);
+            paths.addAll(HOST_STORES);
             paths.addAll(RUN_PROBES);
             var out = new ArrayList<Path>();
             for (Path p : paths) {
@@ -826,11 +825,12 @@ public class SkillJail {
 
     /**
      * What the self-check proves gone from /run: docker's socket (deploy.sh puts the service user
-     * in the docker group when docker runs the containers), the system bus, and the users'
-     * runtime directories. A host without one passes that item trivially.
+     * in the docker group when docker runs the containers), the system bus, the users' runtime
+     * directories, and journald's volatile store (see {@link #HOST_STORES}). A host without one
+     * passes that item trivially.
      */
     static final List<Path> RUN_PROBES = List.of(Path.of("/run/docker.sock"),
-            Path.of("/run/dbus/system_bus_socket"), Path.of("/run/user"));
+            Path.of("/run/dbus/system_bus_socket"), Path.of("/run/user"), Path.of("/run/log/journal"));
 
     static final Path RESOLV_CONF = Path.of("/etc/resolv.conf");
 
@@ -850,21 +850,21 @@ public class SkillJail {
     }
 
     /**
-     * journald's persistent store. The unit sends the service's console output to the journal,
-     * and deploy.sh puts the service user in systemd-journal, which reads all of it: a group the
-     * jail cannot take away, so the store is hidden as the service's own state is.
+     * The host's stores a skill must not read, each a hidden root where present, as the
+     * service's own state is; what is in them is what the self-check proves gone, and none may
+     * be exposed or bound back.
+     * <ul>
+     *   <li>journald's persistent store. The unit sends the service's console output to the
+     *       journal, and deploy.sh puts the service user in systemd-journal, which reads all of
+     *       it: a group the jail cannot take away. Its volatile store goes with /run
+     *       ({@link #RUN_PROBES});</li>
+     *   <li>where crash reports and core dumps land: apport's reports, apport's core files and
+     *       systemd-coredump's. One of a crashed process of the service user's is readable by
+     *       that user, and holds the process's memory.</li>
+     * </ul>
      */
-    static final Path JOURNAL = Path.of("/var/log/journal");
-
-    /** Both of journald's stores; the volatile one goes with /run. */
-    static final List<Path> JOURNALS = List.of(JOURNAL, RUN.resolve("log/journal"));
-
-    /**
-     * Where crash reports and core dumps land: apport's and systemd-coredump's. A report of a
-     * crashed process of the service user's is readable by that user, and holds the process's
-     * memory. Hidden, where present, as journald's store is.
-     */
-    static final List<Path> CRASH_DUMPS = List.of(Path.of("/var/crash"), Path.of("/var/lib/systemd/coredump"));
+    static final List<Path> HOST_STORES = List.of(Path.of("/var/log/journal"), Path.of("/var/crash"),
+            Path.of("/var/lib/apport/coredump"), Path.of("/var/lib/systemd/coredump"));
 
     /** What is directly in {@code dir}: nothing when it is absent or cannot be listed. */
     private static List<Path> entries(Path dir) {
@@ -876,8 +876,8 @@ public class SkillJail {
     }
 
     static List<Path> hiddenRoots(Layout l) {
-        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), l.backups(),
-                l.repo(), JOURNAL, CRASH_DUMPS.get(0), CRASH_DUMPS.get(1));
+        return hiddenRoots(Stream.concat(Stream.of(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(),
+                l.backups(), l.repo()), HOST_STORES.stream()).toArray(Path[]::new));
     }
 
     /**

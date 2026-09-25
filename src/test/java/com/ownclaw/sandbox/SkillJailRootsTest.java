@@ -22,13 +22,12 @@ class SkillJailRootsTest {
     @TempDir Path tmp;
 
     /**
-     * {@code roots} and, where this host has them, journald's store and the crash dumps, in the
-     * order the jail sorts them.
+     * {@code roots} and, where this host has them, the host's stores -- journald's and the crash
+     * dumps -- in the order the jail sorts them.
      */
     static List<Path> withHostStores(List<Path> roots) {
         var out = new java.util.ArrayList<>(roots);
-        if (Files.isDirectory(SkillJail.JOURNAL)) out.add(SkillJail.JOURNAL);
-        for (Path dumps : SkillJail.CRASH_DUMPS) if (Files.isDirectory(dumps)) out.add(dumps);
+        for (Path store : SkillJail.HOST_STORES) if (Files.isDirectory(store)) out.add(store);
         return out.stream().sorted().toList();
     }
 
@@ -64,10 +63,10 @@ class SkillJailRootsTest {
         Files.createDirectories(m.root().resolve("repo/.git"));
         var l = m.layout();
         // The command line a standard layout gets is the one it got before they were candidates.
-        List<String> before = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l.cwd(), l.dataDir(),
-                l.skillsRoot(), l.envsRoot(), l.logDir(), SkillJail.JOURNAL, SkillJail.CRASH_DUMPS.get(0),
-                SkillJail.CRASH_DUMPS.get(1)), null, m.skillDir(), List.of(),
-                List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
+        var standard = new java.util.ArrayList<>(List.of(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir()));
+        standard.addAll(SkillJail.HOST_STORES);
+        List<String> before = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(standard.toArray(Path[]::new)),
+                null, m.skillDir(), List.of(), List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
         List<String> now = SkillJail.bwrapArgs("/usr/bin/bwrap", SkillJail.hiddenRoots(l), null, m.skillDir(),
                 List.of(), List.of(), tmp.resolve("run-tmp"), List.of("python3", "x.py"));
         assertEquals(before, now);
@@ -130,23 +129,19 @@ class SkillJailRootsTest {
     }
 
     @Test
-    @DisplayName("journald's store is hidden whenever it exists; /run is never a hidden root")
-    void theJournalIsHidden() throws Exception {
-        assumeTrue(Files.isDirectory(SkillJail.JOURNAL), "no persistent journal on this host");
+    @DisplayName("journald's store and every place a crash report or a core dump lands are hidden wherever they exist; /run is never a hidden root")
+    void theHostStoresAreHidden() throws Exception {
+        // Each by name: a store left out of the list is one a skill reads.
+        List<Path> stores = List.of(Path.of("/var/log/journal"), Path.of("/var/crash"),
+                Path.of("/var/lib/apport/coredump"), Path.of("/var/lib/systemd/coredump"));
+        assertEquals(stores, SkillJail.HOST_STORES);
+        var present = stores.stream().filter(Files::isDirectory).toList();
+        assumeTrue(!present.isEmpty(), "none of them on this host");
         var m = JailTestKit.Mirror.create(tmp);
         var roots = SkillJail.hiddenRoots(m.layout());
-        assertTrue(roots.contains(SkillJail.JOURNAL), roots.toString());
+        assertTrue(roots.containsAll(present), roots.toString());
         assertEquals(withHostStores(List.of(m.root().toRealPath())), roots);
         assertFalse(roots.stream().anyMatch(r -> r.startsWith("/run")), roots.toString());
-    }
-
-    @Test
-    @DisplayName("the crash dumps are hidden wherever they exist")
-    void theCrashDumpsAreHidden() throws Exception {
-        var present = SkillJail.CRASH_DUMPS.stream().filter(Files::isDirectory).toList();
-        assumeTrue(!present.isEmpty(), "no crash dump directory on this host");
-        var roots = SkillJail.hiddenRoots(JailTestKit.Mirror.create(tmp).layout());
-        assertTrue(roots.containsAll(present), roots.toString());
     }
 
     /** The command of the self-check's probe, from a jail over {@code m} that came up READY. */
@@ -164,42 +159,28 @@ class SkillJailRootsTest {
     @DisplayName("the self-check proves docker's socket, the system bus and the users' runtime directories gone")
     void theSelfCheckProbesRun() throws Exception {
         List<String> probe = probed(JailTestKit.Mirror.create(tmp));
-        for (String p : List.of("/run/docker.sock", "/run/dbus/system_bus_socket", "/run/user")) {
+        for (String p : List.of("/run/docker.sock", "/run/dbus/system_bus_socket", "/run/user", "/run/log/journal")) {
             assertTrue(probe.contains(p), "not probed: " + p + " in " + probe);
         }
     }
 
     @Test
-    @DisplayName("the self-check proves what is in journald's stores gone, not the directories a tmpfs leaves")
-    void theSelfCheckProbesTheJournal() throws Exception {
+    @DisplayName("the self-check proves what is in the host's stores gone, not the directories a tmpfs leaves")
+    void theSelfCheckProbesTheHostStores() throws Exception {
         var inside = new java.util.ArrayList<Path>();
-        for (Path store : List.of(SkillJail.JOURNAL, Path.of("/run/log/journal"))) {
+        for (Path store : SkillJail.HOST_STORES) {
             if (Files.isDirectory(store) && Files.isReadable(store)) {
                 try (var s = Files.list(store)) {
                     inside.addAll(s.toList());
                 }
             }
         }
-        assumeTrue(!inside.isEmpty(), "no journal on this host");
+        assumeTrue(!inside.isEmpty(), "nothing in them on this host");
         List<String> probe = probed(JailTestKit.Mirror.create(tmp));
         for (Path p : inside) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
-        assertFalse(probe.contains(SkillJail.JOURNAL.toString()), "the store itself stays, as the tmpfs's mount point");
-    }
-
-    @Test
-    @DisplayName("the self-check proves what is in the crash dump directories gone")
-    void theSelfCheckProbesTheCrashDumps() throws Exception {
-        var inside = new java.util.ArrayList<Path>();
-        for (Path dumps : SkillJail.CRASH_DUMPS) {
-            if (Files.isDirectory(dumps) && Files.isReadable(dumps)) {
-                try (var s = Files.list(dumps)) {
-                    inside.addAll(s.toList());
-                }
-            }
+        for (Path store : SkillJail.HOST_STORES) {
+            assertFalse(probe.contains(store.toString()), "the store itself stays, as the tmpfs's mount point: " + store);
         }
-        assumeTrue(!inside.isEmpty(), "no crash dumps on this host");
-        List<String> probe = probed(JailTestKit.Mirror.create(tmp));
-        for (Path p : inside) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
     }
 
     @Test
@@ -226,6 +207,7 @@ class SkillJailRootsTest {
                 "/opt/ownclaw/backups/b.tar", "/opt/ownclaw/repo/.git", "/opt/ownclaw", "/opt", "/",
                 "/proc/1", "/tmp", "/var/tmp", "/var", "relative/.ssh", "  ",
                 "/var/crash", "/var/crash/_usr_bin_x.1000.crash", "/var/lib/systemd/coredump",
+                "/var/lib/apport/coredump", "/var/lib/apport",
                 "/var/log", "/var/log/journal", "/run", "/run/dbus", "/run/user/1000", "/run/log",
                 "/opt/ownclaw/.ssh", "/opt/ownclaw/.config/rclone/", "/run/ownclaw-test-cups"), layout);
         assertEquals(List.of(
