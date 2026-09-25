@@ -700,39 +700,13 @@ The Executor can propose generalization: "I have 3 skills that all send messages
 
 ### 5.8 Skill Interaction (Mid-Execution User Input)
 
-Some skills need to communicate with the user during execution. The I/O protocol supports this:
+A skill cannot ask the user anything while it runs. Its input is the JSON on stdin, its result the JSON on stdout:
 
-**Standard flow** (non-interactive skill):
 ```
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
 ```
 
-**Interactive flow** (skill with `interactive: true`):
-```
-Java → [JSON params via stdin] → skill.py
-                                      │
-                                skill writes to stdout:
-                                {"type": "need_input", 
-                                 "prompt": "Found 3 files matching 'meeting*'. Which one?",
-                                 "options": ["meeting_feb20.md", "meeting_feb21.md", "meeting_feb22.md"]}
-                                      │
-                                      ▼
-                                Java reads this, forwards to user chat:
-                                "🔍 Found 3 files. Which one?
-                                 1. meeting_feb20.md
-                                 2. meeting_feb21.md
-                                 3. meeting_feb22.md"
-                                      │
-                                User responds: "3"
-                                      │
-                                      ▼
-                                Java writes to skill's stdin:
-                                {"type": "user_input", "value": "meeting_feb22.md"}
-                                      │
-                                skill.py continues execution...
-                                      │
-                                {"type": "result", "status": "success", "output": {...}}
-```
+A skill that prints a `{"type": "need_input", ...}` line anyway is stopped there: the process is killed and the run fails, rather than waiting for an answer that would never come. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
 
 **Progress reporting** (any skill):
 ```
@@ -984,7 +958,7 @@ Executor handles all compression locally (zero cloud cost):
 │  • Java writes JSON params to skill's stdin  │
 │  • Skill writes JSON lines to stdout:        │
 │    - {"type":"progress","message":"..."}     │
-│    - {"type":"need_input","prompt":"..."}    │
+│    - need_input: ends the run (§5.8)         │
 │    - {"type":"result","status":"...","output"}│
 │  • Stderr captured for debugging             │
 │  • Exit code: 0 = success, non-zero = error  │
@@ -1502,7 +1476,7 @@ During task execution, the system sends concise status messages to the user's ch
 | `started` | "⚙️ Starting: summarize emails" | Task begins execution |
 | `step` | "→ Step 2/4: filtering unread emails" | Each plan step begins |
 | `progress` | "⏳ Step 2/4: found 23 unread emails" | Skill sends progress update |
-| `need_input` | "❓ Skill needs input: Which folder? [Inbox/All]" | Skill requests user input |
+| `need_input` | "❓ Which folder should I search? [Inbox/All]" | A task stopped to ask the user a question |
 | `credential` | "🔑 Skill requests access to SMTP credentials. [Always/Once/Deny]" | Credential approval needed |
 | `mentor` | "🧠 Escalating to Mentor for planning..." | Cloud LLM invoked |
 | `completed` | "✅ Done: sent summary to john@example.com" | Task finished successfully |
@@ -1628,7 +1602,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Feedback loop (Mentor reviews, max N rounds)
 - [x] Plan cache (LRU, invalidation on skill changes)
 - [x] User preferences (maintained by Executor, local LLM)
-- [x] Skill interaction (need_input protocol)
+- [x] Skill interaction: a skill cannot wait on the user; need_input ends the run (§5.8)
 
 ### Phase 3: Polish & Hardening
 
