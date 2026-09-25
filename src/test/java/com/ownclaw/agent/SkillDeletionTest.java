@@ -15,7 +15,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,8 +30,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Deleting a skill removes a directory -- and environments -- that a run of it writes while it
- * goes on, and the delete opens directories with a chmod that follows a link. So a skill with a
- * run in flight is not deleted, and never leaves the registry on the way to that answer.
+ * goes on, and a run writing them meanwhile can leave part of them behind, or block the delete.
+ * So a skill with a run in flight is not deleted, and never leaves the registry on the way to
+ * that answer; and what the delete could not remove is said, not called deleted.
  */
 class SkillDeletionTest {
 
@@ -164,5 +167,39 @@ class SkillDeletionTest {
         assertSame(racing, dynamic.getDynamic("quick_skill").orElseThrow(), "not registered again");
         assertTrue(tools.find("quick_skill").isPresent());
         assertTrue(Files.exists(real.skillDir().resolve("skill.py")), "deleted under a run that had started");
+    }
+
+    @Test
+    @DisplayName("a directory the delete cannot open is left, and the answer says so instead of \"deleted\"")
+    void whatCannotBeRemovedIsSaid() throws Exception {
+        create("cache_skill", "def run(params):\n    return {'output': 'ok'}\n");
+        Path dir = generated.resolve("cache_skill");
+        // What a run's os.makedirs('cache', mode=0o300) leaves: a directory its owner cannot list.
+        Path cache = Files.createDirectories(dir.resolve("cache"));
+        Files.writeString(cache.resolve("blob"), "x");
+        Path envCache = Files.createDirectories(envs.resolve("cache_skill/cache"));
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
+        Files.setPosixFilePermissions(envCache, PosixFilePermissions.fromString("-wx------"));
+        try {
+            String answer = manager.deleteSkill("cache_skill");
+
+            assertTrue(answer.startsWith("ERROR") && answer.contains(dir.toString()), answer);
+            assertFalse(answer.contains("permanently deleted"), answer);
+            assertTrue(Files.exists(cache, LinkOption.NOFOLLOW_LINKS));
+            assertFalse(dynamic.isDynamic("cache_skill"), "it is unregistered all the same");
+
+            // The skill's directory gone, its environment's left: that is said too.
+            Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
+            com.ownclaw.sandbox.SkillJail.deleteTree(dir);
+            create("cache_skill", "def run(params):\n    return {'output': 'ok'}\n");
+            answer = manager.deleteSkill("cache_skill");
+            assertTrue(answer.startsWith("ERROR") && answer.contains("its environment"), answer);
+            assertTrue(Files.exists(envCache, LinkOption.NOFOLLOW_LINKS));
+        } finally {
+            if (Files.exists(cache, LinkOption.NOFOLLOW_LINKS)) {
+                Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
+            }
+            Files.setPosixFilePermissions(envCache, PosixFilePermissions.fromString("rwx------"));
+        }
     }
 }

@@ -318,8 +318,8 @@ class SkillJailIntegrationTest {
             long jailedMs = Long.parseLong(timing.get(1));
             assertTrue(jailedMs < 4000, "a background grandchild held the run open for " + jailedMs + " ms");
 
-            // The run's private /tmp goes when its launch closes, with a process of the run still
-            // going in its jail: this run's own directory, whatever other runs have in theirs.
+            // The run's private /tmp goes when its launch closes, once what the run left running
+            // in its jail is gone too: this run's own directory, whatever other runs have in theirs.
             Path runTmp;
             try (var launch = jail.prepare(List.of("/bin/sh", "-c", "sleep 8 & echo x > /tmp/left.txt"),
                     m.skillDir(), List.of())) {

@@ -378,11 +378,17 @@ public class SkillManager {
             return stillRunning(name);
         }
 
-        SkillJail.deleteTree(skill.skillDir());
+        boolean dirGone = SkillJail.deleteTree(skill.skillDir());
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
         // pulled in, for every skill ever deleted.
-        pythonEnv.removeEnvironments(name);
-
+        boolean envsGone = pythonEnv.removeEnvironments(name);
+        if (!dirGone || !envsGone) {
+            // A directory in it the service user cannot read -- a run's 0300 cache -- is left.
+            return "ERROR: Skill '" + name + "' is unregistered, but "
+                    + (dirGone ? "its environment" : skill.skillDir().toString())
+                    + " could not be fully removed: a directory in it cannot be read (the log names "
+                    + "it). Remove it on the host before creating a skill of this name again.";
+        }
         return "Skill '" + name + "' has been permanently deleted.";
     }
 

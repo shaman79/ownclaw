@@ -311,8 +311,11 @@ public class SkillJail {
      * anything the command left running goes on. Its pid 1 in the jail -- a fork of it, so it
      * carries the same argv, this run's /tmp included -- is killed once bubblewrap is gone
      * (--die-with-parent), and the kernel ends every process in the jail's PID namespace before
-     * that pid 1 is gone itself. Until then a process of the run can still write {@code runTmp},
-     * which {@link #deleteTree} must not meet. What is killed here is what carries that fresh
+     * that pid 1 is gone itself: nothing of the run outlives it. But it, and what the command
+     * left running, do outlive bubblewrap's return -- usually by a millisecond or so, and a
+     * process left running can still write {@code runTmp} in that time. A write racing
+     * {@link #deleteTree} can leave part of the tree, or block the delete on a FIFO; so the
+     * delete waits for that pid 1 instead. What is killed here is what carries that fresh
      * temporary path in its argv: this run's bubblewrap and its pid 1, or a process that put it
      * there itself, which only makes this wait longer.
      */
@@ -1415,31 +1418,37 @@ public class SkillJail {
 
     /**
      * Remove a directory tree a jailed run wrote, as far as it can be: the one recursive delete
-     * for such trees. The root is opened by its path, once. Everything below it is read, opened
-     * and removed by name, relative to its parent's open directory, and never through a link: a
-     * link is unlinked, not entered, and a directory is opened only as the directory it is -- one
-     * that has become a link since its type was read fails to open and is left. Each directory
-     * is made u+rwx before it is listed, since the run may have left it unwritable: the root by
-     * its path, the rest through their parent without following a link, which the JDK does by
-     * opening them. So one below the root that the service user cannot read -- a run's
-     * {@code os.makedirs('cache', mode=0o300)} -- stays closed and is left, as is anything more
-     * than {@link #DELETE_DEPTH} directories down. What is left is logged.
+     * for such trees. Returns whether {@code root} is gone. The root is opened by its path, once.
+     * Everything below it is read, opened and removed by name, relative to its parent's open
+     * directory, and never through a link: a link is unlinked, not entered, and every open below
+     * the root refuses one. Each directory is made u+rwx before it is listed, since the run may
+     * have left it unwritable: the root by its path, the rest through their parent without
+     * following a link, which the JDK does by opening them. So one below the root that the
+     * service user cannot read -- a run's {@code os.makedirs('cache', mode=0o300)} -- stays
+     * closed and is left, as is anything more than {@link #DELETE_DEPTH} directories down. What
+     * is left is logged.
      * <p>
      * So a process that writes the tree while this runs cannot turn the delete on anything
-     * outside it. The callers delete a tree once nothing should be writing it: a run's /tmp once
-     * its jail has ended ({@link Launch#close}); the self-check's own directories, which only its
-     * fixed probe writes; a probe's or syntax check's scratch directory, written by system Python
-     * alone; a container build's context, which only the JVM writes; a skill's directory and
-     * environments once no run of it is in flight ({@code SkillManager.deleteSkill}); and
-     * environments whose skill is gone (the prune). Two cases can still be writing: a load check
-     * or pip run of a skill of the same name being created or updated at that moment, and a run
-     * whose caller looked the skill up before it was unregistered and starts after the last
-     * check that none was in flight. Either can leave part of the tree behind.
+     * outside it. That holds by construction -- every open below the root is O_NOFOLLOW,
+     * relative to its parent's descriptor -- and is not unit-tested: no test can time a swap
+     * between the type being read and the open. Such a writer can still get in the delete's
+     * way. Whatever it swaps in for a directory after its type was read is opened read-only (and
+     * made u+rwx) before it is left -- a link fails to open -- and a FIFO put at a directory's
+     * name blocks the delete until something opens it for writing, which may be never. The
+     * callers delete a tree once nothing should be writing it: a run's /tmp once its jail has
+     * ended ({@link Launch#close}); the self-check's own directories, which only its fixed probe
+     * writes; a probe's or syntax check's scratch directory, written by system Python alone; a
+     * container build's context, which only the JVM writes; a skill's directory and environments
+     * once no run of it is in flight ({@code SkillManager.deleteSkill}); and environments whose
+     * skill is gone (the prune). Two cases can still be writing: a load check or pip run of a
+     * skill of the same name being created or updated at that moment, and a run whose caller
+     * looked the skill up before it was unregistered and starts after the last check that none
+     * was in flight. Either can leave part of the tree behind, or block the delete.
      * <p>
      * Where the file system offers no {@link SecureDirectoryStream} -- Windows, where there is
      * no jail either -- each entry is removed by its path, as a root of its own.
      */
-    public static void deleteTree(Path root) {
+    public static boolean deleteTree(Path root) {
         try {
             if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
                 openForOwner(Files.getFileAttributeView(root, PosixFileAttributeView.class));
@@ -1455,7 +1464,9 @@ public class SkillJail {
         } catch (IOException | RuntimeException e) {
             // best effort: what is left is logged below
         }
-        if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) log.warn("Could not fully remove {}", root);
+        boolean gone = !Files.exists(root, LinkOption.NOFOLLOW_LINKS);
+        if (!gone) log.warn("Could not fully remove {}", root);
+        return gone;
     }
 
     /** Remove what is in the open directory {@code dir}, {@code depth} levels below the root. */
@@ -1477,7 +1488,8 @@ public class SkillJail {
                 try {
                     sub = dir.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS);
                 } catch (IOException e) {
-                    log.warn("Not removing {}: it cannot be opened as the directory it was ({})", entry, e.toString());
+                    log.warn("Not removing {}: it cannot be opened (unreadable, or no longer the "
+                            + "directory it was) ({})", entry, e.toString());
                     continue;
                 }
                 try (sub) {

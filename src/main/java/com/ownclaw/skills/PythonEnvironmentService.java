@@ -303,8 +303,7 @@ public class PythonEnvironmentService {
             // is where that check lives. No cache eviction either: resolvePython checks that
             // the interpreter exists before it trusts a cache hit, so a pruned environment
             // simply misses on the next call.
-            SkillJail.deleteTree(o.dir());
-            boolean removed = !Files.exists(o.dir());
+            boolean removed = SkillJail.deleteTree(o.dir());
             if (removed) freed += o.bytes();
             else log.warn("Environment {} is still on disk after deletion — a file in it "
                     + "could not be removed; the space counted as freed excludes it.", o.dir());
@@ -317,22 +316,27 @@ public class PythonEnvironmentService {
         return out;
     }
 
-    /** Remove a skill's environments now, because the skill itself is being removed. */
-    public void removeEnvironments(String skillName) {
-        if (envsDir == null) return;
-        removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+    /**
+     * Remove a skill's environments now, because the skill itself is being removed. Returns
+     * whether they are gone.
+     */
+    public boolean removeEnvironments(String skillName) {
+        if (envsDir == null) return true;
+        return removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
     }
 
     /**
-     * Remove {@code <root>/<name>} under both roots — and only that.
+     * Remove {@code <root>/<name>} under both roots — and only that. Returns whether nothing
+     * of either is left.
      * <p>
      * The name comes from SKILL.yaml, which the boot scan takes verbatim; {@code ".."} resolved
      * under {@code _envs} and handed to a recursive delete removed the parent directory in a
      * probe. Static, as a function of its roots, so that probe is now a test.
      */
-    static void removeEnvironments(Path envsDir, Path targetsDir, String skillName,
-                                   java.util.function.Consumer<String> forget) {
-        if (skillName == null || skillName.isBlank()) return;
+    static boolean removeEnvironments(Path envsDir, Path targetsDir, String skillName,
+                                      java.util.function.Consumer<String> forget) {
+        if (skillName == null || skillName.isBlank()) return true;
+        boolean gone = true;
         for (Path root : List.of(envsDir, targetsDir)) {
             if (root == null) continue;
             Path dir = root.resolve(skillName);
@@ -340,9 +344,10 @@ public class PythonEnvironmentService {
                 log.warn("Refusing to remove environment for '{}': not a plain name", skillName);
                 continue;
             }
-            if (Files.isDirectory(dir)) SkillJail.deleteTree(dir);
+            if (Files.isDirectory(dir)) gone &= SkillJail.deleteTree(dir);
         }
         forget.accept(skillName);
+        return gone;
     }
 
     private void forgetProvisioning(String skillName) {

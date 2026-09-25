@@ -38,8 +38,7 @@ class SkillJailTreeTest {
         chmod(sealed, "r-x------");
         chmod(root, "---------");
 
-        SkillJail.deleteTree(root);
-
+        assertTrue(SkillJail.deleteTree(root), "deleteTree said it left the tree behind");
         assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS), "deleteTree left the tree behind");
     }
 
@@ -54,7 +53,7 @@ class SkillJailTreeTest {
         Files.writeString(closed.resolve("inside.txt"), "x");
         chmod(closed, "-wx------");
         try {
-            SkillJail.deleteTree(root);
+            assertFalse(SkillJail.deleteTree(root), "deleteTree said the tree is gone");
 
             assertTrue(Files.exists(closed, LinkOption.NOFOLLOW_LINKS));
             assertEquals("-wx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(closed)));
@@ -65,47 +64,26 @@ class SkillJailTreeTest {
     }
 
     @Test
-    @DisplayName("deleteTree unlinks a link and never enters it")
+    @DisplayName("deleteTree unlinks a link, at the top or further down, and never enters it")
     void deleteTreeNeverEntersALink() throws Exception {
+        // Everything below the root is opened and removed by name through its parent, refusing a
+        // link, so what a link leads to is never listed, opened for its owner or emptied.
         Path elsewhere = Files.createDirectories(tmp.resolve("elsewhere"));
         Path kept = Files.writeString(elsewhere.resolve("kept.txt"), "x");
+        Path deep = Files.writeString(Files.createDirectories(elsewhere.resolve("sub")).resolve("deep.txt"), "x");
         chmod(elsewhere, "r-x------");
         Path root = Files.createDirectories(tmp.resolve("run-tmp"));
+        Files.writeString(Files.createDirectories(root.resolve("a")).resolve("own.txt"), "x");
         Files.createSymbolicLink(root.resolve("out"), elsewhere);
+        Files.createSymbolicLink(root.resolve("a/b"), elsewhere);
 
-        SkillJail.deleteTree(root);
+        assertTrue(SkillJail.deleteTree(root));
 
         assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS));
-        assertTrue(Files.exists(kept), "deleteTree deleted through a link");
+        assertTrue(Files.exists(kept) && Files.exists(deep), "deleteTree deleted through a link");
         assertEquals("r-x------", PosixFilePermissions.toString(Files.getPosixFilePermissions(elsewhere)),
                 "deleteTree opened a directory through a link");
         chmod(elsewhere, "rwx------");
-    }
-
-    @Test
-    @DisplayName("deleteTree removes a tree whose directories were swapped for links, and leaves where they lead as it was")
-    void deleteTreeNeverFollowsASwappedDirectory() throws Exception {
-        // What a run writing the tree could leave: a directory, at the top or further down,
-        // replaced by a link to one outside. Everything below the root is opened and removed
-        // by name through its parent, refusing a link, so what the link leads to is never
-        // listed, opened for its owner or emptied.
-        Path canary = Files.createDirectories(tmp.resolve("canary"));
-        Files.writeString(canary.resolve("secret.txt"), "canary");
-        Files.writeString(Files.createDirectories(canary.resolve("sub")).resolve("deep.txt"), "canary");
-        chmod(canary, "r-x------");
-        Path root = Files.createDirectories(tmp.resolve("run-tmp"));
-        Files.writeString(Files.createDirectories(root.resolve("a")).resolve("own.txt"), "x");
-        Files.createSymbolicLink(root.resolve("cache"), canary);
-        Files.createSymbolicLink(root.resolve("a/b"), canary);
-
-        SkillJail.deleteTree(root);
-
-        assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS), "deleteTree left the tree behind");
-        assertEquals("canary", Files.readString(canary.resolve("secret.txt")));
-        assertEquals("canary", Files.readString(canary.resolve("sub/deep.txt")));
-        assertEquals("r-x------", PosixFilePermissions.toString(Files.getPosixFilePermissions(canary)),
-                "deleteTree opened a directory through a link");
-        chmod(canary, "rwx------");
     }
 
     @Test
