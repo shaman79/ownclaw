@@ -180,8 +180,9 @@ public final class JailTestKit {
     }
 
     /**
-     * A stand-in for python. Every start leaves its argv and the environment it was handed
-     * ({@code launch.N/argv}, {@code launch.N/env} under {@code launches}); {@code -m venv DIR}
+     * A stand-in for python. Every start leaves its argv, the environment it was handed and
+     * whether its input ended within 5 s ({@code launch.N/argv}, {@code launch.N/env},
+     * {@code launch.N/stdin} under {@code launches}); {@code -m venv DIR}
      * makes DIR/bin/python a copy of itself, and anything else -- pip included -- succeeds
      * doing nothing. While {@code venvFails} exists, venv fails as it does on a host without
      * ensurepip, so provisioning falls back to a --target install.
@@ -193,6 +194,7 @@ public final class JailTestKit {
                 // What the JVM handed over, before the shell adds anything of its own.
                 + "tr '\\0' '\\n' < /proc/$$/environ > \"$d/env\"\n"
                 + "printf '%s\\n' \"$@\" > \"$d/argv\"\n"
+                + "if timeout 5 cat > /dev/null; then echo ended; else echo open; fi > \"$d/stdin\"\n"
                 + "if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then\n"
                 + "  if [ -e '" + venvFails + "' ]; then echo 'Error: ensurepip is not available'; exit 1; fi\n"
                 + "  mkdir -p \"$3/bin\" && cp \"$0\" \"$3/bin/python\"\n"
@@ -200,8 +202,8 @@ public final class JailTestKit {
                 + "exit 0\n");
     }
 
-    /** One start of {@link #fakePython}. */
-    record Launched(List<String> argv, Map<String, String> env) {
+    /** One start of {@link #fakePython}; {@code inputEnded}: its stdin ended within 5 s. */
+    record Launched(List<String> argv, Map<String, String> env, boolean inputEnded) {
         boolean pipInstall() {
             return argv.size() > 2 && argv.get(0).equals("-m") && argv.get(1).equals("pip")
                     && argv.get(2).equals("install");
@@ -217,7 +219,8 @@ public final class JailTestKit {
                 int eq = line.indexOf('=');
                 if (eq > 0) env.put(line.substring(0, eq), line.substring(eq + 1));
             }
-            out.add(new Launched(Files.readAllLines(d.resolve("argv")), env));
+            out.add(new Launched(Files.readAllLines(d.resolve("argv")), env,
+                    Files.readString(d.resolve("stdin")).strip().equals("ended")));
         }
         return out;
     }

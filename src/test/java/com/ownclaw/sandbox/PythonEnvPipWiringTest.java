@@ -112,6 +112,18 @@ class PythonEnvPipWiringTest {
     }
 
     @Test
+    @DisplayName("pip and venv find their input closed: a build that asks for a password fails at once, not at the timeout")
+    void pipAndVenvFindTheirInputClosed() throws Exception {
+        Files.writeString(requirements(), "requests\n");
+
+        service(inactiveJail()).resolveExecution(m.skillDir(), "probe_skill");
+
+        var all = launched();
+        assertTrue(all.stream().anyMatch(JailTestKit.Launched::pipInstall), "pip was not started: " + all);
+        for (var l : all) assertTrue(l.inputEnded(), "its input was left open: " + l.argv());
+    }
+
+    @Test
     @DisplayName("installPackages starts nothing for a name pip would read as a path, a URL or an option")
     void craftedPackageNamesStartNothing() throws Exception {
         var svc = service(inactiveJail());

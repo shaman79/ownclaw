@@ -819,6 +819,9 @@ public class PythonEnvironmentService {
             pb.redirectErrorStream(true);
             SkillJail.applyEnvironment(pb, Map.of());
             Process p = pb.start();
+            // Nothing is written to its input: a build hook, or pip asking for a private index's
+            // password, reads its end at once and fails, rather than waiting out the timeout.
+            p.getOutputStream().close();
             // Read beside the wait, not after it: a command whose output fills the pipe blocks
             // until it is read, and a hung build hook that holds the output open -- or a process
             // it left running -- never gives the read an end. So a command out of time is killed
