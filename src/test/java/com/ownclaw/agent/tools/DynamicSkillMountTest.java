@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.sandbox.ContainerSandbox;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -29,6 +30,11 @@ import static org.junit.jupiter.api.Assertions.*;
  * read-only, and nothing else. The directory holds every file every user has sent.
  */
 class DynamicSkillMountTest {
+
+    /** The host sandbox, which a container skill never reaches: a run there fails the test. */
+    private static final SandboxManager HOST = (python, script, dir, stdin, env, timeout, progress, readOnly) -> {
+        throw new AssertionError("a container skill ran on the host");
+    };
 
     /** A container runtime that records what it was asked to run, and runs nothing. */
     static final class Recording extends ContainerSandbox {
@@ -74,7 +80,7 @@ class DynamicSkillMountTest {
         Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
         var container = new Recording();
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
-                null, new PythonEnvironmentService(new OwnClawConfig()), List.of(), null,
+                HOST, new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()), List.of(), null,
                 List.of("poppler-utils"), null, container, files);
 
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false,
@@ -126,7 +132,7 @@ class DynamicSkillMountTest {
                         : new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false);
             }
         };
-        var installs = new PythonEnvironmentService(new OwnClawConfig()) {
+        var installs = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
                 return true;
             }
@@ -134,7 +140,7 @@ class DynamicSkillMountTest {
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
         Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
-                null, installs, List.of(), null, List.of("poppler-utils"), null, container, files);
+                HOST, installs, List.of(), null, List.of("poppler-utils"), null, container, files);
 
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false,
                 null, List.of(handed)));
@@ -176,7 +182,7 @@ class DynamicSkillMountTest {
         Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
         var container = new Recording();
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
-                null, new PythonEnvironmentService(new OwnClawConfig()), List.of(), null,
+                HOST, new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()), List.of(), null,
                 List.of("poppler-utils"), null, container, null);
 
         skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false, null, List.of()));

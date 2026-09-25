@@ -21,16 +21,21 @@ class SkillJailArgsTest {
     private static final Path VENV = ROOT.resolve("skills/_envs/pdf reader");
     private static final Path HANDED = ROOT.resolve("data/uploads/9f2c_bank statement.pdf");
     private static final Path TMP = Path.of("/tmp/ownclaw-run-123");
+    private static final Path RESOLVER = Path.of("/run/systemd/resolve");
     private static final List<Path> AUTHORED = List.of(
             SKILL.resolve("SKILL.yaml"), SKILL.resolve("skill.py"), SKILL.resolve("requirements.txt"));
     private static final List<String> COMMAND =
             List.of("/usr/bin/python3", SKILL.resolve("_runner_1a.py").toString());
 
     private static List<String> argv() {
+        return argv(RESOLVER);
+    }
+
+    private static List<String> argv(Path resolver) {
         var readOnly = new java.util.ArrayList<>(AUTHORED);
         readOnly.add(VENV);
         readOnly.add(HANDED);
-        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT, SkillJail.USER_RUNTIME), SKILL, readOnly,
+        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT, SkillJail.JOURNAL), resolver, SKILL, readOnly,
                 List.of(new SkillJail.Bind(ROOT.resolve(".ssh"), ROOT.resolve(".ssh"))), TMP, COMMAND);
     }
 
@@ -59,12 +64,12 @@ class SkillJailArgsTest {
         int remount = first(ops, "--remount-ro", ROOT.toString());
         int work = first(ops, "--bind", SKILL.toString(), SKILL.toString());
         assertTrue(tmpfs < work && work < remount);
-        // Every hidden root alike, /run/user included.
-        assertTrue(first(ops, "--tmpfs", SkillJail.USER_RUNTIME.toString()) < work);
-        assertTrue(first(ops, "--remount-ro", SkillJail.USER_RUNTIME.toString()) > work);
+        // Every hidden root alike, the journal included.
+        assertTrue(first(ops, "--tmpfs", SkillJail.JOURNAL.toString()) < work);
+        assertTrue(first(ops, "--remount-ro", SkillJail.JOURNAL.toString()) > work);
         for (Op o : ops) {
             boolean skillBind = (o.flag().equals("--ro-bind") || o.flag().equals("--ro-bind-try"))
-                    && !o.args().equals(List.of("/", "/"));
+                    && !o.args().equals(List.of("/", "/")) && !o.args().get(0).equals(RESOLVER.toString());
             if (skillBind) {
                 assertTrue(tmpfs < o.index() && o.index() < remount, "out of place: " + o);
             }
@@ -101,11 +106,43 @@ class SkillJailArgsTest {
     }
 
     @Test
-    @DisplayName("nothing about the environment is ever on the command line")
-    void noEnvironmentInArgv() {
-        for (String a : argv()) {
-            assertFalse(a.startsWith("--setenv") || a.startsWith("--unsetenv") || a.startsWith("--clearenv"), a);
+    @DisplayName("/run is emptied after the host goes in, only the resolver put back, and made read-only after every bind")
+    void runHoldsOnlyTheResolver() {
+        var ops = JailTestKit.ops(argv());
+        int host = first(ops, "--ro-bind", "/", "/");
+        int run = first(ops, "--tmpfs", "/run");
+        int resolver = first(ops, "--ro-bind-try", RESOLVER.toString(), RESOLVER.toString());
+        int remount = first(ops, "--remount-ro", "/run");
+        assertTrue(host < run && run < resolver && resolver < remount);
+        int lastBind = ops.stream().filter(o -> o.flag().contains("bind")).mapToInt(Op::index).max().orElseThrow();
+        assertTrue(remount > lastBind, "/run made read-only before a bind");
+        assertEquals(1, ops.stream().filter(o -> o.flag().equals("--tmpfs") && o.args().equals(List.of("/run"))).count());
+        for (Op o : ops) {
+            if (o.flag().contains("bind") && o.index() != resolver) {
+                assertFalse(Path.of(o.args().get(1)).startsWith("/run"), "put back under /run: " + o);
+            }
         }
+    }
+
+    @Test
+    @DisplayName("with no resolver under /run, /run stays empty")
+    void noResolverNoBind() {
+        var ops = JailTestKit.ops(argv(null));
+        first(ops, "--tmpfs", "/run");
+        first(ops, "--remount-ro", "/run");
+        assertFalse(ops.stream().anyMatch(o -> o.flag().contains("bind") && Path.of(o.args().get(1)).startsWith("/run")),
+                ops.toString());
+    }
+
+    @Test
+    @DisplayName("the resolver is its directory under /run, the file alone directly in /run, and nothing outside /run")
+    void resolverDirectory() {
+        // Paths that do not exist are taken as they are written.
+        assertEquals(Path.of("/run/ownclaw-test-none/resolve"),
+                SkillJail.resolver(Path.of("/run/ownclaw-test-none/resolve/stub-resolv.conf")));
+        assertEquals(Path.of("/run/ownclaw-test-resolv.conf"), SkillJail.resolver(Path.of("/run/ownclaw-test-resolv.conf")));
+        assertNull(SkillJail.resolver(Path.of("/etc/ownclaw-test-resolv.conf")));
+        assertNull(SkillJail.resolver(Path.of("/runaway/resolv.conf")));
     }
 
     @Test

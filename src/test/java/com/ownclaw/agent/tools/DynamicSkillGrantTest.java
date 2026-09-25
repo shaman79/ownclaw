@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.RealBubblewrap;
 import com.ownclaw.sandbox.SandboxManager;
@@ -87,7 +88,7 @@ class DynamicSkillGrantTest {
     }
 
     private PythonEnvironmentService environment(Path envDir, List<List<String>> installs) {
-        return new PythonEnvironmentService(new OwnClawConfig()) {
+        return new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override
             public PythonResolution resolveExecution(Path skillDir, String skillName) {
                 return new PythonResolution("python3", Map.of(), envDir);

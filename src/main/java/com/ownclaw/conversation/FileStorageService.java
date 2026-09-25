@@ -109,14 +109,23 @@ public class FileStorageService {
      * <p>
      * A link at the name -- left by a skill that ran unjailed, say -- is not followed: the path
      * is read into a model's context and served for download, and would hand over whatever the
-     * link leads to. {@link #delete} takes the name as it is, so it still removes a link there.
+     * link leads to. Nor is a file with a second name, a hard link: {@link #store} writes each
+     * upload new, so another name was made later, and to .env or the database it is that file.
+     * The count is read where the file system keeps one the JVM can read (not on Windows).
+     * {@link #delete} takes the name as it is, so it still removes a link there.
      */
     public Path getFilePath(String fileId) {
         List<String> names = jdbc.queryForList(
                 "SELECT stored_name FROM file_attachments WHERE id = ?", String.class, fileId);
         if (names.isEmpty()) return null;
         Path path = storedPath(names.getFirst());
-        return path != null && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ? path : null;
+        if (path == null || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return null;
+        if (!path.getFileSystem().supportedFileAttributeViews().contains("unix")) return path;
+        try {
+            return (Integer) Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) == 1 ? path : null;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /**

@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.interfaces.web.SkillController;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.RealBubblewrap;
 import com.ownclaw.sandbox.SkillJail;
@@ -84,7 +85,7 @@ class AuthoredFilesPreconditionTest {
     @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
     @DisplayName("an authored file that is a link is refused: its target is neither read, written nor shown")
     void aLinkedAuthoredFileIsRefused(String file) throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         assertFalse(create(CODE, null).startsWith("ERROR"));
         Path planted = skillDir().resolve(file);
         Files.delete(planted);
@@ -118,7 +119,7 @@ class AuthoredFilesPreconditionTest {
     @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
     @DisplayName("an authored file that is a hard link to .env is refused: never read, shown or written")
     void aHardLinkedAuthoredFileIsRefused(String file) throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         assertFalse(create(CODE, null).startsWith("ERROR"));
         // Made while nothing was jailed, it is a regular file to every other check.
         Path planted = skillDir().resolve(file);
@@ -144,7 +145,7 @@ class AuthoredFilesPreconditionTest {
     @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
     @DisplayName("a link a skill leaves at an authored file while it is checked is not written through by the restore")
     void theRestoreNeverWritesThroughALink(String file) throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         assertFalse(create(CODE, null).startsWith("ERROR"));
         // Unjailed -- as every skill runs until bubblewrap is installed -- the load check runs the
         // module's top level in the skill's own directory. This one swaps the file for a link and
@@ -168,7 +169,7 @@ class AuthoredFilesPreconditionTest {
     @Test
     @DisplayName("a skill with no requirements gets an empty regular requirements.txt, and runs on system Python")
     void noRequirementsMeansAnEmptyFile() throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         Path req = generated.resolve("greet_user/requirements.txt");
 
         assertFalse(create(CODE, null).startsWith("ERROR"));
@@ -320,7 +321,7 @@ class AuthoredFilesPreconditionTest {
     @Test
     @DisplayName("quarantining a skill that left a link at the note's name writes the note, never through the link")
     void theQuarantineNoteIsNotWrittenThroughALink() throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         Path dir = Files.createDirectories(generated.resolve("bad_skill"));
         Files.writeString(dir.resolve("skill.py"), "raise SystemExit\n");
         Files.createSymbolicLink(dir.resolve("QUARANTINE-REASON.txt"), secret);
@@ -338,7 +339,7 @@ class AuthoredFilesPreconditionTest {
     @Test
     @DisplayName("a SKILL.yaml that is a link is refused at load, not parsed through it")
     void aLinkedYamlIsNotLoaded() throws Exception {
-        setUp(SkillJail.off());
+        setUp(JailTestKit.off());
         Path dir = Files.createDirectories(generated.resolve("linked_skill"));
         Files.writeString(dir.resolve("skill.py"), CODE);
         Path elsewhere = Files.writeString(root.resolve("elsewhere.yaml"),

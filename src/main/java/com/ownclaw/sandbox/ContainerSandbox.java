@@ -33,14 +33,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>The container gets:
  * <ul>
  *   <li>The skill directory bind-mounted read-write at {@code /skill}, with its SKILL.yaml,
- *       skill.py and requirements.txt read-only on top -- refused, as the jail refuses a bind,
- *       when the directory is a link, holds a hard link out, or an authored file is not a
- *       regular file</li>
+ *       skill.py and requirements.txt read-only on top</li>
  *   <li>Each file the task was handed, read-only</li>
  *   <li>{@code --network=host} so the skill can access the local network</li>
- *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) via {@code -e}</li>
+ *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) by name, {@code -e KEY},
+ *       each value in the runtime CLI's own environment and never on its command line</li>
  *   <li>JSON input on stdin, JSON output on stdout</li>
  * </ul>
+ * Every bind passes the jail's checks first ({@link SkillJail#checkBinds}), and the run is
+ * refused at the first that fails: a link, a hard link out, an authored file that is not a
+ * regular file, a bind reaching the service's state.
  * A run here never passes {@link SkillJail}, whatever its mode: the container is its isolation.
  * So while the jail refuses every launch, {@code DynamicSkill} refuses a container run too.
  *
@@ -416,11 +418,7 @@ public class ContainerSandbox {
             }
 
         } finally {
-            // Clean up build context
-            try (var walk = Files.walk(buildCtx)) {
-                walk.sorted(Comparator.reverseOrder())
-                        .forEach(path -> { try { Files.deleteIfExists(path); } catch (IOException ignored) {} });
-            }
+            SkillJail.deleteTree(buildCtx);
         }
     }
 
@@ -528,10 +526,7 @@ public class ContainerSandbox {
         try {
             List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars);
 
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(false);
-
-            Process process = pb.start();
+            Process process = runProcess(cmd, envVars).start();
 
             // Write JSON input to stdin
             if (stdinJson != null) {
@@ -613,10 +608,7 @@ public class ContainerSandbox {
         try {
             List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, extraVolumes);
 
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(false);
-
-            Process process = pb.start();
+            Process process = runProcess(cmd, envVars).start();
 
             if (stdinJson != null) {
                 try (OutputStream os = process.getOutputStream()) {
@@ -705,30 +697,23 @@ public class ContainerSandbox {
         cmd.add("-i");              // interactive (for stdin)
         cmd.add("--network=host");  // access local network (for scanning, etc.)
 
-        // Bind-mount the skill directory at /skill (read-write for temp files), checked as the
-        // jail checks what it binds: the runtime follows a link to wherever it leads -- docker's
-        // daemon as root -- and a hard link out of the directory would be as writable as the rest.
+        // Every bind checked as the jail checks its own: the runtime follows a link to wherever
+        // it leads -- docker's daemon as root -- and a hard link out of a bind shows its other
+        // name's file, writable in the skill directory.
         Path dir = skillDir.toAbsolutePath().normalize();
-        SkillJail.refuseLink(dir, Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath().normalize().getParent());
-        List<Path> authored = SkillJail.authoredFiles(dir);
-        String linked = SkillJail.linkedOutside(dir);
-        if (linked != null) throw new IOException(linked);
+        Map<String, String> handed = extraVolumes == null ? Map.of() : extraVolumes;
+        List<Path> readOnly = SkillJail.checkBinds(dir,
+                handed.keySet().stream().map(Path::of).toList(), SkillJail.layoutOf(config));
+        // The skill directory at /skill, read-write for temp files.
         cmd.add("-v");
         cmd.add(dir + ":/skill");
-        // Its authored files read-only on top, as in the jail: a skill that rewrote its own
-        // SKILL.yaml could declare the credentials it wants, and its requirements.txt what the
-        // JVM installs next.
-        for (Path f : authored) {
+        // Then what the check left, read-only: each handed file at the path it was told, and the
+        // skill's authored files over their own names, as in the jail -- a skill that rewrote its
+        // own SKILL.yaml could declare the credentials it wants, and its requirements.txt what
+        // the JVM installs next.
+        for (Path f : readOnly) {
             cmd.add("-v");
-            cmd.add(f + ":/skill/" + f.getFileName() + ":ro");
-        }
-
-        // Extra bind-mounts (e.g. uploads directory for attached files)
-        if (extraVolumes != null) {
-            for (var vol : extraVolumes.entrySet()) {
-                cmd.add("-v");
-                cmd.add(vol.getKey() + ":" + vol.getValue() + ":ro");
-            }
+            cmd.add(f + ":" + handed.getOrDefault(f.toString(), "/skill/" + f.getFileName()) + ":ro");
         }
 
         // Ensure Python shared library is always findable at runtime
@@ -745,16 +730,13 @@ public class ContainerSandbox {
         // ran a line. It only happened to skills that declare BOTH system_packages (which selects
         // the container) and requirements.txt (which creates the host venv) -- exactly the
         // combination the built-in capability patterns prescribe for system and network work.
-        if (envVars != null) {
-            for (var entry : envVars.entrySet()) {
-                String key = entry.getKey();
-                if ("PATH".equals(key) || "PYTHONPATH".equals(key)) {
-                    log.debug("Not forwarding host {} into the container; it names host paths.", key);
-                    continue;
-                }
-                cmd.add("-e");
-                cmd.add(key + "=" + entry.getValue());
-            }
+        //
+        // By name only: the process list shows a command line to every user on the host, so the
+        // values -- the skill's credentials among them -- go in the CLI's own environment
+        // (runProcess), and the runtime passes each named one on.
+        for (String key : forwarded(envVars).keySet()) {
+            cmd.add("-e");
+            cmd.add(key);
         }
 
         cmd.add(imageTag);
@@ -764,6 +746,27 @@ public class ContainerSandbox {
         cmd.add("/skill/" + scriptPath.getFileName());
 
         return cmd;
+    }
+
+    /**
+     * The runtime CLI's process for a run command: its environment is the jail's allow-list and
+     * the values of the variables {@link #buildRunCommand} names, which the runtime passes on.
+     */
+    static ProcessBuilder runProcess(List<String> cmd, Map<String, String> envVars) {
+        ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(false);
+        SkillJail.applyEnvironment(pb, forwarded(envVars));
+        return pb;
+    }
+
+    /**
+     * The variables a run passes into the container: {@code envVars} without PATH and PYTHONPATH,
+     * which name host paths (see buildRunCommand).
+     */
+    private static Map<String, String> forwarded(Map<String, String> envVars) {
+        var out = new LinkedHashMap<String, String>(envVars == null ? Map.of() : envVars);
+        out.remove("PATH");
+        out.remove("PYTHONPATH");
+        return out;
     }
 
     // ────────────────────── Helpers ──────────────────────

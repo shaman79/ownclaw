@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
@@ -49,7 +50,7 @@ class SkillLifecycleTest {
      * real one in {@link SkillLifecycleJailedTest}, which runs these same tests inside it.
      */
     SkillJail jail(Path root, Path generated) throws IOException {
-        return SkillJail.off();
+        return JailTestKit.off();
     }
 
     @BeforeEach

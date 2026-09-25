@@ -1,6 +1,7 @@
 package com.ownclaw.agent.tools;
 
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
@@ -37,7 +38,7 @@ class DynamicSkillSelfHealNameTest {
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
         Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
         var asked = new ArrayList<List<String>>();
-        var pythonEnv = new PythonEnvironmentService(new OwnClawConfig()) {
+        var pythonEnv = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override public boolean installPackages(Path dir, String name, List<String> packages) {
                 asked.add(packages);
                 return false;

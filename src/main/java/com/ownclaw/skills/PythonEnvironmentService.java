@@ -15,6 +15,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -156,11 +158,6 @@ public class PythonEnvironmentService {
         return d.getParent() != null && d.getParent().equals(r) && !d.equals(r);
     }
 
-    /** Without a jail: for tests that build the service by hand. */
-    public PythonEnvironmentService(OwnClawConfig config) {
-        this(config, SkillJail.off());
-    }
-
     @Autowired
     public PythonEnvironmentService(OwnClawConfig config, SkillJail jail) {
         this.config = config;
@@ -219,14 +216,11 @@ public class PythonEnvironmentService {
         }
     }
 
+    // Asked, not tried: a probe file written by name would go through a link left at that name.
     private boolean tryEnsureWritableDir(Path dir) {
         try {
             Files.createDirectories(dir);
-            Path probe = dir.resolve(".write_test");
-            Files.writeString(probe, "ok", StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-            Files.deleteIfExists(probe);
-            return true;
+            return Files.isWritable(dir);
         } catch (Exception e) {
             return false;
         }
@@ -688,7 +682,7 @@ public class PythonEnvironmentService {
         }
 
         Path dest = bootstrapDir.resolve("get-pip.py");
-        if (Files.exists(dest) && Files.size(dest) > 0) {
+        if (Files.isRegularFile(dest, LinkOption.NOFOLLOW_LINKS) && Files.size(dest) > 0) {
             return dest;
         }
 
@@ -706,7 +700,9 @@ public class PythonEnvironmentService {
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
                 throw new IOException("Failed to download get-pip.py: HTTP " + resp.statusCode());
             }
-            Files.write(dest, resp.body(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            // A link left at the name is replaced, never written through. get-pip.py is Python
+            // source, text.
+            SkillJail.writeFresh(dest, new String(resp.body(), StandardCharsets.UTF_8));
             return dest;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -868,17 +864,22 @@ public class PythonEnvironmentService {
 
     /**
      * The hash an earlier provisioning left, or null when there is none to trust. Its directory
-     * is one a jailed pip writes, so only a regular file counts: a link is not followed, and
-     * the fresh write that follows replaces it.
+     * is one a jailed pip writes -- a concurrent run's pip for the same skill among them, while
+     * this reads -- so a link is not followed, and no more is read than the opened file's size.
+     * That keeps a FIFO put at the name from hanging the thread: it has no size, and opened for
+     * writing as well as reading, its open does not wait for a writer (Linux), as an open for
+     * reading alone would. Whatever is there, the fresh write that follows replaces it.
      */
-    private static String storedHash(Path hashFile) throws IOException {
-        if (!Files.isRegularFile(hashFile, LinkOption.NOFOLLOW_LINKS)) return null;
-        return readNoFollow(hashFile).strip();
-    }
-
-    private static String readNoFollow(Path file) throws IOException {
-        try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    private static String storedHash(Path hashFile) {
+        try (FileChannel in = FileChannel.open(hashFile, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS)) {
+            ByteBuffer hash = ByteBuffer.allocate((int) Math.min(in.size(), 256));
+            while (hash.hasRemaining() && in.read(hash) > 0) {
+                // a regular file's bytes, no more than it held
+            }
+            return new String(hash.array(), 0, hash.position(), StandardCharsets.UTF_8).strip();
+        } catch (IOException e) {
+            return null;
         }
     }
 

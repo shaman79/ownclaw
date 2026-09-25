@@ -7,7 +7,7 @@ import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.interfaces.CommandHandler;
-import com.ownclaw.sandbox.SkillJail;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -48,7 +48,7 @@ class CommandDispatchOnceTest {
 
         CountingCommandHandler(ConversationService conversations, TaskQueue queue) {
             super(null, conversations, null, null, null, null, queue, null, null, null, null, null, null,
-                    SkillJail.off());
+                    JailTestKit.off());
         }
 
         @Override

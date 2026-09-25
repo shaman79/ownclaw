@@ -191,9 +191,9 @@ ownclaw:
     # Skill isolation (SkillJail): every Python process OwnClaw starts on the host for skills
     # (their runs and checks, venv and pip) runs inside an unprivileged bubblewrap jail that
     # sees the host read-only and cannot see the database, .env, uploads it was not handed,
-    # other skills, logs, backups or /run/user. Network stays shared. A skill with
-    # system_packages runs in docker/podman instead when one is available -- refused while
-    # the jail refuses.
+    # other skills, logs, backups, the systemd journal, or /run (the resolver aside). Network
+    # stays shared. A skill with system_packages runs in docker/podman instead when one is
+    # available -- refused while the jail refuses.
     #   auto      jail when /usr/bin/bwrap is installed and passes its self-check. While
     #             bwrap is absent or cannot start a jail, skills run unjailed, with one
     #             warning. It refuses every launch when bwrap runs but the self-check fails,
@@ -215,7 +215,8 @@ ownclaw:
     bwrap-path: ${OWNCLAW_SANDBOX_BWRAP_PATH:/usr/bin/bwrap}
     # Host paths a jailed skill may still read, read-only, e.g. a HOME dotfile it needs:
     #   OWNCLAW_SANDBOX_EXPOSE=/opt/ownclaw/.ssh,/opt/ownclaw/.config/rclone
-    # Entries that overlap data/, uploads, .env, skills/, logs/, backups/ or repo/ are dropped.
+    # Entries that overlap data/, uploads, .env, skills/, logs/, backups/, repo/, the journal,
+    # docker's socket, the system bus or /run/user are dropped.
     expose: []
     stall-timeout: 120   # kill process if no output for this many seconds
     python-path: python

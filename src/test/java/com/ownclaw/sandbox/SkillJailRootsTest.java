@@ -21,10 +21,10 @@ class SkillJailRootsTest {
 
     @TempDir Path tmp;
 
-    /** {@code roots} and, on a host that has one, /run/user, in the order the jail sorts them. */
-    static List<Path> withUserRuntime(List<Path> roots) {
+    /** {@code roots} and, on a host that has one, journald's store, in the order the jail sorts them. */
+    static List<Path> withJournal(List<Path> roots) {
         var out = new java.util.ArrayList<>(roots);
-        if (Files.isDirectory(SkillJail.USER_RUNTIME)) out.add(SkillJail.USER_RUNTIME);
+        if (Files.isDirectory(SkillJail.JOURNAL)) out.add(SkillJail.JOURNAL);
         return out.stream().sorted().toList();
     }
 
@@ -32,7 +32,7 @@ class SkillJailRootsTest {
     @DisplayName("only the outermost directory is hidden when it contains the rest")
     void outermostOnly() throws Exception {
         var m = JailTestKit.Mirror.create(tmp);
-        assertEquals(withUserRuntime(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
+        assertEquals(withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
     }
 
     @Test
@@ -49,7 +49,7 @@ class SkillJailRootsTest {
         var roots = SkillJail.hiddenRoots(layout);
         assertTrue(roots.contains(root.toRealPath()), roots.toString());
         assertTrue(roots.contains(elsewhere.toRealPath()), "the real data directory must be hidden: " + roots);
-        assertEquals(withUserRuntime(List.of(root.toRealPath(), elsewhere.toRealPath())), roots);
+        assertEquals(withJournal(List.of(root.toRealPath(), elsewhere.toRealPath())), roots);
     }
 
     @Test
@@ -99,28 +99,50 @@ class SkillJailRootsTest {
     }
 
     @Test
-    @DisplayName("/run/user is hidden whenever it exists; /run and the resolver's files under it are not")
-    void theUserRuntimeDirectoryIsHidden() throws Exception {
-        assumeTrue(Files.isDirectory(SkillJail.USER_RUNTIME), "no /run/user on this host");
+    @DisplayName("journald's store is hidden whenever it exists; /run is never a hidden root")
+    void theJournalIsHidden() throws Exception {
+        assumeTrue(Files.isDirectory(SkillJail.JOURNAL), "no persistent journal on this host");
         var m = JailTestKit.Mirror.create(tmp);
         var roots = SkillJail.hiddenRoots(m.layout());
-        assertEquals(List.of(SkillJail.USER_RUNTIME, m.root().toRealPath()).stream().sorted().toList(), roots);
-        assertFalse(roots.stream().anyMatch(r -> Path.of("/run/systemd/resolve").startsWith(r)), roots.toString());
+        assertEquals(List.of(SkillJail.JOURNAL, m.root().toRealPath()).stream().sorted().toList(), roots);
+        assertFalse(roots.stream().anyMatch(r -> r.startsWith("/run")), roots.toString());
     }
 
-    @Test
-    @DisplayName("the self-check proves the service user's own directory under /run/user hidden")
-    void theSelfCheckProbesTheUserRuntimeDirectory() throws Exception {
-        Path mine = SkillJail.ownRuntimeDir();
-        assumeTrue(mine != null, "no /run/user/<uid> on this host");
-        var m = JailTestKit.Mirror.create(tmp);
+    /** The command of the self-check's probe, from a jail over {@code m} that came up READY. */
+    private List<String> probed(JailTestKit.Mirror m) throws Exception {
         Path record = Files.createDirectories(tmp.resolve("rec"));
         Path bwrap = JailTestKit.recordingEach(tmp.resolve("bin/bwrap"), record);
         var jail = new SkillJail("required", bwrap.toString(), m.layout(), List.of(), new AtomicLong()::get);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        List<String> probe = Files.readAllLines(record.resolve("call.0/argv"));
-        assertTrue(JailTestKit.command(probe).contains(SkillJail.PROBE_NAME), probe.toString());
-        assertTrue(JailTestKit.command(probe).contains(mine.toString()), "not probed: " + probe);
+        List<String> probe = JailTestKit.command(Files.readAllLines(record.resolve("call.0/argv")));
+        assertTrue(probe.contains(SkillJail.PROBE_NAME), probe.toString());
+        return probe;
+    }
+
+    @Test
+    @DisplayName("the self-check proves docker's socket, the system bus and the users' runtime directories gone")
+    void theSelfCheckProbesRun() throws Exception {
+        List<String> probe = probed(JailTestKit.Mirror.create(tmp));
+        for (String p : List.of("/run/docker.sock", "/run/dbus/system_bus_socket", "/run/user")) {
+            assertTrue(probe.contains(p), "not probed: " + p + " in " + probe);
+        }
+    }
+
+    @Test
+    @DisplayName("the self-check proves what is in journald's stores gone, not the directories a tmpfs leaves")
+    void theSelfCheckProbesTheJournal() throws Exception {
+        var inside = new java.util.ArrayList<Path>();
+        for (Path store : List.of(SkillJail.JOURNAL, Path.of("/run/log/journal"))) {
+            if (Files.isDirectory(store) && Files.isReadable(store)) {
+                try (var s = Files.list(store)) {
+                    inside.addAll(s.toList());
+                }
+            }
+        }
+        assumeTrue(!inside.isEmpty(), "no journal on this host");
+        List<String> probe = probed(JailTestKit.Mirror.create(tmp));
+        for (Path p : inside) assertTrue(probe.contains(p.toString()), "not probed: " + p + " in " + probe);
+        assertFalse(probe.contains(SkillJail.JOURNAL.toString()), "the store itself stays, as the tmpfs's mount point");
     }
 
     @Test
@@ -133,10 +155,12 @@ class SkillJailRootsTest {
                 "/opt/ownclaw/skills/generated/other", "/opt/ownclaw/skills/_envs/x", "/opt/ownclaw/logs",
                 "/opt/ownclaw/backups/b.tar", "/opt/ownclaw/repo/.git", "/opt/ownclaw", "/opt", "/",
                 "/proc/1", "/tmp", "relative/.ssh", "  ",
-                "/opt/ownclaw/.ssh", "/opt/ownclaw/.config/rclone/"), layout);
+                "/var/log", "/var/log/journal", "/run", "/run/dbus", "/run/user/1000", "/run/log",
+                "/opt/ownclaw/.ssh", "/opt/ownclaw/.config/rclone/", "/run/ownclaw-test-cups"), layout);
         assertEquals(List.of(
                 new SkillJail.Bind(Path.of("/opt/ownclaw/.ssh"), Path.of("/opt/ownclaw/.ssh")),
-                new SkillJail.Bind(Path.of("/opt/ownclaw/.config/rclone"), Path.of("/opt/ownclaw/.config/rclone"))),
+                new SkillJail.Bind(Path.of("/opt/ownclaw/.config/rclone"), Path.of("/opt/ownclaw/.config/rclone")),
+                new SkillJail.Bind(Path.of("/run/ownclaw-test-cups"), Path.of("/run/ownclaw-test-cups"))),
                 kept);
     }
 

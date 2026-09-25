@@ -111,6 +111,25 @@ class FileStorageServicePathTest {
     }
 
     @Test
+    @DisplayName("an upload with a second name -- a hard link to .env -- is neither read, served nor handed over")
+    void aHardLinkedUploadGivesNoPath() throws Exception {
+        String id = files.store("u1", "statement.txt", "text/plain",
+                new ByteArrayInputStream("the statement".getBytes(StandardCharsets.UTF_8)));
+        Path stored = files.getFilePath(id);
+        Files.delete(stored);
+        Files.createLink(stored, env);
+
+        assertNull(files.getFilePath(id), "a path to .env under the upload's name");
+        assertNull(files.readAsText(id), "the hard link was read");
+
+        // A second name made for an upload from elsewhere is just as much another name.
+        String other = files.store("u1", "other.txt", "text/plain",
+                new ByteArrayInputStream("other".getBytes(StandardCharsets.UTF_8)));
+        Files.createLink(tmp.resolve("elsewhere.txt"), files.getFilePath(other));
+        assertNull(files.getFilePath(other));
+    }
+
+    @Test
     @DisplayName("deleting a tampered row removes the row, never the file it points at")
     void deleteNeverFollowsATamperedName() throws Exception {
         String id = row("../ownclaw.db");

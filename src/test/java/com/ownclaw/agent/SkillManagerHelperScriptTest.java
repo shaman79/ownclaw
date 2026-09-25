@@ -5,6 +5,7 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -130,7 +131,7 @@ class SkillManagerHelperScriptTest {
     @DisplayName("a load check the jail refuses fails the skill: not registered unverified")
     void aRefusedLoadCheckFailsClosed() throws Exception {
         var refused = SandboxResult.refused("could not isolate this launch: test refusal");
-        var m = manager(new Recording(refused), new PythonEnvironmentService(cfg));
+        var m = manager(new Recording(refused), new PythonEnvironmentService(cfg, JailTestKit.off()));
 
         String result = m.skills().createSkill(skill("greet_user", CODE));
 
@@ -144,7 +145,7 @@ class SkillManagerHelperScriptTest {
     @DisplayName("the load check reads the skill's environment read-only, under a fresh name each time")
     void theLoadCheckGetsTheEnvironmentAndAFreshName() throws Exception {
         Path envDir = Files.createDirectories(root.resolve("_envs/greet_user"));
-        var env = new PythonEnvironmentService(cfg) {
+        var env = new PythonEnvironmentService(cfg, JailTestKit.off()) {
             @Override
             public PythonResolution resolveExecution(Path skillDir, String skillName) {
                 return new PythonResolution("python3", Map.of(), envDir);
@@ -173,9 +174,9 @@ class SkillManagerHelperScriptTest {
         List<String> planted = List.of("_load_check.py", "_runner_.py", "_runner_0_0.py");
         for (String name : planted) Files.createSymbolicLink(dir.resolve(name), canary);
 
-        var env = new PythonEnvironmentService(cfg);
+        var env = new PythonEnvironmentService(cfg, JailTestKit.off());
         env.init();
-        var sandbox = new ProcessSandbox(new ObjectMapper(), SkillJail.off());
+        var sandbox = new ProcessSandbox(new ObjectMapper(), JailTestKit.off());
         var m = manager(sandbox, env);
 
         String created = m.skills().createSkill(skill("greet_user", CODE));

@@ -229,7 +229,7 @@ public class OwnClawConfig {
     public static class Sandbox {
         /** auto, required or off -- see SkillJail. */
         private String isolation = "auto";
-        /** Host paths a jailed skill may read, e.g. a HOME dotfile; protected paths are dropped. */
+        /** Host paths a jailed skill may read, e.g. a HOME dotfile; ones reaching what it hides are dropped. */
         private java.util.List<String> expose = new java.util.ArrayList<>();
         private String bwrapPath = "/usr/bin/bwrap";
         private int stallTimeout = 120;

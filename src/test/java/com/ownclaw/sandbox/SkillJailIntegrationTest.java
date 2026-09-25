@@ -90,7 +90,16 @@ class SkillJailIntegrationTest {
             r['skill_yaml_writable'] = appendable('SKILL.yaml')
             r['etc_readable'] = readable('/etc/passwd')
             r['resolv_readable'] = readable('/etc/resolv.conf')
-            r['user_runtime'] = os.path.exists(p['user_runtime']) if p['user_runtime'] else None
+            try:
+                socket.getaddrinfo(p['dns_name'], 443)
+                r['dns'] = True
+            except Exception:
+                r['dns'] = False
+            r['run'] = sorted(os.listdir('/run'))
+            r['run_writable'] = appendable('/run/ownclaw-it-probe')
+            r['host_run'] = [q for q in p['host_run'] if os.path.exists(q) or os.path.islink(q)]
+            r['journal'] = [q for q in p['journal'] if os.path.exists(q)]
+            r['journal_readable'] = [q for q in p['journal_files'] if readable(q)]
             r['jvm_tmp_canary'] = os.path.exists(p['jvm_canary'])
             r['tmp_writable'] = appendable(p['scratch'])
             s = socket.socket()
@@ -160,8 +169,10 @@ class SkillJailIntegrationTest {
         in.put("port", port);
         in.put("spawn", spawn);
         in.put("scratch", scratch.toString());
-        Path runtime = SkillJail.ownRuntimeDir();
-        in.put("user_runtime", runtime == null ? "" : runtime.toString());
+        in.put("dns_name", "pypi.org");
+        in.put("host_run", HOST_RUN);
+        in.put("journal", journal().stream().map(Path::toString).toList());
+        in.put("journal_files", journalFiles().stream().map(Path::toString).toList());
 
         long start = System.nanoTime();
         var result = new ProcessSandbox(mapper, jail).execute("python3", script, m.skillDir(),
@@ -170,6 +181,42 @@ class SkillJailIntegrationTest {
         timing.add(String.valueOf(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
         assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
         return mapper.readTree(result.stdout());
+    }
+
+    // What the jail must hide of the host's /run, by both names /run has.
+    private static final List<String> HOST_RUN = List.of("/run/docker.sock", "/var/run/docker.sock",
+            "/run/dbus/system_bus_socket", "/run/user", "/run/user/" + uid(), "/run/systemd/journal/socket");
+
+    private static String uid() {
+        try {
+            return String.valueOf(Files.getAttribute(Path.of("/proc/self"), "unix:uid"));
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /** What is directly in journald's stores on this host. */
+    private static List<Path> journal() throws IOException {
+        var out = new ArrayList<Path>();
+        for (Path store : SkillJail.JOURNALS) {
+            if (!Files.isDirectory(store) || !Files.isReadable(store)) continue;
+            try (Stream<Path> s = Files.list(store)) {
+                out.addAll(s.toList());
+            }
+        }
+        return out;
+    }
+
+    /** A few journal files, one level below the stores. */
+    private static List<Path> journalFiles() throws IOException {
+        var out = new ArrayList<Path>();
+        for (Path dir : journal()) {
+            if (!Files.isDirectory(dir) || !Files.isReadable(dir)) continue;
+            try (Stream<Path> s = Files.list(dir)) {
+                s.limit(3).forEach(out::add);
+            }
+        }
+        return out;
     }
 
     private static List<Path> runTmpDirs() throws IOException {
@@ -188,15 +235,21 @@ class SkillJailIntegrationTest {
             var timing = new ArrayList<String>();
 
             // Unjailed, the probe sees everything: the control that makes the jailed run mean something.
-            JsonNode open = run(SkillJail.off(), jvmCanary, port, false, timing);
+            JsonNode open = run(JailTestKit.off(), jvmCanary, port, false, timing);
             for (String leak : List.of("db", "env", "log", "other_upload", "other_skill", "jvm_environ",
                     "java_visible", "jvm_tmp_canary", "skill_yaml_writable")) {
                 assertTrue(open.get(leak).asBoolean(), "control run should see " + leak + ": " + open);
             }
             assertNotEquals(1, open.get("ppid").asInt());
-            if (SkillJail.ownRuntimeDir() != null) {
-                assertTrue(open.get("user_runtime").asBoolean(), "control run should see /run/user/<uid>");
-            }
+            List<String> hostRun = HOST_RUN.stream()
+                    .filter(q -> Files.exists(Path.of(q), LinkOption.NOFOLLOW_LINKS)).toList();
+            assertEquals(hostRun, mapper.convertValue(open.get("host_run"), List.class),
+                    "control run should see what the host has of /run");
+            assertEquals(journal().stream().map(Path::toString).toList(),
+                    mapper.convertValue(open.get("journal"), List.class), "control run should see the journal");
+            assertEquals(journalFiles().stream().filter(Files::isReadable).map(Path::toString).toList(),
+                    mapper.convertValue(open.get("journal_readable"), List.class),
+                    "control run should read what the service user can of the journal");
             assertTrue(Files.exists(scratch), "the control run writes the host's /tmp");
             Files.delete(scratch);
 
@@ -204,7 +257,7 @@ class SkillJailIntegrationTest {
             var status = jail.status();
             assertEquals(SkillJail.State.READY, status.state(), status.reason());
             assertFalse(status.selfCheck().containsValue(false), status.selfCheck().toString());
-            assertEquals(SkillJailRootsTest.withUserRuntime(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
+            assertEquals(SkillJailRootsTest.withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
 
             var before = runTmpDirs();
             JsonNode jailed = run(jail, jvmCanary, port, true, timing);
@@ -227,9 +280,18 @@ class SkillJailIntegrationTest {
                     "a write to the skill's own directory must reach the host");
             assertFalse(jailed.get("skill_yaml_writable").asBoolean(), "SKILL.yaml is writable inside the jail");
             assertTrue(jailed.get("etc_readable").asBoolean());
-            // The user manager's and the session bus's sockets are gone; the resolver is not.
-            assertFalse(jailed.get("user_runtime").asBoolean(false), "/run/user/<uid> is visible inside the jail");
+            // /run holds the resolver's directory and nothing else, read-only; the journal's
+            // contents are gone. Names still resolve wherever they do outside.
+            Path resolver = SkillJail.resolver(SkillJail.RESOLV_CONF);
+            assertEquals(resolver == null ? List.of() : List.of(resolver.getName(1).toString()),
+                    mapper.convertValue(jailed.get("run"), List.class), "more than the resolver under /run");
+            assertEquals(List.of(), mapper.convertValue(jailed.get("host_run"), List.class), "visible under /run");
+            assertFalse(jailed.get("run_writable").asBoolean(), "/run is writable inside the jail");
+            assertEquals(List.of(), mapper.convertValue(jailed.get("journal"), List.class), "the journal is visible");
+            assertEquals(List.of(), mapper.convertValue(jailed.get("journal_readable"), List.class),
+                    "the journal is readable");
             assertEquals(open.get("resolv_readable"), jailed.get("resolv_readable"), "DNS configuration lost");
+            if (open.get("dns").asBoolean()) assertTrue(jailed.get("dns").asBoolean(), "names no longer resolve");
             assertTrue(jailed.get("tmp_writable").asBoolean());
             assertFalse(Files.exists(scratch), "a jailed write to /tmp reached the host's /tmp");
             assertFalse(jailed.get("jvm_tmp_canary").asBoolean(), "the JVM's /tmp is visible");
@@ -300,12 +362,12 @@ class SkillJailIntegrationTest {
         var layout = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
         List<Path> db = List.of(root.resolve("data/ownclaw.db"), realData.resolve("ownclaw.db"));
 
-        JsonNode open = readableFrom(SkillJail.off(), skillDir, db);
+        JsonNode open = readableFrom(JailTestKit.off(), skillDir, db);
         for (Path p : db) assertTrue(open.get(p.toString()).asBoolean(), "control run should read " + p);
 
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withUserRuntime(List.of(root.toRealPath(), realData.toRealPath())),
+        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath(), realData.toRealPath())),
                 SkillJail.hiddenRoots(layout));
         JsonNode jailed = readableFrom(jail, skillDir, db);
         for (Path p : db) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
@@ -323,7 +385,7 @@ class SkillJailIntegrationTest {
         Files.delete(root.resolve(".env"));
         Files.createSymbolicLink(root.resolve(".env"), elsewhere);
         var layout = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
-        assertTrue(readableFrom(SkillJail.off(), skillDir, List.of(elsewhere)).get(elsewhere.toString()).asBoolean(),
+        assertTrue(readableFrom(JailTestKit.off(), skillDir, List.of(elsewhere)).get(elsewhere.toString()).asBoolean(),
                 "control run should read the linked .env");
 
         var jail = new SkillJail("auto", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
@@ -343,11 +405,11 @@ class SkillJailIntegrationTest {
         var layout = new SkillJail.Layout(root, data.resolve("ownclaw.db"), root.resolve("skills/generated"), null);
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withUserRuntime(List.of(root.toRealPath())), SkillJail.hiddenRoots(layout),
+        assertEquals(SkillJailRootsTest.withJournal(List.of(root.toRealPath())), SkillJail.hiddenRoots(layout),
                 "the data directory is not there yet");
 
         Path db = Files.writeString(Files.createDirectories(data).resolve("ownclaw.db"), "canary-db-secret");
-        assertTrue(readableFrom(SkillJail.off(), skillDir, List.of(db)).get(db.toString()).asBoolean(),
+        assertTrue(readableFrom(JailTestKit.off(), skillDir, List.of(db)).get(db.toString()).asBoolean(),
                 "control run should read the database");
         assertFalse(readableFrom(jail, skillDir, List.of(db)).get(db.toString()).asBoolean(),
                 "a data directory made after the jail's check is readable inside the jail");

@@ -123,13 +123,35 @@ class SkillJailTreeTest {
     }
 
     @Test
-    @DisplayName("a directory that cannot be opened is named in the refusal")
+    @DisplayName("a bound directory that cannot be opened is named in the refusal")
     void aDirectoryThatStaysUnreadableIsNamed() throws Exception {
         // Nothing in a skill's directory can be another user's, so borrow one of the host's.
         Path notOurs = Path.of("/root");
         assumeTrue(Files.isDirectory(notOurs) && !Files.isReadable(notOurs),
                 "needs a directory this user can neither read nor open");
-        assertEquals("could not read /root under /root: a directory there cannot be listed or entered",
+        assertEquals("/root cannot be listed or entered, so what it holds cannot be checked",
                 SkillJail.linkedOutside(notOurs));
+    }
+
+    @Test
+    @DisplayName("the answer names the bound directory, never a name the walk found in it")
+    void noWalkedNameInTheAnswer() throws Exception {
+        // A second run can swap a directory for a link while the walk is under way, and the
+        // names found past it are then another directory's.
+        Path outside = Files.writeString(tmp.resolve("outside.txt"), "x");
+        Path dir = Files.createDirectories(tmp.resolve("skill"));
+        Files.createLink(Files.createDirectories(dir.resolve("sub")).resolve("found-name.txt"), outside);
+        assertEquals("a file under " + dir + " has another name outside it (a hard link): tampered skill",
+                SkillJail.linkedOutside(dir));
+
+        SkillJail.deleteTree(dir.resolve("sub"));
+        Path closed = Files.createDirectories(dir.resolve("closed-name"));
+        chmod(closed, "---------");
+        try {
+            assertEquals("a directory under " + dir + " cannot be listed or entered, so what it holds cannot be checked",
+                    SkillJail.linkedOutside(dir));
+        } finally {
+            chmod(closed, "rwx------");
+        }
     }
 }

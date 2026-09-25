@@ -5,7 +5,7 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
-import com.ownclaw.sandbox.SkillJail;
+import com.ownclaw.sandbox.JailTestKit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -36,7 +36,7 @@ class OpsServiceTest {
         String session = conversations.createSession("u1", "Statements");
         conversations.saveMessage("u1", session, "assistant", "[Private answer]", List.of(), "a1b2c3d4", SECRET);
         var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper(),
-                SkillJail.off());
+                JailTestKit.off());
 
         // Guarding the column was not enough: a CTE column list renames it without naming it.
         for (String sql : List.of("SELECT * FROM conversations",
@@ -70,7 +70,7 @@ class OpsServiceTest {
         config.getSkills().setGeneratedPath(generated.toString());
         var ops = new OpsService(config, MigratedDatabase.at(tmp.resolve("t.db")), null,
                 new DynamicSkillRegistry(config, null, null, null, null, null, null), null, null, null,
-                new ObjectMapper(), SkillJail.off());
+                new ObjectMapper(), JailTestKit.off());
 
         var rows = new java.util.HashMap<String, Map<String, Object>>();
         for (var row : (List<Map<String, Object>>) ops.skills(null).get("skills")) {

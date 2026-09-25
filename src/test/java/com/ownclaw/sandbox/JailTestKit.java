@@ -1,5 +1,7 @@
 package com.ownclaw.sandbox;
 
+import com.ownclaw.config.OwnClawConfig;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -11,11 +13,20 @@ import java.util.Map;
 
 /**
  * What the jail tests share: a mirror of the production directory on a temp dir, stand-ins for
- * /usr/bin/bwrap, and a reader for the argv the jail builds.
+ * /usr/bin/bwrap, and a reader for the argv the jail builds. Public for {@link #off}.
  */
-final class JailTestKit {
+public final class JailTestKit {
 
     private JailTestKit() {}
+
+    /**
+     * A jail that is switched off, for tests anywhere that build a sandbox by hand. Its layout is
+     * the default configuration's, as the service's own would be.
+     */
+    public static SkillJail off() {
+        return new SkillJail("off", null, SkillJail.layoutOf(new OwnClawConfig()), List.of(),
+                System::currentTimeMillis);
+    }
 
     /** A small copy of /opt/ownclaw: the secrets are canaries a test can look for. */
     record Mirror(Path root, Path db, Path env, Path uploads, Path handed, Path otherUpload,

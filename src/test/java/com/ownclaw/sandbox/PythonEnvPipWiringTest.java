@@ -363,4 +363,50 @@ class PythonEnvPipWiringTest {
             assertEquals(0, s.count(), "a refusal fell through to downloading get-pip.py");
         }
     }
+
+    @Test
+    @DisplayName("choosing where environments go writes nothing through a link left in the directory")
+    void theWritableCheckWritesNothing() throws Exception {
+        // .write_test was the probe file's fixed name: a link left there made startup write
+        // "ok" wherever it led, then delete the link.
+        Path envs = m.root().resolve("skills/_envs");
+        Path planted = Files.createSymbolicLink(envs.resolve(".write_test"), m.env());
+        String before = Files.readString(m.env());
+
+        var svc = service(inactiveJail());
+
+        assertEquals(before, Files.readString(m.env()), ".env was written through the link");
+        assertTrue(Files.isSymbolicLink(planted));
+        Files.writeString(requirements(), "requests\n");
+        assertEquals(venv(), svc.resolveExecution(m.skillDir(), "probe_skill").envDir(),
+                "the writable directory was not the one chosen");
+    }
+
+    @Test
+    @DisplayName("a FIFO where the requirements hash is kept hangs nothing: the hash is taken as absent and rewritten")
+    void aFifoAtTheHashHangsNothing() throws Exception {
+        // What a jailed pip of a concurrent run of the same skill can put there between one
+        // look at the name and the next. Opened for reading alone, it would wait for a writer.
+        assumeTrue(Files.isExecutable(Path.of("/usr/bin/mkfifo")), "no mkfifo");
+        Files.writeString(requirements(), "requests\n");
+        var svc = service(inactiveJail());
+        Files.createDirectories(venv().resolve("bin"));
+        Files.copy(python, venv().resolve("bin/python"));
+        Path hash = venv().resolve(".req_hash");
+        assertEquals(0, new ProcessBuilder("/usr/bin/mkfifo", hash.toString()).start().waitFor());
+        try {
+            String chosen = assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
+                    () -> svc.resolvePython(m.skillDir(), "probe_skill"));
+            assertEquals(venv().resolve("bin/python").toString(), chosen,
+                    String.valueOf(svc.getLastProvisionError(m.skillDir(), "probe_skill")));
+            assertTrue(Files.isRegularFile(hash, LinkOption.NOFOLLOW_LINKS), "the FIFO was not replaced");
+            assertEquals(1, pipInstalls(), "provisioning ran again");
+        } finally {
+            // A reader left waiting on the FIFO is let go: opened for both, the open never waits.
+            if (Files.exists(hash, LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(hash, LinkOption.NOFOLLOW_LINKS)) {
+                java.nio.channels.FileChannel.open(hash, java.nio.file.StandardOpenOption.READ,
+                        java.nio.file.StandardOpenOption.WRITE).close();
+            }
+        }
+    }
 }

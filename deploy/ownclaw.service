@@ -31,7 +31,7 @@ ProtectSystem=strict
 # Load-bearing for skill isolation: the jail shows skills the host read-only as this unit sees
 # it, so this is what keeps /home and /root out of their sight. It hides /run/user too, where
 # the service user's systemd user manager would start a process outside any jail; the jail
-# hides that itself as well. Do not remove it.
+# hides all of /run itself as well. Do not remove it.
 ProtectHome=true
 # Only what the service writes at runtime. The repo, this unit file and deploy.sh are
 # root-owned and deliberately NOT writable: the service runs LLM-generated code, and

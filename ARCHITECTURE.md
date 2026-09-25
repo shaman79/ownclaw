@@ -921,7 +921,7 @@ Executor handles all compression locally (zero cloud cost):
 
 ### 8.1 Sandbox Architecture
 
-Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups) and over `/run/user`; the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` is its own, the PID namespace is new and the network is the host's. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) is installed and passes its self-check, runs skills unjailed with a warning until then, and refuses every launch if a jail that has worked stops starting; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read; entries that overlap the service's state are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
+Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups), over journald's store, and over all of `/run` but the resolver's directory (docker's socket, the system bus, the users' runtime directories); the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` is its own, the PID namespace is new and the network is the host's. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) is installed and passes its self-check, runs skills unjailed with a warning until then, and refuses every launch if a jail that has worked stops starting; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read; entries that overlap what the jail hides are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -931,8 +931,8 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 │  │          SkillJail (bubblewrap)         │  │
 │  │                                         │  │
 │  │  Linux: every host Python of a skill    │  │
-│  │  • Host read-only; service state and    │  │
-│  │    /run/user under tmpfs                │  │
+│  │  • Host read-only; service state, the   │  │
+│  │    journal and /run under tmpfs         │  │
 │  │  • Skill dir writable; authored files,  │  │
 │  │    env, handed files read-only          │  │
 │  │  • Private /tmp, own PID namespace      │  │

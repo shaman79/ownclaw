@@ -13,7 +13,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -309,7 +308,7 @@ public class DynamicSkill implements Tool {
         }
         // Here, before the container is chosen: a run in docker or podman never passes the jail,
         // so while it refuses every launch it would be the one way around it.
-        Optional<String> refused = sandbox == null ? Optional.empty() : sandbox.unavailable();
+        Optional<String> refused = sandbox.unavailable();
         if (refused.isPresent()) return ToolResult.failure(refused.get());
 
         Path runnerScript = null;
@@ -500,9 +499,9 @@ public class DynamicSkill implements Tool {
 
     /**
      * The handed file's real path, or null -- logged by id, never by name -- when it cannot be
-     * handed over: the record names no regular file directly in the uploads directory (see
-     * {@code FileStorageService.getFilePath}), or what is there has stopped being one. A bad
-     * attachment is dropped, not thrown, so one bad row never fails the task.
+     * handed over: the record names no regular file directly in the uploads directory, or one
+     * with another name (see {@code FileStorageService.getFilePath}). A bad attachment is
+     * dropped, not thrown, so one bad row never fails the task.
      * <p>
      * The real path, because it is bound into the jail at that path and so has to be what the
      * skill is told. A regular file directly in uploads is not a link, so its real path is the
@@ -511,16 +510,11 @@ public class DynamicSkill implements Tool {
     private Path handedFile(String fileId) {
         Path stored = fileStorage.getFilePath(fileId);
         if (stored == null) {
-            log.warn("Skill '{}': attachment {} names no regular file in the uploads directory; not handing it over",
+            log.warn("Skill '{}': attachment {} names no regular file of its own in the uploads directory; not handing it over",
                     name, fileId);
             return null;
         }
         try {
-            // Again as it is used: what the store saw a moment ago.
-            if (!Files.isRegularFile(stored, LinkOption.NOFOLLOW_LINKS)) {
-                log.warn("Skill '{}': attachment {} is no longer a regular file; not handing it over", name, fileId);
-                return null;
-            }
             return stored.toRealPath();
         } catch (IOException | RuntimeException e) {
             log.warn("Skill '{}': attachment {} could not be resolved ({}); not handing it over",

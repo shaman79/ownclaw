@@ -424,8 +424,9 @@ class SkillJailModeTest {
         // Made before the jail existed, it would keep the database readable through the writable bind.
         Files.createLink(m.skillDir().resolve("cache.bin"), m.db());
         try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
-            assertNotNull(l.refusal());
-            assertTrue(l.refusal().contains("cache.bin"), l.refusal());
+            // Not by name: a name the walk found can be one from outside the directory.
+            assertEquals("could not isolate this launch: a file under " + m.skillDir()
+                    + " has another name outside it (a hard link): tampered skill", l.refusal());
             assertTrue(l.argv().isEmpty());
         }
     }
@@ -445,7 +446,8 @@ class SkillJailModeTest {
         Path inEnv = Files.createLink(envDir.resolve("lib/site-packages/data.bin"), m.db());
         try (var l = jail.prepare(CMD, m.skillDir(), List.of(envDir))) {
             assertNotNull(l.refusal(), "a hard link to the database inside the environment was bound");
-            assertTrue(l.refusal().contains("data.bin"), l.refusal());
+            assertEquals("could not isolate this launch: a file under " + envDir
+                    + " has another name outside it (a hard link): tampered skill", l.refusal());
             assertTrue(l.argv().isEmpty());
         }
         Files.delete(inEnv);
@@ -481,8 +483,8 @@ class SkillJailModeTest {
                 Files.setPosixFilePermissions(e.getKey(), PosixFilePermissions.fromString(e.getValue()));
                 try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
                     assertNotNull(l.refusal(), "launched with " + e.getKey() + " at " + e.getValue());
-                    assertEquals("could not isolate this launch: could not read " + e.getKey() + " under "
-                            + m.skillDir() + ": a directory there cannot be listed or entered", l.refusal());
+                    assertEquals("could not isolate this launch: a directory under " + m.skillDir()
+                            + " cannot be listed or entered, so what it holds cannot be checked", l.refusal());
                     assertTrue(l.argv().isEmpty());
                 }
                 assertEquals(e.getValue(), PosixFilePermissions.toString(Files.getPosixFilePermissions(e.getKey())),
@@ -506,7 +508,8 @@ class SkillJailModeTest {
             var result = new ProcessSandbox(new ObjectMapper(), jail)
                     .execute("python3", markerScript(tmp.resolve("marker")), m.skillDir(), null, Map.of(), 10, null, List.of());
             assertFalse(result.isSuccess());
-            assertTrue(result.stderr().contains("could not read " + cache), result.stderr());
+            assertTrue(result.stderr().contains("a directory under " + m.skillDir() + " cannot be listed"),
+                    result.stderr());
             assertFalse(Files.exists(tmp.resolve("marker")), "the skill ran");
             assertEquals("-wx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(cache)));
         } finally {

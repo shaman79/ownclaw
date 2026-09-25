@@ -51,18 +51,26 @@ import java.util.function.LongSupplier;
  * process can see. The host stays visible read-only, so a skill that inspects the machine still
  * works; a tmpfs is laid over each outermost directory the service keeps its state in, and only
  * the skill's own directory (writable), its authored files, and what the caller hands it
- * (read-only) are put back. A tmpfs goes over {@code /run/user} as well, where the service
- * user's systemd user manager and session bus would start a process outside the jail when
- * asked; and a fresh PID namespace removes {@code /proc/<jvm>/environ} and
- * {@code /proc/<jvm>/root}. The network is deliberately shared: the property that matters -- a
- * skill cannot read the database and post it anywhere -- comes from hiding the database, and
- * skills that talk to the LAN, mail servers or Ollama keep working.
+ * (read-only) are put back. The jail cannot drop the service user's supplementary groups, so
+ * what the groups deploy.sh adds open is hidden too: a tmpfs goes over journald's store
+ * ({@link #JOURNAL}; systemd-journal), which holds the service's own console output, and
+ * another over all of {@code /run} ({@link #RUN}; docker's socket), with only the resolver's
+ * directory put back ({@link #resolver}). Under /run too are the system bus and each user's
+ * runtime directory, where the service user's systemd user manager and session bus would start
+ * a process outside the jail when asked. A fresh PID namespace removes
+ * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
+ * the property that matters -- a skill cannot read the database and post it anywhere -- comes
+ * from hiding the database, and skills that talk to the LAN, mail servers or Ollama keep
+ * working.
  * <p>
  * Accepted as consequences of that design:
  * <ul>
  *   <li>{@code --share-net} shares the abstract Unix-socket namespace too, so whatever on the
  *       host listens on an abstract socket is reachable;</li>
- *   <li>/dev is the host's, so {@code /dev/log} still reaches the system log;</li>
+ *   <li>/dev is the host's, and all of /run but the resolver is gone: {@code /dev/log},
+ *       which on a systemd host links into /run, no longer reaches the system log; nothing
+ *       reaches journald, the printing or the mDNS daemon (no {@code .local} names), and there
+ *       is no {@code /run/lock} or utmp;</li>
  *   <li>loopback reaches the service's own HTTP port: a skill can call its API as any client
  *       on the LAN can.</li>
  * </ul>
@@ -200,7 +208,8 @@ public class SkillJail {
      * Where the service keeps what a skill must not see, all absolute and normalized.
      *
      * @param cwd       the service's working directory; in production it holds .env, the repo,
-     *                  backups and the JDK, and is the one root that covers all the others
+     *                  backups and the JDK, and is the one root that covers all the service's
+     *                  others
      * @param database  the SQLite file; its directory also holds the uploads
      * @param generated the generated-skills directory; its parent holds the environments
      * @param logDir    where the log file is written
@@ -223,16 +232,29 @@ public class SkillJail {
         List<Path> mustBeHidden() {
             var out = new ArrayList<>(List.of(database, dotEnv(), uploads(), generated, envsRoot()));
             if (logDir != null) out.add(logDir);
-            Path runtime = ownRuntimeDir();
-            if (runtime != null) out.add(runtime);
+            out.addAll(RUN_PROBES);
+            // A tmpfs leaves the directory it covers in place: what was in it, as the host has
+            // it now, is what must be gone.
+            for (Path store : JOURNALS) out.addAll(entries(store));
             return out;
         }
 
-        /** What neither the owner's expose list nor a caller's bind may ever reach. */
-        List<Path> protectedPaths() {
-            var out = new ArrayList<>(List.of(dataDir(), uploads(), database, dotEnv(), skillsRoot(),
+        /**
+         * What neither the owner's expose list nor a caller's bind may ever reach, by written and
+         * by real path: the service's state, journald's stores, and what the self-check proves
+         * gone from /run.
+         */
+        List<Path> guarded() {
+            var paths = new ArrayList<>(List.of(dataDir(), uploads(), database, dotEnv(), skillsRoot(),
                     generated, envsRoot(), cwd.resolve("backups"), cwd.resolve("repo")));
-            if (logDir != null) out.add(logDir);
+            if (logDir != null) paths.add(logDir);
+            paths.addAll(JOURNALS);
+            paths.addAll(RUN_PROBES);
+            var out = new ArrayList<Path>();
+            for (Path p : paths) {
+                out.add(p);
+                out.add(real(p));
+            }
             return out;
         }
     }
@@ -370,11 +392,6 @@ public class SkillJail {
         this.startedAt = clock.getAsLong();
     }
 
-    /** A jail that is switched off, for code and tests that construct a sandbox by hand. */
-    public static SkillJail off() {
-        return new SkillJail("off", null, null, List.of(), System::currentTimeMillis);
-    }
-
     /** Evaluate once at startup, so the log says what the jail will do before the first skill. */
     @PostConstruct
     public void init() {
@@ -423,31 +440,10 @@ public class SkillJail {
             // not slip out from under the tmpfs because the check that saw it ran earlier.
             List<Path> roots = hiddenRoots(layout);
             Path dir = abs(workDir);
-            // Before anything is created in it: requirements.txt made through a linked directory
-            // would land wherever the link points.
-            refuseLink(dir, layout.skillsRoot());
-            List<Path> ro = new ArrayList<>(layout.generated().equals(dir.getParent())
-                    ? authoredFiles(dir) : List.of());
-            String linked = linkedOutside(dir);
-            if (linked != null) throw new IOException(linked);
-            for (Path p : readOnly == null ? List.<Path>of() : readOnly) {
-                if (p == null) continue;
-                Path n = abs(p);
-                refuseLink(n, layout.skillsRoot());
-                if (!Files.exists(n)) {
-                    log.warn("Not binding {} into the jail: it does not exist", n);
-                    continue;
-                }
-                // A read-only bind shows a hard link's target as well as the writable one does:
-                // a handed upload or an environment file linked to the database.
-                linked = linkedOutside(n);
-                if (linked != null) throw new IOException(linked);
-                ro.add(n);
-            }
-            String leak = reachesProtected(dir, ro, roots);
-            if (leak != null) throw new IOException(leak);
+            List<Path> ro = checkBinds(dir, readOnly, layout);
             tmp = Files.createTempDirectory("ownclaw-run-");
-            List<String> argv = bwrapArgs(bwrap.toString(), roots, dir, ro, e.expose(), tmp, command);
+            List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
+                    e.expose(), tmp, command);
             isolatedRuns.incrementAndGet();
             return new Launch(argv, true, null, tmp);
         } catch (IOException | RuntimeException ex) {
@@ -625,8 +621,8 @@ public class SkillJail {
                 Path r = real(p);
                 if (!r.equals(p)) command.add(r.toString());
             }
-            List<String> argv = bwrapArgs(bwrap.toString(), roots, probeDir, List.of(ro), expose, tmp,
-                    command);
+            List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), probeDir,
+                    List.of(ro), expose, tmp, command);
 
             ProcessBuilder pb = new ProcessBuilder(argv).directory(probeDir.toFile());
             applyEnvironment(pb, Map.of());
@@ -731,17 +727,21 @@ public class SkillJail {
      *   <li>new namespaces for everything but the network; die with the JVM; own session;</li>
      *   <li>the host, read-only;</li>
      *   <li>the host's /dev (serial devices keep working; permissions still apply), a private
-     *       /dev/shm, a /proc for the new PID namespace, and the run's own /tmp;</li>
+     *       /dev/shm, a /proc for the new PID namespace;</li>
+     *   <li>an empty /run, and the resolver's directory put back into it, read-only;</li>
+     *   <li>the run's own /tmp;</li>
      *   <li>a tmpfs over every hidden root;</li>
      *   <li>then, on top of those, the working directory read-write, and the read-only binds;</li>
-     *   <li>then each hidden root's tmpfs made read-only -- after the binds, so the working
-     *       directory's own mount stays writable;</li>
+     *   <li>then each hidden root's tmpfs, and /run's, made read-only -- after the binds, so the
+     *       working directory's own mount stays writable;</li>
      *   <li>{@code --} and the command, which is never parsed as a bubblewrap option.</li>
      * </ol>
      * Nothing from the environment appears here: credentials reach the skill through
      * bubblewrap's own process environment, never through its argv.
+     *
+     * @param resolver what {@link #resolver} found, or null
      */
-    static List<String> bwrapArgs(String bwrap, List<Path> hiddenRoots, Path workDir,
+    static List<String> bwrapArgs(String bwrap, List<Path> hiddenRoots, Path resolver, Path workDir,
                                   List<Path> readOnly, List<Bind> expose, Path tmp,
                                   List<String> command) {
         var a = new ArrayList<String>();
@@ -751,6 +751,8 @@ public class SkillJail {
         a.addAll(List.of("--dev-bind", "/dev", "/dev"));
         a.addAll(List.of("--tmpfs", "/dev/shm"));
         a.addAll(List.of("--proc", "/proc"));
+        a.addAll(List.of("--tmpfs", RUN.toString()));
+        if (resolver != null) a.addAll(List.of("--ro-bind-try", resolver.toString(), resolver.toString()));
         a.addAll(List.of("--bind", tmp.toString(), "/tmp"));
         for (Path root : hiddenRoots) a.addAll(List.of("--tmpfs", root.toString()));
         a.addAll(List.of("--bind", workDir.toString(), workDir.toString()));
@@ -759,6 +761,7 @@ public class SkillJail {
         // missing file must not take the jail down with it.
         for (Bind b : expose) a.addAll(List.of("--ro-bind-try", b.source().toString(), b.dest().toString()));
         for (Path root : hiddenRoots) a.addAll(List.of("--remount-ro", root.toString()));
+        a.addAll(List.of("--remount-ro", RUN.toString()));
         a.addAll(List.of("--chdir", workDir.toString()));
         a.add("--");
         a.addAll(command);
@@ -766,26 +769,59 @@ public class SkillJail {
     }
 
     /**
-     * Where systemd keeps each user's runtime directory, with the service user's session bus and
-     * the socket of its systemd user manager in it: asked over either, the manager starts a
-     * process as the service user outside any jail, which sees everything the jail hides. So it is
-     * hidden whenever it exists. It holds no system directory; the resolver's files are under
-     * /run/systemd, which stays visible.
+     * Hidden whole, the resolver aside. It holds the host daemons' sockets -- docker's, rootful
+     * podman's and containerd's, the system bus, journald's -- and each user's runtime directory,
+     * with the service user's systemd user manager and session bus in it, either of which starts
+     * a process as the service user outside any jail when asked.
      */
-    static final Path USER_RUNTIME = Path.of("/run/user");
+    static final Path RUN = Path.of("/run");
 
-    /** This process's own directory under {@link #USER_RUNTIME}, or null when there is none. */
-    static Path ownRuntimeDir() {
-        try {
-            Path mine = USER_RUNTIME.resolve(String.valueOf(Files.getAttribute(Path.of("/proc/self"), "unix:uid")));
-            return Files.isDirectory(mine) ? mine : null;
+    /**
+     * What the self-check proves gone from /run: docker's socket (deploy.sh puts the service user
+     * in the docker group when docker runs the containers), the system bus, and the users'
+     * runtime directories. A host without one passes that item trivially.
+     */
+    static final List<Path> RUN_PROBES = List.of(Path.of("/run/docker.sock"),
+            Path.of("/run/dbus/system_bus_socket"), Path.of("/run/user"));
+
+    static final Path RESOLV_CONF = Path.of("/etc/resolv.conf");
+
+    /**
+     * What the jail's empty /run gets back, so names still resolve: the directory
+     * {@code resolvConf} really lives in when that is under /run -- systemd-resolved's,
+     * NetworkManager's, resolvconf's. The directory rather than the file, because the file is
+     * usually replaced, not rewritten, and a bind of it would keep the old one; resolved keeps
+     * its socket there too. The file alone when it lies directly in /run, which must not come back whole. Null
+     * when it is not under /run: then /etc has it, and /etc is visible.
+     */
+    static Path resolver(Path resolvConf) {
+        Path conf = real(resolvConf);
+        Path dir = conf.getParent();
+        if (dir == null || !dir.startsWith(RUN)) return null;
+        return dir.equals(RUN) ? conf : dir;
+    }
+
+    /**
+     * journald's persistent store. The unit sends the service's console output to the journal,
+     * and deploy.sh puts the service user in systemd-journal, which reads all of it: a group the
+     * jail cannot take away, so the store is hidden as the service's own state is.
+     */
+    static final Path JOURNAL = Path.of("/var/log/journal");
+
+    /** Both of journald's stores; the volatile one goes with /run. */
+    static final List<Path> JOURNALS = List.of(JOURNAL, RUN.resolve("log/journal"));
+
+    /** What is directly in {@code dir}: nothing when it is absent or cannot be listed. */
+    private static List<Path> entries(Path dir) {
+        try (var s = Files.list(dir)) {
+            return s.toList();
         } catch (IOException | RuntimeException e) {
-            return null; // no /proc (Windows, macOS): no systemd user manager either
+            return List.of();
         }
     }
 
     static List<Path> hiddenRoots(Layout l) {
-        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), USER_RUNTIME);
+        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), JOURNAL);
     }
 
     /**
@@ -829,18 +865,14 @@ public class SkillJail {
 
     /**
      * The owner's read-only exceptions (for example a HOME dotfile a skill needs), minus any
-     * that would reach the service's state: an entry equal to, inside, or containing a protected
-     * path is dropped -- by its written path and by its real path -- as is anything under the
-     * host's /proc, and /tmp or the JVM's temp directory as a whole, which would lay the JVM's
-     * temp files over the run's own /tmp. Entries absent today are kept and bound with
-     * {@code -try}.
+     * that would reach what the jail hides: an entry equal to, inside, or containing a
+     * {@link Layout#guarded} path is dropped -- by its written path and by its real path -- as
+     * is anything under the host's /proc, and /tmp or the JVM's temp directory as a whole, which
+     * would lay the JVM's temp files over the run's own /tmp. Entries absent today are kept and
+     * bound with {@code -try}.
      */
     static List<Bind> filterExpose(List<String> entries, Layout layout) {
-        var guarded = new ArrayList<Path>();
-        for (Path p : layout.protectedPaths()) {
-            guarded.add(p);
-            guarded.add(real(p));
-        }
+        var guarded = new ArrayList<>(layout.guarded());
         guarded.add(Path.of("/proc"));
         Path jvmTmp = abs(Path.of(System.getProperty("java.io.tmpdir")));
         List<Path> tmps = List.of(Path.of("/tmp"), jvmTmp, real(jvmTmp));
@@ -865,6 +897,44 @@ public class SkillJail {
             out.add(new Bind(r, p));
         }
         return List.copyOf(out);
+    }
+
+    /**
+     * The checks a skill's binds pass before anything is started, jailed or in a container, and
+     * the read-only binds they leave: a skill directory's authored files, then each of
+     * {@code readOnly} that exists (a missing one is logged and left out). Throws, with the
+     * reason, at the first bind that is a link or reached through one, a work directory whose
+     * authored files are not regular files, a hard link out of any bind, or a bind that is, or
+     * holds, a guarded path.
+     *
+     * @param workDir  the one directory the process may write
+     * @param readOnly host paths the process may read, each at its own path; may be null
+     */
+    static List<Path> checkBinds(Path workDir, List<Path> readOnly, Layout l) throws IOException {
+        Path dir = abs(workDir);
+        // Before anything is created in it: requirements.txt made through a linked directory
+        // would land wherever the link points.
+        refuseLink(dir, l.skillsRoot());
+        List<Path> ro = new ArrayList<>(l.generated().equals(dir.getParent()) ? authoredFiles(dir) : List.of());
+        String linked = linkedOutside(dir);
+        if (linked != null) throw new IOException(linked);
+        for (Path p : readOnly == null ? List.<Path>of() : readOnly) {
+            if (p == null) continue;
+            Path n = abs(p);
+            refuseLink(n, l.skillsRoot());
+            if (!Files.exists(n)) {
+                log.warn("Not binding {}: it does not exist", n);
+                continue;
+            }
+            // A read-only bind shows a hard link's target as well as the writable one does:
+            // a handed upload or an environment file linked to the database.
+            linked = linkedOutside(n);
+            if (linked != null) throw new IOException(linked);
+            ro.add(n);
+        }
+        String leak = reachesProtected(dir, ro, l);
+        if (leak != null) throw new IOException(leak);
+        return ro;
     }
 
     /**
@@ -920,12 +990,19 @@ public class SkillJail {
      * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
      * are the skill's own business. Returns why, or null.
      * <p>
-     * Never through a link, and changing nothing. A name gone since its directory was listed --
-     * another run of the same skill removing its {@code _runner_} script -- is skipped; root
-     * itself must exist. A directory the service user cannot list or enter as it is -- a skill's
-     * {@code os.makedirs('cache', mode=0o300)} -- is the answer, since what it holds cannot be
-     * checked. It is not opened to find out: that is a chmod, which follows a link, and a second
-     * run of the same skill can swap the directory for one while this walks.
+     * It changes nothing, and reads each name's attributes without following a link. A second
+     * run of the same skill, writing the tree while this walks, can still swap a directory for
+     * a link between the walk reading it and listing it: the walk then lists, and reads the
+     * attributes of, what lies where the link leads. So no name the walk finds goes into the
+     * answer, which reaches the model; the log has it, for the owner. That second run is jailed,
+     * so it cannot make a hard link out, and its own launch's walk found none to move out of
+     * this one's way.
+     * <p>
+     * A name gone since its directory was listed -- another run of the same skill removing its
+     * {@code _runner_} script -- is skipped; root itself must exist. A directory the service user
+     * cannot list or enter as it is -- a skill's {@code os.makedirs('cache', mode=0o300)} -- is
+     * the answer, since what it holds cannot be checked. It is not opened to find out: that is a
+     * chmod, which follows a link.
      */
     static String linkedOutside(Path root) throws IOException {
         var namesInside = new HashMap<Object, Integer>();
@@ -948,17 +1025,20 @@ public class SkillJail {
             } catch (NoSuchFileException gone) {
                 if (p.equals(root)) throw gone;
             } catch (AccessDeniedException denied) {
-                return "could not read " + p + " under " + root
-                        + ": a directory there cannot be listed or entered";
+                log.warn("Refusing a bind of {}: {} cannot be listed or entered", root, p);
+                return (p.equals(root) ? root.toString() : "a directory under " + root)
+                        + " cannot be listed or entered, so what it holds cannot be checked";
             }
         }
         for (var e : links.entrySet()) {
             if (e.getValue() > namesInside.get(e.getKey())) {
                 Path file = named.get(e.getKey());
                 // A bind of the file itself: outside it is any other name at all.
-                return file.equals(root)
-                        ? file + " is a hard link (another name outside its bound path): tampered skill"
-                        : file + " has another name outside " + root + " (a hard link): tampered skill";
+                if (file.equals(root)) {
+                    return root + " is a hard link (another name outside its bound path): tampered skill";
+                }
+                log.warn("Refusing a bind of {}: {} has another name outside it", root, file);
+                return "a file under " + root + " has another name outside it (a hard link): tampered skill";
             }
         }
         return null;
@@ -977,16 +1057,12 @@ public class SkillJail {
     }
 
     /**
-     * A bind that is, or contains, a hidden root or a protected path would put it back on top of
-     * the tmpfs. Checked by written and by real path. Returns why, or null.
+     * A bind that is, or contains, a {@link Layout#guarded} path would put it back on top of the
+     * tmpfs over it -- or, in a container, simply show it. Checked by written and by real path.
+     * Returns why, or null.
      */
-    private String reachesProtected(Path workDir, List<Path> readOnly, List<Path> roots) {
-        var guarded = new ArrayList<Path>();
-        for (Path p : roots) guarded.add(p);
-        for (Path p : layout.protectedPaths()) {
-            guarded.add(p);
-            guarded.add(real(p));
-        }
+    private static String reachesProtected(Path workDir, List<Path> readOnly, Layout l) {
+        List<Path> guarded = l.guarded();
         var binds = new ArrayList<Path>();
         binds.add(workDir);
         binds.addAll(readOnly);
@@ -1042,12 +1118,10 @@ public class SkillJail {
         // Worked out now, as prepare() does for every launch, so the owner can read what the
         // jail will hide before bubblewrap is even installed.
         List<String> roots = List.of();
-        if (layout != null) {
-            try {
-                roots = hiddenRoots(layout).stream().map(Path::toString).toList();
-            } catch (RuntimeException ex) {
-                m.put("hiddenRootsError", ex.getMessage());
-            }
+        try {
+            roots = hiddenRoots(layout).stream().map(Path::toString).toList();
+        } catch (RuntimeException ex) {
+            m.put("hiddenRootsError", ex.getMessage());
         }
         m.put("hiddenRoots", roots);
         // The owner's expose entries that survived the filter, as bound by the last self-check
@@ -1279,7 +1353,8 @@ public class SkillJail {
      * between the check and the chmod would have the chmod land there. The callers: a run's /tmp
      * once its jail has ended ({@link Launch#close}); the self-check's own directories, which
      * only its fixed probe writes; a probe's or syntax check's scratch directory, written by
-     * system Python alone; a skill's directory and environments once no run of it is in flight
+     * system Python alone; a container build's context, which only the JVM writes; a skill's
+     * directory and environments once no run of it is in flight
      * ({@code SkillManager.deleteSkill}); and environments whose skill is gone (the prune). Two
      * gaps are accepted as rare: a deletion or a prune at the moment a skill of the same name is
      * being created or updated, whose load check and pip run in those directories; and a run of a
