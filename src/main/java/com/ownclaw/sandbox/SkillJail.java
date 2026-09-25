@@ -741,8 +741,8 @@ public class SkillJail {
      * <ol>
      *   <li>new namespaces for everything but the network; die with the JVM; own session;</li>
      *   <li>the host, read-only;</li>
-     *   <li>the host's /dev (serial devices keep working; permissions still apply), a private
-     *       /dev/shm, a /proc for the new PID namespace;</li>
+     *   <li>the host's /dev (serial devices keep working; permissions still apply), its own
+     *       /dev/mqueue, a private /dev/shm, a /proc for the new PID namespace;</li>
      *   <li>an empty /run, and the resolver's directory put back into it, read-only;</li>
      *   <li>the run's own /tmp;</li>
      *   <li>a tmpfs over every hidden root;</li>
@@ -764,6 +764,7 @@ public class SkillJail {
         a.addAll(List.of("--unshare-all", "--share-net", "--die-with-parent", "--new-session"));
         a.addAll(List.of("--ro-bind", "/", "/"));
         a.addAll(List.of("--dev-bind", "/dev", "/dev"));
+        a.addAll(List.of("--mqueue", "/dev/mqueue"));
         a.addAll(List.of("--tmpfs", "/dev/shm"));
         a.addAll(List.of("--proc", "/proc"));
         a.addAll(List.of("--tmpfs", RUN.toString()));

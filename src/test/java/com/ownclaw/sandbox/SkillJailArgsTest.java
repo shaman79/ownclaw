@@ -87,7 +87,8 @@ class SkillJailArgsTest {
         for (String f : List.of("--unshare-all", "--share-net", "--die-with-parent", "--new-session")) {
             assertTrue(argv.contains(f), f);
         }
-        first(ops, "--dev-bind", "/dev", "/dev");
+        // The jail's own message queues over the host's, which the /dev bind brings in.
+        assertTrue(first(ops, "--dev-bind", "/dev", "/dev") < first(ops, "--mqueue", "/dev/mqueue"));
         first(ops, "--tmpfs", "/dev/shm");
         first(ops, "--proc", "/proc");
         first(ops, "--bind", TMP.toString(), "/tmp");

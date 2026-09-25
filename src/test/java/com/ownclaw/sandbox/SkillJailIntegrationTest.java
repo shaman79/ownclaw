@@ -111,6 +111,11 @@ class SkillJailIntegrationTest {
                 r['loopback'] = False
             finally:
                 s.close()
+            try:
+                os.close(os.open('/dev/mqueue/' + p['mqueue'], os.O_CREAT | os.O_RDWR))
+                r['mqueue_made'] = True
+            except Exception:
+                r['mqueue_made'] = False
             r['cred'] = os.environ.get('SKILL_CRED')
             r['env_names'] = sorted(os.environ.keys())
             r['pwd'] = os.environ.get('PWD')
@@ -173,6 +178,7 @@ class SkillJailIntegrationTest {
         in.put("host_run", HOST_RUN);
         in.put("journal", journal().stream().map(Path::toString).toList());
         in.put("journal_files", journalFiles().stream().map(Path::toString).toList());
+        in.put("mqueue", QUEUE.getFileName().toString());
 
         long start = System.nanoTime();
         var result = new ProcessSandbox(jail).execute("python3", script, m.skillDir(),
@@ -182,6 +188,9 @@ class SkillJailIntegrationTest {
         assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
         return mapper.readTree(result.stdout());
     }
+
+    // A POSIX message queue the probe makes, by the name the host's /dev/mqueue would show it.
+    private static final Path QUEUE = Path.of("/dev/mqueue/ownclaw-it-" + ProcessHandle.current().pid());
 
     // What the jail must hide of the host's /run, by both names /run has.
     private static final List<String> HOST_RUN = List.of("/run/docker.sock", "/var/run/docker.sock",
@@ -246,6 +255,10 @@ class SkillJailIntegrationTest {
                     "control run should read what the service user can of the journal");
             assertTrue(Files.exists(scratch), "the control run writes the host's /tmp");
             Files.delete(scratch);
+            if (open.get("mqueue_made").asBoolean()) {
+                assertTrue(Files.exists(QUEUE), "the control run's message queue is not on the host");
+                Files.delete(QUEUE);
+            }
 
             var jail = new SkillJail("auto", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
             var status = jail.status();
@@ -287,6 +300,9 @@ class SkillJailIntegrationTest {
             if (open.get("dns").asBoolean()) assertTrue(jailed.get("dns").asBoolean(), "names no longer resolve");
             assertTrue(jailed.get("tmp_writable").asBoolean());
             assertFalse(Files.exists(scratch), "a jailed write to /tmp reached the host's /tmp");
+            // Its message queues are its own: made inside, gone with the jail.
+            assertTrue(jailed.get("mqueue_made").asBoolean(), "no message queue could be made in the jail");
+            assertFalse(Files.exists(QUEUE), "a message queue made in the jail is on the host");
             assertFalse(jailed.get("jvm_tmp_canary").asBoolean(), "the JVM's /tmp is visible");
             assertTrue(jailed.get("loopback").asBoolean(), "the host network must stay shared");
 
@@ -321,6 +337,7 @@ class SkillJailIntegrationTest {
         } finally {
             Files.deleteIfExists(jvmCanary);
             Files.deleteIfExists(scratch);
+            Files.deleteIfExists(QUEUE);
         }
     }
 
