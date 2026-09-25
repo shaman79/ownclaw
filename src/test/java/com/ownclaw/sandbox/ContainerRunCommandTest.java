@@ -340,6 +340,45 @@ class ContainerRunCommandTest {
     }
 
     @Test
+    @DisplayName("with every thread of the common pool held, an image still builds: its output is read as it prints, and the image is checked")
+    void aBuildIsReadWhateverThePoolIsDoing() throws Exception {
+        // A build printing a line every 0.3 s for 6 s: unread, it looks stalled at the first
+        // look, after 5 s, against a 3 s timeout. The check of the image prints its version.
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "case \"$1\" in version) exit 0;; image) exit 1;; run) echo 'Python 3.12.0'; exit 0;; esac\n"
+                + "i=0; while [ $i -lt 20 ]; do echo \"step $i\"; sleep 0.3; i=$((i+1)); done\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        config.getSandbox().setStallTimeout(3);
+        var fake = new ContainerSandbox(config);
+        fake.init();
+
+        int threads = java.util.concurrent.ForkJoinPool.getCommonPoolParallelism();
+        var holding = new java.util.concurrent.CountDownLatch(threads);
+        var release = new java.util.concurrent.atomic.AtomicBoolean();
+        for (int i = 0; i < threads; i++) {
+            java.util.concurrent.ForkJoinPool.commonPool().execute(() -> {
+                holding.countDown();
+                while (!release.get()) {
+                    try { Thread.sleep(10); } catch (InterruptedException e) { return; }
+                }
+            });
+        }
+        try {
+            assertTrue(holding.await(10, java.util.concurrent.TimeUnit.SECONDS), "the pool's threads were not all held");
+            String tag = assertTimeoutPreemptively(java.time.Duration.ofSeconds(40),
+                    () -> fake.ensureImage(List.of("nmap"), null, skillDir, null, null));
+            assertTrue(tag.startsWith("localhost/ownclaw-skill-"), tag);
+        } finally {
+            release.set(true);
+        }
+    }
+
+    @Test
     @DisplayName("an authored file that is a link is refused, never mounted where it leads")
     void anAuthoredLinkIsRefused() throws Exception {
         Files.delete(skillDir.resolve("skill.py"));

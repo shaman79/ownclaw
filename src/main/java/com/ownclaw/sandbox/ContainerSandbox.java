@@ -482,7 +482,7 @@ public class ContainerSandbox {
                     }
                 } catch (IOException ignored) {}
                 return outputBuf.toString();
-            });
+            }, ProcessSandbox.OWN_THREAD);
 
             int buildStallTimeout = config.getSandbox().getStallTimeout();
             boolean finished = ProcessSandbox.waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
@@ -703,7 +703,7 @@ public class ContainerSandbox {
             // Previous version drained synchronously (blocking until EOF) which
             // made the timeout dead code — a hanging container blocked forever.
             CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(p.getInputStream()));
+                    () -> drainStream(p.getInputStream()), ProcessSandbox.OWN_THREAD);
             boolean finished = p.waitFor(30, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();

@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -79,6 +80,14 @@ public class ProcessSandbox implements SandboxManager {
         return new SandboxResult(-1, stdout, "Killed: the skill's output went past the "
                 + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);
     }
+
+    /**
+     * Where each of a run's output streams is read: a thread of its own, as its input is written.
+     * Not the common pool, whose few threads a blocking read holds for as long as the process
+     * runs: with more runs at once than it has threads, a later run's output went unread, and the
+     * stall timer killed it while it printed.
+     */
+    static final Executor OWN_THREAD = r -> Thread.ofVirtual().start(r);
 
     /** Reads the progress lines a skill prints; nothing else. */
     private static final ObjectMapper PROGRESS = new ObjectMapper();
@@ -163,9 +172,10 @@ public class ProcessSandbox implements SandboxManager {
      * {@code watchNeedInput}, a need_input line ends the run at once, as a failure that says
      * need_input is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
      * <p>
-     * The input is written last, on a thread of its own: a process that never reads it and never
-     * exits is then ended by the stall timeout like any other, and one that exits or closes its
-     * stdin before reading all of it gives its own exit code and stderr as the result.
+     * Each stream is read on a thread of its own ({@link #OWN_THREAD}), started first; the input
+     * is written last, on a thread of its own too: a process that never reads it and never exits
+     * is then ended by the stall timeout like any other, and one that exits or closes its stdin
+     * before reading all of it gives its own exit code and stderr as the result.
      *
      * @param alsoKill run after the process is killed for stalling or for its output: what else
      *                 must end with it
@@ -183,7 +193,8 @@ public class ProcessSandbox implements SandboxManager {
         // Drain stderr async to prevent pipe-buffer deadlock.
         AtomicBoolean overLimit = new AtomicBoolean(false);
         CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
-                drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
+                drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity),
+                OWN_THREAD);
 
         // Read stdout line-by-line so a progress line is forwarded, and a need_input line
         // caught, as it arrives. What a skill prints goes into the runner's capture and its
@@ -228,7 +239,7 @@ public class ProcessSandbox implements SandboxManager {
                 }
             } catch (IOException ignored) {}
             return buf.toByteArray();
-        });
+        }, OWN_THREAD);
 
         Thread.ofVirtual().name("skill-stdin-" + process.pid()).start(() -> writeInput(process, stdinJson));
 
