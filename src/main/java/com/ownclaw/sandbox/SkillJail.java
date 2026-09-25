@@ -70,13 +70,19 @@ import java.util.function.LongSupplier;
  * <p>
  * Accepted as consequences of that design:
  * <ul>
- *   <li>{@code --share-net} shares the abstract Unix-socket namespace too, so whatever on the
- *       host listens on an abstract socket is reachable;</li>
+ *   <li>{@code --share-net} shares loopback and the abstract Unix-socket namespace, so
+ *       everything on the host listening on either is reachable: CUPS where it listens there,
+ *       the service's own HTTP port (a skill can call its API as any client on the LAN can),
+ *       and, on a dev host running as the owner, the owner's X11 display -- whose
+ *       ~/.Xauthority a skill there can read -- and a browser's debug port;</li>
+ *   <li>the kernel session keyring is the JVM's: bubblewrap has no option for a new one, so a
+ *       skill sees the keys in it and can add its own, which outlive its run;</li>
  *   <li>a fresh PID namespace, kept because it hides {@code /proc/<jvm>/environ}: a skill sees
  *       only its own processes, so ps, pgrep and psutil list the jail's few, with no error;</li>
  *   <li>/dev is the host's but for a private /dev/shm and its own /dev/mqueue, and all of /run
  *       but the resolver is gone: {@code /dev/log}, which on a systemd host links into /run, no
- *       longer reaches the system log (logger exits 0 while nothing is logged); nothing reaches
+ *       longer reaches the system log (logger exits 0 while nothing is logged, and Python's
+ *       SysLogHandler prints a logging-error traceback to stderr for each record); nothing reaches
  *       the mDNS daemon (a {@code .local} name it would answer does not resolve), and there is
  *       no {@code /run/lock} or utmp;</li>
  *   <li>/dev/pts is the host's too: a skill can open a terminal its user owns -- none in
@@ -89,9 +95,9 @@ import java.util.function.LongSupplier;
  *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
  *   <li>with /run gone, so are the system bus and systemd's own socket: systemctl, timedatectl,
  *       hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail;</li>
- *   <li>CUPS is still reached over loopback, where it listens there;</li>
- *   <li>loopback reaches the service's own HTTP port: a skill can call its API as any client
- *       on the LAN can.</li>
+ *   <li>a bubblewrap that cannot mount the jail's own /dev/mqueue cannot start a jail, so under
+ *       auto skills run unjailed until it can -- as long as the jail has not been ready in this
+ *       process (see the modes below).</li>
  * </ul>
  * <p>
  * Each launch walks what it binds, file by file ({@link #linkedOutside}), and when the run ends

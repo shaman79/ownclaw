@@ -192,16 +192,20 @@ ownclaw:
     # (their runs and checks, venv and pip) runs inside an unprivileged bubblewrap jail that
     # sees the host read-only and cannot see the database, .env, uploads it was not handed,
     # other skills, logs, backups, the systemd journal, crash dumps, or /run (the resolver
-    # aside). /tmp is its own, and the same directory is its /var/tmp. Network stays shared. A skill with system_packages runs in docker/podman instead when one is
-    # available -- refused while the jail refuses.
+    # aside). /tmp is its own, and the same directory is its /var/tmp. Network stays shared.
+    # A skill with system_packages runs in docker/podman instead when one is available --
+    # refused while the jail refuses.
     #   auto      jail when /usr/bin/bwrap is installed and passes its self-check. While
-    #             bwrap is absent or cannot start a jail, skills run unjailed, with one
-    #             warning. It refuses every launch when bwrap runs but the self-check fails,
-    #             and when the jail was ready earlier in this process and cannot start now.
+    #             bwrap is absent or cannot start a jail (one that cannot mount the jail's own
+    #             /dev/mqueue cannot), skills run unjailed, with one warning. It refuses every
+    #             launch when bwrap runs but the self-check fails, and when the jail was ready
+    #             earlier in this process and cannot start now.
     #   required  refuse to start a skill when the jail is not working (fail closed)
     #   off       no jail (development, Windows)
     # On a dev host running as your own user, HOME is yours, and the jail does not hide HOME (by
     # design): a skill there reads your dotfiles and reaches your ssh agent under ~/.ssh/agent.
+    # Everything listening on loopback or an abstract socket is reachable too: there, your X11
+    # display (with ~/.Xauthority readable) and any browser debug port.
     # In production HOME is the service directory, which is hidden, and the unit sets
     # ProtectHome.
     # When jailed, a single launch the jail cannot isolate (a tampered skill directory, a
@@ -211,7 +215,9 @@ ownclaw:
     # a link or a hard link is refused, never read or written through.
     # A jailed skill sees the host's files but only its own processes: systemctl, timedatectl,
     # hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it,
-    # journalctl exits 0 with no entries, and logger exits 0 while nothing is logged.
+    # journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's
+    # SysLogHandler prints a logging-error traceback to stderr for each record. The kernel
+    # session keyring is shared with the service (bubblewrap cannot give a jail its own).
     # Install:  sudo apt install bubblewrap, then sudo systemctl restart ownclaw. The jail
     #           would come up within a minute on its own, but a process an earlier unjailed
     #           run left running stays outside any jail until the restart ends it.
