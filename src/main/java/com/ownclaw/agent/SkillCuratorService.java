@@ -337,8 +337,10 @@ public class SkillCuratorService {
             for (DynamicSkill skill : dynamicSkills) {
                 sb.append("\n### ").append(skill.name()).append("\n```python\n");
                 try {
-                    String code = Files.readString(skill.skillDir().resolve("skill.py"), StandardCharsets.UTF_8);
-                    sb.append(code);
+                    // Through the one reader of authored files: a link or a second name a skill
+                    // left at this name is refused, not followed to .env and sent.
+                    String code = com.ownclaw.sandbox.SkillJail.readAuthored(skill.skillDir().resolve("skill.py"));
+                    sb.append(code != null ? code : "(could not read source)");
                 } catch (Exception e) {
                     sb.append("(could not read source)");
                 }

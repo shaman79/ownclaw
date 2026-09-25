@@ -110,6 +110,31 @@ class AuthoredFilesPreconditionTest {
         assertNotNull(page);
         assertFalse(String.valueOf(page).contains("canary-env-secret"), "the link's target reached the page: " + page);
         assertTrue(String.valueOf(page.get("error")).contains("tampered"), String.valueOf(page));
+
+        // And skill_manage analyze, which sends every skill's source to the cloud, reads it by
+        // the same rule.
+        String sent = analyzeRequest(jdbc);
+        assertFalse(sent.contains("canary-env-secret"), "the link's target was sent for analysis");
+        if (file.equals("skill.py")) assertTrue(sent.contains("(could not read source)"), sent);
+    }
+
+    /** What skill_manage analyze sends to the cloud, captured by a fake provider behind the door. */
+    private String analyzeRequest(org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        var sent = new StringBuilder();
+        var fake = new com.ownclaw.llm.LlmProvider() {
+            public com.ownclaw.llm.LlmResponse chat(List<com.ownclaw.llm.LlmMessage> m, com.ownclaw.llm.LlmRequestConfig c) {
+                m.forEach(x -> sent.append(x.content()));
+                return new com.ownclaw.llm.LlmResponse("{}", 1, 1);
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "anthropic"; }
+        };
+        var cfg = new OwnClawConfig();
+        var gateway = new com.ownclaw.llm.CloudGateway(fake, fake, cfg, row -> { }, null);
+        var router = new LlmRouter(fake, gateway, cfg, null);
+        new SkillCuratorService(jdbc, router, tools, dynamic)
+                .analyzeLibrary(new AgentContext("u1", "t1", "tidy up my skills").egress("analyze"));
+        return sent.toString();
     }
 
     @ParameterizedTest
