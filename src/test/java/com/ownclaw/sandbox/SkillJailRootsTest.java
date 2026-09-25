@@ -156,7 +156,7 @@ class SkillJailRootsTest {
     }
 
     @Test
-    @DisplayName("the self-check proves docker's socket, the system bus and the users' runtime directories gone")
+    @DisplayName("the self-check proves docker's socket, the system bus, the users' runtime directories and journald's volatile store gone")
     void theSelfCheckProbesRun() throws Exception {
         List<String> probe = probed(JailTestKit.Mirror.create(tmp));
         for (String p : List.of("/run/docker.sock", "/run/dbus/system_bus_socket", "/run/user", "/run/log/journal")) {

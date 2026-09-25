@@ -82,10 +82,10 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
-     * Where each of a run's output streams is read: a thread of its own, as its input is written.
-     * Not the common pool, whose few threads a blocking read holds for as long as the process
-     * runs: with more runs at once than it has threads, a later run's output went unread, and the
-     * stall timer killed it while it printed.
+     * A thread of its own for each task: where each of a run's output streams is read, as its
+     * input is written on one. Not the common pool, whose few threads a blocking read holds for
+     * as long as the process runs: with more runs at once than it has threads, a later run's
+     * output went unread, and the stall timer killed it while it printed.
      */
     static final Executor OWN_THREAD = r -> Thread.ofVirtual().start(r);
 
