@@ -130,6 +130,13 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
+     * What a run that asked for input fails with: no answer can reach a skill while it runs, and
+     * the model is told what to do instead.
+     */
+    static final String NEED_INPUT_UNSUPPORTED = "need_input is not supported: a skill cannot ask the "
+            + "user while it runs. Fail instead, and say what you need.";
+
+    /**
      * Returns true if a stdout line looks like a need_input JSON message. A skill cannot be
      * answered while it runs, so such a line ends the run.
      */
@@ -153,28 +160,22 @@ public class ProcessSandbox implements SandboxManager {
      * progress callback, progress lines the skill emits
      * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted and forwarded
      * through it, and are NOT included in the final stdout; without one they stay in it. With
-     * {@code watchNeedInput}, a need_input line ends the run at once, reported as stalled.
+     * {@code watchNeedInput}, a need_input line ends the run at once, as a failure that says
+     * need_input is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
+     * <p>
+     * The input is written last, on a thread of its own: a process that never reads it and never
+     * exits is then ended by the stall timeout like any other, and one that exits or closes its
+     * stdin before reading all of it gives its own exit code and stderr as the result.
      *
      * @param alsoKill run after the process is killed for stalling or for its output: what else
      *                 must end with it
-     * @throws IOException when it cannot be started or given its input
+     * @throws IOException when it cannot be started
      */
     static SandboxResult run(ProcessBuilder pb, Path scriptPath, String stdinJson, int timeoutSec,
                              ProgressCallback progressCallback, boolean watchNeedInput,
                              Runnable alsoKill) throws IOException {
         long startTime = System.currentTimeMillis();
         Process process = pb.start();
-
-        // Write JSON input to stdin
-        if (stdinJson != null) {
-            try (OutputStream os = process.getOutputStream()) {
-                os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
-                os.flush();
-            }
-        } else {
-            // Close stdin immediately so the process sees EOF if it tries to read
-            process.getOutputStream().close();
-        }
 
         // Track last time any output was produced — used for stall detection.
         AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
@@ -189,7 +190,7 @@ public class ProcessSandbox implements SandboxManager {
         // result, not onto this stream; what reaches it is the result itself -- a returned
         // need_input dict -- or a write past the capture (sys.__stdout__, a process the skill
         // starts). No answer will ever come, so the process is killed at once and the run
-        // reported as stalled.
+        // fails, saying so.
         AtomicBoolean needInputDetected = new AtomicBoolean(false);
         CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
             ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
@@ -229,6 +230,8 @@ public class ProcessSandbox implements SandboxManager {
             return buf.toByteArray();
         });
 
+        Thread.ofVirtual().name("skill-stdin-" + process.pid()).start(() -> writeInput(process, stdinJson));
+
         // Stall detection: no wall-clock timeout — process runs as long as it
         // produces output. Killed only if no stdout/stderr for timeoutSec seconds.
         boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
@@ -257,12 +260,26 @@ public class ProcessSandbox implements SandboxManager {
         if (needInputDetected.get()) {
             log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
                     scriptPath.getFileName());
-            return new SandboxResult(-1, stdout, stderr, durationMs, true);
+            return new SandboxResult(-1, stdout, NEED_INPUT_UNSUPPORTED + (stderr.isBlank() ? "" : "\n" + stderr),
+                    durationMs, false);
         }
 
         int exitCode = process.exitValue();
         log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
         return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
+    }
+
+    /**
+     * Give the process its input, if any, and close its stdin, so it sees the end of it. A
+     * process that exits or closes its stdin first makes the write fail; its stdin is closed all
+     * the same, and its own exit code and stderr say what happened.
+     */
+    private static void writeInput(Process process, String stdinJson) {
+        try (OutputStream os = process.getOutputStream()) {
+            if (stdinJson != null) os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            log.debug("Process {} did not take all of its input: {}", process.pid(), e.getMessage());
+        }
     }
 
     /**

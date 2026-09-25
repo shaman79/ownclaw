@@ -253,7 +253,7 @@ class ContainerRunCommandTest {
     }
 
     @Test
-    @DisplayName("one runner for both: progress forwarded from each; a need_input line ends a host run at once, a container run hands it back")
+    @DisplayName("one runner for both: progress forwarded from each; a need_input line fails a host run at once, saying it is not supported; a container run hands it back")
     void oneRunnerForAHostAndAContainerRun() throws Exception {
         assumeTrue(Files.isExecutable(Path.of("/usr/bin/python3")), "python3 is not available");
         String progress = "{\"type\":\"progress\",\"message\":\"half\",\"percent\":50}";
@@ -265,7 +265,8 @@ class ContainerRunCommandTest {
         long start = System.nanoTime();
         var host = new ProcessSandbox(JailTestKit.off()).execute("python3", script, skillDir, null, Map.of(), 60,
                 (msg, pct) -> seen.add(msg), List.of());
-        assertTrue(host.timedOut(), "a need_input line did not end the host run: " + host);
+        assertFalse(host.timedOut(), "a need_input line was reported as a stall: " + host);
+        assertTrue(host.stderr().startsWith(ProcessSandbox.NEED_INPUT_UNSUPPORTED), host.toString());
         assertTrue(System.nanoTime() - start < 8_000_000_000L, "the host run was waited out");
 
         Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
