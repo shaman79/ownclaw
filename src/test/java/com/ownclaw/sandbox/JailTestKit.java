@@ -29,14 +29,46 @@ public final class JailTestKit {
     }
 
     /**
-     * A new directory the jail shows read-only, for a test that must see what the jail hides.
-     * Not under /tmp or /var/tmp: the jail replaces both with the run's own, so everything kept
-     * there is out of sight whether or not the tmpfs over the hidden roots did its job. Under
-     * the build directory of the project the tests run from; the caller deletes it.
+     * A new directory the jail shows read-only, for a test that must see what the jail hides:
+     * under the build directory of the project the tests run from; the caller deletes it.
      */
     static Path visibleDir(String prefix) throws IOException {
-        Path parent = Files.createDirectories(Path.of("build", "jail-it").toAbsolutePath());
-        return Files.createTempDirectory(parent, prefix);
+        return visibleDir(Path.of("build", "jail-it"), prefix);
+    }
+
+    /**
+     * A new directory under {@code parent}, which must not be under /tmp, /var/tmp or the JVM's
+     * temp directory, by its written path or its real one: the jail replaces each with the run's
+     * own, so everything kept there is out of sight whether or not the tmpfs over the hidden
+     * roots did its job, and a test that it is hidden would pass whatever the jail did.
+     *
+     * @throws AssertionError when it is, before anything is made there
+     */
+    static Path visibleDir(Path parent, String prefix) throws IOException {
+        Path dir = parent.toAbsolutePath().normalize();
+        notInATempDirectory(dir);
+        Files.createDirectories(dir);
+        notInATempDirectory(dir.toRealPath());
+        return Files.createTempDirectory(dir, prefix);
+    }
+
+    private static void notInATempDirectory(Path dir) {
+        var temps = new ArrayList<Path>();
+        for (Path t : List.of(Path.of("/tmp"), Path.of("/var/tmp"), Path.of(System.getProperty("java.io.tmpdir")))) {
+            temps.add(t.toAbsolutePath().normalize());
+            try {
+                temps.add(t.toRealPath());
+            } catch (IOException absent) {
+                // nothing is there to be under
+            }
+        }
+        for (Path t : temps) {
+            if (dir.startsWith(t)) {
+                throw new AssertionError(dir + " is under " + t + ", which the jail replaces with the run's own: "
+                        + "a test there cannot see what the jail hides. Run the tests from a checkout outside "
+                        + "/tmp, /var/tmp and the JVM's temp directory.");
+            }
+        }
     }
 
     /** A small copy of /opt/ownclaw: the secrets are canaries a test can look for. */
