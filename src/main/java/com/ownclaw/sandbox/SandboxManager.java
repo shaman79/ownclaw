@@ -53,7 +53,5 @@ public interface SandboxManager {
      * Why every launch would be refused right now, if it would -- so a caller can stop before
      * doing work whose check it cannot run.
      */
-    default Optional<String> unavailable() {
-        return Optional.empty();
-    }
+    Optional<String> unavailable();
 }

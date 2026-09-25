@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -95,6 +96,11 @@ class SkillManagerHelperScriptTest {
             readOnly.add(List.copyOf(ro));
             assertTrue(Files.isRegularFile(script), "the script exists while it runs");
             return loadCheck;
+        }
+
+        @Override
+        public Optional<String> unavailable() {
+            return Optional.empty();
         }
     }
 

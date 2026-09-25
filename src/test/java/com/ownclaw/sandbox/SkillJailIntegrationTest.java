@@ -219,12 +219,6 @@ class SkillJailIntegrationTest {
         return out;
     }
 
-    private static List<Path> runTmpDirs() throws IOException {
-        try (Stream<Path> s = Files.list(Path.of(System.getProperty("java.io.tmpdir")))) {
-            return s.filter(p -> p.getFileName().toString().startsWith("ownclaw-run-")).toList();
-        }
-    }
-
     @Test
     @DisplayName("a jailed skill sees only its own directory, its handed file and the read-only host")
     void jailedSkillSeesOnlyWhatItWasGiven() throws Exception {
@@ -259,7 +253,6 @@ class SkillJailIntegrationTest {
             assertFalse(status.selfCheck().containsValue(false), status.selfCheck().toString());
             assertEquals(SkillJailRootsTest.withJournal(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
 
-            var before = runTmpDirs();
             JsonNode jailed = run(jail, jvmCanary, port, true, timing);
 
             for (String hidden : List.of("db", "env", "log", "other_upload", "other_skill")) {
@@ -308,7 +301,23 @@ class SkillJailIntegrationTest {
 
             long jailedMs = Long.parseLong(timing.get(1));
             assertTrue(jailedMs < 4000, "a background grandchild held the run open for " + jailedMs + " ms");
-            assertEquals(before, runTmpDirs(), "the run's private /tmp must be removed");
+
+            // The run's private /tmp goes when its launch closes, with a process of the run still
+            // going in its jail: this run's own directory, whatever other runs have in theirs.
+            Path runTmp;
+            try (var launch = jail.prepare(List.of("/bin/sh", "-c", "sleep 8 & echo x > /tmp/left.txt"),
+                    m.skillDir(), List.of())) {
+                assertTrue(launch.jailed(), String.valueOf(launch.refusal()));
+                runTmp = launch.tmpDir();
+                var pb = new ProcessBuilder(launch.argv()).directory(m.skillDir().toFile())
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD);
+                SkillJail.applyEnvironment(pb, Map.of());
+                Process p = pb.start();
+                p.getOutputStream().close();
+                assertTrue(p.waitFor(10, TimeUnit.SECONDS), "the jailed shell did not return");
+                assertTrue(Files.exists(runTmp.resolve("left.txt")), "the run's /tmp is not " + runTmp);
+            }
+            assertFalse(Files.exists(runTmp, LinkOption.NOFOLLOW_LINKS), "the run's private /tmp must be removed");
         } finally {
             Files.deleteIfExists(jvmCanary);
             Files.deleteIfExists(scratch);

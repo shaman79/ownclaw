@@ -919,9 +919,9 @@ public class SkillJail {
      * The checks a skill's binds pass before anything is started, jailed or in a container, and
      * the read-only binds they leave: a skill directory's authored files, then each of
      * {@code readOnly} that exists (a missing one is logged and left out). Throws, with the
-     * reason, at the first bind that is a link or reached through one, a work directory whose
-     * authored files are not regular files, a hard link out of any bind, or a bind that is, or
-     * holds, a guarded path.
+     * reason, at the first of: a bind that is a link, or is reached through a link below
+     * skills/; a work directory whose authored files are not regular files; a hard link out of
+     * any bind; a bind that is, or holds, a guarded path.
      *
      * @param workDir  the one directory the process may write
      * @param readOnly host paths the process may read, each at its own path; may be null
@@ -1004,7 +1004,9 @@ public class SkillJail {
      * also has a name outside it. A hard link made while nothing was jailed -- to the database,
      * say -- would keep that file readable, and current, through the bind. Nothing inside a jail
      * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
-     * are the skill's own business. Returns why, or null.
+     * are the skill's own business. Returns why, or null -- always null where the file system
+     * keeps no link count the JVM can read (Windows, where a container run still checks its
+     * binds), as {@link #refuseHardLink} skips there too.
      * <p>
      * It changes nothing, and reads each name's attributes without following a link. A second
      * run of the same skill, writing the tree while this walks, can still swap a directory for
@@ -1021,6 +1023,7 @@ public class SkillJail {
      * would be a chmod by its path, which follows a link.
      */
     static String linkedOutside(Path root) throws IOException {
+        if (!root.getFileSystem().supportedFileAttributeViews().contains("unix")) return null;
         var namesInside = new HashMap<Object, Integer>();
         var links = new HashMap<Object, Integer>();
         var named = new HashMap<Object, Path>();

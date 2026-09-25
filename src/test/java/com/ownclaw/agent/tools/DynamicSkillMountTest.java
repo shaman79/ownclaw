@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -32,8 +33,17 @@ import static org.junit.jupiter.api.Assertions.*;
 class DynamicSkillMountTest {
 
     /** The host sandbox, which a container skill never reaches: a run there fails the test. */
-    private static final SandboxManager HOST = (python, script, dir, stdin, env, timeout, progress, readOnly) -> {
-        throw new AssertionError("a container skill ran on the host");
+    private static final SandboxManager HOST = new SandboxManager() {
+        @Override
+        public SandboxResult execute(String python, Path script, Path dir, String stdin, Map<String, String> env,
+                                     int timeout, ProgressCallback progress, List<Path> readOnly) {
+            throw new AssertionError("a container skill ran on the host");
+        }
+
+        @Override
+        public Optional<String> unavailable() {
+            return Optional.empty();
+        }
     };
 
     /** A container runtime that records what it was asked to run, and runs nothing. */

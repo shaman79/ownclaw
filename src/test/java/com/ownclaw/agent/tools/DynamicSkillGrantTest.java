@@ -27,6 +27,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,6 +61,11 @@ class DynamicSkillGrantTest {
             return answers.isEmpty()
                     ? new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false)
                     : answers.poll();
+        }
+
+        @Override
+        public Optional<String> unavailable() {
+            return Optional.empty();
         }
     }
 

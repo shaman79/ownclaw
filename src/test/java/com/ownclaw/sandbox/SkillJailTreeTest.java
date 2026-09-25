@@ -130,6 +130,19 @@ class SkillJailTreeTest {
     }
 
     @Test
+    @DisplayName("on a file system without link counts (Windows) the hard-link check finds nothing, and does not fail")
+    void noLinkCountsNoRefusal() throws Exception {
+        // A zip file system has no "unix" view, as Windows' has none: a container run there
+        // checks its binds all the same.
+        try (var fs = java.nio.file.FileSystems.newFileSystem(tmp.resolve("fs.zip"), java.util.Map.of("create", "true"))) {
+            Path dir = Files.createDirectories(fs.getPath("/skill"));
+            Files.writeString(dir.resolve("skill.py"), "x");
+            assertFalse(fs.supportedFileAttributeViews().contains("unix"));
+            assertNull(SkillJail.linkedOutside(dir));
+        }
+    }
+
+    @Test
     @DisplayName("names another run removes while the hard-link check walks are skipped, not a refusal")
     void namesRemovedMidWalkAreSkipped() throws Exception {
         Path dir = Files.createDirectories(tmp.resolve("skill"));

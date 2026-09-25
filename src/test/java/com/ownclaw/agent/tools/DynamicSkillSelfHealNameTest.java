@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -44,7 +45,18 @@ class DynamicSkillSelfHealNameTest {
                 return false;
             }
         };
-        SandboxManager sandbox = (python, script, dir, stdin, env, timeout, progress, readOnly) -> result;
+        SandboxManager sandbox = new SandboxManager() {
+            @Override
+            public SandboxResult execute(String python, Path script, Path dir, String stdin, Map<String, String> env,
+                                         int timeout, ProgressCallback progress, List<Path> readOnly) {
+                return result;
+            }
+
+            @Override
+            public Optional<String> unavailable() {
+                return Optional.empty();
+            }
+        };
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
                 sandbox, pythonEnv, List.of(), null, List.of(), null, null, null);
         skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));

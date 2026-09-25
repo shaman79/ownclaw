@@ -527,7 +527,7 @@ public class DynamicSkill implements Tool {
      * What an isolated run may read besides the read-only host: the environment its imports
      * come from, and the files this task was handed. Nothing else of the service's.
      */
-    static List<Path> readOnlyFor(PythonEnvironmentService.PythonResolution resolution, List<Path> handed) {
+    public static List<Path> readOnlyFor(PythonEnvironmentService.PythonResolution resolution, List<Path> handed) {
         var out = new ArrayList<Path>();
         if (resolution.envDir() != null) out.add(resolution.envDir());
         out.addAll(handed);

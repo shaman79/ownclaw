@@ -431,9 +431,8 @@ public class SkillManager {
             // would. A launch the jail refuses comes back as a failed result, never as an
             // exception, so it cannot reach the "registering unverified" catch below: a skill
             // whose check could not run isolated is not let in unverified.
-            List<Path> readOnly = resolution.envDir() == null ? List.of() : List.of(resolution.envDir());
             SandboxResult result = sandbox.execute(resolution.python(), checkScript, skillDir,
-                    null, resolution.extraEnv(), 60, null, readOnly);
+                    null, resolution.extraEnv(), 60, null, DynamicSkill.readOnlyFor(resolution, List.of()));
             if (result.isSuccess()) return null;
             if (result.timedOut()) {
                 return "Importing the module timed out after 60s — module-level code should not "
