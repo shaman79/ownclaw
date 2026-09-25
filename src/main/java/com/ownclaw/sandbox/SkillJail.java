@@ -94,6 +94,9 @@ import java.util.stream.Stream;
  *   <li>the user namespace maps only the service user's own uid and gid, so its supplementary
  *       groups show as 65534 (nogroup) inside: a skill that looks at its group list concludes
  *       it lacks a group, while access is still decided by the real groups;</li>
+ *   <li>a skill's /tmp, and /var/tmp with it, is fresh on every run: what it kept there between
+ *       runs -- a last-seen marker, a token cache -- is lost, where unjailed the service's own
+ *       /tmp kept it;</li>
  *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
  *   <li>with /run gone, so are the system bus and systemd's own socket: systemctl, timedatectl,
  *       hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail;</li>
