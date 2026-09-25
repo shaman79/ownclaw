@@ -273,8 +273,8 @@ public class TelegramBotService {
             // Not a recognized command — fall through to agent
         }
 
-        // Interactive skill input: if a skill is waiting for user input, route this message
-        // to the pending need_input prompt instead of starting a new task.
+        // A waiting prompt (the /setup wizard's): route this message to it as the answer
+        // instead of starting a new task.
         if (interactionHandler.hasPending(userId)) {
             boolean handled = interactionHandler.provideInput(userId, userId, text);
             if (!handled) {

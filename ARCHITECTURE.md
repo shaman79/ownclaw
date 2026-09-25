@@ -12,7 +12,7 @@ OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LL
 
 - **Cloud LLM (Orchestrator)** — a large cloud LLM (OpenAI or Anthropic, configurable) that **always** drives the main agent loop: reasoning, planning, deciding which tools to call, and evaluating results. The cloud LLM is the "brain" — it sees every message, makes every decision, and owns the Think→Act→Observe loop.
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
-- **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (Podman containers on Linux, ProcessBuilder on Windows).
+- **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (a bubblewrap jail on Linux, docker/podman for skills with system packages, a plain child process on Windows).
 
 The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is a fallback — if the cloud is unavailable, the system degrades to local-only mode.
 
@@ -71,7 +71,7 @@ scenario breaks the system's ability to handle all others.
 | **LlmRouter** | Provider selector | Always selects cloud LLM; falls back to local only if cloud is unavailable | Java |
 | **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
 | **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
-| **SkillRunner** | Skill execution engine | Runs Python skill scripts in sandboxed containers (Podman/ProcessBuilder), manages I/O | Java + Python |
+| **SkillRunner** | Skill execution engine | Runs Python skill scripts in a bubblewrap jail (SkillJail), or docker/podman for system packages; manages I/O | Java + Python |
 | **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
 | **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
@@ -140,15 +140,16 @@ scenario breaks the system's ability to handle all others.
 │  └──────────────────────┬───────────────────────────┘                  │
 │                         ▼                                              │
 │  ┌──────────────────────────────────────────────────┐                  │
-│  │              Container Sandbox (Podman/Process)    │                  │
+│  │             Skill sandbox (SkillJail)             │                  │
 │  │                                                   │                  │
-│  │  Linux:   Podman container with python:3.11-slim  │                  │
-│  │  Windows: ProcessBuilder (dev mode)               │                  │
+│  │  Linux:   bubblewrap jail, host read-only         │                  │
+│  │  Packages: docker/podman (system_packages)        │                  │
+│  │  Windows: plain child process (dev mode)          │                  │
 │  │                                                   │                  │
 │  │  • Credential injection via env vars              │                  │
 │  │  • Per-skill venv with pip dependencies           │                  │
-│  │  • Network: configurable (allow/deny per skill)   │                  │
-│  │  • Timeout: hard kill after configurable limit    │                  │
+│  │  • Network: the host's                            │                  │
+│  │  • Stall timeout: killed after N s silent         │                  │
 │  │  • I/O: JSON params → stdout result + progress    │                  │
 │  └──────────────────────────────────────────────────┘                  │
 │                                                                        │
@@ -519,9 +520,6 @@ created_by: system       # system | mentor | user
 tested: true
 reversible: false        # Can this action be undone?
 
-# Interaction capabilities
-interactive: false       # Can this skill request user input mid-execution?
-
 # Version history
 changelog:
   - version: 2
@@ -547,8 +545,7 @@ This file is what the Executor scans to preselect skills. It must stay small.
       "complexity": "low",
       "params": ["to", "subject", "body", "attachments?"],
       "credentials": ["SMTP_*"],
-      "reversible": false,
-      "interactive": false
+      "reversible": false
     },
     {
       "name": "browse_web",
@@ -558,8 +555,7 @@ This file is what the Executor scans to preselect skills. It must stay small.
       "complexity": "medium",
       "params": ["url", "selector?", "wait_for?"],
       "credentials": [],
-      "reversible": true,
-      "interactive": false
+      "reversible": true
     }
   ]
 }
@@ -706,7 +702,7 @@ A skill cannot ask the user anything while it runs. Its input is the JSON on std
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
 ```
 
-A skill that prints a `{"type": "need_input", ...}` line anyway is stopped there: the process is killed and the run fails, rather than waiting for an answer that would never come. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
+A line a skill prints is captured into its result like any other output. A skill that returns a `{"type": "need_input", ...}` dict -- or writes one past the capture, to `sys.__stdout__` or from a process it starts -- is killed the moment it appears, and the run is reported as stalled: no answer would ever come. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
 
 **Progress reporting** (any skill):
 ```
@@ -925,26 +921,26 @@ Executor handles all compression locally (zero cloud cost):
 
 ### 8.1 Sandbox Architecture
 
-> **Note (v0.3)**: Production sandbox now uses **Podman containers** (python:3.11-slim image) instead of bubblewrap. The container-based approach provides better dependency isolation (per-skill venvs built inside containers) and more consistent cross-platform behavior.
+Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups) and over `/run/user`; the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` is its own, the PID namespace is new and the network is the host's. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) is installed and passes its self-check, runs skills unjailed with a warning until then, and refuses every launch if a jail that has worked stops starting; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read; entries that overlap the service's state are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
 
 ```
 ┌─────────────────────────────────────────────┐
 │              OwnClaw Process (Java)          │
 │                                              │
 │  ┌────────────────────────────────────────┐  │
-│  │          ContainerSandbox               │  │
+│  │          SkillJail (bubblewrap)         │  │
 │  │                                         │  │
-│  │  Linux: Podman (rootless containers)    │  │
-│  │  • Image: python:3.11-slim             │  │
-│  │  • Mount: skill dir (read-only)        │  │
-│  │  • Mount: venv dir (per-skill)         │  │
-│  │  • Network: configurable per skill     │  │
-│  │  • Timeout: hard kill                  │  │
-│  │  • Pip install on first run            │  │
+│  │  Linux: every host Python of a skill    │  │
+│  │  • Host read-only; service state and    │  │
+│  │    /run/user under tmpfs                │  │
+│  │  • Skill dir writable; authored files,  │  │
+│  │    env, handed files read-only          │  │
+│  │  • Private /tmp, own PID namespace      │  │
+│  │  • Network: the host's                  │  │
+│  │  • Killed after N s without output      │  │
 │  │                                         │  │
-│  │  Windows (dev): ProcessBuilder           │  │
-│  │  • Working dir isolation                │  │
-│  │  • Timeout via Future.get()             │  │
+│  │  system_packages: docker/podman         │  │
+│  │  Windows (dev): unjailed (mode off)     │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
 │  Credential Injection:                       │
@@ -1049,8 +1045,8 @@ Chat: "⚠️ New skill 'api_check_stocks' (generated by Mentor)
 
 | Threat | Mitigation |
 |--------|-----------|
-| Malicious skill code | Sandbox (bwrap/chroot), no host filesystem access |
-| Credential exfiltration | Network deny-by-default, only allow declared endpoints |
+| Malicious skill code | SkillJail (bubblewrap): the host read-only, the service's state hidden, only its own directory writable (§8.1) |
+| Credential exfiltration | Only approved credentials reach a skill (§8.3), and the database and .env are hidden from it (§8.1); the network is shared, not filtered |
 | Unauthorized credential access | Explicit user approval required (permanent/one-time/decline) |
 | Mentor generating credential-grabbing skills | New skills requesting sensitive credentials trigger extra warning in chat |
 | Prompt injection via user input | Executor uses structured I/O, not raw string interpolation |
@@ -1168,8 +1164,8 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | Skill scripts | Python 3.11+ | Rich library ecosystem |
-| Sandbox (Linux) | bubblewrap (bwrap) | Lightweight, widely available |
-| Sandbox (Windows) | ProcessBuilder + restrictions | Dev-mode, weaker isolation |
+| Sandbox (Linux) | bubblewrap (bwrap), through SkillJail; docker/podman for skills with system packages | Unprivileged, widely available |
+| Sandbox (Windows) | A plain child process (isolation off) | Dev-mode: the environment allow-list only |
 | Shared base env | Single venv with common libs (requests, beautifulsoup4, etc.) | Avoid re-installing common deps |
 | Per-skill env | venv per skill (when skill declares custom deps) | Dependency isolation |
 
@@ -1234,7 +1230,7 @@ ownclaw/
 │       │   │
 │       │   ├── skillrunner/
 │       │   │   ├── SkillRunnerService.java        # Executes skills in sandbox
-│       │   │   ├── SkillInteractionHandler.java   # Handles need_input/progress from skills
+│       │   │   ├── SkillInteractionHandler.java   # A prompt waiting for the user's answer (/setup)
 │       │   │   ├── SkillRollbackHandler.java      # Handles versioned rollback on failure
 │       │   │   └── SkillOutputParser.java         # Parses JSON-lines from skill stdout
 │       │   │
@@ -1259,8 +1255,9 @@ ownclaw/
 │       │   │
 │       │   ├── sandbox/
 │       │   │   ├── SandboxManager.java            # Interface
-│       │   │   ├── BubblewrapSandbox.java         # Linux production sandbox
-│       │   │   ├── ProcessSandbox.java            # Windows/dev sandbox
+│       │   │   ├── SkillJail.java                 # bubblewrap jail around every host Python of a skill
+│       │   │   ├── ProcessSandbox.java            # Runs a skill's Python, through SkillJail
+│       │   │   ├── ContainerSandbox.java          # docker/podman, for skills with system packages
 │       │   │   └── SandboxResult.java             # Execution result model
 │       │   │
 │       │   ├── users/
@@ -1407,9 +1404,10 @@ ownclaw:
 
   # Sandbox
   sandbox:
-    type: auto                   # auto | bubblewrap | process
-    default_timeout: 60          # seconds
-    default_network: deny        # allow | deny
+    isolation: auto              # auto | required | off -- SkillJail (§8.1); from .env only
+    bwrap_path: /usr/bin/bwrap   # absolute; never looked up on PATH
+    expose: []                   # host paths a jailed skill may still read
+    stall_timeout: 120           # seconds without output before a skill is killed
     python_path: /usr/bin/python3
 
   # Skills
@@ -1607,7 +1605,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 ### Phase 3: Polish & Hardening
 
 - [x] MCP Bridge implementation (should work with our skills system alongside, but give us access to existing tools)
-- [ ] Bubblewrap sandbox (Linux production)
+- [x] Bubblewrap sandbox (Linux production): SkillJail, §8.1 -- on once bubblewrap is installed on the host
 - [ ] Multi-provider cloud LLM support (OpenAI, DeepSeek, Mistral)
 - [ ] Skill generalization (merge similar skills)
 - [ ] Teaching pipeline (Mentor → Executor knowledge transfer, distillation)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.SkillManager;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.ProcessSandbox;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -77,7 +78,7 @@ class RunnerHarnessRegressionTest {
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg);
         var skill = new DynamicSkill("harness_probe", "probe", Map.of(), skillDir, false, false, 30,
-                new ProcessSandbox(env, new ObjectMapper()), env, List.of(), null, List.of(), null, null, null);
+                new ProcessSandbox(new ObjectMapper(), SkillJail.off()), env, List.of(), null, List.of(), null, null, null);
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
         assertTrue(result.success(), result.output());
         return result.output();
@@ -152,7 +153,7 @@ class RunnerHarnessRegressionTest {
         cfg.getSkills().setGeneratedPath(tmp.resolve("generated").toString());
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg);
-        var sandbox = new ProcessSandbox(env, new ObjectMapper());
+        var sandbox = new ProcessSandbox(new ObjectMapper(), SkillJail.off());
         var tools = new ToolRegistry(List.of());
         return new SkillManager(new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null),
                 tools, cfg, sandbox, env, null);

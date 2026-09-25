@@ -63,7 +63,7 @@ class SkillLifecycleTest {
         SkillJail jail = jail(root, generated);
         PythonEnvironmentService pyEnv = new PythonEnvironmentService(cfg, jail);
         pyEnv.init();
-        ProcessSandbox sandbox = new ProcessSandbox(pyEnv, new ObjectMapper(), jail);
+        ProcessSandbox sandbox = new ProcessSandbox(new ObjectMapper(), jail);
         registry = new ToolRegistry(List.of());
         DynamicSkillRegistry dynamic =
                 new DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);

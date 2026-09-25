@@ -90,7 +90,7 @@ class PrivateAnswerInTheWebChatTest {
         };
         var mapper = new ObjectMapper();
         chat = new ChatWebSocketHandler(new Answering(), null, conversations, emitter, null, wizard, auth,
-                new SkillInteractionHandler(null), null, null, mapper);
+                new SkillInteractionHandler(), null, null, mapper);
         Map<String, Object> attributes = new HashMap<>();
         socket = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (proxy, method, args) -> switch (method.getName()) {

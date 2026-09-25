@@ -299,7 +299,7 @@ public class SkillJail {
 
     /** A snapshot for health and tests. */
     public record Status(Mode mode, State state, String reason, String bwrap, String version,
-                         List<Path> hiddenRoots, List<Bind> exposed, Map<String, Boolean> selfCheck,
+                         List<Bind> exposed, Map<String, Boolean> selfCheck,
                          long checkedAtMillis, long isolatedRuns, long directRuns, long refusedRuns) {}
 
     private record Signature(boolean present, long size, long modified, Object key) {
@@ -324,7 +324,7 @@ public class SkillJail {
     private final AtomicLong refusedRuns = new AtomicLong();
     private final long startedAt;
     // The first moment the jail was READY in this process; from then on auto never runs a
-    // launch unjailed again (see unavailable()).
+    // launch unjailed again (see notStarting()).
     private volatile long readySince;
 
     private Evaluation evaluation;
@@ -384,7 +384,7 @@ public class SkillJail {
     public Status status() {
         Evaluation e = current();
         return new Status(mode, e.state(), e.reason(), bwrap == null ? null : bwrap.toString(),
-                e.version(), e.roots(), e.expose(), e.checks(), e.at(),
+                e.version(), e.expose(), e.checks(), e.at(),
                 isolatedRuns.get(), directRuns.get(), refusedRuns.get());
     }
 
@@ -493,7 +493,7 @@ public class SkillJail {
             } catch (RuntimeException ex) {
                 // Never let a surprise escape prepare(): a caller that catches exceptions and
                 // carries on (the load check registers "unverified") would turn it into a run.
-                next = unavailable("the jail could not be evaluated: " + ex, sig, now, null, List.of());
+                next = notStarting("the jail could not be evaluated: " + ex, sig, now, null, List.of());
             }
             if (e == null || e.state() != next.state() || !Objects.equals(e.reason(), next.reason())) {
                 logState(next);
@@ -509,21 +509,22 @@ public class SkillJail {
             return new Evaluation(State.OFF, "isolation is off (ownclaw.sandbox.isolation=off)",
                     sig, now, null, List.of(), List.of(), Map.of());
         }
-        if (configError != null) return unavailable(configError, sig, now, null, List.of());
+        if (configError != null) return notStarting(configError, sig, now, null, List.of());
         if (!sig.present()) {
-            return unavailable("bubblewrap is not installed (" + bwrap + " not found); "
-                    + "install it with: sudo apt install bubblewrap", sig, now, null, List.of());
+            return notStarting("bubblewrap is not installed (" + bwrap + " not found); "
+                    + "install it with: sudo apt install bubblewrap, then sudo systemctl restart ownclaw",
+                    sig, now, null, List.of());
         }
         String version = version();
         List<Path> roots;
         try {
             roots = hiddenRoots(layout);
         } catch (IllegalStateException ex) {
-            return unavailable(ex.getMessage(), sig, now, version, List.of());
+            return notStarting(ex.getMessage(), sig, now, version, List.of());
         }
         List<Bind> expose = filterExpose(exposeEntries, layout);
         SelfCheck check = selfCheck(roots, expose);
-        if (!check.completed()) return unavailable(check.reason(), sig, now, version, roots);
+        if (!check.completed()) return notStarting(check.reason(), sig, now, version, roots);
         if (check.checks().containsValue(false)) {
             // bubblewrap ran and an item failed. Every item is required, the functional ones (a
             // writable working directory, a readable /etc, the shared network) as much as the
@@ -542,7 +543,7 @@ public class SkillJail {
      * later launch outside it. Taking bubblewrap away on purpose then takes a restart or
      * {@code off}.
      */
-    private Evaluation unavailable(String reason, Signature sig, long now, String version,
+    private Evaluation notStarting(String reason, Signature sig, long now, String version,
                                    List<Path> roots) {
         State s = mode == Mode.AUTO && readySince == 0 ? State.INACTIVE : State.REFUSING;
         return new Evaluation(s, reason, sig, now, version, roots, List.of(), Map.of());
@@ -953,8 +954,11 @@ public class SkillJail {
         }
         for (var e : links.entrySet()) {
             if (e.getValue() > namesInside.get(e.getKey())) {
-                return named.get(e.getKey()) + " has another name outside " + root
-                        + " (a hard link): tampered skill";
+                Path file = named.get(e.getKey());
+                // A bind of the file itself: outside it is any other name at all.
+                return file.equals(root)
+                        ? file + " is a hard link (another name outside its bound path): tampered skill"
+                        : file + " has another name outside " + root + " (a hard link): tampered skill";
             }
         }
         return null;
@@ -1065,6 +1069,8 @@ public class SkillJail {
         m.put("selfCheck", check);
 
         var runs = new LinkedHashMap<String, Object>();
+        runs.put("counts", "launches of any Python the service starts through the jail: skill runs, their "
+                + "syntax and load checks, venv, pip and version probes");
         runs.put("since", iso(startedAt));
         runs.put("isolated", s.isolatedRuns());
         runs.put("direct", s.directRuns());

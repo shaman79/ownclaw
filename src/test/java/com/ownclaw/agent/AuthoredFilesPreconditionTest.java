@@ -60,7 +60,7 @@ class AuthoredFilesPreconditionTest {
         cfg.getSandbox().setPythonPath("python3");
         env = new PythonEnvironmentService(cfg, jail);
         env.init();
-        var sandbox = new ProcessSandbox(env, new ObjectMapper(), jail);
+        var sandbox = new ProcessSandbox(new ObjectMapper(), jail);
         tools = new ToolRegistry(List.of());
         dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
         manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);

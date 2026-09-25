@@ -43,7 +43,7 @@ class DynamicSkillSelfHealNameTest {
                 return false;
             }
         };
-        SandboxManager sandbox = (script, dir, stdin, env, timeout) -> result;
+        SandboxManager sandbox = (python, script, dir, stdin, env, timeout, progress, readOnly) -> result;
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
                 sandbox, pythonEnv, List.of(), null, List.of(), null, null, null);
         skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));

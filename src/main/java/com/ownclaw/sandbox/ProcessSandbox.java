@@ -2,10 +2,8 @@ package com.ownclaw.sandbox;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ownclaw.skills.PythonEnvironmentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
@@ -82,18 +80,10 @@ public class ProcessSandbox implements SandboxManager {
                 + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);
     }
 
-    private final PythonEnvironmentService pythonEnv;
     private final ObjectMapper mapper;
     private final SkillJail jail;
 
-    /** Without a jail: for tests and tools that build a sandbox by hand. */
-    public ProcessSandbox(PythonEnvironmentService pythonEnv, ObjectMapper mapper) {
-        this(pythonEnv, mapper, SkillJail.off());
-    }
-
-    @Autowired
-    public ProcessSandbox(PythonEnvironmentService pythonEnv, ObjectMapper mapper, SkillJail jail) {
-        this.pythonEnv = pythonEnv;
+    public ProcessSandbox(ObjectMapper mapper, SkillJail jail) {
         this.mapper = mapper;
         this.jail = jail;
     }
@@ -101,26 +91,6 @@ public class ProcessSandbox implements SandboxManager {
     @Override
     public Optional<String> unavailable() {
         return jail.unavailable();
-    }
-
-    @Override
-    public SandboxResult execute(Path scriptPath, Path workingDir, String stdinJson,
-                                 Map<String, String> envVars, int timeoutSec) {
-        return execute(pythonEnv.getSystemPython(), scriptPath, workingDir, stdinJson, envVars, timeoutSec);
-    }
-
-    @Override
-    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
-                                 String stdinJson, Map<String, String> envVars, int timeoutSec) {
-        return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec, null, List.of());
-    }
-
-    @Override
-    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
-                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
-                                 ProgressCallback progressCallback) {
-        return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec,
-                progressCallback, List.of());
     }
 
     @Override
@@ -146,7 +116,7 @@ public class ProcessSandbox implements SandboxManager {
         pb.redirectErrorStream(false);
 
         // Only the allow-listed environment plus the skill's declared credentials. When jailed
-        // this is bubblewrap's environment, which it hands to the skill unchanged.
+        // this is bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
         SkillJail.applyEnvironment(pb, envVars);
 
         try {
@@ -171,9 +141,11 @@ public class ProcessSandbox implements SandboxManager {
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
                     drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
 
-            // Read stdout line-by-line so we can detect need_input immediately.
-            // If a skill emits need_input in a non-interactive run it will block forever
-            // waiting for user input that will never come — kill it right away.
+            // Read stdout line-by-line so a need_input line is caught as it arrives. What a skill
+            // prints goes into the runner's capture and its result, not onto this stream; what
+            // reaches it is the result itself -- a returned need_input dict -- or a write past the
+            // capture (sys.__stdout__, a process the skill starts). No answer will ever come, so
+            // the process is killed at once and the run reported as stalled.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
@@ -217,7 +189,7 @@ public class ProcessSandbox implements SandboxManager {
 
             // need_input emitted → immediate failure (process was already killed above)
             if (needInputDetected.get()) {
-                log.warn("Sandbox aborted — skill emitted need_input in non-interactive execution: {}",
+                log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
                         scriptPath.getFileName());
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }
@@ -244,8 +216,8 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
-     * Returns true if a stdout line looks like a need_input JSON message.
-     * Used to fail-fast in non-interactive execution before the process blocks forever.
+     * Returns true if a stdout line looks like a need_input JSON message. A skill cannot be
+     * answered while it runs, so such a line ends the run.
      */
     private static boolean isNeedInputLine(String line) {
         String t = line.trim();
@@ -326,7 +298,7 @@ public class ProcessSandbox implements SandboxManager {
                             }
                         }
 
-                        // Detect need_input in non-interactive mode
+                        // A need_input line ends the run (see run())
                         if (isNeedInputLine(trimmed)) {
                             needInputDetected.set(true);
                             process.destroyForcibly();
@@ -360,7 +332,7 @@ public class ProcessSandbox implements SandboxManager {
             if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
 
             if (needInputDetected.get()) {
-                log.warn("Sandbox aborted — need_input in non-interactive execution: {}",
+                log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
                         scriptPath.getFileName());
                 return new SandboxResult(-1, stdout, stderr, durationMs, true);
             }

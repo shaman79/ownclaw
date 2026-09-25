@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.ProcessSandbox;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -69,7 +70,7 @@ class SkillDeletionTest {
         cfg.getSandbox().setPythonPath("python3");
         env = new PythonEnvironmentService(cfg);
         env.init();
-        sandbox = new ProcessSandbox(env, new ObjectMapper());
+        sandbox = new ProcessSandbox(new ObjectMapper(), SkillJail.off());
         tools = new ToolRegistry(List.of());
         dynamic = new RecordingRegistry(cfg, tools, sandbox, env);
         manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);

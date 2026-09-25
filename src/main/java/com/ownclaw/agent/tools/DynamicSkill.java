@@ -500,14 +500,13 @@ public class DynamicSkill implements Tool {
 
     /**
      * The handed file's real path, or null -- logged by id, never by name -- when it cannot be
-     * handed over: the record names no plain file in the uploads directory, the file is gone,
-     * it is a link, or its real path is anything but a regular file directly inside the uploads
-     * directory. A bad attachment is dropped, not thrown, so one bad row never fails the task.
+     * handed over: the record names no regular file directly in the uploads directory (see
+     * {@code FileStorageService.getFilePath}), or what is there has stopped being one. A bad
+     * attachment is dropped, not thrown, so one bad row never fails the task.
      * <p>
      * The real path, because it is bound into the jail at that path and so has to be what the
-     * skill is told; and a regular file directly inside uploads, because a link or a crafted
-     * row pointing at the database or at another user's upload would otherwise be bound in
-     * read-only as though it were the file this task was given.
+     * skill is told. A regular file directly in uploads is not a link, so its real path is the
+     * same file, directly in the real uploads directory.
      */
     private Path handedFile(String fileId) {
         Path stored = fileStorage.getFilePath(fileId);
@@ -517,19 +516,12 @@ public class DynamicSkill implements Tool {
             return null;
         }
         try {
+            // Again as it is used: what the store saw a moment ago.
             if (!Files.isRegularFile(stored, LinkOption.NOFOLLOW_LINKS)) {
-                log.warn("Skill '{}': attachment {} is missing, a link or not a regular file; not handing it over",
-                        name, fileId);
+                log.warn("Skill '{}': attachment {} is no longer a regular file; not handing it over", name, fileId);
                 return null;
             }
-            Path uploads = fileStorage.getUploadsDir().toRealPath();
-            Path real = stored.toRealPath();
-            if (!uploads.equals(real.getParent()) || !Files.isRegularFile(real, LinkOption.NOFOLLOW_LINKS)) {
-                log.warn("Skill '{}': attachment {} is not a regular file directly in the uploads directory; "
-                        + "not handing it over", name, fileId);
-                return null;
-            }
-            return real;
+            return stored.toRealPath();
         } catch (IOException | RuntimeException e) {
             log.warn("Skill '{}': attachment {} could not be resolved ({}); not handing it over",
                     name, fileId, e.getClass().getSimpleName());

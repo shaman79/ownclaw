@@ -164,7 +164,7 @@ class SkillJailIntegrationTest {
         in.put("user_runtime", runtime == null ? "" : runtime.toString());
 
         long start = System.nanoTime();
-        var result = new ProcessSandbox(null, mapper, jail).execute("python3", script, m.skillDir(),
+        var result = new ProcessSandbox(mapper, jail).execute("python3", script, m.skillDir(),
                 mapper.writeValueAsString(in), Map.of("SKILL_CRED", "cred-canary"), 30, null,
                 List.of(m.handed()));
         timing.add(String.valueOf(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
@@ -204,7 +204,7 @@ class SkillJailIntegrationTest {
             var status = jail.status();
             assertEquals(SkillJail.State.READY, status.state(), status.reason());
             assertFalse(status.selfCheck().containsValue(false), status.selfCheck().toString());
-            assertEquals(SkillJailRootsTest.withUserRuntime(List.of(m.root().toRealPath())), status.hiddenRoots());
+            assertEquals(SkillJailRootsTest.withUserRuntime(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
 
             var before = runTmpDirs();
             JsonNode jailed = run(jail, jvmCanary, port, true, timing);
@@ -280,8 +280,8 @@ class SkillJailIntegrationTest {
         Path script = skillDir.resolve("_runner_readable.py");
         Files.deleteIfExists(script);
         Files.writeString(script, READABLE);
-        var result = new ProcessSandbox(null, mapper, jail).execute("python3", script, skillDir,
-                mapper.writeValueAsString(paths.stream().map(Path::toString).toList()), Map.of(), 30);
+        var result = new ProcessSandbox(mapper, jail).execute("python3", script, skillDir,
+                mapper.writeValueAsString(paths.stream().map(Path::toString).toList()), Map.of(), 30, null, List.of());
         assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
         return mapper.readTree(result.stdout());
     }
@@ -306,7 +306,7 @@ class SkillJailIntegrationTest {
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
         assertEquals(SkillJailRootsTest.withUserRuntime(List.of(root.toRealPath(), realData.toRealPath())),
-                jail.status().hiddenRoots());
+                SkillJail.hiddenRoots(layout));
         JsonNode jailed = readableFrom(jail, skillDir, db);
         for (Path p : db) assertFalse(jailed.get(p.toString()).asBoolean(), p + " is readable inside the jail");
     }
@@ -343,7 +343,7 @@ class SkillJailIntegrationTest {
         var layout = new SkillJail.Layout(root, data.resolve("ownclaw.db"), root.resolve("skills/generated"), null);
         var jail = new SkillJail("required", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        assertEquals(SkillJailRootsTest.withUserRuntime(List.of(root.toRealPath())), jail.status().hiddenRoots(),
+        assertEquals(SkillJailRootsTest.withUserRuntime(List.of(root.toRealPath())), SkillJail.hiddenRoots(layout),
                 "the data directory is not there yet");
 
         Path db = Files.writeString(Files.createDirectories(data).resolve("ownclaw.db"), "canary-db-secret");

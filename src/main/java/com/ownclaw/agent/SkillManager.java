@@ -482,7 +482,7 @@ public class SkillManager {
                     StandardCharsets.UTF_8);
 
             String python = pythonEnv.getSystemPython();
-            SandboxResult result = sandbox.execute(python, checkScript, tempDir, null, Map.of(), 10);
+            SandboxResult result = sandbox.execute(python, checkScript, tempDir, null, Map.of(), 10, null, List.of());
 
             if (!result.isSuccess()) {
                 return result.stderr().isBlank() ? result.stdout() : result.stderr();

@@ -84,13 +84,12 @@ class SkillManagerHelperScriptTest {
         }
 
         @Override
-        public SandboxResult execute(Path script, Path dir, String in, Map<String, String> env, int timeout) {
-            return new SandboxResult(0, "", "", 1, false);
-        }
-
-        @Override
         public SandboxResult execute(String python, Path script, Path dir, String in, Map<String, String> env,
                                      int timeout, ProgressCallback cb, List<Path> ro) {
+            // Anything but the load check -- the syntax check before it -- passes.
+            if (!script.getFileName().toString().startsWith("_load_check_")) {
+                return new SandboxResult(0, "", "", 1, false);
+            }
             scripts.add(script);
             readOnly.add(List.copyOf(ro));
             assertTrue(Files.isRegularFile(script), "the script exists while it runs");
@@ -107,7 +106,7 @@ class SkillManagerHelperScriptTest {
                 System::currentTimeMillis);
         assertEquals(SkillJail.State.REFUSING, jail.status().state());
         var env = new PythonEnvironmentService(cfg, jail);
-        var m = manager(new ProcessSandbox(env, new ObjectMapper(), jail), env);
+        var m = manager(new ProcessSandbox(new ObjectMapper(), jail), env);
 
         Path existing = Files.createDirectories(generated.resolve("greet_user"));
         Files.writeString(existing.resolve("skill.py"), "# the working version\n");
@@ -176,7 +175,7 @@ class SkillManagerHelperScriptTest {
 
         var env = new PythonEnvironmentService(cfg);
         env.init();
-        var sandbox = new ProcessSandbox(env, new ObjectMapper());
+        var sandbox = new ProcessSandbox(new ObjectMapper(), SkillJail.off());
         var m = manager(sandbox, env);
 
         String created = m.skills().createSkill(skill("greet_user", CODE));

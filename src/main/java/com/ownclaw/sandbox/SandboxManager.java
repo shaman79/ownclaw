@@ -28,50 +28,26 @@ public interface SandboxManager {
     }
 
     /**
-     * Execute a Python script in a sandboxed environment.
+     * Run a skill's Python script.
      *
-     * @param scriptPath   path to the skill.py script
-     * @param workingDir   the skill's directory; writable, and when the skill is isolated the
-     *                     only writable path besides its private /tmp
-     * @param stdinJson    JSON input to pass via stdin
-     * @param envVars      environment variables (credentials + config)
-     * @param timeoutSec   stall timeout — process is killed if no output for this many seconds
+     * @param pythonPath       the interpreter: the system one, or the skill's environment's
+     * @param scriptPath       the script to run
+     * @param workingDir       the skill's directory; writable, and when the skill is isolated the
+     *                         only writable path besides its private /tmp
+     * @param stdinJson        JSON input to pass via stdin; null for none
+     * @param envVars          environment variables (credentials + config)
+     * @param timeoutSec       stall timeout — the process is killed if it prints nothing for this
+     *                         many seconds
+     * @param progressCallback receives the progress lines the skill emits
+     *                         ({@code {"type":"progress",...}}), which are then left out of stdout;
+     *                         null for none
+     * @param readOnly         host paths the skill may read when it is isolated, each at its own
+     *                         path -- its environment and the files this task was handed
      * @return execution result
      */
-    SandboxResult execute(Path scriptPath, Path workingDir, String stdinJson,
-                          Map<String, String> envVars, int timeoutSec);
-
-    /**
-     * Execute with a specific Python executable (for venv support).
-     */
-    default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir,
-                                  String stdinJson, Map<String, String> envVars, int timeoutSec) {
-        return execute(scriptPath, workingDir, stdinJson, envVars, timeoutSec);
-    }
-
-    /**
-     * Execute with a specific Python executable and progress callback.
-     * Progress lines emitted by the skill ({@code {"type":"progress",...}}) are intercepted
-     * and forwarded via the callback instead of being included in stdout.
-     *
-     * @param progressCallback receives progress updates (may be null for no-op)
-     */
-    default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir,
-                                  String stdinJson, Map<String, String> envVars, int timeoutSec,
-                                  ProgressCallback progressCallback) {
-        return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
-    }
-
-    /**
-     * Execute with read-only access to host paths the skill would otherwise not see when it is
-     * isolated -- its environment and the files this task was handed, each at its own path.
-     * Implementations without isolation have nothing to open up and ignore the list.
-     */
-    default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir,
-                                  String stdinJson, Map<String, String> envVars, int timeoutSec,
-                                  ProgressCallback progressCallback, List<Path> readOnly) {
-        return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec, progressCallback);
-    }
+    SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir, String stdinJson,
+                          Map<String, String> envVars, int timeoutSec, ProgressCallback progressCallback,
+                          List<Path> readOnly);
 
     /**
      * Why every launch would be refused right now, if it would -- so a caller can stop before

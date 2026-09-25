@@ -42,7 +42,7 @@ class ProcessSandboxOutputLimitTest {
                 "out.flush()",
                 "time.sleep(" + sleepAfter + ")",
                 ""));
-        return new ProcessSandbox(null, new ObjectMapper(), SkillJail.off()).execute("python3", script, tmp,
+        return new ProcessSandbox(new ObjectMapper(), SkillJail.off()).execute("python3", script, tmp,
                 null, Map.of(), 60, progress ? (msg, pct) -> { } : null, List.of());
     }
 
