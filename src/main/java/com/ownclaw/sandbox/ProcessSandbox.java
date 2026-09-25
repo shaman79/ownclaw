@@ -94,12 +94,6 @@ public class ProcessSandbox implements SandboxManager {
         return jail.unavailable();
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * @throws IllegalArgumentException when a name in {@code envVars} is not
-     *                                  {@link SkillJail#settableName}; nothing is started
-     */
     @Override
     public SandboxResult execute(String python, Path scriptPath, Path workingDir,
                                  String stdinJson, Map<String, String> envVars, int timeoutSec,
@@ -109,8 +103,8 @@ public class ProcessSandbox implements SandboxManager {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
             ProcessBuilder pb = new ProcessBuilder(launch.argv());
             pb.directory(workingDir.toFile());
-            // Only the allow-listed environment plus the skill's declared credentials. When jailed
-            // this is bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
+            // Only the allow-listed environment plus what the caller sets. When jailed this is
+            // bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
             SkillJail.applyEnvironment(pb, envVars);
             long startTime = System.currentTimeMillis();
             try {

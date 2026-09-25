@@ -194,11 +194,23 @@ public class DynamicSkill implements Tool {
     );
 
     /**
+     * The key a skill's credentials travel under in the JSON on the runner's stdin. The runner
+     * takes them out of the parameters and puts them into its own environment before skill.py is
+     * loaded, so the skill reads them from {@code os.environ}, as it always has, its subprocesses
+     * inherit them, and they are never in the params it is given. They are never in the
+     * environment of the process that starts the runner, either: bubblewrap, or the container
+     * runtime's CLI, neither of them jailed, where a name the dynamic loader or the runtime
+     * reads -- LD_PRELOAD, DOCKER_HOST -- would act on that process itself.
+     */
+    static final String CREDENTIALS = "_credentials";
+
+    /**
      * The runner harness that bootstraps skill execution.
      *
      * <p>We do NOT run skill.py directly — instead we run this thin wrapper that:
      * <ol>
-     *   <li>Reads JSON parameters from stdin</li>
+     *   <li>Reads JSON parameters from stdin, and moves the {@link #CREDENTIALS} among them into
+     *       its own environment</li>
      *   <li>Imports skill.py and calls its {@code run(params)} function</li>
      *   <li>Prints the returned dict as JSON to stdout</li>
      *   <li>Catches and reports any exception as a structured failure</li>
@@ -271,6 +283,7 @@ public class DynamicSkill implements Tool {
         "",
         "try:",
         "    params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
+        "    os.environ.update(params.pop('" + CREDENTIALS + "', None) or {})",
         "    builtins.report_progress = report_progress",
         "    _capture = io.StringIO()",
         "    sys.stdout = _capture",
@@ -350,26 +363,21 @@ public class DynamicSkill implements Tool {
                     effectiveParams.put("_attached_files", attachedFiles);
                 }
             }
-            String inputJson = mapper.writeValueAsString(effectiveParams);
 
-            Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
-            // Force UTF-8 for Python's stdin/stdout/stderr — prevents mojibake when
-            // skills produce non-ASCII output (Czech, CJK, accented chars, etc.)
-            envVars.put("PYTHONIOENCODING", "utf-8");
-            envVars.put("PYTHONUTF8", "1");
-
-            // Inject credentials from the encrypted vault as environment variables
+            // The skill's credentials, from the encrypted vault, go in with its input (see
+            // CREDENTIALS) -- always set, so a parameter of that name from the caller never
+            // reaches the runner's environment.
+            Map<String, String> creds = Map.of();
             if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
                 log.info("Skill '{}': requesting credentials {} for user='{}'",
                         name, requiredCredentials, context.userId());
-                Map<String, String> creds = credentialVault.getCredentials(
+                Map<String, String> found = credentialVault.getCredentials(
                         context.userId(), requiredCredentials);
                 log.info("Skill '{}': vault returned {} credentials, keys={}",
-                        name, creds.size(), creds.keySet());
-                envVars.putAll(creds);
-                if (creds.size() < requiredCredentials.size()) {
+                        name, found.size(), found.keySet());
+                if (found.size() < requiredCredentials.size()) {
                     List<String> missing = requiredCredentials.stream()
-                            .filter(k -> !creds.containsKey(k))
+                            .filter(k -> !found.containsKey(k))
                             .toList();
                     log.warn("Skill '{}' missing credentials: {}", name, missing);
                     return ToolResult.failure(
@@ -377,7 +385,8 @@ public class DynamicSkill implements Tool {
                             + ". Ask the user to store each one by typing: /cred set KEY value"
                             + " — do not ask them to paste the value to you.");
                 }
-                log.info("Skill '{}': all {} credentials injected as env vars", name, creds.size());
+                creds = found;
+                log.info("Skill '{}': all {} credentials handed over with its input", name, creds.size());
             } else {
                 log.info("Skill '{}': credential injection SKIPPED (requiredCredentials={}, "
                         + "credentialVault={}, userId={})",
@@ -385,6 +394,8 @@ public class DynamicSkill implements Tool {
                         credentialVault != null ? "present" : "NULL",
                         context.userId() != null ? context.userId() : "NULL");
             }
+            effectiveParams.put(CREDENTIALS, creds);
+            String inputJson = mapper.writeValueAsString(effectiveParams);
 
             // Run the skill: choose container or direct process execution.
             // Skills with system_packages run in a Docker/Podman container so packages
@@ -404,7 +415,7 @@ public class DynamicSkill implements Tool {
                 usedContainer = true;
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
-                        inputJson, envVars, timeoutSec,
+                        inputJson, timeoutSec,
                         context.progressCallback(), extraVolumes);
             } else {
                 if (!systemPackages.isEmpty()) {
@@ -415,7 +426,7 @@ public class DynamicSkill implements Tool {
                 // Direct process execution (original path)
                 result = sandbox.execute(
                         resolution.python(), runnerScript, skillDir,
-                        inputJson, envVars, timeoutSec,
+                        inputJson, environment(resolution), timeoutSec,
                         context.progressCallback(), readOnlyFor(resolution, handed));
             }
 
@@ -437,7 +448,7 @@ public class DynamicSkill implements Tool {
                         boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
                         if (installed) {
                             SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                    runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes,
+                                    runnerScript, skillDir, inputJson, timeoutSec, extraVolumes,
                                     handed);
                             if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                                 log.info("Self-heal succeeded for skill '{}'", name);
@@ -461,7 +472,7 @@ public class DynamicSkill implements Tool {
                             name, pkg, missingModule);
                     if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
                         SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes,
+                                runnerScript, skillDir, inputJson, timeoutSec, extraVolumes,
                                 handed);
                         if (retry != null && !retry.timedOut() && retry.isSuccess()) {
                             log.info("Self-heal (stderr) succeeded for skill '{}'", name);
@@ -524,6 +535,19 @@ public class DynamicSkill implements Tool {
     }
 
     /**
+     * The variables a run is given beside the allow-list, all of them the service's own: the
+     * environment's PATH or PYTHONPATH, and UTF-8 for Python's stdin/stdout/stderr -- prevents
+     * mojibake when skills produce non-ASCII output (Czech, CJK, accented chars, etc.). Never a
+     * credential: those go in with the input ({@link #CREDENTIALS}).
+     */
+    static Map<String, String> environment(PythonEnvironmentService.PythonResolution resolution) {
+        Map<String, String> env = new HashMap<>(resolution.extraEnv());
+        env.put("PYTHONIOENCODING", "utf-8");
+        env.put("PYTHONUTF8", "1");
+        return env;
+    }
+
+    /**
      * What an isolated run may read besides the read-only host: the environment its imports
      * come from, and the files this task was handed. Nothing else of the service's.
      */
@@ -558,8 +582,8 @@ public class DynamicSkill implements Tool {
      */
     private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
                                          Path runnerScript, Path skillDir, String inputJson,
-                                         Map<String, String> envVars, int timeoutSec,
-                                         Map<String, String> extraVolumes, List<Path> handed) {
+                                         int timeoutSec, Map<String, String> extraVolumes,
+                                         List<Path> handed) {
         try {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
@@ -567,22 +591,17 @@ public class DynamicSkill implements Tool {
                 String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage, null);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
-                        inputJson, envVars, timeoutSec, null, extraVolumes);
+                        inputJson, timeoutSec, null, extraVolumes);
             } else {
                 // Direct process execution
                 var healedResolution = pythonEnv.resolveExecution(skillDir, name);
-                Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
-                healedEnv.put("PYTHONIOENCODING", "utf-8");
-                healedEnv.put("PYTHONUTF8", "1");
-                healedEnv.putAll(envVars.entrySet().stream()
-                        .filter(e -> !healedEnv.containsKey(e.getKey()))
-                        .collect(java.util.stream.Collectors.toMap(
-                                Map.Entry::getKey, Map.Entry::getValue)));
                 // The heal may have just created the environment, so it is read again rather
-                // than taken from the first run; the handed files are the first run's own.
+                // than taken from the first run; the handed files are the first run's own, and
+                // the credentials come with the input, as on the first run.
                 return sandbox.execute(
                         healedResolution.python(), runnerScript, skillDir,
-                        inputJson, healedEnv, timeoutSec, null, readOnlyFor(healedResolution, handed));
+                        inputJson, environment(healedResolution), timeoutSec, null,
+                        readOnlyFor(healedResolution, handed));
             }
         } catch (Exception e) {
             log.error("Self-heal retry failed for skill '{}': {}", name, e.getMessage());

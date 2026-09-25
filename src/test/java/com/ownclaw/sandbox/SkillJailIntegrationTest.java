@@ -116,7 +116,7 @@ class SkillJailIntegrationTest {
                 r['mqueue_made'] = True
             except Exception:
                 r['mqueue_made'] = False
-            r['cred'] = os.environ.get('SKILL_CRED')
+            r['utf8'] = os.environ.get('PYTHONUTF8')
             r['env_names'] = sorted(os.environ.keys())
             r['pwd'] = os.environ.get('PWD')
             if p.get('spawn'):
@@ -182,7 +182,7 @@ class SkillJailIntegrationTest {
 
         long start = System.nanoTime();
         var result = new ProcessSandbox(jail).execute("python3", script, m.skillDir(),
-                mapper.writeValueAsString(in), Map.of("SKILL_CRED", "cred-canary"), 30, null,
+                mapper.writeValueAsString(in), Map.of("PYTHONUTF8", "1"), 30, null,
                 List.of(m.handed()));
         timing.add(String.valueOf(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
         assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
@@ -306,11 +306,11 @@ class SkillJailIntegrationTest {
             assertFalse(jailed.get("jvm_tmp_canary").asBoolean(), "the JVM's /tmp is visible");
             assertTrue(jailed.get("loopback").asBoolean(), "the host network must stay shared");
 
-            assertEquals("cred-canary", jailed.get("cred").asText());
+            assertEquals("1", jailed.get("utf8").asText(), "a variable the service sets did not arrive");
             for (JsonNode n : jailed.get("env_names")) {
                 String name = n.asText();
                 // PWD is bubblewrap's own, set for --chdir; it is the skill directory, not the JVM's.
-                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || name.equals("SKILL_CRED")
+                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || name.equals("PYTHONUTF8")
                         || name.equals("PWD"), "unexpected variable inside the jail: " + name);
             }
             assertEquals(m.skillDir().toString(), jailed.get("pwd").asText());
@@ -342,20 +342,14 @@ class SkillJailIntegrationTest {
     }
 
     @Test
-    @DisplayName("a credential named for the dynamic loader starts nothing; the environment's PATH, PYTHONPATH and VIRTUAL_ENV still arrive")
-    void aLoaderNameStartsNothing() throws Exception {
+    @DisplayName("a credential reaches the jailed skill and its subprocesses on stdin; bubblewrap's own environment never holds one, whatever its name")
+    void credentialsReachOnlyTheJail() throws Exception {
         var jail = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
-        var sandbox = new ProcessSandbox(jail);
         Path lib = Files.writeString(m.skillDir().resolve("lib.so"), "");
-        Path script = Files.writeString(m.skillDir().resolve("_runner_env.py"), """
-                import json, os
-                open('ran', 'w').close()
-                print(json.dumps({k: os.environ.get(k) for k in ('PATH', 'PYTHONPATH', 'VIRTUAL_ENV', 'SMTP_PASSWORD')}))
-                """);
 
         // Control: a bubblewrap that is not setuid -- this one -- has the loader act on the name in
-        // its own process, outside any jail.
+        // its own process, outside any jail, when it is in bubblewrap's environment.
         if (((Integer) Files.getAttribute(BWRAP, "unix:mode") & 04000) == 0) {
             var raw = new ProcessBuilder(BWRAP.toString(), "--version").redirectErrorStream(true);
             raw.environment().put("LD_PRELOAD", lib.toString());
@@ -365,22 +359,66 @@ class SkillJailIntegrationTest {
             assertTrue(said.contains(lib.toString()), "the loader did not read the name: " + said);
         }
 
-        var e = assertThrows(IllegalArgumentException.class, () -> sandbox.execute("python3", script, m.skillDir(),
-                null, Map.of("LD_PRELOAD", lib.toString(), "SMTP_PASSWORD", "cred-canary"), 30, null, List.of()));
-        assertEquals(SkillJail.nameRefusal("LD_PRELOAD"), e.getMessage());
-        assertFalse(Files.exists(m.skillDir().resolve("ran")), "the skill ran");
+        var cfg = new OwnClawConfig();
+        cfg.getSkills().setGeneratedPath(m.generated().toString());
+        cfg.getDatabase().setPath(m.db().toString());
+        cfg.getSandbox().setPythonPath("python3");
+        var env = new PythonEnvironmentService(cfg, jail);
+        env.init();
+        var vault = new com.ownclaw.users.CredentialVault(null) {
+            @Override
+            public Map<String, String> getCredentials(String userId, List<String> keys) {
+                return Map.of("SKILL_TOKEN", "cred-canary-9d2", "LD_PRELOAD", lib.toString());
+            }
+        };
+        Files.writeString(m.skillDir().resolve("skill.py"), """
+                import json, os, subprocess, time
+                def run(params):
+                    time.sleep(2)  # while the test reads bubblewrap's environment
+                    child = subprocess.run(['sh', '-c', 'printf %s "$SKILL_TOKEN"'], capture_output=True, text=True)
+                    return {'output': json.dumps({'token': os.environ.get('SKILL_TOKEN'),
+                                                  'preload': os.environ.get('LD_PRELOAD'),
+                                                  'child': child.stdout, 'params': sorted(params)})}
+                """);
+        var skill = new com.ownclaw.agent.tools.DynamicSkill("probe_skill", "probe", Map.of(), m.skillDir(), false,
+                false, 30, new ProcessSandbox(jail), env, List.of("SKILL_TOKEN", "LD_PRELOAD"), vault, List.of(),
+                null, null, null);
 
-        // What the service itself puts there for a venv or a --target install is not held back.
-        String path = m.skillDir().resolve("venv/bin") + ":" + System.getenv("PATH");
-        var result = sandbox.execute("python3", script, m.skillDir(), null, Map.of("PATH", path,
-                "PYTHONPATH", m.skillDir().resolve("target").toString(), "VIRTUAL_ENV", m.skillDir().resolve("venv").toString(),
-                "SMTP_PASSWORD", "cred-canary"), 30, null, List.of());
-        assertTrue(result.isSuccess(), result.stderr());
-        JsonNode env = mapper.readTree(result.stdout());
-        assertEquals(path, env.get("PATH").asText());
-        assertEquals(m.skillDir().resolve("target").toString(), env.get("PYTHONPATH").asText());
-        assertEquals(m.skillDir().resolve("venv").toString(), env.get("VIRTUAL_ENV").asText());
-        assertEquals("cred-canary", env.get("SMTP_PASSWORD").asText());
+        var run = java.util.concurrent.CompletableFuture.supplyAsync(() -> skill.execute(Map.of("x", 1),
+                new com.ownclaw.agent.tools.ToolExecutionContext("u1", "t1", null, () -> false)));
+        // The JVM's own bubblewrap child for this skill, read while the skill runs.
+        String bwrapEnv = null;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (bwrapEnv == null && !run.isDone() && System.nanoTime() < deadline) {
+            for (ProcessHandle p : ProcessHandle.current().children().toList()) {
+                boolean ours = p.info().command().map(BWRAP.toString()::equals).orElse(false)
+                        && p.info().arguments().map(a -> List.of(a).contains(m.skillDir().toString())).orElse(false);
+                if (!ours) continue;
+                try {
+                    bwrapEnv = Files.readString(Path.of("/proc/" + p.pid() + "/environ")).replace('\0', '\n');
+                } catch (IOException gone) {
+                    // it ended in between
+                }
+            }
+            Thread.sleep(20);
+        }
+        var result = run.get(60, TimeUnit.SECONDS);
+
+        assertTrue(result.success(), result.output());
+        JsonNode seen = mapper.readTree(result.output());
+        assertEquals("cred-canary-9d2", seen.get("token").asText());
+        assertEquals("cred-canary-9d2", seen.get("child").asText(), "a subprocess of the skill did not inherit it");
+        assertEquals(lib.toString(), seen.get("preload").asText(), "inside the jail the name is the skill's own");
+        assertEquals("[\"x\"]", seen.get("params").toString(), "the credentials are left in the skill's params");
+
+        assertNotNull(bwrapEnv, "bubblewrap was not seen while the skill ran");
+        for (String line : bwrapEnv.lines().toList()) {
+            String name = line.substring(0, Math.max(0, line.indexOf('=')));
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || List.of("PYTHONUTF8", "PYTHONPATH").contains(name),
+                    "bubblewrap's environment holds " + name);
+        }
+        assertFalse(bwrapEnv.contains("cred-canary-9d2") || bwrapEnv.contains(lib.toString()),
+                "a credential is in bubblewrap's environment");
     }
 
     // Prints, for each path it is given, whether it could read a byte of it -- never the byte.

@@ -35,10 +35,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *       skill.py and requirements.txt read-only on top</li>
  *   <li>Each file the task was handed, read-only</li>
  *   <li>{@code --network=host} so the skill can access the local network</li>
- *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) by name, {@code -e KEY},
- *       each value in the runtime CLI's own environment and never on its command line; a run
- *       with a variable {@link SkillJail#settableName} refuses -- among them every name the CLI
- *       itself reads -- is not started</li>
+ *   <li>No variable of the service's or of the run: the image sets the encoding, and the
+ *       skill's credentials come on stdin with its input, for the runner to put into its own
+ *       environment inside the container -- never into the runtime CLI's</li>
  *   <li>JSON input on stdin, JSON output on stdout</li>
  * </ul>
  * Every bind passes the jail's checks first ({@link SkillJail#checkBinds}), and the run is
@@ -158,7 +157,7 @@ public class ContainerSandbox {
 
     private boolean isRuntimeInstalled(String runtime) {
         try {
-            Process p = cli(List.of(runtime, "version"), Map.of())
+            Process p = cli(List.of(runtime, "version"))
                     .redirectErrorStream(true)
                     .start();
             drainStream(p.getInputStream());
@@ -179,7 +178,7 @@ public class ContainerSandbox {
         try {
             // Quick smoke test: ask podman to unshare a trivial command.
             // This exercises the same user-namespace code path that build uses.
-            Process p = cli(List.of(podman, "unshare", "cat", "/proc/self/uid_map"), Map.of())
+            Process p = cli(List.of(podman, "unshare", "cat", "/proc/self/uid_map"))
                     .redirectErrorStream(true)
                     .start();
             String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
@@ -312,7 +311,7 @@ public class ContainerSandbox {
 
     private boolean imageExists(String imageTag) {
         try {
-            Process p = cli(List.of(containerRuntime, "image", "inspect", imageTag), Map.of())
+            Process p = cli(List.of(containerRuntime, "image", "inspect", imageTag))
                     .redirectErrorStream(true)
                     .start();
             drainStream(p.getInputStream());
@@ -443,7 +442,7 @@ public class ContainerSandbox {
             // gets killed by the stall detector.
             cmd.add(buildCtx.toAbsolutePath().toString());
 
-            Process p = cli(cmd, Map.of())
+            Process p = cli(cmd)
                     .redirectErrorStream(true)
                     .start();
 
@@ -511,25 +510,21 @@ public class ContainerSandbox {
      * @param python           python executable (usually "python3" inside the container)
      * @param scriptPath       path to the runner script (relative to skillDir)
      * @param skillDir         skill directory — mounted read-write at /skill, its authored files read-only
-     * @param stdinJson        JSON input for stdin
-     * @param envVars          environment variables to inject
+     * @param stdinJson        JSON input for stdin, the skill's credentials with it
      * @param timeoutSec       stall timeout: the run is killed after this many seconds without output
      * @param progressCallback receives the skill's progress lines; null for none
      * @param extraVolumes     the files the task was handed, host path to the path inside the
      *                         container, each read-only; null for none
      * @return sandbox result
-     * @throws IllegalArgumentException when a name in {@code envVars} is not
-     *                                  {@link SkillJail#settableName}; nothing is started
      */
     public SandboxResult execute(String imageTag, String python, Path scriptPath,
-                                 Path skillDir, String stdinJson,
-                                 Map<String, String> envVars, int timeoutSec,
+                                 Path skillDir, String stdinJson, int timeoutSec,
                                  SandboxManager.ProgressCallback progressCallback,
                                  Map<String, String> extraVolumes) {
         long startTime = System.currentTimeMillis();
         try {
-            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, extraVolumes);
-            return ProcessSandbox.run(cli(cmd, envVars), scriptPath, stdinJson, timeoutSec, progressCallback, false);
+            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, extraVolumes);
+            return ProcessSandbox.run(cli(cmd), scriptPath, stdinJson, timeoutSec, progressCallback, false);
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
             log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
@@ -541,8 +536,7 @@ public class ContainerSandbox {
      * Build the docker/podman run command.
      */
     List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
-                                 Path skillDir, Map<String, String> envVars,
-                                 Map<String, String> extraVolumes) throws IOException {
+                                 Path skillDir, Map<String, String> extraVolumes) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(containerRuntime);
         cmd.add("run");
@@ -573,25 +567,10 @@ public class ContainerSandbox {
         cmd.add("-e");
         cmd.add("LD_LIBRARY_PATH=/usr/local/lib");
 
-        // Inject environment variables.
-        //
-        // PATH and PYTHONPATH are deliberately NOT forwarded. They are resolved against the HOST
-        // filesystem -- PythonEnvironmentService sets PATH to the host virtualenv's bin directory
-        // -- and that path does not exist inside the container. Passing it replaced the image's
-        // own PATH with a directory that is not there, so the interpreter the container was built
-        // around became unreachable and the run failed with "python3: not found" before the skill
-        // ran a line. It only happened to skills that declare BOTH system_packages (which selects
-        // the container) and requirements.txt (which creates the host venv) -- exactly the
-        // combination the built-in capability patterns prescribe for system and network work.
-        //
-        // By name only: the process list shows a command line to every user on the host, so the
-        // values -- the skill's credentials among them -- go in the CLI's own environment
-        // (cli, which refuses a name the runtime reads itself), and the runtime passes each named
-        // one on.
-        for (String key : forwarded(envVars).keySet()) {
-            cmd.add("-e");
-            cmd.add(key);
-        }
+        // Nothing of a host run's environment goes in. The image sets the encoding; the skill's
+        // credentials come on stdin, with its input; and PATH and PYTHONPATH name the host's
+        // virtualenv, which is not there -- passed in, they once replaced the image's own PATH,
+        // and the run failed with "python3: not found" before the skill ran a line.
 
         cmd.add(imageTag);
 
@@ -606,45 +585,30 @@ public class ContainerSandbox {
      * What the runtime CLI reads from its environment to find its daemon and its configuration,
      * over a socket or TLS. Every start of it is given these as the service has them, so the
      * version check, the image lookup, the build, the image check and the run all talk to the
-     * same daemon. A skill cannot set one: {@link SkillJail#settableName} reserves them all.
+     * same daemon.
      */
     static final List<String> RUNTIME_ENV = List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
             "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "CONTAINER_HOST", "CONTAINERS_CONF", "XDG_RUNTIME_DIR");
 
-    /** {@link #cli(List, Map, Map)} with the service's own environment. */
-    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars) {
-        return cli(cmd, envVars, System.getenv());
+    /** {@link #cli(List, Map)} with the service's own environment. */
+    static ProcessBuilder cli(List<String> cmd) {
+        return cli(cmd, System.getenv());
     }
 
     /**
-     * Every start of the runtime CLI. Its environment is the jail's allow-list, the values of the
-     * variables {@link #buildRunCommand} names for a run, which the runtime passes on -- each
-     * name held to {@link SkillJail#settableName} -- and the runtime's own {@link #RUNTIME_ENV}
-     * as {@code source} has them; nothing else.
+     * Every start of the runtime CLI. Its environment is the jail's allow-list and the runtime's
+     * own {@link #RUNTIME_ENV} as {@code source} has them; nothing else -- nothing of a skill's.
      *
-     * @param envVars a run's variables; {@code Map.of()} for every other call
-     * @param source  where the runtime's own settings come from: the service's environment
-     * @throws IllegalArgumentException when a name in {@code envVars} is not settable
+     * @param source where the runtime's own settings come from: the service's environment
      */
-    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars, Map<String, String> source) {
+    static ProcessBuilder cli(List<String> cmd, Map<String, String> source) {
         ProcessBuilder pb = new ProcessBuilder(cmd);
-        SkillJail.applyEnvironment(pb, forwarded(envVars));
+        SkillJail.applyEnvironment(pb, Map.of());
         for (String name : RUNTIME_ENV) {
             String value = source.get(name);
             if (value != null) pb.environment().put(name, value);
         }
         return pb;
-    }
-
-    /**
-     * The variables a run passes into the container: {@code envVars} without PATH and PYTHONPATH,
-     * which name host paths (see buildRunCommand).
-     */
-    private static Map<String, String> forwarded(Map<String, String> envVars) {
-        var out = new LinkedHashMap<String, String>(envVars == null ? Map.of() : envVars);
-        out.remove("PATH");
-        out.remove("PYTHONPATH");
-        return out;
     }
 
     // ────────────────────── Helpers ──────────────────────
@@ -681,7 +645,7 @@ public class ContainerSandbox {
      */
     private boolean validateImage(String imageTag) {
         try {
-            Process p = cli(List.of(containerRuntime, "run", "--rm", imageTag, "python3", "--version"), Map.of())
+            Process p = cli(List.of(containerRuntime, "run", "--rm", imageTag, "python3", "--version"))
                     .redirectErrorStream(true)
                     .start();
             // Drain async so the 30s waitFor timeout is actually reachable.

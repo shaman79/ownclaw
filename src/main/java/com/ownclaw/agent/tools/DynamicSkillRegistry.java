@@ -327,51 +327,44 @@ public class DynamicSkillRegistry {
     }
 
     /**
-     * Parse the credentials field from SKILL.yaml.
-     * Supports both a YAML list and a comma-separated string.
-     *
-     * @throws IOException naming the first credential that is not {@link SkillJail#settableName}:
-     *                     a skill that declares one does not load
+     * The credentials field from SKILL.yaml; a skill that declares a name
+     * {@link #credentialNames} refuses does not load.
      */
     private List<String> parseCredentials(Map<String, Object> yaml) throws IOException {
-        List<String> names = credentialList(yaml.get("credentials"));
+        try {
+            return credentialNames(yaml.get("credentials"));
+        } catch (IllegalArgumentException refused) {
+            throw new IOException("SKILL.yaml: " + refused.getMessage());
+        }
+    }
+
+    /**
+     * The credential names a skill declares, upper-cased: the one parser for them, for SKILL.yaml
+     * and for skill_create and patchCredentials alike. A list, nested or not, or a string, each
+     * element a comma-separated list of names -- the model may send one stringified, as
+     * "[IMAP_HOST, IMAP_PORT]", so brackets are dropped.
+     *
+     * @throws IllegalArgumentException at the first name that is not a
+     *                                  {@link CredentialVault#validName}
+     */
+    public static List<String> credentialNames(Object declared) {
+        var names = new ArrayList<String>();
+        collectNames(declared, names);
         for (String name : names) {
-            if (!SkillJail.settableName(name)) throw new IOException("SKILL.yaml: " + SkillJail.nameRefusal(name));
+            if (!CredentialVault.validName(name)) throw new IllegalArgumentException(CredentialVault.nameRefusal(name));
         }
-        return names;
+        return List.copyOf(names);
     }
 
-    private List<String> credentialList(Object credObj) {
-        if (credObj == null) return List.of();
-        if (credObj instanceof List<?> list) {
-            // Flatten nested lists and strip brackets from stringified list elements
-            List<String> result = new ArrayList<>();
-            flattenCredentialList(list, result);
-            return result;
+    private static void collectNames(Object declared, List<String> out) {
+        if (declared == null) return;
+        if (declared instanceof List<?> list) {
+            for (Object item : list) collectNames(item, out);
+            return;
         }
-        if (credObj instanceof String str && !str.isBlank()) {
-            // Strip brackets in case of stringified list format: "[KEY1, KEY2]"
-            str = str.replaceAll("[\\[\\]]", "");
-            return Arrays.stream(str.split(","))
-                    .map(String::trim)
-                    .map(String::toUpperCase)
-                    .filter(s -> !s.isBlank())
-                    .toList();
-        }
-        return List.of();
-    }
-
-    /** Recursively flatten nested lists of credential keys into a flat list of clean strings. */
-    private void flattenCredentialList(List<?> list, List<String> result) {
-        for (Object item : list) {
-            if (item instanceof List<?> nested) {
-                flattenCredentialList(nested, result);
-            } else if (item != null) {
-                String key = item.toString().replaceAll("[\\[\\]]", "").trim().toUpperCase();
-                if (!key.isBlank()) {
-                    result.add(key);
-                }
-            }
+        for (String part : declared.toString().replaceAll("[\\[\\]]", "").split(",")) {
+            String name = part.trim().toUpperCase();
+            if (!name.isBlank()) out.add(name);
         }
     }
 

@@ -142,7 +142,7 @@ public class SkillManager {
 
         List<String> credentials;
         try {
-            credentials = credentialNames(str(params, "credentials"));
+            credentials = DynamicSkillRegistry.credentialNames(params.get("credentials"));
         } catch (IllegalArgumentException refused) {
             return "ERROR: " + refused.getMessage();
         }
@@ -312,7 +312,7 @@ public class SkillManager {
         if (credentials == null || credentials.isBlank()) return "ERROR: Credentials list is required.";
 
         try {
-            credentialNames(credentials);
+            DynamicSkillRegistry.credentialNames(credentials);
         } catch (IllegalArgumentException refused) {
             return "ERROR: " + refused.getMessage();
         }
@@ -510,23 +510,6 @@ public class SkillManager {
         } finally {
             if (tempDir != null) SkillJail.deleteTree(tempDir);
         }
-    }
-
-    /**
-     * The credential names in a comma-separated list, upper-cased -- the model may send the list
-     * stringified, as "[IMAP_HOST, IMAP_PORT]".
-     *
-     * @throws IllegalArgumentException at the first that is not {@link SkillJail#settableName}
-     */
-    static List<String> credentialNames(String credentials) {
-        if (credentials == null || credentials.isBlank()) return List.of();
-        List<String> names = Arrays.stream(credentials.replaceAll("[\\[\\]]", "").split(","))
-                .map(String::trim)
-                .map(String::toUpperCase)
-                .filter(s -> !s.isBlank())
-                .toList();
-        names.forEach(SkillJail::requireSettable);
-        return names;
     }
 
     private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,

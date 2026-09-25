@@ -1,6 +1,5 @@
 package com.ownclaw.users;
 
-import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -54,6 +53,25 @@ public class CredentialVault {
     private static final java.util.regex.Pattern SECRET_KEY = java.util.regex.Pattern.compile(
             "(?i)(pass|pwd|secret|token|api[_-]?key|credential|auth|bearer|cookie|session)");
 
+    private static final java.util.regex.Pattern NAME = java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]*");
+
+    /**
+     * Whether a credential may have this name: upper-case letters, digits and underscores,
+     * starting with a letter. A skill finds its credentials in its own environment under their
+     * names, so each is the name of an environment variable. The one rule for such a name,
+     * checked where one is stored ({@code /cred set}) and declared (skill_create,
+     * patchCredentials, SKILL.yaml).
+     */
+    public static boolean validName(String name) {
+        return name != null && NAME.matcher(name).matches();
+    }
+
+    /** Why {@code name} is refused: the one wording, wherever {@link #validName} says no. */
+    public static String nameRefusal(String name) {
+        return "'" + name + "' cannot name a credential: a name is upper-case letters, digits and "
+                + "underscores, starting with a letter. Give it another name.";
+    }
+
     public CredentialVault(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
@@ -86,12 +104,12 @@ public class CredentialVault {
      * @param userId the user ID
      * @param key    credential key (e.g. SMTP_HOST, OPENAI_API_KEY)
      * @param value  plaintext credential value
-     * @throws IllegalArgumentException when the key, upper-cased, is not a name a skill may be
-     *                                  given ({@link SkillJail#settableName}); nothing is stored
+     * @throws IllegalArgumentException when the key, upper-cased, is not a {@link #validName};
+     *                                  nothing is stored
      */
     public void storeCredential(String userId, String key, String value) {
         key = key.strip().toUpperCase();
-        SkillJail.requireSettable(key);
+        if (!validName(key)) throw new IllegalArgumentException(nameRefusal(key));
         value = value.strip();
         try {
             String salt = getOrCreateUserSalt(userId);

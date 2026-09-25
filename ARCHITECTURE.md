@@ -146,7 +146,7 @@ scenario breaks the system's ability to handle all others.
 │  │  Packages: docker/podman (system_packages)        │                  │
 │  │  Windows: plain child process (dev mode)          │                  │
 │  │                                                   │                  │
-│  │  • Credential injection via env vars              │                  │
+│  │  • Credentials: stdin, then the skill's own env   │                  │
 │  │  • Per-skill venv with pip dependencies           │                  │
 │  │  • Network: the host's                            │                  │
 │  │  • Stall timeout: killed after N s silent         │                  │
@@ -945,8 +945,9 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 │                                              │
 │  Credential Injection:                       │
 │  • Credentials decrypted in Java memory      │
-│  • Passed to sandbox via env vars            │
-│  • Env vars cleared after execution          │
+│  • Passed on stdin with the input; the       │
+│    runner puts them in the skill's own env   │
+│  • Never in bwrap's or the runtime CLI's env │
 │  • Never written to disk unencrypted         │
 │  • ONLY approved credentials injected (§8.3) │
 │                                              │

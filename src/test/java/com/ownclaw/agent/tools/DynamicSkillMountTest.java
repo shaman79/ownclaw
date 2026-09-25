@@ -60,7 +60,7 @@ class DynamicSkillMountTest {
             return "test-image";
         }
         @Override public SandboxResult execute(String image, String python, Path script, Path dir,
-                                               String stdinJson, Map<String, String> env, int timeout,
+                                               String stdinJson, int timeout,
                                                SandboxManager.ProgressCallback cb,
                                                Map<String, String> extraVolumes) {
             runs++;
@@ -133,7 +133,7 @@ class DynamicSkillMountTest {
             @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
                                                 SandboxManager.ProgressCallback cb) { return "test-image"; }
             @Override public SandboxResult execute(String image, String python, Path script, Path dir,
-                                                   String stdinJson, Map<String, String> env, int timeout,
+                                                   String stdinJson, int timeout,
                                                    SandboxManager.ProgressCallback cb,
                                                    Map<String, String> extraVolumes) {
                 runs.add(extraVolumes);

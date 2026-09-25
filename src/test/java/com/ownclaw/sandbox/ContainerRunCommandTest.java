@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * What a container run of a skill is given: its directory, the files it was handed, its
- * environment. The container never passes the jail, so what the jail refuses of a bind -- a
+ * credentials. The container never passes the jail, so what the jail refuses of a bind -- a
  * link, a hard link out, an authored file that is not a regular file, a bind reaching the
  * service's state -- is refused here too, and the authored files go in read-only.
  */
@@ -47,12 +47,12 @@ class ContainerRunCommandTest {
     }
 
     private List<String> command(Path dir) throws IOException {
-        return container.buildRunCommand("test-image", "python3", dir.resolve("_runner_x.py"), dir, Map.of(), null);
+        return container.buildRunCommand("test-image", "python3", dir.resolve("_runner_x.py"), dir, null);
     }
 
     private List<String> handing(Map<String, String> volumes) throws IOException {
         return container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir,
-                Map.of(), volumes);
+                volumes);
     }
 
     @Test
@@ -124,68 +124,37 @@ class ContainerRunCommandTest {
     }
 
     @Test
-    @DisplayName("credentials go by name on the command line, their values only in the runtime's environment")
-    void credentialsByNameOnly() throws Exception {
-        var envVars = Map.of("SKILL_CRED", "cred-canary", "PATH", "/host/venv/bin", "PYTHONIOENCODING", "utf-8");
-        List<String> cmd = container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"),
-                skillDir, envVars, null);
-        int e = cmd.indexOf("SKILL_CRED");
-        assertTrue(e > 0 && cmd.get(e - 1).equals("-e"), cmd.toString());
-        assertTrue(cmd.contains("PYTHONIOENCODING"), cmd.toString());
-        // The runtime's own name comes first; it is detected at startup, and here there is none.
-        assertFalse(cmd.stream().skip(1).anyMatch(a -> a.contains("cred-canary") || a.startsWith("PATH=")),
-                cmd.toString());
-        assertFalse(cmd.contains("PATH"), "a host PATH was named: " + cmd);
-
-        Map<String, String> cli = ContainerSandbox.cli(cmd, envVars).environment();
-        assertEquals("cred-canary", cli.get("SKILL_CRED"));
-        assertNotEquals("/host/venv/bin", cli.get("PATH"), "the host venv's PATH replaced the CLI's own");
-        for (String name : cli.keySet()) {
-            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || envVars.containsKey(name)
-                    || ContainerSandbox.RUNTIME_ENV.contains(name), "the runtime CLI was handed " + name);
-        }
-    }
-
-    @Test
-    @DisplayName("every start of the runtime CLI gets the daemon settings the service has, and nothing else of its environment")
+    @DisplayName("every start of the runtime CLI gets each daemon setting the service has, and nothing else of its environment")
     void everyStartTalksToTheSameDaemon() {
         // The run and the calls before it -- version, image inspect, build -- alike: an image
         // built on one daemon and run against another is not there.
-        var service = Map.of("DOCKER_HOST", "unix:///x.sock", "DOCKER_TLS_VERIFY", "1",
-                "XDG_RUNTIME_DIR", "/run/user/1000", "OWNCLAW_OPS_TOKEN", "canary-env-secret");
-        for (Map<String, String> run : List.of(Map.<String, String>of(), Map.of("SKILL_CRED", "c"))) {
-            Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), run, service).environment();
-            assertEquals("unix:///x.sock", cli.get("DOCKER_HOST"));
-            assertEquals("1", cli.get("DOCKER_TLS_VERIFY"));
-            assertEquals("/run/user/1000", cli.get("XDG_RUNTIME_DIR"));
-            for (String name : cli.keySet()) {
-                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name)
-                        || run.containsKey(name), "the runtime CLI was handed " + name);
-            }
+        var service = new java.util.HashMap<String, String>();
+        for (String name : ContainerSandbox.RUNTIME_ENV) service.put(name, "service-" + name);
+        service.put("OWNCLAW_OPS_TOKEN", "canary-env-secret");
+        Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), service).environment();
+        for (String name : ContainerSandbox.RUNTIME_ENV) assertEquals("service-" + name, cli.get(name), name);
+        for (String name : cli.keySet()) {
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name),
+                    "the runtime CLI was handed " + name);
         }
     }
 
     @Test
-    @DisplayName("a skill cannot name a variable the runtime CLI reads itself: the name rule reserves each")
-    void theRuntimeSettingsAreReserved() {
-        for (String name : ContainerSandbox.RUNTIME_ENV) assertFalse(SkillJail.settableName(name), name);
-    }
-
-    @Test
-    @DisplayName("a run whose variable the name rule refuses is not started, and says why")
-    void aRefusedNameStartsNothing() throws Exception {
-        for (String name : List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
-                "CONTAINERS_CONF", "REGISTRY_AUTH_FILE", "XDG_RUNTIME_DIR", "HTTP_PROXY", "HTTPS_PROXY",
-                "NO_PROXY", "HOME", "STORAGE_OPTS", "_CONTAINERS_USERNS_CONFIGURED", "PODMAN_USERNS",
-                "BUILDAH_ISOLATION", "LD_PRELOAD", "GCONV_PATH")) {
-            var e = assertThrows(IllegalArgumentException.class,
-                    () -> ContainerSandbox.cli(List.of("docker", "run"), Map.of(name, "x")), name);
-            assertEquals(SkillJail.nameRefusal(name), e.getMessage());
-        }
-        // Through execute, with a stand-in runtime that notes every start it gets.
-        Path calls = Files.createDirectories(tmp.resolve("calls"));
+    @DisplayName("a container run gets its credentials on stdin and puts them in its own environment; the runtime CLI's environment and command line never hold one")
+    void theCredentialsGoInOnStdin() throws Exception {
+        assumeTrue(Files.isExecutable(Path.of("/usr/bin/python3")), "python3 is not available");
+        // A stand-in for the runtime's CLI: it keeps its own environment and argv, and runs the
+        // runner as the container would, from the skill directory mounted at /skill, with
+        // nothing of its own environment.
+        Path record = Files.createDirectories(tmp.resolve("record"));
         Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
-        Files.writeString(runtime, "#!/bin/sh\necho \"$1\" >> '" + calls.resolve("log") + "'\nexit 0\n");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "case \"$1\" in version|image) exit 0;; esac\n"
+                + "tr '\\0' '\\n' < /proc/$$/environ > '" + record.resolve("env") + "'\n"
+                + "printf '%s\\n' \"$@\" > '" + record.resolve("argv") + "'\n"
+                + "for a in \"$@\"; do case \"$a\" in *:/skill) skill=\"${a%:/skill}\";; esac; done\n"
+                + "for last in \"$@\"; do :; done\n"
+                + "exec env -i PATH=/usr/bin:/bin /usr/bin/python3 \"$skill/${last#/skill/}\"\n");
         Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
         var config = new OwnClawConfig();
         config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
@@ -195,15 +164,38 @@ class ContainerRunCommandTest {
         fake.init();
         assertEquals(runtime.toString(), fake.runtime());
 
-        var e = assertThrows(IllegalArgumentException.class, () -> fake.execute("test-image", "python3",
-                skillDir.resolve("_runner_x.py"), skillDir, null, Map.of("LD_PRELOAD", "/x.so"), 5, null, null));
-        assertEquals(SkillJail.nameRefusal("LD_PRELOAD"), e.getMessage());
-        assertFalse(Files.readAllLines(calls.resolve("log")).contains("run"), "the run was started");
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import json, os, subprocess
+                def run(params):
+                    child = subprocess.run(['sh', '-c', 'printf %s "$SKILL_TOKEN"'], capture_output=True, text=True)
+                    return {'output': json.dumps({'token': os.environ.get('SKILL_TOKEN'), 'child': child.stdout,
+                                                  'params': sorted(params)})}
+                """);
+        var vault = new com.ownclaw.users.CredentialVault(null) {
+            @Override
+            public Map<String, String> getCredentials(String userId, List<String> keys) {
+                return Map.of("SKILL_TOKEN", "cred-canary-4c1");
+            }
+        };
+        var skill = new com.ownclaw.agent.tools.DynamicSkill("nmap_scan", "scans", Map.of(), skillDir, false,
+                false, 30, new ProcessSandbox(JailTestKit.off()),
+                new com.ownclaw.skills.PythonEnvironmentService(config, JailTestKit.off()), List.of("SKILL_TOKEN"),
+                vault, List.of("nmap"), null, fake, null);
 
-        var ok = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
-                Map.of("DOCKERHUB_TOKEN", "t", "SMTP_HOST", "h"), 5, null, null);
-        assertTrue(ok.isSuccess(), ok.stderr());
-        assertTrue(Files.readAllLines(calls.resolve("log")).contains("run"), "an ordinary credential was refused");
+        var result = skill.execute(Map.of("x", 1),
+                new com.ownclaw.agent.tools.ToolExecutionContext("u1", "t1", null, () -> false));
+
+        assertTrue(result.success(), result.output());
+        var seen = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result.output());
+        assertEquals("cred-canary-4c1", seen.get("token").asText());
+        assertEquals("cred-canary-4c1", seen.get("child").asText(), "a subprocess of the skill did not inherit it");
+        assertEquals("[\"x\"]", seen.get("params").toString(), "the credentials are left in the skill's params");
+        String cliEnv = Files.readString(record.resolve("env"));
+        String argv = Files.readString(record.resolve("argv"));
+        for (String leak : List.of("SKILL_TOKEN", "cred-canary-4c1")) {
+            assertFalse(cliEnv.contains(leak), "the runtime CLI's environment holds " + leak + ": " + cliEnv);
+            assertFalse(argv.contains(leak), "the run's command line holds " + leak + ": " + argv);
+        }
     }
 
     @Test
@@ -232,7 +224,7 @@ class ContainerRunCommandTest {
         config.getSandbox().setContainerRuntime(runtime.toString());
         var fake = new ContainerSandbox(config);
         fake.init();
-        var container = fake.execute("test-image", "python3", script, skillDir, null, Map.of(), 60,
+        var container = fake.execute("test-image", "python3", script, skillDir, null, 60,
                 (msg, pct) -> seen.add(msg), null);
         assertTrue(container.isSuccess(), container.toString());
         assertEquals(ask, container.stdout().strip());
@@ -263,7 +255,7 @@ class ContainerRunCommandTest {
 
         long start = System.nanoTime();
         var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
-                Map.of(), 60, progress ? (msg, pct) -> { } : null, null);
+                60, progress ? (msg, pct) -> { } : null, null);
         long ms = (System.nanoTime() - start) / 1_000_000;
 
         assertFalse(result.isSuccess(), "a run past the output limit succeeded");
