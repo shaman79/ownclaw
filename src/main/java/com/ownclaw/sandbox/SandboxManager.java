@@ -42,8 +42,8 @@ public interface SandboxManager {
      * @param timeoutSec       stall timeout — the process is killed if it prints nothing for this
      *                         many seconds
      * @param progressCallback receives the progress lines the skill emits
-     *                         ({@code {"type":"progress",...}}), which are then left out of stdout;
-     *                         null for none
+     *                         ({@code {"type":"progress",...}}); null for none. They are never
+     *                         part of stdout either way
      * @param readOnly         host paths the skill may read when it is isolated, each at its own
      *                         path -- its environment and the files this task was handed
      * @return execution result

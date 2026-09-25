@@ -2,6 +2,7 @@ package com.ownclaw.sandbox;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -47,5 +48,27 @@ class ProcessSandboxProgressTest {
         assertEquals(callback ? List.of("half way 50") : List.of(), seen);
         // Mutation: progress lines kept when there is no callback -> the progress dict is stdout's
         // first value, and the result parser reads it as the result.
+    }
+
+    @Test
+    @DisplayName("a progress callback that throws leaves the line out of the result all the same, and gets the next one")
+    void aThrowingCallbackKeepsTheLineOut() throws Exception {
+        // The real callback writes the task's progress to the database, which can fail.
+        Path script = Files.writeString(tmp.resolve("_runner_progress.py"), String.join("\n",
+                "import json",
+                "print(json.dumps({'type': 'progress', 'message': 'one'}), flush=True)",
+                "print(json.dumps({'type': 'progress', 'message': 'two'}), flush=True)",
+                "print(json.dumps({'output': 'done'}))",
+                ""));
+        var seen = new ArrayList<String>();
+        var result = new ProcessSandbox(JailTestKit.off()).execute("python3", script, tmp,
+                null, Map.of(), 30, (msg, pct) -> {
+                    seen.add(msg);
+                    throw new IllegalStateException("database is locked");
+                }, List.of());
+
+        assertTrue(result.isSuccess(), result.stderr());
+        assertEquals("{\"output\": \"done\"}", result.stdout().strip());
+        assertEquals(List.of("one", "two"), seen);
     }
 }

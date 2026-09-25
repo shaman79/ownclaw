@@ -2208,7 +2208,7 @@ public class AgentLoop {
         // System prompt: expert Python code generator
         var sys = new StringBuilder();
         sys.append("Expert Python developer. Production-quality, first try.\n\n");
-        sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
+        sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`, never a 'type' key. No unhandled exceptions.\n");
         sys.append("Always `def run(params):` — never keyword args. Use `params.get('key')`.\n");
         sys.append("```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text}\n```\n");
         sys.append("Credentials as env vars. system_packages on PATH. Keep anything that must last "

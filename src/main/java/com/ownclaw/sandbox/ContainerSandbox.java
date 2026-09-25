@@ -515,9 +515,9 @@ public class ContainerSandbox {
     // ────────────────────── Execution ──────────────────────
 
     /**
-     * Execute a Python script inside a container. With a progress callback, the progress lines
-     * the skill prints ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
-     * through it and left out of stdout; without one they stay in it. Past
+     * Execute a Python script inside a container. The progress lines the skill prints
+     * ({@code {"type":"progress","message":"...","percent":N}}) are forwarded through the
+     * callback when there is one, and are never part of stdout. Past
      * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream the runtime's CLI is killed, as it is
      * when the run stalls, and the container with it ({@link #kill}). The one runner for this and
      * a host run: {@link ProcessSandbox#run}.

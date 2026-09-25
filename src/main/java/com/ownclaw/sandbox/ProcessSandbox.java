@@ -140,11 +140,18 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
-     * Returns true if a stdout line looks like a progress JSON message.
+     * A trimmed stdout line as a progress message -- a JSON object whose "type" is progress -- or
+     * null when it is not one.
      */
-    private static boolean isProgressLine(String line) {
-        String t = line.trim();
-        return t.startsWith("{") && t.contains("\"progress\"");
+    private static JsonNode progress(String line) {
+        if (!line.startsWith("{") || !line.contains("\"progress\"")) return null;
+        try {
+            JsonNode node = PROGRESS.readTree(line);
+            return "progress".equals(node.path("type").asText("")) ? node : null;
+        } catch (IOException e) {
+            log.debug("Failed to parse progress line: {}", line);
+            return null;
+        }
     }
 
     /**
@@ -152,9 +159,11 @@ public class ProcessSandbox implements SandboxManager {
      * -- and see it through: {@code stdinJson} on its stdin, both streams read within
      * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. Progress lines
      * the skill emits ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
-     * through the callback when there is one, and are never part of the final stdout: the result
-     * is parsed from it, and a progress line ahead of the result was read as the result -- a
-     * working skill failed its self-heal retry, which runs with no callback.
+     * through the callback when there is one -- a callback that throws is logged -- and are never
+     * part of the final stdout, from which the result is parsed: a progress line ahead of the
+     * result was read as the result, and a working skill failed its self-heal retry, which runs
+     * with no callback. A result whose top-level "type" is progress is taken for a progress line
+     * too; the skill contract reserves the key.
      * <p>
      * Each stream is read on a thread of its own ({@link #OWN_THREAD}), started first; the input
      * is written last, on a thread of its own too: a process that never reads it and never exits
@@ -190,21 +199,19 @@ public class ProcessSandbox implements SandboxManager {
                     lastActivity.set(System.currentTimeMillis());
                     String trimmed = line.trim();
 
-                    if (isProgressLine(trimmed)) {
-                        try {
-                            JsonNode node = PROGRESS.readTree(trimmed);
-                            if ("progress".equals(node.path("type").asText(""))) {
-                                if (progressCallback != null) {
-                                    String msg = node.path("message").asText("Working...");
-                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
-                                            ? node.get("percent").asInt() : null;
-                                    progressCallback.onProgress(msg, pct);
-                                }
-                                continue; // never part of the result stdout
+                    JsonNode progress = progress(trimmed);
+                    if (progress != null) {
+                        if (progressCallback != null) {
+                            String msg = progress.path("message").asText("Working...");
+                            Integer pct = progress.has("percent") && !progress.get("percent").isNull()
+                                    ? progress.get("percent").asInt() : null;
+                            try {
+                                progressCallback.onProgress(msg, pct);
+                            } catch (RuntimeException e) {
+                                log.warn("Progress callback failed: {}", e.toString());
                             }
-                        } catch (Exception e) {
-                            log.debug("Failed to parse progress line: {}", trimmed);
                         }
+                        continue; // never part of the result stdout
                     }
 
                     buf.write(line.getBytes(StandardCharsets.UTF_8));
