@@ -146,6 +146,7 @@ class ProcessLaunchInventoryTest {
         assertEquals("C.UTF-8", env.get("LANG"));
         assertEquals("/opt/ownclaw/skills/_targets/x", env.get("PYTHONPATH"));
         assertEquals("utf-8", env.get("PYTHONIOENCODING"));
+        assertEquals("1", env.get("PYTHONUTF8"));
         assertFalse(env.containsKey("VIRTUAL_ENV"), "a VIRTUAL_ENV nothing of the service set was passed on");
         assertFalse(env.containsKey("OWNCLAW_OPS_TOKEN"));
     }

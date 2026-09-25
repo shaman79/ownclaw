@@ -1349,7 +1349,7 @@ public class SkillJail {
     static final Set<String> ENV_ALLOWLIST = Set.of(
             "PATH",                 // find python and system binaries
             "HOME",                 // pip, venv and several libraries expect it
-            "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",   // UTF-8 in and out
+            "LANG", "LC_ALL", "LC_CTYPE",
             "TZ",
             "TMPDIR", "TMP", "TEMP",
             "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
@@ -1357,11 +1357,18 @@ public class SkillJail {
             "TEMPDIR", "USERPROFILE");
 
     /**
-     * Replaces the inherited environment with the allow-listed subset plus the variables the
-     * service sets itself: the skill's environment (PATH or PYTHONPATH) and the encoding.
-     * Applied to whatever is started -- bubblewrap passes its own environment to the skill, so
-     * this is the skill's, and it is bubblewrap's, which runs outside the jail. A skill's
-     * credentials are never here: they come on the skill's stdin (DynamicSkill.CREDENTIALS).
+     * UTF-8 for Python's stdin, stdout and stderr and for the files it opens, whatever the
+     * platform's encoding: skills handle Czech text, and mojibake has been a recurring source of
+     * bad output. Set for every launch, so a skill's run, its load check and pip alike.
+     */
+    static final Map<String, String> ENCODING = Map.of("PYTHONIOENCODING", "utf-8", "PYTHONUTF8", "1");
+
+    /**
+     * Replaces the inherited environment with the allow-listed subset, the {@link #ENCODING},
+     * and the variables the caller sets: a skill's environment (PATH or PYTHONPATH). Applied to
+     * whatever is started -- bubblewrap passes its own environment to the skill, so this is the
+     * skill's, and it is bubblewrap's, which runs outside the jail. A skill's credentials are
+     * never here: they come on the skill's stdin (DynamicSkill.CREDENTIALS).
      */
     public static void applyEnvironment(ProcessBuilder pb, Map<String, String> envVars) {
         Map<String, String> env = pb.environment();
@@ -1374,9 +1381,7 @@ public class SkillJail {
         }
         env.clear();
         env.putAll(keep);
-        // Default to UTF-8 rather than the platform encoding: skills handle Czech text and
-        // mojibake has been a recurring source of bad output.
-        env.putIfAbsent("PYTHONIOENCODING", "utf-8");
+        env.putAll(ENCODING);
         if (envVars != null) {
             env.putAll(envVars);
         }

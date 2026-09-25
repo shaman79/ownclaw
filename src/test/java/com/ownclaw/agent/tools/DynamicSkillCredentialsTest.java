@@ -20,7 +20,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -100,8 +99,7 @@ class DynamicSkillCredentialsTest {
         assertEquals(Map.of("SMTP_PASS", "cred-canary-51", "LD_PRELOAD", "/x.so"),
                 mapper.convertValue(in.get(DynamicSkill.CREDENTIALS), Map.class));
         assertEquals("owner@example.org", in.get("to").asText());
-        assertEquals(Set.of("PYTHONIOENCODING", "PYTHONUTF8"), sandbox.env.get(0).keySet(),
-                "the run was started with more than the service's own variables");
+        assertEquals(Map.of(), sandbox.env.get(0), "the run was started with more than its environment's own variables");
     }
 
     @Test

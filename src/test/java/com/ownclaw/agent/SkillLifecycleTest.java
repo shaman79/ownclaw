@@ -127,6 +127,19 @@ class SkillLifecycleTest {
     }
 
     @Test
+    @DisplayName("the load check imports a skill in the environment a run gives it: UTF-8 mode included")
+    void theLoadCheckReadsTheRunsEnvironment() throws Exception {
+        String result = create("utf8_skill", "Needs UTF-8 mode, as every run has it.",
+                "import sys\nif not sys.flags.utf8_mode:\n    raise ImportError('imported without UTF-8 mode')\n"
+                        + "def run(params):\n    return {'output': 'utf8_mode=%d' % sys.flags.utf8_mode}\n");
+        assertFalse(result.startsWith("ERROR"), result);
+        var ran = registry.find("utf8_skill").orElseThrow().execute(Map.of(),
+                new com.ownclaw.agent.tools.ToolExecutionContext("u1", "t1", null, () -> false));
+        assertTrue(ran.success(), ran.output());
+        assertEquals("utf8_mode=1", ran.output());
+    }
+
+    @Test
     @DisplayName("a module with no run() is rejected")
     void moduleWithoutRunIsRejected() {
         String result = create("no_entry_point", "Has no run function.",

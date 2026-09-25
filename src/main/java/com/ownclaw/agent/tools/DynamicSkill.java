@@ -426,7 +426,7 @@ public class DynamicSkill implements Tool {
                 // Direct process execution (original path)
                 result = sandbox.execute(
                         resolution.python(), runnerScript, skillDir,
-                        inputJson, environment(resolution), timeoutSec,
+                        inputJson, resolution.extraEnv(), timeoutSec,
                         context.progressCallback(), readOnlyFor(resolution, handed));
             }
 
@@ -535,19 +535,6 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * The variables a run is given beside the allow-list, all of them the service's own: the
-     * environment's PATH or PYTHONPATH, and UTF-8 for Python's stdin/stdout/stderr -- prevents
-     * mojibake when skills produce non-ASCII output (Czech, CJK, accented chars, etc.). Never a
-     * credential: those go in with the input ({@link #CREDENTIALS}).
-     */
-    static Map<String, String> environment(PythonEnvironmentService.PythonResolution resolution) {
-        Map<String, String> env = new HashMap<>(resolution.extraEnv());
-        env.put("PYTHONIOENCODING", "utf-8");
-        env.put("PYTHONUTF8", "1");
-        return env;
-    }
-
-    /**
      * What an isolated run may read besides the read-only host: the environment its imports
      * come from, and the files this task was handed. Nothing else of the service's.
      */
@@ -600,7 +587,7 @@ public class DynamicSkill implements Tool {
                 // the credentials come with the input, as on the first run.
                 return sandbox.execute(
                         healedResolution.python(), runnerScript, skillDir,
-                        inputJson, environment(healedResolution), timeoutSec, null,
+                        inputJson, healedResolution.extraEnv(), timeoutSec, null,
                         readOnlyFor(healedResolution, handed));
             }
         } catch (Exception e) {

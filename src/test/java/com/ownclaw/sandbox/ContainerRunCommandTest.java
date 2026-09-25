@@ -191,7 +191,8 @@ class ContainerRunCommandTest {
         Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), service).environment();
         for (String name : daemon) assertEquals("service-" + name, cli.get(name), name);
         for (String name : cli.keySet()) {
-            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name),
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || SkillJail.ENCODING.containsKey(name)
+                    || ContainerSandbox.RUNTIME_ENV.contains(name),
                     "the runtime CLI was handed " + name);
         }
     }

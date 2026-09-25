@@ -35,8 +35,8 @@ public interface SandboxManager {
      * @param workingDir       the skill's directory; writable, and when the skill is isolated the
      *                         only writable path besides its private /tmp
      * @param stdinJson        JSON input to pass via stdin; null for none
-     * @param envVars          the variables the service sets beside the allow-list: the skill's
-     *                         environment (PATH or PYTHONPATH) and the encoding. Never a
+     * @param envVars          the variables the service sets beside the allow-list and the
+     *                         encoding: the skill's environment (PATH or PYTHONPATH). Never a
      *                         credential: those come with the input on stdin, so that they are
      *                         never in the environment of a process outside the jail
      * @param timeoutSec       stall timeout — the process is killed if it prints nothing for this

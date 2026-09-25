@@ -332,7 +332,7 @@ class SkillJailIntegrationTest {
             for (JsonNode n : jailed.get("env_names")) {
                 String name = n.asText();
                 // PWD is bubblewrap's own, set for --chdir; it is the skill directory, not the JVM's.
-                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || name.equals("PYTHONUTF8")
+                assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || SkillJail.ENCODING.containsKey(name)
                         || name.equals("PWD"), "unexpected variable inside the jail: " + name);
             }
             assertEquals(m.skillDir().toString(), jailed.get("pwd").asText());
@@ -437,7 +437,8 @@ class SkillJailIntegrationTest {
         assertNotNull(bwrapEnv, "bubblewrap was not seen while the skill ran");
         for (String line : bwrapEnv.lines().toList()) {
             String name = line.substring(0, Math.max(0, line.indexOf('=')));
-            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || List.of("PYTHONUTF8", "PYTHONPATH").contains(name),
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || SkillJail.ENCODING.containsKey(name)
+                    || name.equals("PYTHONPATH"),
                     "bubblewrap's environment holds " + name);
         }
         assertFalse(bwrapEnv.contains("cred-canary-9d2") || bwrapEnv.contains(lib.toString()),

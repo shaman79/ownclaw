@@ -112,8 +112,9 @@ public class ProcessSandbox implements SandboxManager {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
             ProcessBuilder pb = new ProcessBuilder(launch.argv());
             pb.directory(workingDir.toFile());
-            // Only the allow-listed environment plus what the caller sets. When jailed this is
-            // bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
+            // Only the allow-listed environment, the encoding and what the caller sets. When
+            // jailed this is bubblewrap's environment, which it hands to the skill unchanged
+            // apart from PWD.
             SkillJail.applyEnvironment(pb, envVars);
             long startTime = System.currentTimeMillis();
             try {
