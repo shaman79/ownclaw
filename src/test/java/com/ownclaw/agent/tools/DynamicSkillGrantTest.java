@@ -211,7 +211,18 @@ class DynamicSkillGrantTest {
     @DisplayName("jailed for real: the skill reads its handed file by the path it is told, and sees no other upload")
     void theHandedFileThroughTheRealJail() throws Exception {
         RealBubblewrap.assumeWorks();
-        Path root = Files.createDirectories(tmp.resolve("opt-ownclaw"));
+        // Where the jail shows the host, so only its tmpfs can hide what is here: under /tmp,
+        // which each run has its own of, the hiding would pass whatever the jail did.
+        Path base = JailTestKit.visibleDir("grant-it-");
+        try {
+            handedFileThroughTheRealJail(base);
+        } finally {
+            SkillJail.deleteTree(base);
+        }
+    }
+
+    private void handedFileThroughTheRealJail(Path base) throws Exception {
+        Path root = Files.createDirectories(base.resolve("opt-ownclaw"));
         Files.writeString(root.resolve(".env"), "OWNCLAW_OPS_TOKEN=canary-env-secret\n");
         Store s = store(Files.createDirectories(root.resolve("data")));
         String handed = s.store("u1", "statement.txt", "handed-content");

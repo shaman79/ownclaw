@@ -769,10 +769,11 @@ public class SkillJail {
      * <ol>
      *   <li>new namespaces for everything but the network; die with the JVM; own session;</li>
      *   <li>the host, read-only;</li>
-     *   <li>the host's /dev (serial devices keep working; permissions still apply), its own
-     *       /dev/mqueue, a private /dev/shm, a /proc for the new PID namespace;</li>
-     *   <li>an empty /run, and the resolver's directory put back into it, read-only;</li>
-     *   <li>the run's own /tmp, and the same directory at /var/tmp;</li>
+     *   <li>the host's /dev (serial devices keep working; permissions still apply);</li>
+     *   <li>the run's own of each path in {@link #REPLACED}: /dev/mqueue, a private /dev/shm, a
+     *       /proc for the new PID namespace, an empty /run, and its /tmp, which is its /var/tmp
+     *       too;</li>
+     *   <li>the resolver's directory put back into /run, read-only;</li>
      *   <li>a tmpfs over every hidden root;</li>
      *   <li>then, on top of those, the working directory read-write, and the read-only binds;</li>
      *   <li>then each hidden root's tmpfs, and /run's, made read-only -- after the binds, so the
@@ -792,15 +793,12 @@ public class SkillJail {
         a.addAll(List.of("--unshare-all", "--share-net", "--die-with-parent", "--new-session"));
         a.addAll(List.of("--ro-bind", "/", "/"));
         a.addAll(List.of("--dev-bind", "/dev", "/dev"));
-        a.addAll(List.of("--mqueue", "/dev/mqueue"));
-        a.addAll(List.of("--tmpfs", "/dev/shm"));
-        a.addAll(List.of("--proc", "/proc"));
-        a.addAll(List.of("--tmpfs", RUN.toString()));
+        for (Replaced r : REPLACED) {
+            a.add(r.option());
+            if (r.option().equals("--bind")) a.add(tmp.toString());
+            a.add(r.at().toString());
+        }
         if (resolver != null) a.addAll(List.of("--ro-bind-try", resolver.toString(), resolver.toString()));
-        a.addAll(List.of("--bind", tmp.toString(), "/tmp"));
-        // Production gives the service a private, writable /var/tmp (PrivateTmp=true), and a
-        // skill may write there as it may write /tmp.
-        a.addAll(List.of("--bind", tmp.toString(), "/var/tmp"));
         for (Path root : hiddenRoots) a.addAll(List.of("--tmpfs", root.toString()));
         a.addAll(List.of("--bind", workDir.toString(), workDir.toString()));
         for (Path p : readOnly) a.addAll(List.of("--ro-bind", p.toString(), p.toString()));
@@ -822,6 +820,26 @@ public class SkillJail {
      * a process as the service user outside any jail when asked.
      */
     static final Path RUN = Path.of("/run");
+
+    /** A host path a run has its own of, and the bubblewrap option that mounts the run's own there. */
+    record Replaced(String option, Path at) {}
+
+    /**
+     * Every host path a run has its own of, in the order bwrapArgs mounts them: POSIX message
+     * queues (over the host's, which the /dev bind brings in), /dev/shm, a /proc for its PID
+     * namespace, an empty {@link #RUN}, and /tmp -- for {@code --bind}, the run's own directory --
+     * which is /var/tmp as well: production gives the service a private, writable /var/tmp
+     * (PrivateTmp=true), and a skill may write there as it may write /tmp. Whatever the host
+     * keeps under one of them, the resolver's directory put back into /run aside, a run cannot
+     * see.
+     */
+    static final List<Replaced> REPLACED = List.of(
+            new Replaced("--mqueue", Path.of("/dev/mqueue")),
+            new Replaced("--tmpfs", Path.of("/dev/shm")),
+            new Replaced("--proc", Path.of("/proc")),
+            new Replaced("--tmpfs", RUN),
+            new Replaced("--bind", Path.of("/tmp")),
+            new Replaced("--bind", Path.of("/var/tmp")));
 
     /**
      * What the self-check proves gone from /run: docker's socket (deploy.sh puts the service user

@@ -13,7 +13,8 @@ import java.util.Map;
 
 /**
  * What the jail tests share: a mirror of the production directory on a temp dir, stand-ins for
- * /usr/bin/bwrap, and a reader for the argv the jail builds. Public for {@link #off}.
+ * /usr/bin/bwrap, and a reader for the argv the jail builds. Public for {@link #off} and
+ * {@link #visibleDir(String)}.
  */
 public final class JailTestKit {
 
@@ -32,41 +33,53 @@ public final class JailTestKit {
      * A new directory the jail shows read-only, for a test that must see what the jail hides:
      * under the build directory of the project the tests run from; the caller deletes it.
      */
-    static Path visibleDir(String prefix) throws IOException {
+    public static Path visibleDir(String prefix) throws IOException {
         return visibleDir(Path.of("build", "jail-it"), prefix);
     }
 
     /**
-     * A new directory under {@code parent}, which must not be under /tmp, /var/tmp or the JVM's
-     * temp directory, by its written path or its real one: the jail replaces each with the run's
-     * own, so everything kept there is out of sight whether or not the tmpfs over the hidden
-     * roots did its job, and a test that it is hidden would pass whatever the jail did.
+     * A new directory under {@code parent}, which must be under none of the paths a run has its
+     * own of ({@link SkillJail#REPLACED}), by its written path or its real one: what is kept there
+     * is out of a run's sight whether or not the tmpfs over the hidden roots did its job, and a
+     * test that it is hidden would pass whatever the jail did. Nor under the JVM's temp
+     * directory, where each run's /tmp is made -- /tmp itself unless java.io.tmpdir says
+     * otherwise.
      *
      * @throws AssertionError when it is, before anything is made there
      */
     static Path visibleDir(Path parent, String prefix) throws IOException {
         Path dir = parent.toAbsolutePath().normalize();
-        notInATempDirectory(dir);
+        refuseReplacedOrTemp(dir);
+        // Its real path is its nearest existing ancestor's, followed by what is still to be made:
+        // through a link, that is where it would be made.
+        Path existing = dir;
+        while (!Files.exists(existing)) existing = existing.getParent();
+        refuseReplacedOrTemp(existing.toRealPath().resolve(existing.relativize(dir)));
         Files.createDirectories(dir);
-        notInATempDirectory(dir.toRealPath());
         return Files.createTempDirectory(dir, prefix);
     }
 
-    private static void notInATempDirectory(Path dir) {
-        var temps = new ArrayList<Path>();
-        for (Path t : List.of(Path.of("/tmp"), Path.of("/var/tmp"), Path.of(System.getProperty("java.io.tmpdir")))) {
-            temps.add(t.toAbsolutePath().normalize());
-            try {
-                temps.add(t.toRealPath());
-            } catch (IOException absent) {
-                // nothing is there to be under
-            }
+    private static void refuseReplacedOrTemp(Path dir) {
+        for (SkillJail.Replaced r : SkillJail.REPLACED) {
+            refuseUnder(dir, r.at(), "which the jail replaces with the run's own");
         }
-        for (Path t : temps) {
+        refuseUnder(dir, Path.of(System.getProperty("java.io.tmpdir")),
+                "the JVM's temp directory, where each run's /tmp is made");
+    }
+
+    private static void refuseUnder(Path dir, Path refused, String what) {
+        var forms = new ArrayList<>(List.of(refused.toAbsolutePath().normalize()));
+        try {
+            forms.add(refused.toRealPath());
+        } catch (IOException absent) {
+            // nothing is there to be under
+        }
+        for (Path t : forms) {
             if (dir.startsWith(t)) {
-                throw new AssertionError(dir + " is under " + t + ", which the jail replaces with the run's own: "
-                        + "a test there cannot see what the jail hides. Run the tests from a checkout outside "
-                        + "/tmp, /var/tmp and the JVM's temp directory.");
+                throw new AssertionError(dir + " is under " + t + ", " + what + ": a test there cannot see "
+                        + "what the jail hides. Run the tests from a checkout outside "
+                        + SkillJail.REPLACED.stream().map(r -> r.at().toString()).toList()
+                        + " and the JVM's temp directory.");
             }
         }
     }

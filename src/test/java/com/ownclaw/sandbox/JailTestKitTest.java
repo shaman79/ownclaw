@@ -11,8 +11,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * The real-bubblewrap tests look for what the jail hides in a directory it shows. One under a
- * temp directory, which the jail replaces with the run's own, would show them nothing and let
- * them pass whatever the jail did; so the kit refuses it, loudly.
+ * path the jail replaces with the run's own would show them nothing and let them pass whatever
+ * the jail did; so the kit refuses it, loudly, before it makes anything.
  */
 class JailTestKitTest {
 
@@ -22,16 +22,17 @@ class JailTestKitTest {
     @DisplayName("a visible directory under the JVM's temp directory is refused, by its written path and by its real one")
     void aTempDirectoryIsNeverVisible() throws Exception {
         var e = assertThrows(AssertionError.class, () -> JailTestKit.visibleDir(tmp.resolve("build/jail-it"), "x-"));
-        assertTrue(e.getMessage().contains("which the jail replaces"), e.getMessage());
+        assertTrue(e.getMessage().contains("cannot see what the jail hides"), e.getMessage());
         assertFalse(Files.exists(tmp.resolve("build")), "something was made there first");
 
-        // A link from the project's build directory into it: fine by its written path, not by its real one.
+        // A link from the project's build directory into it: fine by its written path, not by its
+        // real one -- which is the link's target, followed by what is still to be made.
         Path link = Files.createDirectories(Path.of("build").toAbsolutePath())
                 .resolve("jail-it-link-" + ProcessHandle.current().pid());
         Files.createSymbolicLink(link, Files.createDirectories(tmp.resolve("elsewhere")));
         try {
-            e = assertThrows(AssertionError.class, () -> JailTestKit.visibleDir(link, "x-"));
-            assertTrue(e.getMessage().contains("which the jail replaces"), e.getMessage());
+            e = assertThrows(AssertionError.class, () -> JailTestKit.visibleDir(link.resolve("jail-it"), "x-"));
+            assertTrue(e.getMessage().contains("cannot see what the jail hides"), e.getMessage());
         } finally {
             Files.delete(link);
         }
@@ -44,6 +45,21 @@ class JailTestKitTest {
             assertTrue(Files.isDirectory(shown), shown.toString());
         } finally {
             Files.delete(shown);
+        }
+    }
+
+    @Test
+    @DisplayName("a visible directory under any path the jail replaces is refused, and nothing is made there")
+    void everyReplacedPathIsRefused() throws Exception {
+        for (SkillJail.Replaced r : SkillJail.REPLACED) {
+            Path under = r.at().resolve("ownclaw-kit-" + ProcessHandle.current().pid());
+            try {
+                var e = assertThrows(AssertionError.class, () -> JailTestKit.visibleDir(under, "x-"), r.at().toString());
+                assertTrue(e.getMessage().contains("which the jail replaces"), e.getMessage());
+                assertFalse(Files.exists(under), "something was made under " + r.at());
+            } finally {
+                if (Files.exists(under)) SkillJail.deleteTree(under);
+            }
         }
     }
 }
