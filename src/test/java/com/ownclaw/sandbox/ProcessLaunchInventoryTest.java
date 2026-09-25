@@ -109,8 +109,7 @@ class ProcessLaunchInventoryTest {
             }
         }
         // The guard is only as good as its reading of the source: it must see the launches it guards.
-        assertEquals(List.of("launch.argv()", "launch.argv()"),
-                found.get("com/ownclaw/sandbox/ProcessSandbox.java"));
+        assertEquals(List.of("launch.argv()"), found.get("com/ownclaw/sandbox/ProcessSandbox.java"));
         assertTrue(found.containsKey("com/ownclaw/skills/PythonEnvironmentService.java"));
     }
 

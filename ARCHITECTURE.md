@@ -702,7 +702,7 @@ A skill cannot ask the user anything while it runs. Its input is the JSON on std
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
 ```
 
-A line a skill prints is captured into its result like any other output. A skill that returns a `{"type": "need_input", ...}` dict -- or writes one past the capture, to `sys.__stdout__` or from a process it starts -- is killed the moment it appears, and the run is reported as stalled: no answer would ever come. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
+A line a skill prints is captured into its result like any other output. On the host (`ProcessSandbox`), a skill that returns a `{"type": "need_input", ...}` dict -- or writes one past the capture, to `sys.__stdout__` or from a process it starts -- is killed the moment it appears, and the run is reported as stalled: no answer would ever come. A container run (`ContainerSandbox`, for `system_packages`) does not look for it: the dict comes back as the run's result, like any other. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
 
 **Progress reporting** (any skill):
 ```

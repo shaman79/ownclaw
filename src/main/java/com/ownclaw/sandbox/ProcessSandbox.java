@@ -100,15 +100,35 @@ public class ProcessSandbox implements SandboxManager {
         try (SkillJail.Launch launch = jail.prepare(
                 List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly)) {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
-            return progressCallback == null
-                    ? run(launch, python, scriptPath, workingDir, stdinJson, envVars, timeoutSec)
-                    : runWithProgress(launch, python, scriptPath, workingDir, stdinJson, envVars,
-                            timeoutSec, progressCallback);
+            return run(launch, python, scriptPath, workingDir, stdinJson, envVars, timeoutSec, progressCallback);
         }
     }
 
+    /**
+     * Returns true if a stdout line looks like a need_input JSON message. A skill cannot be
+     * answered while it runs, so such a line ends the run.
+     */
+    private static boolean isNeedInputLine(String line) {
+        String t = line.trim();
+        return t.startsWith("{") && t.contains("\"need_input\"");
+    }
+
+    /**
+     * Returns true if a stdout line looks like a progress JSON message.
+     */
+    private static boolean isProgressLine(String line) {
+        String t = line.trim();
+        return t.startsWith("{") && t.contains("\"progress\"");
+    }
+
+    /**
+     * Run what {@code launch} says. With a progress callback, progress lines the skill emits
+     * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted and forwarded
+     * through it, and are NOT included in the final stdout; without one they stay in it.
+     */
     private SandboxResult run(SkillJail.Launch launch, String python, Path scriptPath, Path workingDir,
-                              String stdinJson, Map<String, String> envVars, int timeoutSec) {
+                              String stdinJson, Map<String, String> envVars, int timeoutSec,
+                              ProgressCallback progressCallback) {
         long startTime = System.currentTimeMillis();
 
         ProcessBuilder pb = new ProcessBuilder(launch.argv());
@@ -141,11 +161,12 @@ public class ProcessSandbox implements SandboxManager {
             CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
                     drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
 
-            // Read stdout line-by-line so a need_input line is caught as it arrives. What a skill
-            // prints goes into the runner's capture and its result, not onto this stream; what
-            // reaches it is the result itself -- a returned need_input dict -- or a write past the
-            // capture (sys.__stdout__, a process the skill starts). No answer will ever come, so
-            // the process is killed at once and the run reported as stalled.
+            // Read stdout line-by-line so a progress line is forwarded, and a need_input line
+            // caught, as it arrives. What a skill prints goes into the runner's capture and its
+            // result, not onto this stream; what reaches it is the result itself -- a returned
+            // need_input dict -- or a write past the capture (sys.__stdout__, a process the skill
+            // starts). No answer will ever come, so the process is killed at once and the run
+            // reported as stalled.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
@@ -155,13 +176,31 @@ public class ProcessSandbox implements SandboxManager {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
-                        buf.write(line.getBytes(StandardCharsets.UTF_8));
-                        buf.write('\n');
-                        if (isNeedInputLine(line)) {
+                        String trimmed = line.trim();
+
+                        if (progressCallback != null && isProgressLine(trimmed)) {
+                            try {
+                                JsonNode node = mapper.readTree(trimmed);
+                                if ("progress".equals(node.path("type").asText(""))) {
+                                    String msg = node.path("message").asText("Working...");
+                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
+                                            ? node.get("percent").asInt() : null;
+                                    progressCallback.onProgress(msg, pct);
+                                    continue; // Don't include progress lines in the result stdout
+                                }
+                            } catch (Exception e) {
+                                log.debug("Failed to parse progress line: {}", trimmed);
+                            }
+                        }
+
+                        if (isNeedInputLine(trimmed)) {
                             needInputDetected.set(true);
                             process.destroyForcibly(); // fail fast — user input will never arrive
                             break;
                         }
+
+                        buf.write(line.getBytes(StandardCharsets.UTF_8));
+                        buf.write('\n');
                     }
                 } catch (IOException ignored) {}
                 return buf.toByteArray();
@@ -211,143 +250,6 @@ public class ProcessSandbox implements SandboxManager {
                 errMsg = "Sandbox I/O error: " + e.getMessage();
                 log.error("Sandbox I/O error for {}: {}", scriptPath.getFileName(), e.getMessage());
             }
-            return new SandboxResult(-1, "", errMsg, durationMs, false);
-        }
-    }
-
-    /**
-     * Returns true if a stdout line looks like a need_input JSON message. A skill cannot be
-     * answered while it runs, so such a line ends the run.
-     */
-    private static boolean isNeedInputLine(String line) {
-        String t = line.trim();
-        return t.startsWith("{") && t.contains("\"need_input\"");
-    }
-
-    /**
-     * Returns true if a stdout line looks like a progress JSON message.
-     */
-    private static boolean isProgressLine(String line) {
-        String t = line.trim();
-        return t.startsWith("{") && t.contains("\"progress\"");
-    }
-
-    /**
-     * Execute with a progress callback.  Progress lines emitted by the skill
-     * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted
-     * and forwarded via the callback.  They are NOT included in the final stdout.
-     */
-    private SandboxResult runWithProgress(SkillJail.Launch launch, String python, Path scriptPath,
-                                          Path workingDir, String stdinJson,
-                                          Map<String, String> envVars, int timeoutSec,
-                                          ProgressCallback progressCallback) {
-        long startTime = System.currentTimeMillis();
-
-        ProcessBuilder pb = new ProcessBuilder(launch.argv());
-        pb.directory(workingDir.toFile());
-        pb.redirectErrorStream(false);
-
-        SkillJail.applyEnvironment(pb, envVars);
-
-        try {
-            Process process = pb.start();
-
-            // Write JSON input to stdin
-            if (stdinJson != null) {
-                try (OutputStream os = process.getOutputStream()) {
-                    os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
-                    os.flush();
-                }
-            } else {
-                process.getOutputStream().close();
-            }
-
-            // Track last time any output was produced — used for stall detection.
-            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
-
-            // Drain stderr async
-            AtomicBoolean overLimit = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
-                    drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
-
-            // Read stdout line-by-line; intercept progress and need_input lines.
-            AtomicBoolean needInputDetected = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
-                ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(limited(process.getInputStream(), process, overLimit),
-                                StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        lastActivity.set(System.currentTimeMillis());
-                        String trimmed = line.trim();
-
-                        // Intercept progress lines
-                        if (isProgressLine(trimmed)) {
-                            try {
-                                JsonNode node = mapper.readTree(trimmed);
-                                if ("progress".equals(node.path("type").asText(""))) {
-                                    String msg = node.path("message").asText("Working...");
-                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
-                                            ? node.get("percent").asInt() : null;
-                                    progressCallback.onProgress(msg, pct);
-                                    continue; // Don't include progress lines in the result stdout
-                                }
-                            } catch (Exception e) {
-                                log.debug("Failed to parse progress line: {}", trimmed);
-                            }
-                        }
-
-                        // A need_input line ends the run (see run())
-                        if (isNeedInputLine(trimmed)) {
-                            needInputDetected.set(true);
-                            process.destroyForcibly();
-                            break;
-                        }
-
-                        buf.write(line.getBytes(StandardCharsets.UTF_8));
-                        buf.write('\n');
-                    }
-                } catch (IOException ignored) {}
-                return buf.toByteArray();
-            });
-
-            // Stall detection: no wall-clock timeout.
-            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
-            long durationMs = System.currentTimeMillis() - startTime;
-
-            if (!finished) {
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                process.destroyForcibly();
-                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-            if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
-
-            if (needInputDetected.get()) {
-                log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
-                        scriptPath.getFileName());
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            int exitCode = process.exitValue();
-            log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
-            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
-
-        } catch (IOException e) {
-            long durationMs = System.currentTimeMillis() - startTime;
-            String errMsg = !launch.jailed() && e.getMessage() != null
-                    && e.getMessage().contains("Cannot run program")
-                    ? "Python interpreter not found at '" + python + "'."
-                    : "Sandbox I/O error: " + e.getMessage();
-            log.error("Sandbox error for {}: {}", scriptPath.getFileName(), errMsg);
             return new SandboxResult(-1, "", errMsg, durationMs, false);
         }
     }
