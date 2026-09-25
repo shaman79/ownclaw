@@ -85,12 +85,10 @@ public class ProcessSandbox implements SandboxManager {
         try (SkillJail.Launch launch = jail.prepare(
                 List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly)) {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
-            SandboxResult result = progressCallback == null
+            return progressCallback == null
                     ? run(launch, python, scriptPath, workingDir, stdinJson, envVars, timeoutSec)
                     : runWithProgress(launch, python, scriptPath, workingDir, stdinJson, envVars,
                             timeoutSec, progressCallback);
-            jail.afterRun(launch, result.stderr());
-            return result;
         }
     }
 

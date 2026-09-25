@@ -116,6 +116,32 @@ class AuthoredFilesPreconditionTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
+    @DisplayName("an authored file that is a hard link to .env is refused: never read, shown or written")
+    void aHardLinkedAuthoredFileIsRefused(String file) throws Exception {
+        setUp(SkillJail.off());
+        assertFalse(create(CODE, null).startsWith("ERROR"));
+        // Made while nothing was jailed, it is a regular file to every other check.
+        Path planted = skillDir().resolve(file);
+        Files.delete(planted);
+        Files.createLink(planted, secret);
+        assertTrue(Files.isRegularFile(planted, LinkOption.NOFOLLOW_LINKS));
+
+        String result = create("def run(params):\n    return {'output': 'updated'}\n", null);
+        assertTrue(result.startsWith("ERROR") && result.contains(file + " has another name (a hard link)"), result);
+        assertFalse(result.contains("canary-env-secret"), result);
+
+        String shown = manager.readSkill("greet_user");
+        assertFalse(shown.contains("canary-env-secret"), "the hard link's other name reached the model: " + shown);
+        String code = manager.readSkillCode("greet_user");
+        assertTrue(code == null || !code.contains("canary-env-secret"));
+
+        var refused = assertThrows(java.io.IOException.class, () -> SkillJail.writeAuthored(planted, "overwritten\n"));
+        assertTrue(refused.getMessage().contains("hard link"), refused.getMessage());
+        assertEquals(SECRET, Files.readString(secret), "written through the hard link");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SKILL.yaml", "skill.py", "requirements.txt"})
     @DisplayName("a link a skill leaves at an authored file while it is checked is not written through by the restore")
     void theRestoreNeverWritesThroughALink(String file) throws Exception {
         setUp(SkillJail.off());

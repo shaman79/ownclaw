@@ -199,8 +199,8 @@ class SkillJailModeTest {
     }
 
     @Test
-    @DisplayName("a run that bubblewrap itself failed forces a recheck; a jail that was on then refuses, never runs unjailed")
-    void bwrapFailureForcesRecheck() throws Exception {
+    @DisplayName("a jail that was on and stops starting fails the run, then refuses at its next check, never runs unjailed")
+    void aJailThatStopsStartingRefuses() throws Exception {
         var jail = jail("auto", switchable());
         var sandbox = new ProcessSandbox(null, new ObjectMapper(), jail);
         assertEquals(SkillJail.State.READY, jail.status().state());
@@ -216,9 +216,10 @@ class SkillJailModeTest {
         assertFalse(result.isSuccess(), "the failed run fails; it is never retried unjailed");
         assertFalse(Files.exists(marker));
 
-        // The recheck cannot start a jail. Before the jail was ever on that would be INACTIVE;
-        // after, every later launch would run unjailed. It refuses instead.
-        var s = jail.status();
+        // The next check -- the operator's self-test forces one -- cannot start a jail. Before
+        // the jail was ever on that would be INACTIVE; after, every later launch would run
+        // unjailed. It refuses instead.
+        var s = jail.recheck();
         assertEquals(SkillJail.State.REFUSING, s.state(), s.reason());
         assertTrue(jail.unavailable().orElseThrow().startsWith("skill isolation was on and cannot start a jail now"),
                 jail.unavailable().toString());
@@ -254,17 +255,28 @@ class SkillJailModeTest {
     }
 
     @Test
-    @DisplayName("the forced recheck waits out the minute since the last one")
-    void recheckIsRateLimited() throws Exception {
+    @DisplayName("a run's /tmp is removed only once no process of its jail is left, and what is left is ended")
+    void theRunTmpOutlivesNoProcessOfItsJail() throws Exception {
         var jail = jail("auto", switchable());
         assertEquals(SkillJail.State.READY, jail.status().state());
-        Files.createFile(flag);
         var launch = jail.prepare(CMD, m.skillDir(), List.of());
-        launch.close();
-        jail.afterRun(launch, "bwrap: execvp python3: No such file or directory");
-        assertEquals(SkillJail.State.READY, jail.status().state());
-        now.addAndGet(SkillJail.RECHECK_MS);
-        assertEquals(SkillJail.State.REFUSING, jail.status().state());
+        Path runTmp = launch.tmpDir();
+        assertNotNull(runTmp);
+        // What bubblewrap's own pid 1 is for a moment after bubblewrap returns: a process with
+        // the run's argv, still able to write the run's /tmp.
+        Process straggler = new ProcessBuilder("/bin/sh", "-c",
+                "while :; do echo x > \"$1/still-writing\"; sleep 0.01; done", "sh", runTmp.toString())
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+        try {
+            while (!Files.exists(runTmp.resolve("still-writing"))) Thread.sleep(10);
+
+            launch.close();
+
+            assertFalse(straggler.isAlive(), "the run's /tmp was removed while a process of its jail ran");
+            assertFalse(Files.exists(runTmp, LinkOption.NOFOLLOW_LINKS), "the run's /tmp was left behind");
+        } finally {
+            straggler.destroyForcibly();
+        }
     }
 
     @Test
@@ -383,35 +395,58 @@ class SkillJailModeTest {
     }
 
     @Test
-    @DisplayName("a directory the skill made unreadable is opened and checked, not a reason to refuse every launch")
-    void anUnreadableDirectoryIsOpenedAndChecked() throws Exception {
+    @DisplayName("a directory the skill cannot list or enter refuses the launch, and is left as it is")
+    void anUnreadableDirectoryIsRefusedAndLeftAsItIs() throws Exception {
         var jail = jail("auto", switchable());
         assertEquals(SkillJail.State.READY, jail.status().state());
-        // What os.makedirs('cache', mode=0o300) and a later chmod leave behind; and a directory
-        // that can be listed but not entered.
-        Path cache = Files.createDirectories(m.skillDir().resolve("cache/deeper"));
+        // What os.makedirs('cache', mode=0o300) leaves; one that can be listed but not entered;
+        // and one that can do neither. Opening them to look was a chmod through whatever a
+        // second run of the skill had swapped in by then.
+        Path cache = Files.createDirectories(m.skillDir().resolve("cache"));
         Files.writeString(cache.resolve("page.html"), "<html/>");
-        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("---------"));
-        Files.setPosixFilePermissions(cache.getParent(), PosixFilePermissions.fromString("-wx------"));
         Path index = Files.createDirectories(m.skillDir().resolve("index"));
         Files.writeString(index.resolve("terms.txt"), "x");
-        Files.setPosixFilePermissions(index, PosixFilePermissions.fromString("r--------"));
-        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
-            assertNull(l.refusal(), l.refusal());
-            assertTrue(l.jailed());
+        Path closed = Files.createDirectories(m.skillDir().resolve("closed"));
+        var modes = Map.of(cache, "-wx------", index, "r--------", closed, "---------");
+        try {
+            for (var e : modes.entrySet()) {
+                for (var other : modes.keySet()) {
+                    Files.setPosixFilePermissions(other, PosixFilePermissions.fromString("rwx------"));
+                }
+                Files.setPosixFilePermissions(e.getKey(), PosixFilePermissions.fromString(e.getValue()));
+                try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+                    assertNotNull(l.refusal(), "launched with " + e.getKey() + " at " + e.getValue());
+                    assertEquals("could not isolate this launch: could not read " + e.getKey() + " under "
+                            + m.skillDir() + ": a directory there cannot be listed or entered", l.refusal());
+                    assertTrue(l.argv().isEmpty());
+                }
+                assertEquals(e.getValue(), PosixFilePermissions.toString(Files.getPosixFilePermissions(e.getKey())),
+                        "the launch changed the mode of " + e.getKey());
+            }
+        } finally {
+            for (var d : modes.keySet()) {
+                Files.setPosixFilePermissions(d, PosixFilePermissions.fromString("rwx------"));
+            }
         }
-        for (Path d : List.of(cache, cache.getParent(), index)) {
-            assertTrue(Files.isReadable(d) && Files.isExecutable(d), "not opened: " + d);
-        }
+    }
 
-        // Opened, it is checked like the rest: a hard link out hidden in it is still found.
-        Files.createLink(cache.resolve("db.bin"), m.db());
-        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("---------"));
-        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
-            assertNotNull(l.refusal(), "a hard link out inside an unreadable directory was not found");
-            assertTrue(l.refusal().contains("db.bin"), l.refusal());
+    @Test
+    @DisplayName("a mode-0300 directory in the skill's directory: the launch is refused and the mode stays 0300")
+    void aMode0300DirectoryIsNotOpened() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        Path cache = Files.createDirectories(m.skillDir().resolve("cache"));
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
+        try {
+            var result = new ProcessSandbox(null, new ObjectMapper(), jail)
+                    .execute("python3", markerScript(tmp.resolve("marker")), m.skillDir(), null, Map.of(), 10);
+            assertFalse(result.isSuccess());
+            assertTrue(result.stderr().contains("could not read " + cache), result.stderr());
+            assertFalse(Files.exists(tmp.resolve("marker")), "the skill ran");
+            assertEquals("-wx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(cache)));
+        } finally {
+            Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
         }
-        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
     }
 
     @Test

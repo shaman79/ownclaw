@@ -23,7 +23,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.stream.Stream;
 
 /**
  * Core service for creating, editing, reading, deleting, and listing skills.
@@ -343,7 +342,8 @@ public class SkillManager {
     }
 
     /**
-     * Delete a skill permanently.
+     * Delete a skill permanently: its directory and its environments. Refused while a run of it
+     * is in flight.
      */
     public String deleteSkill(String name) {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
@@ -353,25 +353,29 @@ public class SkillManager {
 
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
+        DynamicSkill skill = skillOpt.get();
 
-        Path skillDir = skillOpt.get().skillDir();
+        // Never while a run of it is going on: the run can write the directory and its
+        // environment, and the delete opens directories with a chmod, which would follow a link
+        // the run swapped in -- to .env or the database (see SkillJail.deleteTree). Checked again
+        // once it is unregistered, for a run that started in between.
+        if (skill.inFlight() > 0) return stillRunning(name);
         dynamicSkillRegistry.unregister(name);
-
-        try {
-            if (Files.exists(skillDir)) {
-                try (Stream<Path> walk = Files.walk(skillDir)) {
-                    walk.sorted(Comparator.reverseOrder())
-                        .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
-                }
-            }
-        } catch (IOException e) {
-            log.warn("Failed to fully delete skill directory {}: {}", skillDir, e.getMessage());
+        if (skill.inFlight() > 0) {
+            dynamicSkillRegistry.register(skill);
+            return stillRunning(name);
         }
+
+        SkillJail.deleteTree(skill.skillDir());
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
         // pulled in, for every skill ever deleted.
         pythonEnv.removeEnvironments(name);
 
         return "Skill '" + name + "' has been permanently deleted.";
+    }
+
+    private static String stillRunning(String name) {
+        return "ERROR: Skill '" + name + "' is running right now; it was not deleted. Try again when it has finished.";
     }
 
     // ────────────────────── List / Stats ──────────────────────
@@ -487,7 +491,7 @@ public class SkillManager {
         } catch (Exception e) {
             return "Syntax check failed: " + e.getMessage();
         } finally {
-            cleanupTempDir(tempDir);
+            if (tempDir != null) SkillJail.deleteTree(tempDir);
         }
     }
 
@@ -533,14 +537,6 @@ public class SkillManager {
             yaml.put("container_image", containerImage.trim());
         }
         return yamlMapper.writeValueAsString(yaml);
-    }
-
-    private void cleanupTempDir(Path dir) {
-        if (dir == null) return;
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder())
-                .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
-        } catch (IOException ignored) {}
     }
 
     private String str(Map<String, Object> m, String key) {

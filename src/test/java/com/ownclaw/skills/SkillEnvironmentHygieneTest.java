@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -166,14 +167,39 @@ class SkillEnvironmentHygieneTest {
     }
 
     @Test
-    @DisplayName("deleting a tree removes all of it")
-    void deleteTreeRemovesTheTree(@TempDir Path tmp) throws Exception {
-        Path d = dirWithBytes(tmp, "gone", 4_096);
-        Files.createDirectories(d.resolve("nested"));
-        Files.write(d.resolve("nested/more.bin"), new byte[1_024]);
+    @DisplayName("an orphan's size is its own files: a link in it is neither followed nor counted")
+    void anOrphansSizeDoesNotFollowLinks(@TempDir Path tmp) throws Exception {
+        Path envs = Files.createDirectories(tmp.resolve("_envs"));
+        Path targets = Files.createDirectories(envs.resolve("_targets"));
+        Path dead = dirWithBytes(envs, "daily_lunch_preview", 10);
+        Path big = Files.write(tmp.resolve("elsewhere.bin"), new byte[100_000]);
+        Files.createSymbolicLink(dead.resolve("linked.bin"), big);
+        Files.createSymbolicLink(dead.resolve("linked-dir"), tmp);
 
-        PythonEnvironmentService.deleteTree(d);
-        assertFalse(Files.exists(d));
+        var orphans = PythonEnvironmentService.findOrphans(envs, targets, Set.of("daily_menu_fetcher"));
+
+        assertEquals(1, orphans.size());
+        assertEquals(10, orphans.get(0).bytes(), "a link's target was counted as the environment's own");
+    }
+
+    @Test
+    @DisplayName("an orphaned environment a jailed pip left with unreadable and unwritable directories is pruned in full")
+    void anOrphanWithUnreadableDirectoriesIsPruned(@TempDir Path tmp) throws Exception {
+        Path envs = Files.createDirectories(tmp.resolve("_envs"));
+        Path targets = Files.createDirectories(envs.resolve("_targets"));
+        Path live = dirWithBytes(envs, "daily_menu_fetcher", 10);
+        Path dead = dirWithBytes(envs, "daily_lunch_preview", 10);
+        Path cache = dirWithBytes(dead, "cache", 1_000);
+        Path sealed = dirWithBytes(dead, "sealed", 1_000);
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
+        Files.setPosixFilePermissions(sealed, PosixFilePermissions.fromString("r-x------"));
+
+        var result = PythonEnvironmentService.prune(envs, targets, Set.of("daily_menu_fetcher"), false);
+
+        assertEquals(1, result.size());
+        assertTrue(result.get(0).removed(), "reported as still on disk");
+        assertFalse(Files.exists(dead), "the environment was not removed");
+        assertTrue(Files.exists(live));
     }
 
     // ── CPU torch: the flag, the three host commands, and the container line ──

@@ -93,16 +93,16 @@ public class DynamicSkill implements Tool {
     /**
      * How many invocations of this skill are running right now.
      * <p>
-     * Read before retiring a skill. Retirement moves the skill's directory, and a running
-     * invocation is reading {@code skill.py}, its virtualenv and its own {@code _runner_} harness
-     * out of that directory the whole time it executes -- some of them for minutes. Moving it
-     * mid-run does not fail cleanly: the interpreter is already started, so what the user gets is
-     * a Python error about a path that existed a moment ago.
+     * Read before retiring or deleting a skill. Retirement moves the skill's directory, and a
+     * running invocation is reading {@code skill.py}, its virtualenv and its own {@code _runner_}
+     * harness out of that directory the whole time it executes -- some of them for minutes.
+     * Moving it mid-run does not fail cleanly: the interpreter is already started, so what the
+     * user gets is a Python error about a path that existed a moment ago.
      */
     private final java.util.concurrent.atomic.AtomicInteger inFlight =
             new java.util.concurrent.atomic.AtomicInteger();
 
-    /** Invocations currently executing. Zero means the directory is safe to move. */
+    /** Invocations currently executing. Zero means the directory is safe to move or delete. */
     public int inFlight() {
         return inFlight.get();
     }
@@ -166,10 +166,16 @@ public class DynamicSkill implements Tool {
      * <p>
      * The module is made as importlib makes it -- {@code __spec__}, {@code __loader__} and the
      * rest are there, as they were when the runner imported it -- but skill.py is compiled from
-     * its source every time rather than loaded by the spec's loader. That loader would let a
-     * {@code __pycache__/skill.*.pyc} in the same writable directory run in its place whenever
-     * its header said it was current -- so what ran need not be what skill.py says, the file
-     * that is read-only inside the jail and the one every review reads.
+     * its source every time rather than run by the spec's loader. That loader runs a
+     * {@code __pycache__/skill.*.pyc} whose header says it is current: the same modification
+     * time, to the whole second, and the same size as skill.py. Loading that way, the load check
+     * would leave the pyc of the update it imports, so an update that failed the check and had
+     * the previous version written back within the same second, at the same size, would go on
+     * running the code just rejected.
+     * <p>
+     * This does not pin what runs against the skill itself. Its directory is writable and first
+     * on sys.path, so a module it leaves there -- a json.py, say -- is imported before skill.py
+     * is, as it always was; the jail bounds what such a module can do.
      */
     public static final String SKILL_LOADER = String.join("\n",
         "import sys, os, io, json, builtins, traceback, inspect, importlib.util",
@@ -550,7 +556,7 @@ public class DynamicSkill implements Tool {
         byte[] nonce = new byte[16];
         NONCES.nextBytes(nonce);
         Path script = dir.resolve(prefix + HexFormat.of().formatHex(nonce) + ".py");
-        PythonEnvironmentService.writeFresh(script, content);
+        SkillJail.writeFresh(script, content);
         return script;
     }
 

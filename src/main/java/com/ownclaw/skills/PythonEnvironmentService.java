@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -15,7 +16,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -353,11 +356,7 @@ public class PythonEnvironmentService {
             // is where that check lives. No cache eviction either: resolvePython checks that
             // the interpreter exists before it trusts a cache hit, so a pruned environment
             // simply misses on the next call.
-            try {
-                deleteTree(o.dir());
-            } catch (IOException e) {
-                log.warn("Could not remove orphaned environment {}: {}", o.dir(), e.getMessage());
-            }
+            SkillJail.deleteTree(o.dir());
             boolean removed = !Files.exists(o.dir());
             if (removed) freed += o.bytes();
             else log.warn("Environment {} is still on disk after deletion — a file in it "
@@ -394,11 +393,7 @@ public class PythonEnvironmentService {
                 log.warn("Refusing to remove environment for '{}': not a plain name", skillName);
                 continue;
             }
-            try {
-                if (Files.isDirectory(dir)) deleteTree(dir);
-            } catch (IOException e) {
-                log.warn("Could not remove environment {}: {}", dir, e.getMessage());
-            }
+            if (Files.isDirectory(dir)) SkillJail.deleteTree(dir);
         }
         forget.accept(skillName);
     }
@@ -433,23 +428,35 @@ public class PythonEnvironmentService {
         return out;
     }
 
+    /**
+     * The bytes of the regular files in the tree. A link is neither followed nor counted, and a
+     * directory that cannot be read -- a jailed pip can leave one mode 0300 -- counts as empty
+     * instead of failing the whole listing.
+     */
     static long sizeOf(Path dir) {
-        try (Stream<Path> walk = Files.walk(dir)) {
-            return walk.filter(Files::isRegularFile).mapToLong(f -> {
-                try { return Files.size(f); } catch (IOException e) { return 0L; }
-            }).sum();
-        } catch (IOException e) {
-            return 0L;
-        }
-    }
+        long[] bytes = {0};
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path f, BasicFileAttributes a) {
+                    if (a.isRegularFile()) bytes[0] += a.size();
+                    return FileVisitResult.CONTINUE;
+                }
 
-    /** Delete a directory tree. The bytes it held are known from findOrphans; no second walk. */
-    static void deleteTree(Path dir) throws IOException {
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try { Files.deleteIfExists(p); } catch (IOException ignored) { }
+                @Override
+                public FileVisitResult visitFileFailed(Path f, IOException e) {
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path d, IOException e) {
+                    return FileVisitResult.CONTINUE;
+                }
             });
+        } catch (IOException e) {
+            // what was counted stands
         }
+        return bytes[0];
     }
 
     /**
@@ -545,7 +552,7 @@ public class PythonEnvironmentService {
             log.info("Provisioning Python venv for skill '{}' ...", skillName);
             createVenv(venvDir, skillDir);
             installRequirements(venvDir, reqFile, skillDir);
-            writeFresh(hashFile, reqHash);
+            SkillJail.writeFresh(hashFile, reqHash);
             provisionedHashes.put(cacheKey, reqHash);
             lastProvisionErrors.remove(cacheKey);
 
@@ -618,7 +625,7 @@ public class PythonEnvironmentService {
             if (declared != null && !declared.isBlank()) {
                 String reqHash = hash(declared.strip());
                 Files.createDirectories(venvDir);
-                writeFresh(venvDir.resolve(".req_hash"), reqHash);
+                SkillJail.writeFresh(venvDir.resolve(".req_hash"), reqHash);
                 provisionedHashes.put(skillName + ":" + skillDir, reqHash);
             }
 
@@ -661,7 +668,7 @@ public class PythonEnvironmentService {
             throw new IOException("pip --target install failed: " + install.output);
         }
 
-        writeFresh(hashFile, reqHash);
+        SkillJail.writeFresh(hashFile, reqHash);
         return targetDir;
     }
 
@@ -865,17 +872,29 @@ public class PythonEnvironmentService {
             pb.redirectErrorStream(true);
             SkillJail.applyEnvironment(pb, Map.of());
             Process p = pb.start();
+            // Read beside the wait, not after it: a command whose output fills the pipe blocks
+            // until it is read, and a hung build hook that holds the output open -- or a process
+            // it left running -- never gives the read an end. So a command out of time is killed
+            // first, and its output is waited for only briefly.
+            var out = new ByteArrayOutputStream();
+            Thread drain = Thread.ofVirtual().start(() -> {
+                try (var in = p.getInputStream()) {
+                    in.transferTo(out);
+                } catch (IOException ignored) {
+                    // what was read before is kept
+                }
+            });
             boolean ok = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            jail.afterRun(launch, output);
-
             if (!ok) {
                 p.destroyForcibly();
-                return new ProcessResult(-1, output + "\n(timeout)");
+                p.waitFor(5, TimeUnit.SECONDS);
             }
+            drain.join(Duration.ofSeconds(5));
+            String output = out.toString(StandardCharsets.UTF_8);
+            if (!ok) return new ProcessResult(-1, output + "\n(timeout)");
             return new ProcessResult(p.exitValue(), output);
         } finally {
-            if (scratch != null) deleteTree(scratch);
+            if (scratch != null) SkillJail.deleteTree(scratch);
         }
     }
 
@@ -909,18 +928,6 @@ public class PythonEnvironmentService {
         try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
-    }
-
-    /**
-     * Write a file the service owns into a directory a jailed process can write. Whatever is at
-     * the name goes first -- a link is removed, not followed -- and the file is then created
-     * new, which fails rather than follows if something reappears in between. A planted link
-     * cannot turn the write into one over .env or the database.
-     */
-    public static void writeFresh(Path file, String content) throws IOException {
-        Files.deleteIfExists(file);
-        Files.writeString(file, content, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
     }
 
     /** Relative path to the python executable inside a venv. */

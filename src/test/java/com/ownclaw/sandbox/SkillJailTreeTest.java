@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -92,13 +94,42 @@ class SkillJailTreeTest {
     }
 
     @Test
+    @DisplayName("a directory another run removes between the check reading it and listing it is skipped, not a refusal")
+    void directoriesRemovedMidWalkAreSkipped() throws Exception {
+        // A run making and removing work directories while a second launch of the same skill is
+        // checked: one gone by the time it is listed is not an unreadable one.
+        Path dir = Files.createDirectories(tmp.resolve("skill"));
+        var stop = new AtomicBoolean();
+        var failure = new AtomicReference<Throwable>();
+        Thread churn = new Thread(() -> {
+            try {
+                for (long n = 0; !stop.get(); n++) {
+                    Files.createDirectory(dir.resolve("work-" + n));
+                    if (n >= 20) Files.delete(dir.resolve("work-" + (n - 20)));
+                }
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+        });
+        churn.start();
+        try {
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (System.nanoTime() < end) assertNull(SkillJail.linkedOutside(dir));
+        } finally {
+            stop.set(true);
+            churn.join();
+        }
+        assertNull(failure.get(), String.valueOf(failure.get()));
+    }
+
+    @Test
     @DisplayName("a directory that cannot be opened is named in the refusal")
     void aDirectoryThatStaysUnreadableIsNamed() throws Exception {
         // Nothing in a skill's directory can be another user's, so borrow one of the host's.
         Path notOurs = Path.of("/root");
         assumeTrue(Files.isDirectory(notOurs) && !Files.isReadable(notOurs),
                 "needs a directory this user can neither read nor open");
-        assertEquals("unreadable directory /root in the skill's own directory /root",
+        assertEquals("could not read /root under /root: a directory there cannot be listed or entered",
                 SkillJail.linkedOutside(notOurs));
     }
 }

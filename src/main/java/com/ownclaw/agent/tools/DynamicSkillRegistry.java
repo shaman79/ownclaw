@@ -7,6 +7,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -20,7 +21,6 @@ import java.util.List;
 import java.util.Comparator;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
@@ -271,14 +271,10 @@ public class DynamicSkillRegistry {
             log.warn("Quarantined skill '{}' to {} — its code is intact and recoverable",
                     skillDir.getFileName(), dest);
             // The directory was the skill's own, and whatever it left at this name -- a link to
-            // the database, say -- goes first, unfollowed; the note is then made new, and an open
-            // that finds the name taken again fails rather than writing through it.
+            // the database, say -- must not be written through.
             Path note = dest.resolve("QUARANTINE-REASON.txt");
             try {
-                Files.deleteIfExists(note);
-                Files.writeString(note, reasonText + "\nWhen: " + java.time.Instant.now() + "\n",
-                        java.nio.charset.StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW,
-                        StandardOpenOption.WRITE);
+                SkillJail.writeFresh(note, reasonText + "\nWhen: " + java.time.Instant.now() + "\n");
             } catch (IOException noteEx) {
                 log.warn("Quarantined {} without its note: {}", dest, noteEx.getMessage());
             }
@@ -307,7 +303,7 @@ public class DynamicSkillRegistry {
         // Through the one reader of authored files: a link left at this name is refused, not
         // followed into whatever it points at.
         Map<String, Object> yaml = yamlMapper.readValue(
-                com.ownclaw.sandbox.SkillJail.readAuthored(yamlFile), new TypeReference<>() {});
+                SkillJail.readAuthored(yamlFile), new TypeReference<>() {});
 
         String name = getString(yaml, "name");
         String description = getString(yaml, "description");

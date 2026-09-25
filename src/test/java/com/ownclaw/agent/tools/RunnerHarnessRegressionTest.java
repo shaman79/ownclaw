@@ -13,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -105,6 +106,29 @@ class RunnerHarnessRegressionTest {
     void aPlantedPycDoesNotRun() throws Exception {
         plantPyc(skillDir.resolve("skill.py"));
         assertEquals("source|[1]|sibling ok", runSkill());
+    }
+
+    @Test
+    @DisplayName("skill.py written back in the same second at the same size runs as its source says, not as the stale pyc")
+    void aStalePycOfTheSameSecondAndSizeDoesNotRun() throws Exception {
+        // What a failed update and the restore of the previous version would leave: a pyc of one
+        // version, and a source of the same size and whole-second mtime that says something else.
+        Path code = skillDir.resolve("skill.py");
+        Files.writeString(code, "def run(params):\n    return {'output': 'v1'}\n");
+        Ran compiled = python("-c", "import importlib.util, py_compile, sys; py_compile.compile(sys.argv[1], "
+                + "cfile=importlib.util.cache_from_source(sys.argv[1]), doraise=True, "
+                + "invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)", code.toString());
+        assertEquals(0, compiled.exit, compiled.out);
+        FileTime mtime = Files.getLastModifiedTime(code);
+        Files.writeString(code, "def run(params):\n    return {'output': 'v2'}\n");
+        Files.setLastModifiedTime(code, mtime);
+
+        Ran control = python("-c", "import importlib.util, sys; s = importlib.util.spec_from_file_location('skill', "
+                + "sys.argv[1]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                + "print(m.run({})['output'])", code.toString());
+        assertEquals("v1", control.out, "the stale pyc must fool the spec's loader, or this test proves nothing");
+
+        assertEquals("v2", runSkill());
     }
 
     @Test

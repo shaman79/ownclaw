@@ -215,7 +215,6 @@ class PythonEnvPipWiringTest {
         var jail = new SkillJail("auto", bwrap.toString(), m.layout(), List.of(), System::currentTimeMillis);
         assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
         Files.writeString(requirements(), "requests\n");
-        var scratchBefore = scratchDirs();
 
         var res = service(jail).resolveExecution(m.skillDir(), "probe_skill");
 
@@ -241,6 +240,7 @@ class PythonEnvPipWiringTest {
         assertEquals(all.size(), jailed.size(), "one bubblewrap call per Python started: "
                 + jailed.stream().map(JailTestKit::command).toList());
         int provisioning = 0;
+        var scratch = new java.util.ArrayList<Path>();
         for (List<String> argv : jailed) {
             var ops = JailTestKit.ops(argv);
             List<String> cmd = JailTestKit.command(argv);
@@ -254,6 +254,7 @@ class PythonEnvPipWiringTest {
             if (Path.of(chdir).getFileName().toString().startsWith("ownclaw-python-")) {
                 // A startup probe of the system python: an empty directory of its own and
                 // nothing of any skill's.
+                scratch.add(Path.of(chdir));
                 assertEquals(python.toString(), cmd.get(0), argv.toString());
                 assertEquals("--version", cmd.getLast(), argv.toString());
                 assertTrue(ro.isEmpty(), argv.toString());
@@ -264,12 +265,39 @@ class PythonEnvPipWiringTest {
             assertEquals(List.of(List.of(m.skillDir().toString(), m.skillDir().toString())), ro, argv.toString());
         }
         assertTrue(provisioning >= 3, "venv, pip --version and pip install: " + jailed);
-        assertEquals(scratchBefore, scratchDirs(), "a probe's own directory must be removed");
+        // The very directories this test's probes ran in: nothing else in the shared temp
+        // directory -- another test, another run -- has a say in it.
+        assertFalse(scratch.isEmpty(), "the startup probes ran in directories of their own: " + jailed);
+        for (Path d : scratch) {
+            assertFalse(Files.exists(d, LinkOption.NOFOLLOW_LINKS), "a probe's own directory must be removed: " + d);
+        }
     }
 
-    private static List<Path> scratchDirs() throws IOException {
-        try (Stream<Path> s = Files.list(Path.of(System.getProperty("java.io.tmpdir")))) {
-            return s.filter(p -> p.getFileName().toString().startsWith("ownclaw-python-")).sorted().toList();
+    @Test
+    @DisplayName("a command out of time that leaves its output held open is killed and returned from, not waited on")
+    void aHungCommandHoldingItsOutputIsNotWaitedOn() throws Exception {
+        String marker = "ownclaw-hung-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
+        // Answers nothing, and starts a process of its own that holds the output for a minute --
+        // a build hook that hung, and the daemon it started.
+        Path hung = Files.writeString(tmp.resolve("bin/hung-python"),
+                "#!/bin/sh\nsh -c 'sleep 60; :' " + marker + " &\nwait\n");
+        Files.setPosixFilePermissions(hung, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var cfg = new OwnClawConfig();
+        cfg.getSkills().setGeneratedPath(m.generated().toString());
+        cfg.getDatabase().setPath(m.db().toString());
+        cfg.getSandbox().setPythonPath(hung.toString());
+        var svc = new PythonEnvironmentService(cfg, inactiveJail());
+        try {
+            // Five seconds for the command, then it is killed, and its output is waited for briefly.
+            var version = assertTimeoutPreemptively(java.time.Duration.ofSeconds(30), svc::getPythonVersion);
+            assertTrue(version.isEmpty(), version.toString());
+        } finally {
+            ProcessHandle.allProcesses()
+                    .filter(p -> p.info().arguments().map(a -> List.of(a).contains(marker)).orElse(false))
+                    .forEach(p -> {
+                        p.descendants().forEach(ProcessHandle::destroyForcibly);
+                        p.destroyForcibly();
+                    });
         }
     }
 

@@ -64,15 +64,15 @@ import java.util.function.LongSupplier;
  *   <li>{@code off} -- development and Windows.</li>
  * </ul>
  * While the jail is ready, a single launch it cannot isolate -- a tampered skill directory, a
- * hard link out of a bind, a bind that reaches protected state, a directory that stays
- * unreadable -- is refused, never run unjailed.
+ * hard link out of a bind, a bind that reaches protected state, a directory it cannot list or
+ * enter -- is refused, never run unjailed.
  */
 @Component
 public class SkillJail {
 
     private static final Logger log = LoggerFactory.getLogger(SkillJail.class);
 
-    /** How often a jail that is not READY looks again, and the floor on a forced recheck. */
+    /** How often a jail that is not READY looks again. */
     static final long RECHECK_MS = 60_000;
 
     private static final int SELF_CHECK_SECONDS = 10;
@@ -92,6 +92,7 @@ public class SkillJail {
      * there. Written in place, the mount stays and the running copy sees the new content.
      */
     public static void writeAuthored(Path file, String content) throws IOException {
+        if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) refuseHardLink(file);
         Files.writeString(file, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
     }
@@ -101,7 +102,8 @@ public class SkillJail {
      * reads them. The directory is the skill's own and writable by it, so anything but a regular
      * file is refused rather than read -- a link is not followed (one left pointing at .env would
      * put it in front of the model or the owner's browser), and a FIFO would hang the read -- and
-     * the open itself refuses a link that appears after the check.
+     * the open itself refuses a link that appears after the check. So is a regular file with a
+     * second name (see {@link #refuseHardLink}).
      */
     public static String readAuthored(Path file) throws IOException {
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return null;
@@ -109,9 +111,36 @@ public class SkillJail {
             throw new IOException(file.getFileName() + " is not a regular file (a link or something else): "
                     + "tampered skill, not reading it");
         }
+        refuseHardLink(file);
         try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
+    }
+
+    /**
+     * An authored file that is a hard link -- made while nothing was jailed, to .env, say -- is a
+     * regular file to every other check, and reading it would hand .env to the model, writing it
+     * would overwrite .env. Nothing inside a jail can make one (see {@link #linkedOutside}).
+     * Skipped where the file system keeps no link count the JVM can read (Windows).
+     */
+    private static void refuseHardLink(Path file) throws IOException {
+        if (!file.getFileSystem().supportedFileAttributeViews().contains("unix")) return;
+        if ((Integer) Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS) > 1) {
+            throw new IOException(file.getFileName() + " has another name (a hard link): tampered skill");
+        }
+    }
+
+    /**
+     * Write a file the service owns into a directory a skill can write -- its own, or an
+     * environment its pip writes. Whatever is at the name goes first -- a link is removed, not
+     * followed -- and the file is then created new, which fails rather than follows if something
+     * reappears in between. A planted link cannot turn the write into one over .env or the
+     * database. Not for the {@link #AUTHORED} files: see {@link #writeAuthored}.
+     */
+    public static void writeFresh(Path file, String content) throws IOException {
+        Files.deleteIfExists(file);
+        Files.writeString(file, content, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
     }
 
     /** The name the self-check's shell runs under; lets a test double recognise the probe. */
@@ -193,8 +222,8 @@ public class SkillJail {
     /**
      * What to start, and how. Exactly one of these holds: {@code refusal} is set and nothing may
      * be started; or {@code argv} is the command to start -- wrapped in bubblewrap when
-     * {@code jailed}, unchanged otherwise. Close it when the process is gone: that removes the
-     * run's private /tmp.
+     * {@code jailed}, unchanged otherwise. Close it when the process is gone: that ends what is
+     * left of its jail and removes the run's private /tmp.
      */
     public record Launch(List<String> argv, boolean jailed, String refusal, Path tmpDir)
             implements AutoCloseable {
@@ -209,7 +238,41 @@ public class SkillJail {
 
         @Override
         public void close() {
-            if (tmpDir != null) deleteTree(tmpDir);
+            if (tmpDir == null) return;
+            if (jailEnded(tmpDir.toString())) {
+                deleteTree(tmpDir);
+            } else {
+                log.warn("Not removing {}: a process of its jail is still running", tmpDir);
+            }
+        }
+    }
+
+    /**
+     * Whether every process of the jail whose /tmp is {@code runTmp} is gone, killing what is left
+     * and waiting up to 5 s. bubblewrap returns as soon as the command it started exits, while
+     * anything the command left running goes on. Its pid 1 in the jail -- a fork of it, so it
+     * carries the same argv, this run's /tmp included -- is killed once bubblewrap is gone
+     * (--die-with-parent), and the kernel ends every process in the jail's PID namespace before
+     * that pid 1 is gone itself. Until then a process of the run can still write {@code runTmp},
+     * which {@link #deleteTree} must not meet. What is killed here is what carries that fresh
+     * temporary path in its argv: this run's bubblewrap and its pid 1, or a process that put it
+     * there itself, which only makes this wait longer.
+     */
+    private static boolean jailEnded(String runTmp) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (true) {
+            List<ProcessHandle> left = ProcessHandle.allProcesses()
+                    .filter(p -> p.info().arguments().map(a -> List.of(a).contains(runTmp)).orElse(false))
+                    .toList();
+            if (left.isEmpty()) return true;
+            if (System.nanoTime() > deadline) return false;
+            left.forEach(ProcessHandle::destroyForcibly);
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
     }
 
@@ -244,7 +307,6 @@ public class SkillJail {
     private volatile long readySince;
 
     private Evaluation evaluation;
-    private boolean recheckRequested;
 
     @Autowired
     public SkillJail(OwnClawConfig config) {
@@ -373,20 +435,6 @@ public class SkillJail {
     }
 
     /**
-     * Tell the jail how a jailed run ended. bubblewrap reports its own failures on stderr as
-     * {@code bwrap: ...} before the skill ever starts; one of those means the host may have
-     * changed under a jail that passed its check, so look again -- at most once a minute, since
-     * a skill can print that prefix too.
-     */
-    public void afterRun(Launch launch, String stderr) {
-        if (launch != null && launch.jailed() && stderr != null && stderr.startsWith("bwrap:")) {
-            synchronized (this) {
-                recheckRequested = true;
-            }
-        }
-    }
-
-    /**
      * Run the evaluation now, self-check included, whatever the once-a-minute schedule says.
      * For the operator's self-test: a pass there must describe the host as it is, not as it
      * was when the jail last looked.
@@ -409,7 +457,7 @@ public class SkillJail {
         Evaluation e = evaluation;
         boolean due = force || e == null
                 || !sig.equals(e.signature())
-                || ((e.state() != State.READY || recheckRequested) && now - e.at() >= RECHECK_MS);
+                || (e.state() != State.READY && now - e.at() >= RECHECK_MS);
         // Evaluated under the lock: while a recheck runs (up to ~17 s -- bwrap --version 5 s, the
         // probe 10 s, its kill 2 s) every launch waits for it.
         if (due) {
@@ -421,7 +469,6 @@ public class SkillJail {
                 // carries on (the load check registers "unverified") would turn it into a run.
                 next = unavailable("the jail could not be evaluated: " + ex, sig, now, null, List.of());
             }
-            recheckRequested = false;
             if (e == null || e.state() != next.state() || !Objects.equals(e.reason(), next.reason())) {
                 logState(next);
             }
@@ -465,9 +512,9 @@ public class SkillJail {
     /**
      * No jail could be started. Under auto that runs skills unjailed only until the jail has been
      * READY in this process: after that, a jail that stops starting -- bubblewrap removed, a
-     * probe that times out, a recheck after a run bubblewrap failed -- refuses, rather than
-     * quietly running every later launch outside it. Taking bubblewrap away on purpose then
-     * takes a restart or {@code off}.
+     * probe that times out or cannot start one -- refuses, rather than quietly running every
+     * later launch outside it. Taking bubblewrap away on purpose then takes a restart or
+     * {@code off}.
      */
     private Evaluation unavailable(String reason, Signature sig, long now, String version,
                                    List<Path> roots) {
@@ -809,10 +856,12 @@ public class SkillJail {
      * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
      * are the skill's own business. Returns why, or null.
      * <p>
-     * Never through a link. A name gone since its directory was listed -- another run of the same
-     * skill removing its {@code _runner_} script -- is skipped; root itself must exist. A
-     * directory the service user cannot list is opened first (see {@link #listOpened}); one that
-     * stays unreadable is the answer, since what it holds cannot be checked.
+     * Never through a link, and changing nothing. A name gone since its directory was listed --
+     * another run of the same skill removing its {@code _runner_} script -- is skipped; root
+     * itself must exist. A directory the service user cannot list or enter as it is -- a skill's
+     * {@code os.makedirs('cache', mode=0o300)} -- is the answer, since what it holds cannot be
+     * checked. It is not opened to find out: that is a chmod, which follows a link, and a second
+     * run of the same skill can swap the directory for one while this walks.
      */
     static String linkedOutside(Path root) throws IOException {
         var namesInside = new HashMap<Object, Integer>();
@@ -825,7 +874,7 @@ public class SkillJail {
                 Map<String, Object> a = Files.readAttributes(p,
                         "unix:isDirectory,isRegularFile,nlink,fileKey", LinkOption.NOFOLLOW_LINKS);
                 if (Boolean.TRUE.equals(a.get("isDirectory"))) {
-                    pending.addAll(listOpened(p));
+                    pending.addAll(listed(p));
                 } else if (Boolean.TRUE.equals(a.get("isRegularFile")) && (Integer) a.get("nlink") > 1) {
                     Object key = a.get("fileKey") != null ? a.get("fileKey") : p;
                     namesInside.merge(key, 1, Integer::sum);
@@ -835,7 +884,8 @@ public class SkillJail {
             } catch (NoSuchFileException gone) {
                 if (p.equals(root)) throw gone;
             } catch (AccessDeniedException denied) {
-                return "unreadable directory " + p + " in the skill's own directory " + root;
+                return "could not read " + p + " under " + root
+                        + ": a directory there cannot be listed or entered";
             }
         }
         for (var e : links.entrySet()) {
@@ -847,28 +897,15 @@ public class SkillJail {
         return null;
     }
 
-    /**
-     * The entries of a directory in a tree the service user owns. One it cannot list or enter as
-     * it is -- a skill's {@code os.makedirs('cache', mode=0o300)} -- is the service user's own,
-     * so it is opened (u+rwx) first; listing one that still cannot be is denied.
-     */
-    private static List<Path> listOpened(Path dir) throws IOException {
-        if (!Files.isReadable(dir) || !Files.isExecutable(dir)) openForOwner(dir);
+    /** The entries of a directory; denied when it cannot be listed or entered as it is. */
+    private static List<Path> listed(Path dir) throws IOException {
+        if (!Files.isReadable(dir) || !Files.isExecutable(dir)) {
+            // Gone since it was listed is not unreadable: skipped, as any other name gone is.
+            if (Files.notExists(dir, LinkOption.NOFOLLOW_LINKS)) throw new NoSuchFileException(dir.toString());
+            throw new AccessDeniedException(dir.toString());
+        }
         try (var entries = Files.list(dir)) {
             return entries.toList();
-        }
-    }
-
-    // u+rwx, best effort. chmod follows a link, but dir was a directory a moment ago: the most a
-    // swap in between does is add the owner's own bits to a file the service user owns.
-    private static void openForOwner(Path dir) {
-        try {
-            var perms = new HashSet<>(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
-            perms.addAll(List.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
-                    PosixFilePermission.OWNER_EXECUTE));
-            Files.setPosixFilePermissions(dir, perms);
-        } catch (IOException | RuntimeException e) {
-            // not the service user's, or gone: what the caller does next finds out which
         }
     }
 
@@ -1162,12 +1199,24 @@ public class SkillJail {
     }
 
     /**
-     * Remove a directory a jailed run could write into, as far as it can be. A link is unlinked,
-     * never entered (a skill can leave one pointing anywhere); a directory is opened (u+rwx)
-     * before it is listed, since the run may have left it unreadable or unwritable. Whatever is
-     * left is logged.
+     * Remove a directory tree a jailed run wrote, as far as it can be: the one recursive delete
+     * for such trees. A link is unlinked, never entered (a skill can leave one pointing
+     * anywhere); a directory is opened (u+rwx) before it is listed, since the run may have left
+     * it unreadable or unwritable. Whatever is left is logged.
+     * <p>
+     * Only for a tree nothing can write while this runs: opening a directory is a chmod, which
+     * follows a link, so a process that swapped a directory for a link to .env or the database
+     * between the check and the chmod would have the chmod land there. The callers: a run's /tmp
+     * once its jail has ended ({@link Launch#close}); the self-check's own directories, which
+     * only its fixed probe writes; a probe's or syntax check's scratch directory, written by
+     * system Python alone; a skill's directory and environments once no run of it is in flight
+     * ({@code SkillManager.deleteSkill}); and environments whose skill is gone (the prune). Two
+     * gaps are accepted as rare: a deletion or a prune at the moment a skill of the same name is
+     * being created or updated, whose load check and pip run in those directories; and a run of a
+     * skill being deleted or retired whose caller looked it up before it was unregistered and
+     * starts only after the last check that none was in flight.
      */
-    static void deleteTree(Path root) {
+    public static void deleteTree(Path root) {
         remove(root);
         if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) log.warn("Could not fully remove {}", root);
     }
@@ -1183,6 +1232,19 @@ public class SkillJail {
             Files.deleteIfExists(p);
         } catch (IOException | RuntimeException e) {
             // best effort: deleteTree reports what is left
+        }
+    }
+
+    // u+rwx, best effort. The chmod follows a link: dir was a directory a moment ago, and is
+    // still one only because nothing can write the tree while deleteTree runs (see there).
+    private static void openForOwner(Path dir) {
+        try {
+            var perms = new HashSet<>(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
+            perms.addAll(List.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE));
+            Files.setPosixFilePermissions(dir, perms);
+        } catch (IOException | RuntimeException e) {
+            // not the service user's, or gone: the listing that follows finds out which
         }
     }
 }
