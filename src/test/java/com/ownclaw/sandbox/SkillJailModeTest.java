@@ -302,6 +302,26 @@ class SkillJailModeTest {
     }
 
     @Test
+    @DisplayName("a file hard-linked from outside the skill's directory is refused; a link within it is not")
+    void hardLinkFromOutsideRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        Path mine = Files.writeString(m.skillDir().resolve("data.csv"), "a,b\n");
+        Files.createLink(Files.createDirectories(m.skillDir().resolve("out")).resolve("copy.csv"), mine);
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNull(l.refusal(), l.refusal());
+        }
+
+        // Made before the jail existed, it would keep the database readable through the writable bind.
+        Files.createLink(m.skillDir().resolve("cache.bin"), m.db());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(l.refusal());
+            assertTrue(l.refusal().contains("cache.bin"), l.refusal());
+            assertTrue(l.argv().isEmpty());
+        }
+    }
+
+    @Test
     @DisplayName("a bind that would put protected state back on top of the tmpfs is refused")
     void bindsThatExposeStateRefused() throws Exception {
         var jail = jail("auto", switchable());

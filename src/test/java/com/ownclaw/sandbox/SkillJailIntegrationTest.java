@@ -301,6 +301,27 @@ class SkillJailIntegrationTest {
     }
 
     @Test
+    @DisplayName("a .env linked outside every hidden root fails the self-check instead of staying readable")
+    void aSecretLinkedOutsideFailsTheSelfCheck() throws Exception {
+        // The tmpfs over the service directory hides the link, not the file it points at; only the
+        // self-check probing the real path as well notices.
+        Path root = base.resolve("envlink/opt-ownclaw");
+        Path skillDir = skillUnder(root);
+        Path elsewhere = Files.writeString(Files.createDirectories(base.resolve("envlink/etc-ownclaw")).resolve("env"),
+                "OWNCLAW_OPS_TOKEN=canary-env-secret\n");
+        Files.delete(root.resolve(".env"));
+        Files.createSymbolicLink(root.resolve(".env"), elsewhere);
+        var layout = new SkillJail.Layout(root, root.resolve("data/ownclaw.db"), root.resolve("skills/generated"), null);
+        assertTrue(readableFrom(SkillJail.off(), skillDir, List.of(elsewhere)).get(elsewhere.toString()).asBoolean(),
+                "control run should read the linked .env");
+
+        var jail = new SkillJail("auto", BWRAP.toString(), layout, List.of(), System::currentTimeMillis);
+        var status = jail.status();
+        assertEquals(SkillJail.State.REFUSING, status.state(), "even auto refuses a jail that leaks");
+        assertTrue(status.reason().contains(elsewhere.toRealPath().toString()), status.reason());
+    }
+
+    @Test
     @DisplayName("a data directory that appears after the jail came up is hidden from the next launch")
     void aDataDirectoryMadeLaterIsHidden() throws Exception {
         // The roots are worked out again for every launch: roots kept from the check that made

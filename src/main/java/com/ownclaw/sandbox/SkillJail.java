@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -322,6 +323,8 @@ public class SkillJail {
             List<Path> roots = hiddenRoots(layout);
             Path dir = abs(workDir);
             List<Path> ro = new ArrayList<>(authoredFiles(dir));
+            String linked = linkedOutside(dir);
+            if (linked != null) throw new IOException(linked);
             for (Path p : readOnly == null ? List.<Path>of() : readOnly) {
                 if (p == null) continue;
                 Path n = abs(p);
@@ -506,7 +509,13 @@ public class SkillJail {
             Path err = work.resolve("err");
 
             List<String> command = new ArrayList<>(List.of("/bin/sh", "-c", PROBE, PROBE_NAME));
-            for (Path p : layout.mustBeHidden()) command.add(p.toString());
+            for (Path p : layout.mustBeHidden()) {
+                // By real path too: a .env or database linked outside every hidden root would be
+                // hidden where it is configured and readable where it lives.
+                command.add(p.toString());
+                Path r = real(p);
+                if (!r.equals(p)) command.add(r.toString());
+            }
             List<String> argv = bwrapArgs(bwrap.toString(), roots, probeDir, List.of(ro), expose, tmp,
                     command);
 
@@ -755,6 +764,40 @@ public class SkillJail {
             out.add(f);
         }
         return out;
+    }
+
+    /**
+     * A regular file in the working directory that also has a name outside it. A hard link made
+     * while nothing was jailed -- to the database, say -- would keep that file readable, and
+     * current, through the writable bind. Nothing inside a jail can make one: a link cannot cross
+     * the jail's mounts. Links whose every name is inside the directory are the skill's own
+     * business. Returns why, or null.
+     */
+    static String linkedOutside(Path workDir) throws IOException {
+        var namesInside = new HashMap<Object, Integer>();
+        var links = new HashMap<Object, Integer>();
+        var named = new HashMap<Object, Path>();
+        Files.walkFileTree(workDir, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path f, BasicFileAttributes a) throws IOException {
+                if (!a.isRegularFile()) return FileVisitResult.CONTINUE;
+                int n = (Integer) Files.getAttribute(f, "unix:nlink", LinkOption.NOFOLLOW_LINKS);
+                if (n > 1) {
+                    Object key = a.fileKey() != null ? a.fileKey() : f;
+                    namesInside.merge(key, 1, Integer::sum);
+                    links.put(key, n);
+                    named.putIfAbsent(key, f);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        for (var e : links.entrySet()) {
+            if (e.getValue() > namesInside.get(e.getKey())) {
+                return named.get(e.getKey()) + " is a hard link to a file outside " + workDir
+                        + ": tampered skill";
+            }
+        }
+        return null;
     }
 
     /**
