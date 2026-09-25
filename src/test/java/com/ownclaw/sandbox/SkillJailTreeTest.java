@@ -30,20 +30,38 @@ class SkillJailTreeTest {
     }
 
     @Test
-    @DisplayName("deleteTree removes directories a run left unreadable or unwritable, the root's own included")
+    @DisplayName("deleteTree removes directories a run left unwritable, and a root it left closed")
     void deleteTreeOpensEachDirectoryBeforeListingIt() throws Exception {
         Path root = Files.createDirectories(tmp.resolve("run-tmp"));
-        Path closed = Files.createDirectories(root.resolve("closed"));
-        Files.writeString(closed.resolve("inside.txt"), "x");
-        chmod(closed, "---------");
-        Path writeOnly = Files.createDirectories(root.resolve("a/write-only"));
-        Files.writeString(writeOnly.resolve("inside.txt"), "x");
-        chmod(writeOnly, "-wx------");
+        Path sealed = Files.createDirectories(root.resolve("a/sealed"));
+        Files.writeString(sealed.resolve("inside.txt"), "x");
+        chmod(sealed, "r-x------");
         chmod(root, "---------");
 
         SkillJail.deleteTree(root);
 
         assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS), "deleteTree left the tree behind");
+    }
+
+    @Test
+    @DisplayName("a directory below the root that the service user cannot read is left, and the rest removed")
+    void deleteTreeLeavesWhatItCannotOpen() throws Exception {
+        // Opening it for its owner would take a chmod by path, which follows a link; through its
+        // parent the JDK has to open it first, which a directory without read permission refuses.
+        Path root = Files.createDirectories(tmp.resolve("run-tmp"));
+        Files.writeString(root.resolve("own.txt"), "x");
+        Path closed = Files.createDirectories(root.resolve("closed"));
+        Files.writeString(closed.resolve("inside.txt"), "x");
+        chmod(closed, "-wx------");
+        try {
+            SkillJail.deleteTree(root);
+
+            assertTrue(Files.exists(closed, LinkOption.NOFOLLOW_LINKS));
+            assertEquals("-wx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(closed)));
+            assertFalse(Files.exists(root.resolve("own.txt")), "the rest of the tree was left too");
+        } finally {
+            chmod(closed, "rwx------");
+        }
     }
 
     @Test
@@ -62,6 +80,53 @@ class SkillJailTreeTest {
         assertEquals("r-x------", PosixFilePermissions.toString(Files.getPosixFilePermissions(elsewhere)),
                 "deleteTree opened a directory through a link");
         chmod(elsewhere, "rwx------");
+    }
+
+    @Test
+    @DisplayName("deleteTree removes a tree whose directories were swapped for links, and leaves where they lead as it was")
+    void deleteTreeNeverFollowsASwappedDirectory() throws Exception {
+        // What a run writing the tree could leave: a directory, at the top or further down,
+        // replaced by a link to one outside. Everything below the root is opened and removed
+        // by name through its parent, refusing a link, so what the link leads to is never
+        // listed, opened for its owner or emptied.
+        Path canary = Files.createDirectories(tmp.resolve("canary"));
+        Files.writeString(canary.resolve("secret.txt"), "canary");
+        Files.writeString(Files.createDirectories(canary.resolve("sub")).resolve("deep.txt"), "canary");
+        chmod(canary, "r-x------");
+        Path root = Files.createDirectories(tmp.resolve("run-tmp"));
+        Files.writeString(Files.createDirectories(root.resolve("a")).resolve("own.txt"), "x");
+        Files.createSymbolicLink(root.resolve("cache"), canary);
+        Files.createSymbolicLink(root.resolve("a/b"), canary);
+
+        SkillJail.deleteTree(root);
+
+        assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS), "deleteTree left the tree behind");
+        assertEquals("canary", Files.readString(canary.resolve("secret.txt")));
+        assertEquals("canary", Files.readString(canary.resolve("sub/deep.txt")));
+        assertEquals("r-x------", PosixFilePermissions.toString(Files.getPosixFilePermissions(canary)),
+                "deleteTree opened a directory through a link");
+        chmod(canary, "rwx------");
+    }
+
+    @Test
+    @DisplayName("deleteTree stops " + SkillJail.DELETE_DEPTH + " directories down and returns, leaving what is deeper")
+    void deleteTreeStopsAtItsDepth() throws Exception {
+        // Each level holds an open directory and a frame of the walk: a run's endless chain
+        // must not take either from the JVM.
+        Path root = Files.createDirectories(tmp.resolve("run-tmp"));
+        Path level = root;
+        for (int i = 0; i <= SkillJail.DELETE_DEPTH + 1; i++) {
+            Files.writeString(level.resolve("f"), "x");
+            level = Files.createDirectory(level.resolve("d"));
+        }
+        Path last = root.resolve("d/".repeat(SkillJail.DELETE_DEPTH - 1));
+        Path tooDeep = last.resolve("d");
+
+        SkillJail.deleteTree(root);
+
+        assertFalse(Files.exists(root.resolve("f")));
+        assertFalse(Files.exists(last.resolve("f")), "the deepest level it enters is emptied");
+        assertTrue(Files.exists(tooDeep.resolve("f")), "a level deeper than the limit was entered");
     }
 
     @Test

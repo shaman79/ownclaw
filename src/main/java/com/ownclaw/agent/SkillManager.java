@@ -355,10 +355,11 @@ public class SkillManager {
         if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
         DynamicSkill skill = skillOpt.get();
 
-        // Never while a run of it is going on: the run can write the directory and its
-        // environment, and the delete opens directories with a chmod, which would follow a link
-        // the run swapped in -- to .env or the database (see SkillJail.deleteTree). Checked again
-        // once it is unregistered, for a run that started in between.
+        // Never while a run of it is going on: the run can go on writing the directory and its
+        // environment while they are removed, and leave part of them behind. (It cannot turn the
+        // delete on anything outside them: that never follows a link below them -- see
+        // SkillJail.deleteTree.) Checked again once it is unregistered, for a run that started
+        // in between.
         if (skill.inFlight() > 0) return stillRunning(name);
         dynamicSkillRegistry.unregister(name);
         if (skill.inFlight() > 0) {

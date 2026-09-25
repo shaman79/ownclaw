@@ -183,15 +183,13 @@ class SkillEnvironmentHygieneTest {
     }
 
     @Test
-    @DisplayName("an orphaned environment a jailed pip left with unreadable and unwritable directories is pruned in full")
-    void anOrphanWithUnreadableDirectoriesIsPruned(@TempDir Path tmp) throws Exception {
+    @DisplayName("an orphaned environment a jailed pip left with unwritable directories is pruned in full")
+    void anOrphanWithUnwritableDirectoriesIsPruned(@TempDir Path tmp) throws Exception {
         Path envs = Files.createDirectories(tmp.resolve("_envs"));
         Path targets = Files.createDirectories(envs.resolve("_targets"));
         Path live = dirWithBytes(envs, "daily_menu_fetcher", 10);
         Path dead = dirWithBytes(envs, "daily_lunch_preview", 10);
-        Path cache = dirWithBytes(dead, "cache", 1_000);
         Path sealed = dirWithBytes(dead, "sealed", 1_000);
-        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
         Files.setPosixFilePermissions(sealed, PosixFilePermissions.fromString("r-x------"));
 
         var result = PythonEnvironmentService.prune(envs, targets, Set.of("daily_menu_fetcher"), false);
@@ -200,6 +198,26 @@ class SkillEnvironmentHygieneTest {
         assertTrue(result.get(0).removed(), "reported as still on disk");
         assertFalse(Files.exists(dead), "the environment was not removed");
         assertTrue(Files.exists(live));
+    }
+
+    @Test
+    @DisplayName("an orphaned environment holding a directory the service user cannot read is reported as still on disk")
+    void anOrphanWithAnUnreadableDirectoryIsReported(@TempDir Path tmp) throws Exception {
+        Path envs = Files.createDirectories(tmp.resolve("_envs"));
+        Path targets = Files.createDirectories(envs.resolve("_targets"));
+        dirWithBytes(envs, "daily_menu_fetcher", 10);
+        Path dead = dirWithBytes(envs, "daily_lunch_preview", 10);
+        Path cache = dirWithBytes(dead, "cache", 1_000);
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
+        try {
+            var result = PythonEnvironmentService.prune(envs, targets, Set.of("daily_menu_fetcher"), false);
+
+            assertEquals(1, result.size());
+            assertFalse(result.get(0).removed(), "reported as removed while it is still on disk");
+            assertTrue(Files.exists(cache));
+        } finally {
+            Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
+        }
     }
 
     // ── CPU torch: the flag, the three host commands, and the container line ──

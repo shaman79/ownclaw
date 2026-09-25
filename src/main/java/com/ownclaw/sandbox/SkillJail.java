@@ -16,8 +16,10 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -1001,8 +1003,8 @@ public class SkillJail {
      * A name gone since its directory was listed -- another run of the same skill removing its
      * {@code _runner_} script -- is skipped; root itself must exist. A directory the service user
      * cannot list or enter as it is -- a skill's {@code os.makedirs('cache', mode=0o300)} -- is
-     * the answer, since what it holds cannot be checked. It is not opened to find out: that is a
-     * chmod, which follows a link.
+     * the answer, since what it holds cannot be checked. It is not opened to find out: that
+     * would be a chmod by its path, which follows a link.
      */
     static String linkedOutside(Path root) throws IOException {
         var namesInside = new HashMap<Object, Integer>();
@@ -1342,54 +1344,97 @@ public class SkillJail {
         }
     }
 
+    /** How deep {@link #deleteTree} goes below its root; each level holds an open directory. */
+    static final int DELETE_DEPTH = 1000;
+
     /**
      * Remove a directory tree a jailed run wrote, as far as it can be: the one recursive delete
-     * for such trees. A link is unlinked, never entered (a skill can leave one pointing
-     * anywhere); a directory is opened (u+rwx) before it is listed, since the run may have left
-     * it unreadable or unwritable. Whatever is left is logged.
+     * for such trees. The root is opened by its path, once. Everything below it is read, opened
+     * and removed by name, relative to its parent's open directory, and never through a link: a
+     * link is unlinked, not entered, and a directory is opened only as the directory it is -- one
+     * that has become a link since its type was read fails to open and is left. Each directory
+     * is made u+rwx before it is listed, since the run may have left it unwritable: the root by
+     * its path, the rest through their parent without following a link, which the JDK does by
+     * opening them. So one below the root that the service user cannot read -- a run's
+     * {@code os.makedirs('cache', mode=0o300)} -- stays closed and is left, as is anything more
+     * than {@link #DELETE_DEPTH} directories down. What is left is logged.
      * <p>
-     * Only for a tree nothing can write while this runs: opening a directory is a chmod, which
-     * follows a link, so a process that swapped a directory for a link to .env or the database
-     * between the check and the chmod would have the chmod land there. The callers: a run's /tmp
-     * once its jail has ended ({@link Launch#close}); the self-check's own directories, which
-     * only its fixed probe writes; a probe's or syntax check's scratch directory, written by
-     * system Python alone; a container build's context, which only the JVM writes; a skill's
-     * directory and environments once no run of it is in flight
-     * ({@code SkillManager.deleteSkill}); and environments whose skill is gone (the prune). Two
-     * gaps are accepted as rare: a deletion or a prune at the moment a skill of the same name is
-     * being created or updated, whose load check and pip run in those directories; and a run of a
-     * skill being deleted or retired whose caller looked it up before it was unregistered and
-     * starts only after the last check that none was in flight.
+     * So a process that writes the tree while this runs cannot turn the delete on anything
+     * outside it. The callers delete a tree once nothing should be writing it: a run's /tmp once
+     * its jail has ended ({@link Launch#close}); the self-check's own directories, which only its
+     * fixed probe writes; a probe's or syntax check's scratch directory, written by system Python
+     * alone; a container build's context, which only the JVM writes; a skill's directory and
+     * environments once no run of it is in flight ({@code SkillManager.deleteSkill}); and
+     * environments whose skill is gone (the prune). Two cases can still be writing: a load check
+     * or pip run of a skill of the same name being created or updated at that moment, and a run
+     * whose caller looked the skill up before it was unregistered and starts after the last
+     * check that none was in flight. Either can leave part of the tree behind.
+     * <p>
+     * Where the file system offers no {@link SecureDirectoryStream} -- Windows, where there is
+     * no jail either -- each entry is removed by its path, as a root of its own.
      */
     public static void deleteTree(Path root) {
-        remove(root);
+        try {
+            if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+                openForOwner(Files.getFileAttributeView(root, PosixFileAttributeView.class));
+                try (var dir = Files.newDirectoryStream(root)) {
+                    if (dir instanceof SecureDirectoryStream<Path> secure) {
+                        empty(secure, 1);
+                    } else {
+                        for (Path entry : dir) deleteTree(entry);
+                    }
+                }
+            }
+            Files.deleteIfExists(root);
+        } catch (IOException | RuntimeException e) {
+            // best effort: what is left is logged below
+        }
         if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) log.warn("Could not fully remove {}", root);
     }
 
-    private static void remove(Path p) {
-        try {
-            if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
-                openForOwner(p);
-                try (var entries = Files.newDirectoryStream(p)) {
-                    for (Path e : entries) remove(e);
+    /** Remove what is in the open directory {@code dir}, {@code depth} levels below the root. */
+    private static void empty(SecureDirectoryStream<Path> dir, int depth) {
+        for (Path entry : dir) {
+            Path name = entry.getFileName();
+            try {
+                var view = dir.getFileAttributeView(name, PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+                if (!view.readAttributes().isDirectory()) {
+                    dir.deleteFile(name);
+                    continue;
                 }
+                if (depth >= DELETE_DEPTH) {
+                    log.warn("Not removing {}: more than {} directories down", entry, DELETE_DEPTH);
+                    continue;
+                }
+                openForOwner(view);
+                SecureDirectoryStream<Path> sub;
+                try {
+                    sub = dir.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS);
+                } catch (IOException e) {
+                    log.warn("Not removing {}: it cannot be opened as the directory it was ({})", entry, e.toString());
+                    continue;
+                }
+                try (sub) {
+                    empty(sub, depth + 1);
+                }
+                dir.deleteDirectory(name);
+            } catch (IOException | RuntimeException e) {
+                // gone meanwhile, or not empty: deleteTree reports what is left
             }
-            Files.deleteIfExists(p);
-        } catch (IOException | RuntimeException e) {
-            // best effort: deleteTree reports what is left
         }
     }
 
-    // u+rwx, best effort. The chmod follows a link: dir was a directory a moment ago, and is
-    // still one only because nothing can write the tree while deleteTree runs (see there).
-    private static void openForOwner(Path dir) {
+    // u+rwx, best effort: a directory still closed is found out by the open that follows. Null
+    // where the file system has no POSIX permissions.
+    private static void openForOwner(PosixFileAttributeView dir) {
+        if (dir == null) return;
         try {
-            var perms = new HashSet<>(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
+            var perms = new HashSet<>(dir.readAttributes().permissions());
             perms.addAll(List.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE));
-            Files.setPosixFilePermissions(dir, perms);
+            dir.setPermissions(perms);
         } catch (IOException | RuntimeException e) {
-            // not the service user's, or gone: the listing that follows finds out which
+            // not the service user's, or gone
         }
     }
 }
