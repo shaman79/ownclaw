@@ -1,6 +1,5 @@
 package com.ownclaw.agent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolExecutionContext;
@@ -70,7 +69,7 @@ class SkillDeletionTest {
         cfg.getSandbox().setPythonPath("python3");
         env = new PythonEnvironmentService(cfg, JailTestKit.off());
         env.init();
-        sandbox = new ProcessSandbox(new ObjectMapper(), JailTestKit.off());
+        sandbox = new ProcessSandbox(JailTestKit.off());
         tools = new ToolRegistry(List.of());
         dynamic = new RecordingRegistry(cfg, tools, sandbox, env);
         manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);

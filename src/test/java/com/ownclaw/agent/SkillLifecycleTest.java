@@ -1,6 +1,5 @@
 package com.ownclaw.agent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
@@ -64,7 +63,7 @@ class SkillLifecycleTest {
         SkillJail jail = jail(root, generated);
         PythonEnvironmentService pyEnv = new PythonEnvironmentService(cfg, jail);
         pyEnv.init();
-        ProcessSandbox sandbox = new ProcessSandbox(new ObjectMapper(), jail);
+        ProcessSandbox sandbox = new ProcessSandbox(jail);
         registry = new ToolRegistry(List.of());
         DynamicSkillRegistry dynamic =
                 new DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);

@@ -175,7 +175,7 @@ class SkillJailIntegrationTest {
         in.put("journal_files", journalFiles().stream().map(Path::toString).toList());
 
         long start = System.nanoTime();
-        var result = new ProcessSandbox(mapper, jail).execute("python3", script, m.skillDir(),
+        var result = new ProcessSandbox(jail).execute("python3", script, m.skillDir(),
                 mapper.writeValueAsString(in), Map.of("SKILL_CRED", "cred-canary"), 30, null,
                 List.of(m.handed()));
         timing.add(String.valueOf(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
@@ -351,7 +351,7 @@ class SkillJailIntegrationTest {
         Path script = skillDir.resolve("_runner_readable.py");
         Files.deleteIfExists(script);
         Files.writeString(script, READABLE);
-        var result = new ProcessSandbox(mapper, jail).execute("python3", script, skillDir,
+        var result = new ProcessSandbox(jail).execute("python3", script, skillDir,
                 mapper.writeValueAsString(paths.stream().map(Path::toString).toList()), Map.of(), 30, null, List.of());
         assertTrue(result.isSuccess(), "probe failed: " + result.stderr());
         return mapper.readTree(result.stdout());

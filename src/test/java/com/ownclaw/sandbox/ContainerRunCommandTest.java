@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * What a container run of a skill is given: its directory, the files it was handed, its
@@ -176,6 +177,39 @@ class ContainerRunCommandTest {
         List<String> cmd = container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"),
                 skillDir, Map.of("DOCKERHUB_TOKEN", "t", "SMTP_HOST", "h"), null);
         assertTrue(cmd.contains("DOCKERHUB_TOKEN") && cmd.contains("SMTP_HOST"), cmd.toString());
+    }
+
+    @Test
+    @DisplayName("one runner for both: progress forwarded from each; a need_input line ends a host run at once, a container run hands it back")
+    void oneRunnerForAHostAndAContainerRun() throws Exception {
+        assumeTrue(Files.isExecutable(Path.of("/usr/bin/python3")), "python3 is not available");
+        String progress = "{\"type\":\"progress\",\"message\":\"half\",\"percent\":50}";
+        String ask = "{\"need_input\":\"which one?\"}";
+        var seen = new java.util.ArrayList<String>();
+
+        Path script = Files.writeString(skillDir.resolve("_runner_ask.py"), "import sys, time\n"
+                + "print('" + progress + "')\nprint('" + ask + "')\nsys.stdout.flush()\ntime.sleep(10)\n");
+        long start = System.nanoTime();
+        var host = new ProcessSandbox(JailTestKit.off()).execute("python3", script, skillDir, null, Map.of(), 60,
+                (msg, pct) -> seen.add(msg), List.of());
+        assertTrue(host.timedOut(), "a need_input line did not end the host run: " + host);
+        assertTrue(System.nanoTime() - start < 8_000_000_000L, "the host run was waited out");
+
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n[ \"$1\" = version ] && exit 0\n"
+                + "printf '%s\\n' '" + progress + "' '" + ask + "'\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+        var container = fake.execute("test-image", "python3", script, skillDir, null, Map.of(), 60,
+                (msg, pct) -> seen.add(msg), null);
+        assertTrue(container.isSuccess(), container.toString());
+        assertEquals(ask, container.stdout().strip());
+        assertEquals(List.of("half", "half"), seen);
     }
 
     @ParameterizedTest(name = "{0}, progress callback {1}")

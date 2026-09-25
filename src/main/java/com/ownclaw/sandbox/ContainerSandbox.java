@@ -9,7 +9,6 @@ import jakarta.annotation.PostConstruct;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,7 +17,6 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -58,9 +56,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ContainerSandbox {
 
     private static final Logger log = LoggerFactory.getLogger(ContainerSandbox.class);
-
-    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
-            new com.fasterxml.jackson.databind.ObjectMapper();
 
     /**
      * The Dockerfile line that installs a skill's requirements. A fourth place torch can be
@@ -480,7 +475,7 @@ public class ContainerSandbox {
             });
 
             int buildStallTimeout = config.getSandbox().getStallTimeout();
-            boolean finished = waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
+            boolean finished = ProcessSandbox.waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
 
             if (!finished) {
                 long stallSec = (System.currentTimeMillis() - lastBuildActivity.get()) / 1000;
@@ -509,7 +504,7 @@ public class ContainerSandbox {
      * the skill prints ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
      * through it and left out of stdout; without one they stay in it. Past
      * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream the runtime's CLI is killed, as it is
-     * when the run stalls.
+     * when the run stalls. The one runner for this and a host run: {@link ProcessSandbox#run}.
      *
      * @param imageTag         the container image to use (from ensureImage)
      * @param python           python executable (usually "python3" inside the container)
@@ -529,79 +524,9 @@ public class ContainerSandbox {
                                  SandboxManager.ProgressCallback progressCallback,
                                  Map<String, String> extraVolumes) {
         long startTime = System.currentTimeMillis();
-
         try {
             List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, extraVolumes);
-
-            Process process = cli(cmd, envVars).start();
-
-            if (stdinJson != null) {
-                try (OutputStream os = process.getOutputStream()) {
-                    os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
-                    os.flush();
-                }
-            } else {
-                process.getOutputStream().close();
-            }
-
-            // Track output activity for stall detection.
-            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
-            AtomicBoolean overLimit = new AtomicBoolean(false);
-
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() -> drainStreamWithActivity(
-                    ProcessSandbox.limited(process.getErrorStream(), process, overLimit), lastActivity));
-
-            // Read stdout line by line, to intercept progress messages
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
-                ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
-                try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
-                        ProcessSandbox.limited(process.getInputStream(), process, overLimit), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        lastActivity.set(System.currentTimeMillis());
-                        String trimmed = line.trim();
-                        if (progressCallback != null && trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
-                            try {
-                                var node = MAPPER.readTree(trimmed);
-                                if ("progress".equals(node.path("type").asText(""))) {
-                                    String msg = node.path("message").asText("Working...");
-                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
-                                            ? node.get("percent").asInt() : null;
-                                    progressCallback.onProgress(msg, pct);
-                                    continue;
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                        buf.write(line.getBytes(StandardCharsets.UTF_8));
-                        buf.write('\n');
-                    }
-                } catch (IOException ignored) {}
-                return buf.toByteArray();
-            });
-
-            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
-            long durationMs = System.currentTimeMillis() - startTime;
-
-            if (!finished) {
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                process.destroyForcibly();
-                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-                log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-            if (overLimit.get()) return ProcessSandbox.killedOverLimit(scriptPath, stdout, stderr, durationMs);
-
-            int exitCode = process.exitValue();
-            log.debug("Container execution completed [exit={}] {} in {}ms",
-                    exitCode, scriptPath.getFileName(), durationMs);
-            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
-
+            return ProcessSandbox.run(cli(cmd, envVars), scriptPath, stdinJson, timeoutSec, progressCallback, false);
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
             log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
@@ -831,52 +756,6 @@ public class ContainerSandbox {
         } catch (IOException e) {
             return new byte[0];
         }
-    }
-
-    /**
-     * Read an InputStream fully, updating lastActivity on each chunk.
-     * This lets stall detection know the process is still producing output.
-     */
-    private static byte[] drainStreamWithActivity(InputStream is, AtomicLong lastActivity) {
-        try {
-            ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
-            byte[] chunk = new byte[8192];
-            int n;
-            while ((n = is.read(chunk)) != -1) {
-                lastActivity.set(System.currentTimeMillis());
-                buf.write(chunk, 0, n);
-            }
-            return buf.toByteArray();
-        } catch (IOException e) {
-            return new byte[0];
-        }
-    }
-
-    /**
-     * Wait for a process to finish with stall detection instead of a hard wall-clock timeout.
-     * The process runs indefinitely as long as it keeps producing output.
-     * If no output for {@code stallTimeoutSec} seconds, the process is considered stalled.
-     *
-     * @return true if the process finished normally, false if it stalled
-     */
-    private static boolean waitForWithStallDetection(Process process, int stallTimeoutSec,
-                                                     AtomicLong lastActivity) {
-        long stallTimeoutMs = stallTimeoutSec * 1000L;
-        while (process.isAlive()) {
-            try {
-                if (process.waitFor(5, TimeUnit.SECONDS)) {
-                    return true;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-            long sinceLastOutput = System.currentTimeMillis() - lastActivity.get();
-            if (sinceLastOutput > stallTimeoutMs) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static String truncate(String s, int maxLen) {

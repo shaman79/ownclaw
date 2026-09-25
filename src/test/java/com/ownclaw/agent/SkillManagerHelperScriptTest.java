@@ -1,6 +1,5 @@
 package com.ownclaw.agent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolRegistry;
@@ -113,7 +112,7 @@ class SkillManagerHelperScriptTest {
                 System::currentTimeMillis);
         assertEquals(SkillJail.State.REFUSING, jail.status().state());
         var env = new PythonEnvironmentService(cfg, jail);
-        var m = manager(new ProcessSandbox(new ObjectMapper(), jail), env);
+        var m = manager(new ProcessSandbox(jail), env);
 
         Path existing = Files.createDirectories(generated.resolve("greet_user"));
         Files.writeString(existing.resolve("skill.py"), "# the working version\n");
@@ -182,7 +181,7 @@ class SkillManagerHelperScriptTest {
 
         var env = new PythonEnvironmentService(cfg, JailTestKit.off());
         env.init();
-        var sandbox = new ProcessSandbox(new ObjectMapper(), JailTestKit.off());
+        var sandbox = new ProcessSandbox(JailTestKit.off());
         var m = manager(sandbox, env);
 
         String created = m.skills().createSkill(skill("greet_user", CODE));

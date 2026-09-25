@@ -1,6 +1,5 @@
 package com.ownclaw.agent.tools;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.SkillManager;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.JailTestKit;
@@ -78,7 +77,7 @@ class RunnerHarnessRegressionTest {
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg, JailTestKit.off());
         var skill = new DynamicSkill("harness_probe", "probe", Map.of(), skillDir, false, false, 30,
-                new ProcessSandbox(new ObjectMapper(), JailTestKit.off()), env, List.of(), null, List.of(), null, null, null);
+                new ProcessSandbox(JailTestKit.off()), env, List.of(), null, List.of(), null, null, null);
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
         assertTrue(result.success(), result.output());
         return result.output();
@@ -153,7 +152,7 @@ class RunnerHarnessRegressionTest {
         cfg.getSkills().setGeneratedPath(tmp.resolve("generated").toString());
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg, JailTestKit.off());
-        var sandbox = new ProcessSandbox(new ObjectMapper(), JailTestKit.off());
+        var sandbox = new ProcessSandbox(JailTestKit.off());
         var tools = new ToolRegistry(List.of());
         return new SkillManager(new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null),
                 tools, cfg, sandbox, env, null);

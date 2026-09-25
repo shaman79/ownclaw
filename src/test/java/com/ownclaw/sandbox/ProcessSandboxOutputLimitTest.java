@@ -1,6 +1,5 @@
 package com.ownclaw.sandbox;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -42,7 +41,7 @@ class ProcessSandboxOutputLimitTest {
                 "out.flush()",
                 "time.sleep(" + sleepAfter + ")",
                 ""));
-        return new ProcessSandbox(new ObjectMapper(), JailTestKit.off()).execute("python3", script, tmp,
+        return new ProcessSandbox(JailTestKit.off()).execute("python3", script, tmp,
                 null, Map.of(), 60, progress ? (msg, pct) -> { } : null, List.of());
     }
 

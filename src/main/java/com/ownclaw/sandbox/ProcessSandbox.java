@@ -74,17 +74,18 @@ public class ProcessSandbox implements SandboxManager {
         };
     }
 
-    static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
+    private static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
         log.warn("Sandbox killed {}: its output went past {} MB", scriptPath.getFileName(), OUTPUT_LIMIT >> 20);
         return new SandboxResult(-1, stdout, "Killed: the skill's output went past the "
                 + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);
     }
 
-    private final ObjectMapper mapper;
+    /** Reads the progress lines a skill prints; nothing else. */
+    private static final ObjectMapper PROGRESS = new ObjectMapper();
+
     private final SkillJail jail;
 
-    public ProcessSandbox(ObjectMapper mapper, SkillJail jail) {
-        this.mapper = mapper;
+    public ProcessSandbox(SkillJail jail) {
         this.jail = jail;
     }
 
@@ -100,7 +101,29 @@ public class ProcessSandbox implements SandboxManager {
         try (SkillJail.Launch launch = jail.prepare(
                 List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly)) {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
-            return run(launch, python, scriptPath, workingDir, stdinJson, envVars, timeoutSec, progressCallback);
+            ProcessBuilder pb = new ProcessBuilder(launch.argv());
+            pb.directory(workingDir.toFile());
+            // Only the allow-listed environment plus the skill's declared credentials. When jailed
+            // this is bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
+            SkillJail.applyEnvironment(pb, envVars);
+            long startTime = System.currentTimeMillis();
+            try {
+                return run(pb, scriptPath, stdinJson, timeoutSec, progressCallback, true);
+            } catch (IOException e) {
+                long durationMs = System.currentTimeMillis() - startTime;
+                String errMsg;
+                // Jailed, the program that could not start is bubblewrap, not Python.
+                if (!launch.jailed() && e.getMessage() != null && e.getMessage().contains("Cannot run program")) {
+                    errMsg = "Python interpreter not found at '" + python + "'. "
+                            + "Install Python 3 and configure ownclaw.sandbox.python-path, "
+                            + "or run /setup to reconfigure.";
+                    log.error("Python not found: {}. Configure python-path or install Python 3.", python);
+                } else {
+                    errMsg = "Sandbox I/O error: " + e.getMessage();
+                    log.error("Sandbox I/O error for {}: {}", scriptPath.getFileName(), e.getMessage());
+                }
+                return new SandboxResult(-1, "", errMsg, durationMs, false);
+            }
         }
     }
 
@@ -122,136 +145,115 @@ public class ProcessSandbox implements SandboxManager {
     }
 
     /**
-     * Run what {@code launch} says. With a progress callback, progress lines the skill emits
+     * Start {@code pb} -- a skill's Python, jailed or not, or the container runtime's run of one
+     * -- and see it through: {@code stdinJson} on its stdin, both streams read within
+     * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. With a
+     * progress callback, progress lines the skill emits
      * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted and forwarded
-     * through it, and are NOT included in the final stdout; without one they stay in it.
+     * through it, and are NOT included in the final stdout; without one they stay in it. With
+     * {@code watchNeedInput}, a need_input line ends the run at once, reported as stalled.
+     *
+     * @throws IOException when it cannot be started or given its input
      */
-    private SandboxResult run(SkillJail.Launch launch, String python, Path scriptPath, Path workingDir,
-                              String stdinJson, Map<String, String> envVars, int timeoutSec,
-                              ProgressCallback progressCallback) {
+    static SandboxResult run(ProcessBuilder pb, Path scriptPath, String stdinJson, int timeoutSec,
+                             ProgressCallback progressCallback, boolean watchNeedInput) throws IOException {
         long startTime = System.currentTimeMillis();
+        Process process = pb.start();
 
-        ProcessBuilder pb = new ProcessBuilder(launch.argv());
-        pb.directory(workingDir.toFile());
-        pb.redirectErrorStream(false);
-
-        // Only the allow-listed environment plus the skill's declared credentials. When jailed
-        // this is bubblewrap's environment, which it hands to the skill unchanged apart from PWD.
-        SkillJail.applyEnvironment(pb, envVars);
-
-        try {
-            Process process = pb.start();
-
-            // Write JSON input to stdin
-            if (stdinJson != null) {
-                try (OutputStream os = process.getOutputStream()) {
-                    os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
-                    os.flush();
-                }
-            } else {
-                // Close stdin immediately so the process sees EOF if it tries to read
-                process.getOutputStream().close();
+        // Write JSON input to stdin
+        if (stdinJson != null) {
+            try (OutputStream os = process.getOutputStream()) {
+                os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
+                os.flush();
             }
+        } else {
+            // Close stdin immediately so the process sees EOF if it tries to read
+            process.getOutputStream().close();
+        }
 
-            // Track last time any output was produced — used for stall detection.
-            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+        // Track last time any output was produced — used for stall detection.
+        AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
-            // Drain stderr async to prevent pipe-buffer deadlock.
-            AtomicBoolean overLimit = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
-                    drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
+        // Drain stderr async to prevent pipe-buffer deadlock.
+        AtomicBoolean overLimit = new AtomicBoolean(false);
+        CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
+                drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity));
 
-            // Read stdout line-by-line so a progress line is forwarded, and a need_input line
-            // caught, as it arrives. What a skill prints goes into the runner's capture and its
-            // result, not onto this stream; what reaches it is the result itself -- a returned
-            // need_input dict -- or a write past the capture (sys.__stdout__, a process the skill
-            // starts). No answer will ever come, so the process is killed at once and the run
-            // reported as stalled.
-            AtomicBoolean needInputDetected = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
-                ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(limited(process.getInputStream(), process, overLimit),
-                                StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        lastActivity.set(System.currentTimeMillis());
-                        String trimmed = line.trim();
+        // Read stdout line-by-line so a progress line is forwarded, and a need_input line
+        // caught, as it arrives. What a skill prints goes into the runner's capture and its
+        // result, not onto this stream; what reaches it is the result itself -- a returned
+        // need_input dict -- or a write past the capture (sys.__stdout__, a process the skill
+        // starts). No answer will ever come, so the process is killed at once and the run
+        // reported as stalled.
+        AtomicBoolean needInputDetected = new AtomicBoolean(false);
+        CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+            ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(limited(process.getInputStream(), process, overLimit),
+                            StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    lastActivity.set(System.currentTimeMillis());
+                    String trimmed = line.trim();
 
-                        if (progressCallback != null && isProgressLine(trimmed)) {
-                            try {
-                                JsonNode node = mapper.readTree(trimmed);
-                                if ("progress".equals(node.path("type").asText(""))) {
-                                    String msg = node.path("message").asText("Working...");
-                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
-                                            ? node.get("percent").asInt() : null;
-                                    progressCallback.onProgress(msg, pct);
-                                    continue; // Don't include progress lines in the result stdout
-                                }
-                            } catch (Exception e) {
-                                log.debug("Failed to parse progress line: {}", trimmed);
+                    if (progressCallback != null && isProgressLine(trimmed)) {
+                        try {
+                            JsonNode node = PROGRESS.readTree(trimmed);
+                            if ("progress".equals(node.path("type").asText(""))) {
+                                String msg = node.path("message").asText("Working...");
+                                Integer pct = node.has("percent") && !node.get("percent").isNull()
+                                        ? node.get("percent").asInt() : null;
+                                progressCallback.onProgress(msg, pct);
+                                continue; // Don't include progress lines in the result stdout
                             }
+                        } catch (Exception e) {
+                            log.debug("Failed to parse progress line: {}", trimmed);
                         }
-
-                        if (isNeedInputLine(trimmed)) {
-                            needInputDetected.set(true);
-                            process.destroyForcibly(); // fail fast — user input will never arrive
-                            break;
-                        }
-
-                        buf.write(line.getBytes(StandardCharsets.UTF_8));
-                        buf.write('\n');
                     }
-                } catch (IOException ignored) {}
-                return buf.toByteArray();
-            });
 
-            // Stall detection: no wall-clock timeout — process runs as long as it
-            // produces output. Killed only if no stdout/stderr for timeoutSec seconds.
-            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
-            long durationMs = System.currentTimeMillis() - startTime;
+                    if (watchNeedInput && isNeedInputLine(trimmed)) {
+                        needInputDetected.set(true);
+                        process.destroyForcibly(); // fail fast — user input will never arrive
+                        break;
+                    }
 
-            if (!finished) {
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                process.destroyForcibly();
-                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-                log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
+                    buf.write(line.getBytes(StandardCharsets.UTF_8));
+                    buf.write('\n');
+                }
+            } catch (IOException ignored) {}
+            return buf.toByteArray();
+        });
 
+        // Stall detection: no wall-clock timeout — process runs as long as it
+        // produces output. Killed only if no stdout/stderr for timeoutSec seconds.
+        boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
+        long durationMs = System.currentTimeMillis() - startTime;
+
+        if (!finished) {
+            long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
+            process.destroyForcibly();
+            try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-            if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
-
-            // need_input emitted → immediate failure (process was already killed above)
-            if (needInputDetected.get()) {
-                log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
-                        scriptPath.getFileName());
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            int exitCode = process.exitValue();
-            log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
-            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
-
-        } catch (IOException e) {
-            long durationMs = System.currentTimeMillis() - startTime;
-            String errMsg;
-            // Jailed, the program that could not start is bubblewrap, not Python.
-            if (!launch.jailed() && e.getMessage() != null && e.getMessage().contains("Cannot run program")) {
-                errMsg = "Python interpreter not found at '" + python + "'. "
-                        + "Install Python 3 and configure ownclaw.sandbox.python-path, "
-                        + "or run /setup to reconfigure.";
-                log.error("Python not found: {}. Configure python-path or install Python 3.", python);
-            } else {
-                errMsg = "Sandbox I/O error: " + e.getMessage();
-                log.error("Sandbox I/O error for {}: {}", scriptPath.getFileName(), e.getMessage());
-            }
-            return new SandboxResult(-1, "", errMsg, durationMs, false);
+            log.warn("Sandbox stalled (no output for {}s) — killed {} after {}ms total",
+                    stallSec, scriptPath.getFileName(), durationMs);
+            return new SandboxResult(-1, stdout, stderr, durationMs, true);
         }
+
+        String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
+        String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+        if (overLimit.get()) return killedOverLimit(scriptPath, stdout, stderr, durationMs);
+
+        // need_input emitted → immediate failure (process was already killed above)
+        if (needInputDetected.get()) {
+            log.warn("Sandbox aborted — skill emitted need_input, which no answer can reach: {}",
+                    scriptPath.getFileName());
+            return new SandboxResult(-1, stdout, stderr, durationMs, true);
+        }
+
+        int exitCode = process.exitValue();
+        log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);
+        return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
     }
 
     /**
@@ -281,8 +283,8 @@ public class ProcessSandbox implements SandboxManager {
      *
      * @return true if the process finished normally, false if it stalled
      */
-    private static boolean waitForWithStallDetection(Process process, int stallTimeoutSec,
-                                                     AtomicLong lastActivity) {
+    static boolean waitForWithStallDetection(Process process, int stallTimeoutSec,
+                                             AtomicLong lastActivity) {
         long stallTimeoutMs = stallTimeoutSec * 1000L;
         while (process.isAlive()) {
             try {

@@ -1,6 +1,5 @@
 package com.ownclaw.sandbox;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -84,7 +83,7 @@ class SkillJailModeTest {
             assertEquals(CMD, l.argv());
         }
         Path marker = tmp.resolve("marker");
-        var result = new ProcessSandbox(new ObjectMapper(), jail)
+        var result = new ProcessSandbox(jail)
                 .execute("python3", markerScript(marker), m.skillDir(), null, Map.of(), 10, null, List.of());
         assertTrue(result.isSuccess(), result.stderr());
         assertTrue(Files.exists(marker));
@@ -126,7 +125,7 @@ class SkillJailModeTest {
         assertTrue(s.reason().contains(m.db().toString()), "should name the visible database: " + s.reason());
         assertFalse(s.selfCheck().get("hidden"));
         assertFalse(s.selfCheck().get("pidNamespace"));
-        assertTrue(new ProcessSandbox(new ObjectMapper(), jail).unavailable().isPresent());
+        assertTrue(new ProcessSandbox(jail).unavailable().isPresent());
         try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
             assertNotNull(l.refusal());
             assertTrue(l.argv().isEmpty());
@@ -137,7 +136,7 @@ class SkillJailModeTest {
     @DisplayName("required, bubblewrap absent: execute returns the refusal and starts no process")
     void requiredAbsentStartsNothing() throws Exception {
         var jail = jail("required", tmp.resolve("no/such/bwrap"));
-        var sandbox = new ProcessSandbox(new ObjectMapper(), jail);
+        var sandbox = new ProcessSandbox(jail);
         Path marker = tmp.resolve("marker");
         Path script = markerScript(marker);
 
@@ -202,7 +201,7 @@ class SkillJailModeTest {
     @DisplayName("a jail that was on and stops starting fails the run, then refuses at its next check, never runs unjailed")
     void aJailThatStopsStartingRefuses() throws Exception {
         var jail = jail("auto", switchable());
-        var sandbox = new ProcessSandbox(new ObjectMapper(), jail);
+        var sandbox = new ProcessSandbox(jail);
         assertEquals(SkillJail.State.READY, jail.status().state());
 
         // The host changes under a jail that passed; READY is not re-examined on time alone.
@@ -284,7 +283,7 @@ class SkillJailModeTest {
     void readyWrapsTheLaunch() throws Exception {
         var jail = jail("auto", switchable());
         assertEquals(SkillJail.State.READY, jail.status().state());
-        var sandbox = new ProcessSandbox(new ObjectMapper(), jail);
+        var sandbox = new ProcessSandbox(jail);
         Path script = Files.writeString(m.skillDir().resolve("_runner_t.py"), "print('ran')\n");
 
         var result = sandbox.execute("python3", script, m.skillDir(), null,
@@ -505,7 +504,7 @@ class SkillJailModeTest {
         Path cache = Files.createDirectories(m.skillDir().resolve("cache"));
         Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("-wx------"));
         try {
-            var result = new ProcessSandbox(new ObjectMapper(), jail)
+            var result = new ProcessSandbox(jail)
                     .execute("python3", markerScript(tmp.resolve("marker")), m.skillDir(), null, Map.of(), 10, null, List.of());
             assertFalse(result.isSuccess());
             assertTrue(result.stderr().contains("a directory under " + m.skillDir() + " cannot be listed"),

@@ -229,7 +229,7 @@ class DynamicSkillGrantTest {
         var env = new PythonEnvironmentService(cfg, jail);
         env.init();
         var skill = new DynamicSkill("pdf_text", "reads a pdf", Map.of(), skillDir, false, false, 30,
-                new ProcessSandbox(mapper, jail), env, List.of(), null, List.of(), null, null, s.files());
+                new ProcessSandbox(jail), env, List.of(), null, List.of(), null, null, s.files());
         // Prints only facts about what it could reach, never contents it should not have.
         Files.writeString(skillDir.resolve("skill.py"), """
                 import json, os

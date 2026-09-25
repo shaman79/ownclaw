@@ -174,7 +174,7 @@ class DynamicSkillMountTest {
         var container = new Recording();
         var env = new PythonEnvironmentService(new OwnClawConfig(), jail);
         var skill = new DynamicSkill("nmap_scan", "scans", Map.of(), skillDir, false, false, 30,
-                new ProcessSandbox(new ObjectMapper(), jail), env, List.of(), null,
+                new ProcessSandbox(jail), env, List.of(), null,
                 List.of("nmap"), null, container, null);
 
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false, null, List.of()));
