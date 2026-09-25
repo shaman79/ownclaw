@@ -50,14 +50,15 @@ import java.util.function.LongSupplier;
  * credential), {@code .env}, every user's uploads and every other skill were one {@code open()}
  * away, and the network was there to send them anywhere. Stripping the environment (the
  * allow-list below) took the secrets out of the process; this takes them off the disk the
- * process can see. The host stays visible read-only, so a skill that inspects the machine still
- * works; a tmpfs is laid over each outermost directory the service keeps its state in, and only
- * the skill's own directory (writable), its authored files, and what the caller hands it
- * (read-only) are put back. The jail cannot drop the service user's supplementary groups, so
- * what the groups deploy.sh adds open is hidden too: a tmpfs goes over journald's store
- * ({@link #JOURNAL}; systemd-journal), which holds the service's own console output, and
- * another over all of {@code /run} ({@link #RUN}; docker's socket), with only the resolver's
- * directory put back ({@link #resolver}). Under /run too are the system bus and each user's
+ * process can see. The host's files stay visible read-only, so a skill that reads the machine's
+ * state from them -- CPU, memory, disks, network interfaces, uptime -- still works; its processes
+ * and daemons do not (below). A tmpfs is laid over each outermost directory the service keeps
+ * its state in, and only the skill's own directory (writable), its authored files, and what the
+ * caller hands it (read-only) are put back. The jail cannot drop the service user's
+ * supplementary groups, so what the groups deploy.sh adds open is hidden too: a tmpfs goes over
+ * journald's store ({@link #JOURNAL}; systemd-journal), which holds the service's own console
+ * output, and another over all of {@code /run} ({@link #RUN}; docker's socket), with only the
+ * resolver's directory put back ({@link #resolver}). Under /run too are the system bus and each user's
  * runtime directory, where the service user's systemd user manager and session bus would start
  * a process outside the jail when asked. A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
@@ -69,10 +70,16 @@ import java.util.function.LongSupplier;
  * <ul>
  *   <li>{@code --share-net} shares the abstract Unix-socket namespace too, so whatever on the
  *       host listens on an abstract socket is reachable;</li>
+ *   <li>a fresh PID namespace, kept because it hides {@code /proc/<jvm>/environ}: a skill sees
+ *       only its own processes, so ps, pgrep and psutil list the jail's few, with no error;</li>
  *   <li>/dev is the host's, and all of /run but the resolver is gone: {@code /dev/log},
- *       which on a systemd host links into /run, no longer reaches the system log; nothing
- *       reaches journald, the printing or the mDNS daemon (no {@code .local} names), and there
- *       is no {@code /run/lock} or utmp;</li>
+ *       which on a systemd host links into /run, no longer reaches the system log (logger
+ *       exits 0 while nothing is logged); nothing reaches the mDNS daemon (a {@code .local}
+ *       name it would answer does not resolve), and there is no {@code /run/lock} or utmp;</li>
+ *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
+ *   <li>with /run gone, so are the system bus and systemd's own socket: systemctl, timedatectl,
+ *       hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail;</li>
+ *   <li>CUPS is still reached over loopback, where it listens there;</li>
  *   <li>loopback reaches the service's own HTTP port: a skill can call its API as any client
  *       on the LAN can.</li>
  * </ul>

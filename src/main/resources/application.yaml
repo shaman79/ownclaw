@@ -205,6 +205,9 @@ ownclaw:
     # Without bwrap these still apply: pip and venv get the environment allow-list, the runner
     # and load-check scripts are created new under random names, and an authored file that is
     # a link or a hard link is refused, never read or written through.
+    # A jailed skill sees the host's files but only its own processes: systemctl, timedatectl,
+    # hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it,
+    # journalctl exits 0 with no entries, and logger exits 0 while nothing is logged.
     # Install:  sudo apt install bubblewrap, then sudo systemctl restart ownclaw. The jail
     #           would come up within a minute on its own, but a process an earlier unjailed
     #           run left running stays outside any jail until the restart ends it.

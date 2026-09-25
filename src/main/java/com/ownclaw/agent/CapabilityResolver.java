@@ -199,11 +199,11 @@ public class CapabilityResolver {
                             "system.*monitor", "\\bhtop\\b", "\\btop\\b.*process",
                             "running.*process", "system.*health"),
                     "system_info",
-                    "Gather system information: CPU, memory, disk usage, running processes, "
-                            + "network interfaces, uptime. Uses standard Linux tools.",
+                    "Gather system information: CPU, memory, disk usage, network interfaces, "
+                            + "uptime. Uses standard Linux tools.",
                     List.of("procps", "net-tools", "iproute2"),
                     List.of("psutil"),
-                    "{ \"category\": { \"type\": \"string\", \"description\": \"Category: cpu, memory, disk, network, processes, all\", \"required\": false } }",
+                    "{ \"category\": { \"type\": \"string\", \"description\": \"Category: cpu, memory, disk, network, all\", \"required\": false } }",
                     30,
                     List.of("system", "info", "cpu", "memory", "disk", "process", "monitor")
             ),
@@ -412,7 +412,8 @@ public class CapabilityResolver {
                     matched.category,
                     "system_info",
                     "Gather system information using the psutil Python library (no system packages needed). "
-                            + "Report CPU usage, memory, disk, network interfaces, running processes, uptime.",
+                            + "Report CPU usage, memory, disk, network interfaces, uptime. Do not report "
+                            + "running processes: an isolated skill sees only its own.",
                     List.of(),
                     List.of("psutil"),
                     matched.parameters, matched.timeout

@@ -42,9 +42,10 @@ PrivateTmp=true
 # create user, mount and PID namespaces and to mount a fresh /proc -- and the kernel refuses a
 # fresh /proc while the service's own /proc has anything mounted over it. So this unit must NOT
 # gain ProtectKernelTunables, ProtectProc, ProcSubset, PrivateUsers, RestrictNamespaces, or a
-# SystemCallFilter that blocks unshare/mount. Adding one is caught, not silent: the jail's
-# self-check fails, the log says why, and skills then run unisolated with a warning (auto) or
-# are refused (required).
+# SystemCallFilter that blocks unshare/mount. Adding one is caught, not silent: the log says
+# why. auto runs skills unjailed with a warning only while bubblewrap cannot start a jail at
+# all, and only until the jail has worked once in the process; a self-check that runs but fails
+# an item refuses every launch, in auto as in required.
 # NoNewPrivileges can stay as it is; bubblewrap sets no_new_privs for the skill itself.
 
 # Logging
