@@ -290,4 +290,37 @@ class AuthoredFilesPreconditionTest {
             return false;
         }
     }
+
+    @Test
+    @DisplayName("quarantining a skill that left a link at the note's name writes the note, never through the link")
+    void theQuarantineNoteIsNotWrittenThroughALink() throws Exception {
+        setUp(SkillJail.off());
+        Path dir = Files.createDirectories(generated.resolve("bad_skill"));
+        Files.writeString(dir.resolve("skill.py"), "raise SystemExit\n");
+        Files.createSymbolicLink(dir.resolve("QUARANTINE-REASON.txt"), secret);
+
+        var moved = dynamic.quarantineUnregistered(dir, "does not import");
+
+        assertTrue(moved.isPresent());
+        assertEquals(SECRET, Files.readString(secret), "the link's target is untouched");
+        Path note = moved.get().resolve("QUARANTINE-REASON.txt");
+        assertTrue(Files.isRegularFile(note, java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        assertTrue(Files.readString(note).contains("does not import"));
+        // Mutation: the note written as before -> .env overwritten with the reason.
+    }
+
+    @Test
+    @DisplayName("a SKILL.yaml that is a link is refused at load, not parsed through it")
+    void aLinkedYamlIsNotLoaded() throws Exception {
+        setUp(SkillJail.off());
+        Path dir = Files.createDirectories(generated.resolve("linked_skill"));
+        Files.writeString(dir.resolve("skill.py"), CODE);
+        Path elsewhere = Files.writeString(root.resolve("elsewhere.yaml"),
+                "name: linked_skill\ndescription: read from wherever the link pointed\n");
+        Files.createSymbolicLink(dir.resolve("SKILL.yaml"), elsewhere);
+
+        var e = assertThrows(java.io.IOException.class, () -> dynamic.loadSkill(dir));
+        assertTrue(e.getMessage().contains("not a regular file"), e.getMessage());
+        // Mutation: the YAML read through the link -> the skill loads with that description.
+    }
 }

@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Comparator;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
@@ -267,10 +268,20 @@ public class DynamicSkillRegistry {
             String stamp = java.time.Instant.now().toString().replace(':', '-');
             Path dest = quarantineDir.resolve(skillDir.getFileName() + "-" + stamp);
             Files.move(skillDir, dest);
-            Files.writeString(dest.resolve("QUARANTINE-REASON.txt"),
-                    reasonText + "\nWhen: " + java.time.Instant.now() + "\n");
             log.warn("Quarantined skill '{}' to {} — its code is intact and recoverable",
                     skillDir.getFileName(), dest);
+            // The directory was the skill's own, and whatever it left at this name -- a link to
+            // the database, say -- goes first, unfollowed; the note is then made new, and an open
+            // that finds the name taken again fails rather than writing through it.
+            Path note = dest.resolve("QUARANTINE-REASON.txt");
+            try {
+                Files.deleteIfExists(note);
+                Files.writeString(note, reasonText + "\nWhen: " + java.time.Instant.now() + "\n",
+                        java.nio.charset.StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW,
+                        StandardOpenOption.WRITE);
+            } catch (IOException noteEx) {
+                log.warn("Quarantined {} without its note: {}", dest, noteEx.getMessage());
+            }
             return Optional.of(dest);
         } catch (Exception moveEx) {
             log.error("Could not quarantine {} ({}). Leaving it in place.", skillDir, moveEx.getMessage());
@@ -293,7 +304,10 @@ public class DynamicSkillRegistry {
             return null;
         }
 
-        Map<String, Object> yaml = yamlMapper.readValue(yamlFile.toFile(), new TypeReference<>() {});
+        // Through the one reader of authored files: a link left at this name is refused, not
+        // followed into whatever it points at.
+        Map<String, Object> yaml = yamlMapper.readValue(
+                com.ownclaw.sandbox.SkillJail.readAuthored(yamlFile), new TypeReference<>() {});
 
         String name = getString(yaml, "name");
         String description = getString(yaml, "description");

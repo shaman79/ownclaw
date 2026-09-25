@@ -724,9 +724,9 @@ public class OpsService {
             }
             var one = new LinkedHashMap<String, Object>();
             one.put("name", name);
-            one.put("yaml", readTextOrNull(dir.resolve("SKILL.yaml")));
-            one.put("code", readTextOrNull(dir.resolve("skill.py")));
-            one.put("requirements", readTextOrNull(dir.resolve("requirements.txt")));
+            one.put("yaml", authoredOrNote(dir.resolve("SKILL.yaml")));
+            one.put("code", authoredOrNote(dir.resolve("skill.py")));
+            one.put("requirements", authoredOrNote(dir.resolve("requirements.txt")));
             out.put("skill", one);
             return out;
         }
@@ -1086,6 +1086,15 @@ public class OpsService {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    /** A skill's authored file through the one reader of them: a link is refused, not followed. */
+    private static String authoredOrNote(Path p) {
+        try {
+            return com.ownclaw.sandbox.SkillJail.readAuthored(p);
+        } catch (IOException e) {
+            return "«not read: " + e.getMessage() + "»";
+        }
     }
 
     private static String readTextOrNull(Path p) {
