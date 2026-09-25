@@ -133,4 +133,20 @@ class ProcessLaunchInventoryTest {
         assertTrue(Pattern.compile("List<String>\\s+argv\\s*=\\s*bwrapArgs\\s*\\(").matcher(jail).find(),
                 "SkillJail starts `argv` only as bwrapArgs built it");
     }
+
+    @Test
+    @DisplayName("the allow-list keeps what a process needs of the JVM's environment, and nothing the service does not set: not its secrets, not a VIRTUAL_ENV it happens to have")
+    void theAllowList() {
+        var pb = new ProcessBuilder("true");
+        pb.environment().put("LANG", "C.UTF-8");
+        pb.environment().put("VIRTUAL_ENV", "/jvm/venv");
+        pb.environment().put("OWNCLAW_OPS_TOKEN", "canary-env-secret");
+        SkillJail.applyEnvironment(pb, Map.of("PYTHONPATH", "/opt/ownclaw/skills/_targets/x"));
+        Map<String, String> env = pb.environment();
+        assertEquals("C.UTF-8", env.get("LANG"));
+        assertEquals("/opt/ownclaw/skills/_targets/x", env.get("PYTHONPATH"));
+        assertEquals("utf-8", env.get("PYTHONIOENCODING"));
+        assertFalse(env.containsKey("VIRTUAL_ENV"), "a VIRTUAL_ENV nothing of the service set was passed on");
+        assertFalse(env.containsKey("OWNCLAW_OPS_TOKEN"));
+    }
 }

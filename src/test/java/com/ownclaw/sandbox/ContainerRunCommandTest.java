@@ -182,11 +182,14 @@ class ContainerRunCommandTest {
     void everyStartTalksToTheSameDaemon() {
         // The run and the calls before it -- version, image inspect, build -- alike: an image
         // built on one daemon and run against another is not there.
+        // Each by name: a name left out of RUNTIME_ENV is a daemon the CLI no longer finds.
+        List<String> daemon = List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY",
+                "DOCKER_CERT_PATH", "CONTAINER_HOST", "CONTAINERS_CONF", "XDG_RUNTIME_DIR");
         var service = new java.util.HashMap<String, String>();
-        for (String name : ContainerSandbox.RUNTIME_ENV) service.put(name, "service-" + name);
+        for (String name : daemon) service.put(name, "service-" + name);
         service.put("OWNCLAW_OPS_TOKEN", "canary-env-secret");
         Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), service).environment();
-        for (String name : ContainerSandbox.RUNTIME_ENV) assertEquals("service-" + name, cli.get(name), name);
+        for (String name : daemon) assertEquals("service-" + name, cli.get(name), name);
         for (String name : cli.keySet()) {
             assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name),
                     "the runtime CLI was handed " + name);
@@ -325,6 +328,7 @@ class ContainerRunCommandTest {
         config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
         config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
         config.getSandbox().setContainerRuntime(runtime.toString());
+        config.getSandbox().setStallTimeout(2);
         var fake = new ContainerSandbox(config);
         fake.init();
 

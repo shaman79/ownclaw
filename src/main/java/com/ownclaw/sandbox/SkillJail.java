@@ -60,9 +60,10 @@ import java.util.function.LongSupplier;
  * output, and another over all of {@code /run} ({@link #RUN}; docker's socket), with only the
  * resolver's directory put back ({@link #resolver}). Under /run too are the system bus and each user's
  * runtime directory, where the service user's systemd user manager and session bus would start
- * a process outside the jail when asked. The crash dumps are hidden as well ({@link #CRASH_DUMPS}):
- * one of a process of the service user's is readable by it, and holds that process's memory. A skill's
- * /tmp is its own, and so is /var/tmp -- the same directory. A fresh PID namespace removes
+ * a process outside the jail when asked. The crash dumps are hidden as well
+ * ({@link #CRASH_DUMPS}): one of a process of the service user's is readable by it, and holds
+ * that process's memory. A skill's /tmp is its own, and so is /var/tmp -- the same directory.
+ * A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
  * the property that matters -- a skill cannot read the database and post it anywhere -- comes
  * from hiding the database, and skills that talk to the LAN, mail servers or Ollama keep
