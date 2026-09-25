@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,8 +21,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * What each mode does on each kind of host, driven through stand-in bubblewrap binaries and a
  * clock the test moves. The case that matters most is the first deploy: bubblewrap present but
- * blocked must leave skills running exactly as before under {@code auto}, and must stop them
- * under {@code required} without starting anything.
+ * blocked must leave skills running unjailed under {@code auto}, and must stop them under
+ * {@code required} without starting anything.
  */
 class SkillJailModeTest {
 
@@ -69,7 +70,7 @@ class SkillJailModeTest {
     private static final List<String> CMD = List.of("python3", "/x/_runner.py");
 
     @Test
-    @DisplayName("auto, bubblewrap absent: inactive, and a skill runs exactly as it did before")
+    @DisplayName("auto, bubblewrap absent: inactive, and a skill runs unjailed")
     void autoAbsent() throws Exception {
         var jail = jail("auto", tmp.resolve("no/such/bwrap"));
         var s = jail.status();
@@ -146,12 +147,9 @@ class SkillJailModeTest {
         var withProgress = sandbox.execute("python3", script, m.skillDir(), null, Map.of(), 10,
                 (msg, pct) -> { }, List.of());
         assertFalse(withProgress.isSuccess());
-        var interactive = sandbox.executeInteractive("python3", script, m.skillDir(), null, Map.of(), 10,
-                prompt -> "");
-        assertFalse(interactive.isSuccess());
         assertFalse(Files.exists(marker), "a refused launch must not run the script");
         assertTrue(sandbox.unavailable().isPresent());
-        assertEquals(3, jail.status().refusedRuns());
+        assertEquals(2, jail.status().refusedRuns());
     }
 
     @Test
@@ -201,7 +199,7 @@ class SkillJailModeTest {
     }
 
     @Test
-    @DisplayName("a run that bubblewrap itself failed forces a recheck, at most once a minute")
+    @DisplayName("a run that bubblewrap itself failed forces a recheck; a jail that was on then refuses, never runs unjailed")
     void bwrapFailureForcesRecheck() throws Exception {
         var jail = jail("auto", switchable());
         var sandbox = new ProcessSandbox(null, new ObjectMapper(), jail);
@@ -212,12 +210,47 @@ class SkillJailModeTest {
         now.addAndGet(SkillJail.RECHECK_MS);
         assertEquals(SkillJail.State.READY, jail.status().state());
 
-        var result = sandbox.execute("python3", markerScript(tmp.resolve("marker")), m.skillDir(),
-                null, Map.of(), 10);
+        Path marker = tmp.resolve("marker");
+        var result = sandbox.execute("python3", markerScript(marker), m.skillDir(), null, Map.of(), 10);
         assertTrue(result.stderr().startsWith("bwrap:"), result.stderr());
         assertFalse(result.isSuccess(), "the failed run fails; it is never retried unjailed");
-        assertFalse(Files.exists(tmp.resolve("marker")));
-        assertEquals(SkillJail.State.INACTIVE, jail.status().state());
+        assertFalse(Files.exists(marker));
+
+        // The recheck cannot start a jail. Before the jail was ever on that would be INACTIVE;
+        // after, every later launch would run unjailed. It refuses instead.
+        var s = jail.status();
+        assertEquals(SkillJail.State.REFUSING, s.state(), s.reason());
+        assertTrue(jail.unavailable().orElseThrow().startsWith("skill isolation was on and cannot start a jail now"),
+                jail.unavailable().toString());
+        var next = sandbox.execute("python3", markerScript(marker), m.skillDir(), null, Map.of(), 10);
+        assertFalse(next.isSuccess());
+        assertFalse(Files.exists(marker), "a launch after the jail stopped starting ran unjailed");
+        assertEquals(0, jail.status().directRuns());
+
+        // It comes back on its own once bubblewrap works again.
+        Files.delete(flag);
+        now.addAndGet(SkillJail.RECHECK_MS);
+        assertEquals(SkillJail.State.READY, jail.status().state());
+    }
+
+    @Test
+    @DisplayName("bubblewrap removed after the jail was on: refusing until a restart, which starts inactive")
+    void removedAfterReadyRefusesUntilRestart() throws Exception {
+        Path bwrap = switchable();
+        var jail = jail("auto", bwrap);
+        assertEquals(SkillJail.State.READY, jail.status().state());
+
+        Files.delete(bwrap);
+        assertEquals(SkillJail.State.REFUSING, jail.status().state());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(l.refusal());
+            assertTrue(l.refusal().contains("not installed"), l.refusal());
+            assertTrue(l.argv().isEmpty());
+        }
+
+        // A restart is a new jail that was never on here: inactive, as on any host without it.
+        var restarted = jail("auto", bwrap);
+        assertEquals(SkillJail.State.INACTIVE, restarted.status().state());
     }
 
     @Test
@@ -231,7 +264,7 @@ class SkillJailModeTest {
         jail.afterRun(launch, "bwrap: execvp python3: No such file or directory");
         assertEquals(SkillJail.State.READY, jail.status().state());
         now.addAndGet(SkillJail.RECHECK_MS);
-        assertEquals(SkillJail.State.INACTIVE, jail.status().state());
+        assertEquals(SkillJail.State.REFUSING, jail.status().state());
     }
 
     @Test
@@ -319,6 +352,66 @@ class SkillJailModeTest {
             assertTrue(l.refusal().contains("cache.bin"), l.refusal());
             assertTrue(l.argv().isEmpty());
         }
+    }
+
+    @Test
+    @DisplayName("a hard link to the database in a read-only bind -- the skill's environment, a handed upload -- is refused")
+    void hardLinkInAReadOnlyBindRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        Path envDir = Files.createDirectories(m.root().resolve("skills/_envs/probe_skill/lib/site-packages"))
+                .getParent().getParent();
+        Files.writeString(envDir.resolve("lib/site-packages/mod.py"), "X = 1\n");
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(envDir, m.handed()))) {
+            assertNull(l.refusal(), l.refusal());
+        }
+
+        Path inEnv = Files.createLink(envDir.resolve("lib/site-packages/data.bin"), m.db());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(envDir))) {
+            assertNotNull(l.refusal(), "a hard link to the database inside the environment was bound");
+            assertTrue(l.refusal().contains("data.bin"), l.refusal());
+            assertTrue(l.argv().isEmpty());
+        }
+        Files.delete(inEnv);
+
+        // An upload whose file is also the database: bound read-only, it would be the database.
+        Path upload = Files.createLink(m.uploads().resolve("statement.pdf"), m.db());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(upload))) {
+            assertNotNull(l.refusal(), "a handed upload that is a hard link to the database was bound");
+            assertTrue(l.refusal().contains("statement.pdf"), l.refusal());
+        }
+    }
+
+    @Test
+    @DisplayName("a directory the skill made unreadable is opened and checked, not a reason to refuse every launch")
+    void anUnreadableDirectoryIsOpenedAndChecked() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        // What os.makedirs('cache', mode=0o300) and a later chmod leave behind; and a directory
+        // that can be listed but not entered.
+        Path cache = Files.createDirectories(m.skillDir().resolve("cache/deeper"));
+        Files.writeString(cache.resolve("page.html"), "<html/>");
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(cache.getParent(), PosixFilePermissions.fromString("-wx------"));
+        Path index = Files.createDirectories(m.skillDir().resolve("index"));
+        Files.writeString(index.resolve("terms.txt"), "x");
+        Files.setPosixFilePermissions(index, PosixFilePermissions.fromString("r--------"));
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNull(l.refusal(), l.refusal());
+            assertTrue(l.jailed());
+        }
+        for (Path d : List.of(cache, cache.getParent(), index)) {
+            assertTrue(Files.isReadable(d) && Files.isExecutable(d), "not opened: " + d);
+        }
+
+        // Opened, it is checked like the rest: a hard link out hidden in it is still found.
+        Files.createLink(cache.resolve("db.bin"), m.db());
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("---------"));
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(l.refusal(), "a hard link out inside an unreadable directory was not found");
+            assertTrue(l.refusal().contains("db.bin"), l.refusal());
+        }
+        Files.setPosixFilePermissions(cache, PosixFilePermissions.fromString("rwx------"));
     }
 
     @Test

@@ -29,12 +29,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * The operator's view of the jail: checks.sandbox in the ops health, the self-test entry, the
  * notObserved wording on a task page and the /status line -- with the jail inactive, ready and
  * refusing. The owner decides what to install from this and verifies the install with it, so
- * each state must say what it is, why, and what to do next; and it must name HOME's dot entries
- * without ever showing what is in them.
+ * each state must say what it is, why, and what to do next; it must name HOME's dot entries
+ * without ever showing what is in them; and /status, which any user can ask for, says the
+ * state without the reason.
  * <p>
- * Driven through the real SkillJail, OpsService and CommandHandler. The host's files (os-release,
- * the user-namespace sysctls, the AppArmor profile) come from a stand-in root on a temp dir, so
- * each host the hint must handle can be laid out; stand-in bubblewrap binaries give the states.
+ * Driven through the real SkillJail, OpsService and CommandHandler. The host's settings (the
+ * user-namespace sysctls, the AppArmor profile) come from a stand-in root on a temp dir, so each
+ * host the hint must handle can be laid out; stand-in bubblewrap binaries give the states.
  */
 class SkillJailHealthTest {
 
@@ -57,7 +58,7 @@ class SkillJailHealthTest {
         m = JailTestKit.Mirror.create(tmp);
         record = Files.createDirectories(tmp.resolve("record"));
         flag = tmp.resolve("bwrap-fails");
-        host = hostRoot("debian", "", "Debian GNU/Linux 12 (bookworm)", "absent", "1", "15000");
+        host = hostRoot("absent", "1", "15000");
         home = Files.createDirectories(tmp.resolve("home"));
         Files.writeString(Files.createDirectories(home.resolve(".ssh")).resolve("id_ed25519"),
                 "canary-private-key");
@@ -73,13 +74,9 @@ class SkillJailHealthTest {
         if (!probeFileExisted) Files.deleteIfExists(HOST_PROBE_FILE);
     }
 
-    /** A host root with the files the hint reads; a sysctl given as "absent" is not created. */
-    private Path hostRoot(String id, String idLike, String pretty, String restrict, String clone,
-                          String maxNs) throws IOException {
-        Path root = Files.createDirectories(tmp.resolve("host-" + id + "-" + restrict + "-" + clone));
-        Files.createDirectories(root.resolve("etc"));
-        Files.writeString(root.resolve("etc/os-release"), "PRETTY_NAME=\"" + pretty + "\"\nID=" + id
-                + (idLike.isEmpty() ? "" : "\nID_LIKE=" + idLike) + "\n# a comment=ignored\n");
+    /** A host root with the settings the hint reads; a sysctl given as "absent" is not created. */
+    private Path hostRoot(String restrict, String clone, String maxNs) throws IOException {
+        Path root = Files.createDirectories(tmp.resolve("host-" + restrict + "-" + clone + "-" + maxNs));
         sysctl(root, "kernel/apparmor_restrict_unprivileged_userns", restrict);
         sysctl(root, "kernel/unprivileged_userns_clone", clone);
         sysctl(root, "user/max_user_namespaces", maxNs);
@@ -184,10 +181,8 @@ class SkillJailHealthTest {
         assertEquals(0L, runs.get("isolated"));
         assertEquals(0L, runs.get("refused"));
         assertNull(runs.get("readySince"));
-        assertEquals(0L, runs.get("directSinceReady"), "no launch escaped a jail that was never on");
 
         var hostFacts = map(h, "host");
-        assertEquals("Debian GNU/Linux 12 (bookworm)", hostFacts.get("os"));
         assertEquals(Map.of("kernel.apparmor_restrict_unprivileged_userns", "absent",
                 "kernel.unprivileged_userns_clone", "1", "user.max_user_namespaces", "15000"),
                 hostFacts.get("sysctls"));
@@ -195,8 +190,7 @@ class SkillJailHealthTest {
         assertEquals(List.of(".config/", ".netrc", ".ssh/"), h.get("homeDotDirs"));
         assertEquals("sudo apt install bubblewrap", h.get("installHint"));
 
-        assertTrue(jail.statusLine().startsWith(
-                "Skill isolation: INACTIVE, skills run unisolated — bubblewrap is not installed"), jail.statusLine());
+        assertEquals("Skill isolation: INACTIVE, skills run unjailed — why: /api/ops/health", jail.statusLine());
 
         // The same, as the owner reaches it.
         var ops = ops(jail);
@@ -204,7 +198,8 @@ class SkillJailHealthTest {
         assertEquals(true, sandboxCheck(ops).get("canRunSkills"));
         var entry = selfTestEntry(ops);
         assertEquals(true, entry.get("ok"), "not installed yet is where every host starts: " + entry);
-        assertTrue(String.valueOf(entry.get("warning")).contains("until bubblewrap is installed"), entry.toString());
+        assertTrue(String.valueOf(entry.get("warning")).contains("until bubblewrap can start a jail: sudo apt install"),
+                entry.toString());
         String reach = skillReach(ops);
         assertTrue(reach.contains("Skill isolation is INACTIVE") && reach.contains("read the database"), reach);
         String status = status(jail);
@@ -238,8 +233,7 @@ class SkillJailHealthTest {
         assertTrue(String.valueOf(h.get("installHint")).contains("OWNCLAW_SANDBOX_ISOLATION=required"),
                 String.valueOf(h.get("installHint")));
 
-        assertTrue(jail.statusLine().startsWith(
-                "Skill isolation: ON (bubblewrap 0.0-test) — 0 unisolated launches since "), jail.statusLine());
+        assertEquals("Skill isolation: ON (bubblewrap 0.0-test)", jail.statusLine());
 
         var ops = ops(jail);
         assertEquals("READY", sandboxCheck(ops).get("state"));
@@ -249,39 +243,38 @@ class SkillJailHealthTest {
         String reach = skillReach(ops);
         assertTrue(reach.contains("Skill isolation is ON") && reach.contains("cannot read the database")
                 && reach.contains("shares the host network on purpose"), reach);
-        assertTrue(status(jail).contains("\nSkill isolation: ON (bubblewrap 0.0-test) — 0 unisolated launches"),
-                status(jail));
+        assertTrue(status(jail).endsWith("\nSkill isolation: ON (bubblewrap 0.0-test)"), status(jail));
     }
 
     @Test
-    @DisplayName("launches that ran directly after the jail was first ready are counted, and fail the self-test")
-    void unisolatedSinceReadyIsCounted() throws Exception {
+    @DisplayName("a jail that was on and cannot start now refuses and fails the self-test; nothing runs unjailed")
+    void onThenBrokenRefuses() throws Exception {
         Files.createFile(flag);
         var jail = jail("auto", switchable());
-        jail.prepare(CMD, m.skillDir(), List.of()).close();   // before it was ever on: not counted
+        jail.prepare(CMD, m.skillDir(), List.of()).close();   // before it was ever on: unjailed
         assertEquals(SkillJail.State.INACTIVE, jail.status().state());
 
         Files.delete(flag);
         now.addAndGet(SkillJail.RECHECK_MS);
         assertEquals(SkillJail.State.READY, jail.status().state());
-        assertTrue(jail.statusLine().contains("— 0 unisolated launches since "), jail.statusLine());
         Object firstReady = map(health(jail), "runs").get("readySince");
 
         // The host changes under a jail that was on. The self-test looks now, not in a minute.
         Files.createFile(flag);
-        var ops = ops(jail);
-        var entry = selfTestEntry(ops);
-        assertEquals("INACTIVE", entry.get("state"), entry.toString());
+        var entry = selfTestEntry(ops(jail));
+        assertEquals("REFUSING", entry.get("state"), entry.toString());
         assertEquals(false, entry.get("ok"), "a jail that was on and is not is a regression: " + entry);
-        assertTrue(String.valueOf(entry.get("warning")).contains("was on at " + firstReady), entry.toString());
-        jail.prepare(CMD, m.skillDir(), List.of()).close();
+        assertTrue(String.valueOf(entry.get("reason")).contains("uid map"), entry.toString());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(l.refusal());
+        }
+        assertEquals("Skill isolation: REFUSING every skill launch — why: /api/ops/health", jail.statusLine());
 
         Files.delete(flag);
         assertEquals(SkillJail.State.READY, jail.recheck().state());
-        assertTrue(jail.statusLine().contains("— 1 unisolated launch since "), jail.statusLine());
         var runs = map(health(jail), "runs");
-        assertEquals(2L, runs.get("direct"));
-        assertEquals(1L, runs.get("directSinceReady"));
+        assertEquals(1L, runs.get("direct"), "only the launch from before the jail was ever on ran unjailed");
+        assertEquals(1L, runs.get("refused"));
         assertEquals(firstReady, runs.get("readySince"), "counted from the first time it was on");
     }
 
@@ -303,8 +296,9 @@ class SkillJailHealthTest {
         assertEquals(1L, map(h, "runs").get("refused"));
         assertTrue(String.valueOf(h.get("installHint")).startsWith("bubblewrap is installed but the jail is not working"),
                 String.valueOf(h.get("installHint")));
-        assertTrue(jail.statusLine().startsWith("Skill isolation: REFUSING every skill launch — self-check failed"),
-                jail.statusLine());
+        // Anyone can ask /status: the state, never the reason, which names the database's path.
+        assertEquals("Skill isolation: REFUSING every skill launch — why: /api/ops/health", jail.statusLine());
+        assertFalse(status(jail).contains(m.db().toString()), status(jail));
 
         var ops = ops(jail);
         assertEquals(false, sandboxCheck(ops).get("canRunSkills"));
@@ -333,7 +327,7 @@ class SkillJailHealthTest {
     @Test
     @DisplayName("an Ubuntu that restricts user namespaces with no bwrap profile: the hint says apt alone is not enough")
     void hintOnARestrictedUbuntu() throws Exception {
-        host = hostRoot("ubuntu", "debian", "Ubuntu 24.04.1 LTS", "1", "1", "15000");
+        host = hostRoot("1", "1", "15000");
         var absentHint = String.valueOf(health(jail("auto", absent())).get("installHint"));
         assertTrue(absentHint.startsWith("sudo apt install bubblewrap -- but that alone is not enough here"), absentHint);
         assertTrue(absentHint.contains("kernel.apparmor_restrict_unprivileged_userns=1"), absentHint);
@@ -364,17 +358,12 @@ class SkillJailHealthTest {
     }
 
     @Test
-    @DisplayName("user namespaces switched off, or an unknown distribution: the hint says so")
-    void hintOnOtherHosts() throws Exception {
-        host = hostRoot("debian", "", "Debian GNU/Linux 10 (buster)", "absent", "0", "15000");
+    @DisplayName("user namespaces switched off: the hint says apt alone is not enough")
+    void hintWithUserNamespacesOff() throws Exception {
+        host = hostRoot("absent", "0", "15000");
         var off = String.valueOf(health(jail("auto", absent())).get("installHint"));
-        assertTrue(off.contains("unprivileged user namespaces are switched off"), off);
-
-        host = Files.createDirectories(tmp.resolve("bare-host"));
-        var h = health(jail("auto", absent()));
-        assertEquals("unknown", map(h, "host").get("os"));
-        assertEquals("install this distribution's bubblewrap package, so that " + absent() + " exists",
-                h.get("installHint"));
+        assertTrue(off.startsWith("sudo apt install bubblewrap -- but that alone is not enough here: "
+                + "unprivileged user namespaces are switched off"), off);
     }
 
     @Test

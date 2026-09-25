@@ -1018,22 +1018,12 @@ public class OpsService {
                 m.put(k, h.get(k));
             }
             String state = String.valueOf(h.get("state"));
-            @SuppressWarnings("unchecked")
-            var runs = (Map<String, Object>) h.get("runs");
-            boolean wasReady = runs.get("readySince") != null;
-            // Not installed yet is where every host starts, and auto runs skills exactly as
-            // before there, so that alone does not fail. A jail that refuses, or that was on in
-            // this process and is not now, is a regression, and does.
-            m.put("ok", switch (state) {
-                case "READY", "OFF" -> true;
-                case "INACTIVE" -> !wasReady;
-                default -> false;
-            });
+            // Not installed yet is where every host starts: auto runs skills unjailed there, with
+            // the environment allow-list, so that alone does not fail. A jail that refuses --
+            // including one that was on in this process and cannot start now -- does.
+            m.put("ok", !"REFUSING".equals(state));
             if ("INACTIVE".equals(state)) {
-                m.put("warning", wasReady
-                        ? "Skill isolation was on at " + runs.get("readySince") + " and is not now: "
-                          + "skills are running unisolated."
-                        : "Skills run unisolated until bubblewrap is installed: " + h.get("installHint"));
+                m.put("warning", "Skills run unjailed until bubblewrap can start a jail: " + h.get("installHint"));
             }
             return m;
         }));

@@ -10,20 +10,20 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -56,13 +56,16 @@ import java.util.function.LongSupplier;
  * Three modes, from the root-owned {@code .env} only ({@code OWNCLAW_SANDBOX_ISOLATION}), so no
  * skill can switch it off:
  * <ul>
- *   <li>{@code auto} (default) -- jail every launch when bubblewrap is installed and passes a
- *       self-check; otherwise run exactly as before, with one warning. It never refuses a skill
- *       because bubblewrap is missing or blocked, so the first deploy to a host without it
- *       changes nothing.</li>
+ *   <li>{@code auto} (default) -- jail every launch when bubblewrap is installed and passes its
+ *       self-check. While bubblewrap is absent or cannot start a jail, skills run unjailed, with
+ *       one warning -- unless the jail was ready earlier in this process: then that refuses
+ *       every launch, as a self-check that runs but fails always does.</li>
  *   <li>{@code required} -- if the jail is not working, refuse the launch. Fail closed.</li>
  *   <li>{@code off} -- development and Windows.</li>
  * </ul>
+ * While the jail is ready, a single launch it cannot isolate -- a tampered skill directory, a
+ * hard link out of a bind, a bind that reaches protected state, a directory that stays
+ * unreadable -- is refused, never run unjailed.
  */
 @Component
 public class SkillJail {
@@ -139,8 +142,9 @@ public class SkillJail {
     public enum Mode { AUTO, REQUIRED, OFF }
 
     /**
-     * READY: every launch is jailed. INACTIVE: launches run directly, as before the jail existed
-     * (auto only). REFUSING: every launch is refused. OFF: switched off by configuration.
+     * READY: every launch is jailed. INACTIVE: launches run unjailed (auto only, and only until
+     * the jail is first ready). REFUSING: every launch is refused. OFF: switched off by
+     * configuration.
      */
     public enum State { READY, INACTIVE, REFUSING, OFF }
 
@@ -234,12 +238,9 @@ public class SkillJail {
     private final AtomicLong isolatedRuns = new AtomicLong();
     private final AtomicLong directRuns = new AtomicLong();
     private final AtomicLong refusedRuns = new AtomicLong();
-    // Counted from the first moment the jail was READY in this process, not from startup: the
-    // jail picks up a bubblewrap installed while the service runs, and the direct launches from
-    // before that would otherwise read as launches that escaped a working jail. A later fall
-    // back to INACTIVE and its direct launches do count -- that is what this number is for.
-    private final AtomicLong directSinceReady = new AtomicLong();
     private final long startedAt;
+    // The first moment the jail was READY in this process; from then on auto never runs a
+    // launch unjailed again (see unavailable()).
     private volatile long readySince;
 
     private Evaluation evaluation;
@@ -323,7 +324,6 @@ public class SkillJail {
         switch (e.state()) {
             case OFF, INACTIVE -> {
                 directRuns.incrementAndGet();
-                if (readySince != 0) directSinceReady.incrementAndGet();
                 return Launch.direct(command);
             }
             case REFUSING -> {
@@ -350,6 +350,10 @@ public class SkillJail {
                     log.warn("Not binding {} into the jail: it does not exist", n);
                     continue;
                 }
+                // A read-only bind shows a hard link's target as well as the writable one does:
+                // a handed upload or an environment file linked to the database.
+                linked = linkedOutside(n);
+                if (linked != null) throw new IOException(linked);
                 ro.add(n);
             }
             String leak = reachesProtected(dir, ro, roots);
@@ -406,6 +410,8 @@ public class SkillJail {
         boolean due = force || e == null
                 || !sig.equals(e.signature())
                 || ((e.state() != State.READY || recheckRequested) && now - e.at() >= RECHECK_MS);
+        // Evaluated under the lock: while a recheck runs (up to ~17 s -- bwrap --version 5 s, the
+        // probe 10 s, its kill 2 s) every launch waits for it.
         if (due) {
             Evaluation next;
             try {
@@ -446,23 +452,34 @@ public class SkillJail {
         SelfCheck check = selfCheck(roots, expose);
         if (!check.completed()) return unavailable(check.reason(), sig, now, version, roots);
         if (check.checks().containsValue(false)) {
-            // bubblewrap ran and the jail does not hold. That is not "not installed yet", it is a
-            // jail that lies, so even auto refuses rather than pretend.
+            // bubblewrap ran and an item failed. Every item is required, the functional ones (a
+            // writable working directory, a readable /etc, the shared network) as much as the
+            // hiding ones: that is not "not installed yet" but a jail that does not work as it
+            // must, so even auto refuses rather than run skills in it or around it.
             return new Evaluation(State.REFUSING, check.reason(), sig, now, version, roots, expose,
                     check.checks());
         }
         return new Evaluation(State.READY, null, sig, now, version, roots, expose, check.checks());
     }
 
+    /**
+     * No jail could be started. Under auto that runs skills unjailed only until the jail has been
+     * READY in this process: after that, a jail that stops starting -- bubblewrap removed, a
+     * probe that times out, a recheck after a run bubblewrap failed -- refuses, rather than
+     * quietly running every later launch outside it. Taking bubblewrap away on purpose then
+     * takes a restart or {@code off}.
+     */
     private Evaluation unavailable(String reason, Signature sig, long now, String version,
                                    List<Path> roots) {
-        State s = mode == Mode.AUTO ? State.INACTIVE : State.REFUSING;
+        State s = mode == Mode.AUTO && readySince == 0 ? State.INACTIVE : State.REFUSING;
         return new Evaluation(s, reason, sig, now, version, roots, List.of(), Map.of());
     }
 
     private String refusal(Evaluation e) {
-        return mode == Mode.REQUIRED
-                ? "isolation required but unavailable: " + e.reason()
+        if (mode == Mode.REQUIRED) return "isolation required but unavailable: " + e.reason();
+        // auto refuses a self-check that ran and failed, or a jail that was on and cannot start now
+        return e.checks().isEmpty()
+                ? "skill isolation was on and cannot start a jail now: " + e.reason()
                 : "skill isolation is installed but failed its self-check: " + e.reason();
     }
 
@@ -470,8 +487,8 @@ public class SkillJail {
         switch (e.state()) {
             case READY -> log.info("Skill isolation ON ({}): hidden {}, exposed read-only {}",
                     e.version(), e.roots(), e.expose());
-            case INACTIVE -> log.warn("Skill isolation INACTIVE, skills run unisolated as before: {}",
-                    e.reason());
+            case INACTIVE -> log.warn("Skill isolation INACTIVE, skills run unjailed until bubblewrap "
+                    + "can start a jail: {}", e.reason());
             case REFUSING -> log.error("Skill isolation REFUSING every skill launch: {}", e.reason());
             case OFF -> log.info("Skill isolation is off (ownclaw.sandbox.isolation=off)");
         }
@@ -604,7 +621,8 @@ public class SkillJail {
 
     // Inside the skills directory when it can be written, so the probe's own directory is
     // re-exposed from under a hidden root exactly as a skill's is; the JVM temp directory
-    // otherwise. The dot keeps it out of every scan of generated/ and _envs/.
+    // otherwise. It is made in skills/ itself, beside generated/ and _envs/, so no scan of
+    // either sees it.
     private Path createProbeDir() throws IOException {
         Path skills = layout.skillsRoot();
         if (Files.isDirectory(skills) && Files.isWritable(skills)) {
@@ -785,37 +803,73 @@ public class SkillJail {
     }
 
     /**
-     * A regular file in the working directory that also has a name outside it. A hard link made
-     * while nothing was jailed -- to the database, say -- would keep that file readable, and
-     * current, through the writable bind. Nothing inside a jail can make one: a link cannot cross
-     * the jail's mounts. Links whose every name is inside the directory are the skill's own
-     * business. Returns why, or null.
+     * A regular file under {@code root} -- a bind's source, a directory or a single file -- that
+     * also has a name outside it. A hard link made while nothing was jailed -- to the database,
+     * say -- would keep that file readable, and current, through the bind. Nothing inside a jail
+     * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
+     * are the skill's own business. Returns why, or null.
+     * <p>
+     * Never through a link. A name gone since its directory was listed -- another run of the same
+     * skill removing its {@code _runner_} script -- is skipped; root itself must exist. A
+     * directory the service user cannot list is opened first (see {@link #listOpened}); one that
+     * stays unreadable is the answer, since what it holds cannot be checked.
      */
-    static String linkedOutside(Path workDir) throws IOException {
+    static String linkedOutside(Path root) throws IOException {
         var namesInside = new HashMap<Object, Integer>();
         var links = new HashMap<Object, Integer>();
         var named = new HashMap<Object, Path>();
-        Files.walkFileTree(workDir, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult visitFile(Path f, BasicFileAttributes a) throws IOException {
-                if (!a.isRegularFile()) return FileVisitResult.CONTINUE;
-                int n = (Integer) Files.getAttribute(f, "unix:nlink", LinkOption.NOFOLLOW_LINKS);
-                if (n > 1) {
-                    Object key = a.fileKey() != null ? a.fileKey() : f;
+        var pending = new ArrayDeque<Path>(List.of(root));
+        while (!pending.isEmpty()) {
+            Path p = pending.pop();
+            try {
+                Map<String, Object> a = Files.readAttributes(p,
+                        "unix:isDirectory,isRegularFile,nlink,fileKey", LinkOption.NOFOLLOW_LINKS);
+                if (Boolean.TRUE.equals(a.get("isDirectory"))) {
+                    pending.addAll(listOpened(p));
+                } else if (Boolean.TRUE.equals(a.get("isRegularFile")) && (Integer) a.get("nlink") > 1) {
+                    Object key = a.get("fileKey") != null ? a.get("fileKey") : p;
                     namesInside.merge(key, 1, Integer::sum);
-                    links.put(key, n);
-                    named.putIfAbsent(key, f);
+                    links.put(key, (Integer) a.get("nlink"));
+                    named.putIfAbsent(key, p);
                 }
-                return FileVisitResult.CONTINUE;
+            } catch (NoSuchFileException gone) {
+                if (p.equals(root)) throw gone;
+            } catch (AccessDeniedException denied) {
+                return "unreadable directory " + p + " in the skill's own directory " + root;
             }
-        });
+        }
         for (var e : links.entrySet()) {
             if (e.getValue() > namesInside.get(e.getKey())) {
-                return named.get(e.getKey()) + " is a hard link to a file outside " + workDir
-                        + ": tampered skill";
+                return named.get(e.getKey()) + " has another name outside " + root
+                        + " (a hard link): tampered skill";
             }
         }
         return null;
+    }
+
+    /**
+     * The entries of a directory in a tree the service user owns. One it cannot list or enter as
+     * it is -- a skill's {@code os.makedirs('cache', mode=0o300)} -- is the service user's own,
+     * so it is opened (u+rwx) first; listing one that still cannot be is denied.
+     */
+    private static List<Path> listOpened(Path dir) throws IOException {
+        if (!Files.isReadable(dir) || !Files.isExecutable(dir)) openForOwner(dir);
+        try (var entries = Files.list(dir)) {
+            return entries.toList();
+        }
+    }
+
+    // u+rwx, best effort. chmod follows a link, but dir was a directory a moment ago: the most a
+    // swap in between does is add the owner's own bits to a file the service user owns.
+    private static void openForOwner(Path dir) {
+        try {
+            var perms = new HashSet<>(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
+            perms.addAll(List.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE));
+            Files.setPosixFilePermissions(dir, perms);
+        } catch (IOException | RuntimeException e) {
+            // not the service user's, or gone: what the caller does next finds out which
+        }
     }
 
     /**
@@ -857,23 +911,19 @@ public class SkillJail {
      */
     static final String BWRAP_PROFILE = "etc/apparmor.d/bwrap-userns-restrict";
 
-    private static final DateTimeFormatter WHEN =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm z").withZone(ZoneId.systemDefault());
-
     /**
      * What the owner needs to decide on the jail and to verify it, for the ops health check:
      * what it is doing and why, what it hides, which bubblewrap is here, what the self-check
-     * saw, how many launches went which way, and the facts about this host that decide what to
-     * install. Names and settings only, never the content of a file.
+     * saw, how many launches went which way, and the host settings that can stop bubblewrap
+     * starting a jail. Names and settings only, never the content of a file.
      */
     public Map<String, Object> health() {
         return health(Path.of("/"), home());
     }
 
-    /** {@link #health()}, reading the host's files under {@code hostRoot} and HOME at {@code home}. */
+    /** {@link #health()}, reading the host's settings under {@code hostRoot} and HOME at {@code home}. */
     Map<String, Object> health(Path hostRoot, Path home) {
         Status s = status();
-        Map<String, String> os = osRelease(hostRoot);
         Map<String, String> sysctls = sysctls(hostRoot);
         boolean profile = Files.isRegularFile(hostRoot.resolve(BWRAP_PROFILE));
         boolean present = bwrap != null && signature(bwrap).present();
@@ -896,8 +946,8 @@ public class SkillJail {
             }
         }
         m.put("hiddenRoots", roots);
-        // The owner's expose entries that survived the filter; a jail that has not passed its
-        // check yet exposes nothing, so this stays empty until then.
+        // The owner's expose entries that survived the filter, as bound by the last self-check
+        // that ran to the end (READY, or REFUSING on a failed item); empty while none has.
         m.put("exposed", s.exposed().stream()
                 .map(b -> b.source().equals(b.dest()) ? b.dest().toString() : b.dest() + " <- " + b.source())
                 .toList());
@@ -921,37 +971,30 @@ public class SkillJail {
         runs.put("refused", s.refusedRuns());
         long ready = readySince;
         runs.put("readySince", ready == 0 ? null : iso(ready));
-        runs.put("directSinceReady", directSinceReady.get());
         m.put("runs", runs);
 
+        // What can stop bubblewrap starting a jail here: on Ubuntu 24.04, AppArmor.
         var host = new LinkedHashMap<String, Object>();
-        host.put("os", os.getOrDefault("PRETTY_NAME", "unknown"));
-        host.put("kernel", System.getProperty("os.version"));
         host.put("sysctls", sysctls);
         host.put("bwrapProfilePresent", profile);
         m.put("host", host);
 
         m.put("homeDotDirs", homeDotDirs(home));
-        m.put("installHint", installHint(s, present, os, sysctls, profile));
+        m.put("installHint", installHint(s, present, sysctls, profile));
         return m;
     }
 
     /**
-     * One line for /status, in the web chat and in Telegram. When ON it counts the launches
-     * that ran unisolated since the jail was first ready: zero is the mechanical proof that
-     * nothing has run outside it since.
+     * One line for /status, in the web chat and in Telegram. Any user can ask for it, so it gives
+     * the state and not the reason, which can name the service's paths: the owner reads that in
+     * /api/ops/health.
      */
     public String statusLine() {
         Status s = status();
         return switch (s.state()) {
-            case READY -> {
-                long n = directSinceReady.get();
-                yield "Skill isolation: ON (" + (s.version() == null ? "bubblewrap" : s.version()) + ") — "
-                        + n + (n == 1 ? " unisolated launch" : " unisolated launches") + " since "
-                        + WHEN.format(Instant.ofEpochMilli(readySince));
-            }
-            case INACTIVE -> "Skill isolation: INACTIVE, skills run unisolated — " + brief(s.reason());
-            case REFUSING -> "Skill isolation: REFUSING every skill launch — " + brief(s.reason());
+            case READY -> "Skill isolation: ON (" + (s.version() == null ? "bubblewrap" : s.version()) + ")";
+            case INACTIVE -> "Skill isolation: INACTIVE, skills run unjailed — why: /api/ops/health";
+            case REFUSING -> "Skill isolation: REFUSING every skill launch — why: /api/ops/health";
             case OFF -> "Skill isolation: OFF (ownclaw.sandbox.isolation=off)";
         };
     }
@@ -961,8 +1004,7 @@ public class SkillJail {
      * install command because on a host that blocks them installing bubblewrap is not enough,
      * and saying only "install it" would send the owner round the loop once for nothing.
      */
-    private String installHint(Status s, boolean present, Map<String, String> os,
-                               Map<String, String> sysctls, boolean profile) {
+    private String installHint(Status s, boolean present, Map<String, String> sysctls, boolean profile) {
         if (mode == Mode.OFF) {
             return "none: isolation is switched off. To turn it on, remove "
                     + "OWNCLAW_SANDBOX_ISOLATION=off from .env and restart.";
@@ -974,7 +1016,7 @@ public class SkillJail {
                     : "none: isolation is on. To refuse skills whenever it is not (fail closed), add "
                       + "OWNCLAW_SANDBOX_ISOLATION=required to .env and restart.";
         }
-        String install = present ? null : installCommand(os);
+        String install = present ? null : "sudo apt install bubblewrap";
         // A probe that ran to the end proves the namespaces were created, whatever the settings
         // suggest; then what is wrong is the jail, not the host.
         String blocked = s.selfCheck().isEmpty() ? usernsBlocked(sysctls, profile) : null;
@@ -986,21 +1028,12 @@ public class SkillJail {
                 + "in bubblewrap's own words where it had any.";
     }
 
-    private String installCommand(Map<String, String> os) {
-        var ids = List.of((os.getOrDefault("ID", "") + " " + os.getOrDefault("ID_LIKE", ""))
-                .toLowerCase(Locale.ROOT).trim().split("\\s+"));
-        if (ids.contains("debian") || ids.contains("ubuntu")) return "sudo apt install bubblewrap";
-        if (ids.contains("fedora") || ids.contains("rhel")) return "sudo dnf install bubblewrap";
-        return "install this distribution's bubblewrap package, so that " + bwrap + " exists";
-    }
-
     private static String usernsBlocked(Map<String, String> sysctls, boolean profile) {
         if ("0".equals(sysctls.get("kernel.unprivileged_userns_clone"))
                 || "0".equals(sysctls.get("user.max_user_namespaces"))) {
-            return "unprivileged user namespaces are switched off on this host "
-                    + "(kernel.unprivileged_userns_clone or user.max_user_namespaces is 0), and "
-                    + "bubblewrap needs them. Turning them on is a host-wide change for the owner "
-                    + "to decide; nothing is written automatically.";
+            return "unprivileged user namespaces are switched off on this host, and bubblewrap needs "
+                    + "them. Turning them on is a host-wide change: the owner's decision; nothing is "
+                    + "written automatically.";
         }
         if ("1".equals(sysctls.get("kernel.apparmor_restrict_unprivileged_userns")) && !profile) {
             return "kernel.apparmor_restrict_unprivileged_userns=1 and there is no /" + BWRAP_PROFILE
@@ -1011,31 +1044,6 @@ public class SkillJail {
         return null;
     }
 
-    /** NAME=value pairs from os-release under {@code root}; empty when there is none. */
-    static Map<String, String> osRelease(Path root) {
-        var out = new LinkedHashMap<String, String>();
-        for (String name : List.of("etc/os-release", "usr/lib/os-release")) {
-            Path f = root.resolve(name);
-            if (!Files.isRegularFile(f)) continue;
-            try {
-                for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
-                    int eq = line.indexOf('=');
-                    if (eq <= 0 || line.startsWith("#")) continue;
-                    String v = line.substring(eq + 1).strip();
-                    if (v.length() >= 2 && (v.charAt(0) == '"' || v.charAt(0) == '\'')
-                            && v.charAt(v.length() - 1) == v.charAt(0)) {
-                        v = v.substring(1, v.length() - 1);
-                    }
-                    out.put(line.substring(0, eq).strip(), v);
-                }
-            } catch (IOException | RuntimeException e) {
-                // what was read so far is still worth showing
-            }
-            break;
-        }
-        return out;
-    }
-
     /** The user-namespace sysctls under {@code root}/proc/sys: the value, "absent" or "unreadable". */
     static Map<String, String> sysctls(Path root) {
         var out = new LinkedHashMap<String, String>();
@@ -1044,7 +1052,7 @@ public class SkillJail {
             String v;
             try {
                 v = Files.readString(f, StandardCharsets.UTF_8).strip();
-            } catch (java.nio.file.NoSuchFileException e) {
+            } catch (NoSuchFileException e) {
                 v = "absent";
             } catch (IOException | RuntimeException e) {
                 v = "unreadable";
@@ -1078,13 +1086,6 @@ public class SkillJail {
         String h = System.getenv("HOME");
         if (h == null || h.isBlank()) h = System.getProperty("user.home");
         return h == null || h.isBlank() ? null : Path.of(h);
-    }
-
-    /** A reason on one line and of a length a chat message can carry; health has it whole. */
-    private static String brief(String reason) {
-        if (reason == null) return "no reason recorded";
-        String one = reason.strip().replaceAll("\\s+", " ");
-        return one.length() <= 240 ? one : one.substring(0, 239) + "…";
     }
 
     private static String iso(long millis) {
@@ -1161,43 +1162,27 @@ public class SkillJail {
     }
 
     /**
-     * Remove a directory a jailed run could write into. Never follows a link (a skill can
-     * leave one pointing anywhere), and re-opens directories the skill made unreadable so
-     * their contents can go too.
+     * Remove a directory a jailed run could write into, as far as it can be. A link is unlinked,
+     * never entered (a skill can leave one pointing anywhere); a directory is opened (u+rwx)
+     * before it is listed, since the run may have left it unreadable or unwritable. Whatever is
+     * left is logged.
      */
     static void deleteTree(Path root) {
+        remove(root);
+        if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) log.warn("Could not fully remove {}", root);
+    }
+
+    private static void remove(Path p) {
         try {
-            Files.walkFileTree(root, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    try {
-                        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
-                    } catch (IOException | RuntimeException ignored) {
-                        // best effort
-                    }
-                    return FileVisitResult.CONTINUE;
+            if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+                openForOwner(p);
+                try (var entries = Files.newDirectoryStream(p)) {
+                    for (Path e : entries) remove(e);
                 }
-
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                    Files.deleteIfExists(file);
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                    try { Files.deleteIfExists(file); } catch (IOException ignored) { }
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                    Files.deleteIfExists(dir);
-                    return FileVisitResult.CONTINUE;
-                }
-            });
+            }
+            Files.deleteIfExists(p);
         } catch (IOException | RuntimeException e) {
-            log.warn("Could not fully remove {}: {}", root, e.getMessage());
+            // best effort: deleteTree reports what is left
         }
     }
 }
