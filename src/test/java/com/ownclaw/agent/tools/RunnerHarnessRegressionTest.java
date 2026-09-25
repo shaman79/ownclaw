@@ -4,6 +4,8 @@ import com.ownclaw.agent.SkillManager;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
+import com.ownclaw.sandbox.SandboxManager;
+import com.ownclaw.sandbox.SandboxResult;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -18,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -28,7 +31,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * skill's writable directory -- and the load check judges the same source the run executes. The
  * plant is first shown to work on plain Python -- otherwise "it did not change what ran" would
  * prove nothing -- and then run through the real harness. Apart from that the skill loads as it
- * always did: a module importlib made, its own directory first on sys.path.
+ * always did: a module importlib made, its own directory first on sys.path. The result is read
+ * from the line the runner prints last.
  */
 class RunnerHarnessRegressionTest {
 
@@ -72,12 +76,30 @@ class RunnerHarnessRegressionTest {
         return new Ran(p.exitValue(), out);
     }
 
+    /** The whole of the last run's stdout, as the sandbox returned it. */
+    private String lastStdout;
+
     private String runSkill() {
         var cfg = new OwnClawConfig();
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg, JailTestKit.off());
+        var real = new ProcessSandbox(JailTestKit.off());
+        SandboxManager recording = new SandboxManager() {
+            @Override
+            public SandboxResult execute(String python, Path script, Path dir, String in, Map<String, String> vars,
+                                         int timeout, ProgressCallback cb, List<Path> ro) {
+                SandboxResult r = real.execute(python, script, dir, in, vars, timeout, cb, ro);
+                lastStdout = r.stdout();
+                return r;
+            }
+
+            @Override
+            public Optional<String> unavailable() {
+                return real.unavailable();
+            }
+        };
         var skill = new DynamicSkill("harness_probe", "probe", Map.of(), skillDir, false, false, 30,
-                new ProcessSandbox(JailTestKit.off()), env, List.of(), null, List.of(), null, null, null);
+                recording, env, List.of(), null, List.of(), null, null, null);
         var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false));
         assertTrue(result.success(), result.output());
         return result.output();
@@ -198,5 +220,19 @@ class RunnerHarnessRegressionTest {
                         return {'output': 'pool=' + str(pool.map(abs, [-1, -2]))}
                 """);
         assertEquals("pool=[1, 2]", runSkill());
+    }
+
+    @Test
+    @DisplayName("a JSON line a subprocess of the skill prints ahead of the result is not taken for it")
+    void aSubprocessJsonLineIsNotTheResult() throws Exception {
+        // The child writes to the runner's own stdout, which the runner does not capture.
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import subprocess, sys
+                def run(params):
+                    subprocess.run([sys.executable, '-c', 'print(\\'{"status": "ok"}\\')'], check=True)
+                    return {'output': 'the real result'}
+                """);
+        assertEquals("the real result", runSkill());
+        assertTrue(lastStdout.startsWith("{\"status\": \"ok\"}"), "the child printed nothing first: " + lastStdout);
     }
 }

@@ -613,9 +613,12 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * Parse the Python script's stdout into a ToolResult, host and container run alike.
-     * Expected JSON: {"success": true, "output": "text", "data": {}}
-     * Falls back to treating stdout as plain text if not valid JSON. A result whose "type" is
+     * Parse the runner's stdout into a ToolResult, host and container run alike. The runner
+     * prints the result last, as one JSON object on a line of its own
+     * ({"success": true, "output": "text", "data": {}}), so that line is read first: what a
+     * subprocess of the skill wrote to the same stdout before it -- a JSON line among it -- is
+     * never taken for the result. Only when the last line is not a JSON object is the whole of
+     * stdout read, from its first value; output that is neither fails. A result whose "type" is
      * need_input fails, saying it is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
      *
      * @param stdout the script's standard output
@@ -630,53 +633,13 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
-        try {
-            Map<String, Object> parsed = mapper.readValue(stdout.strip(), new TypeReference<>() {});
-            if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
-            boolean success = Boolean.TRUE.equals(parsed.get("success"));
-            String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : stdout;
-
-            // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
-            if (success && output != null && output.startsWith("ERROR:")) {
-                log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
-                success = false;
-            }
-
-            // Treat empty output content as failure even if success=true
-            if (success && (output == null || output.isBlank() || "null".equals(output))) {
-                String hint = (stderr != null && !stderr.isBlank())
-                        ? " stderr: " + stderr.strip()
-                        : "";
-                return ToolResult.failure(
-                        "Tool returned success but with empty output — this usually means the skill " +
-                        "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
-                        + " Use skill_create with the SAME name '" + name + "' to fix it.");
-            }
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> data = parsed.containsKey("data") && parsed.get("data") instanceof Map
-                    ? (Map<String, Object>) parsed.get("data")
-                    : Map.of();
-
-            // Append stderr as a warning if present on a successful result
-            if (success && stderr != null && !stderr.isBlank()) {
-                output = output + "\n[stderr warning: " + stderr.strip() + "]";
-            }
-
-            return success ? ToolResult.success(output, data) : ToolResult.failure(output, data);
-        } catch (Exception e) {
-            // Full stdout isn't valid JSON — try parsing the last non-empty line
-            // (skills may print debug info on earlier lines, with the JSON result last)
-            String lastLine = lastNonEmptyLine(stdout);
-            if (lastLine != null && lastLine.startsWith("{")) {
-                try {
-                    Map<String, Object> fallback = mapper.readValue(lastLine, new TypeReference<>() {});
-                    if (asksForInput(fallback)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
-                    boolean ok = Boolean.TRUE.equals(fallback.get("success"));
-                    String out = fallback.containsKey("output") ? String.valueOf(fallback.get("output")) : lastLine;
-                    return ok ? ToolResult.success(out) : ToolResult.failure(out);
-                } catch (Exception ignored) {}
-            }
+        String text = lastNonEmptyLine(stdout);
+        Map<String, Object> parsed = jsonObject(text);
+        if (parsed == null) {
+            text = stdout.strip();
+            parsed = jsonObject(text);
+        }
+        if (parsed == null) {
             // Non-JSON output from the runner harness means something went wrong.
             // Treat as failure so the agent gets a signal to investigate.
             String detail = (stderr != null && !stderr.isBlank())
@@ -685,6 +648,49 @@ public class DynamicSkill implements Tool {
                     "Tool produced non-JSON output (possible runner error): "
                     + truncateStr(stdout.strip(), 500) + detail
                     + " Use skill_create with the SAME name '" + name + "' to fix.");
+        }
+
+        if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
+        boolean success = Boolean.TRUE.equals(parsed.get("success"));
+        String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : text;
+
+        // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
+        if (success && output != null && output.startsWith("ERROR:")) {
+            log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
+            success = false;
+        }
+
+        // Treat empty output content as failure even if success=true
+        if (success && (output == null || output.isBlank() || "null".equals(output))) {
+            String hint = (stderr != null && !stderr.isBlank())
+                    ? " stderr: " + stderr.strip()
+                    : "";
+            return ToolResult.failure(
+                    "Tool returned success but with empty output — this usually means the skill " +
+                    "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
+                    + " Use skill_create with the SAME name '" + name + "' to fix it.");
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = parsed.containsKey("data") && parsed.get("data") instanceof Map
+                ? (Map<String, Object>) parsed.get("data")
+                : Map.of();
+
+        // Append stderr as a warning if present on a successful result
+        if (success && stderr != null && !stderr.isBlank()) {
+            output = output + "\n[stderr warning: " + stderr.strip() + "]";
+        }
+
+        return success ? ToolResult.success(output, data) : ToolResult.failure(output, data);
+    }
+
+    /** {@code text} read as a JSON object, from its first value; null when it is not one. */
+    private static Map<String, Object> jsonObject(String text) {
+        if (text == null || !text.startsWith("{")) return null;
+        try {
+            return mapper.readValue(text, new TypeReference<>() {});
+        } catch (Exception e) {
+            return null;
         }
     }
 
