@@ -22,6 +22,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -306,6 +307,10 @@ public class DynamicSkill implements Tool {
         if (!Files.exists(scriptPath)) {
             return ToolResult.failure("Skill script not found: " + scriptPath);
         }
+        // Here, before the container is chosen: a run in docker or podman never passes the jail,
+        // so while it refuses every launch it would be the one way around it.
+        Optional<String> refused = sandbox == null ? Optional.empty() : sandbox.unavailable();
+        if (refused.isPresent()) return ToolResult.failure(refused.get());
 
         Path runnerScript = null;
         inFlight.incrementAndGet();

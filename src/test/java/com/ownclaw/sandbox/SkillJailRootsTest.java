@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Which directories disappear, and which exceptions the owner may open up. A root that is too
@@ -20,11 +21,18 @@ class SkillJailRootsTest {
 
     @TempDir Path tmp;
 
+    /** {@code roots} and, on a host that has one, /run/user, in the order the jail sorts them. */
+    static List<Path> withUserRuntime(List<Path> roots) {
+        var out = new java.util.ArrayList<>(roots);
+        if (Files.isDirectory(SkillJail.USER_RUNTIME)) out.add(SkillJail.USER_RUNTIME);
+        return out.stream().sorted().toList();
+    }
+
     @Test
     @DisplayName("only the outermost directory is hidden when it contains the rest")
     void outermostOnly() throws Exception {
         var m = JailTestKit.Mirror.create(tmp);
-        assertEquals(List.of(m.root().toRealPath()), SkillJail.hiddenRoots(m.layout()));
+        assertEquals(withUserRuntime(List.of(m.root().toRealPath())), SkillJail.hiddenRoots(m.layout()));
     }
 
     @Test
@@ -41,7 +49,7 @@ class SkillJailRootsTest {
         var roots = SkillJail.hiddenRoots(layout);
         assertTrue(roots.contains(root.toRealPath()), roots.toString());
         assertTrue(roots.contains(elsewhere.toRealPath()), "the real data directory must be hidden: " + roots);
-        assertEquals(2, roots.size(), roots.toString());
+        assertEquals(withUserRuntime(List.of(root.toRealPath(), elsewhere.toRealPath())), roots);
     }
 
     @Test
@@ -88,6 +96,31 @@ class SkillJailRootsTest {
         var required = new SkillJail("required", bwrap.toString(), layout, List.of(), new AtomicLong()::get);
         assertEquals(SkillJail.State.REFUSING, required.status().state());
         assertTrue(required.unavailable().isPresent());
+    }
+
+    @Test
+    @DisplayName("/run/user is hidden whenever it exists; /run and the resolver's files under it are not")
+    void theUserRuntimeDirectoryIsHidden() throws Exception {
+        assumeTrue(Files.isDirectory(SkillJail.USER_RUNTIME), "no /run/user on this host");
+        var m = JailTestKit.Mirror.create(tmp);
+        var roots = SkillJail.hiddenRoots(m.layout());
+        assertEquals(List.of(SkillJail.USER_RUNTIME, m.root().toRealPath()).stream().sorted().toList(), roots);
+        assertFalse(roots.stream().anyMatch(r -> Path.of("/run/systemd/resolve").startsWith(r)), roots.toString());
+    }
+
+    @Test
+    @DisplayName("the self-check proves the service user's own directory under /run/user hidden")
+    void theSelfCheckProbesTheUserRuntimeDirectory() throws Exception {
+        Path mine = SkillJail.ownRuntimeDir();
+        assumeTrue(mine != null, "no /run/user/<uid> on this host");
+        var m = JailTestKit.Mirror.create(tmp);
+        Path record = Files.createDirectories(tmp.resolve("rec"));
+        Path bwrap = JailTestKit.recordingEach(tmp.resolve("bin/bwrap"), record);
+        var jail = new SkillJail("required", bwrap.toString(), m.layout(), List.of(), new AtomicLong()::get);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        List<String> probe = Files.readAllLines(record.resolve("call.0/argv"));
+        assertTrue(JailTestKit.command(probe).contains(SkillJail.PROBE_NAME), probe.toString());
+        assertTrue(JailTestKit.command(probe).contains(mine.toString()), "not probed: " + probe);
     }
 
     @Test

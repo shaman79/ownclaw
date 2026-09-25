@@ -347,6 +347,70 @@ class SkillJailModeTest {
     }
 
     @Test
+    @DisplayName("a skill directory that is a link is refused, and nothing is created through it")
+    void aLinkedSkillDirectoryIsRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        // Where it leads, a complete skill: bound there, another skill's files would be this run's.
+        Files.writeString(m.otherSkill().resolve("SKILL.yaml"), "name: other_skill\n");
+        Path linked = Files.createSymbolicLink(m.generated().resolve("linked_skill"), m.otherSkill());
+        try (var l = jail.prepare(CMD, linked, List.of())) {
+            assertNotNull(l.refusal(), "a linked skill directory was bound where it leads");
+            assertTrue(l.argv().isEmpty());
+        }
+        assertFalse(Files.exists(m.otherSkill().resolve("requirements.txt"), LinkOption.NOFOLLOW_LINKS),
+                "requirements.txt was created through the link");
+    }
+
+    @Test
+    @DisplayName("an environment that is a link -- to a directory holding a hard link to the database -- is refused")
+    void aLinkedEnvironmentIsRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        Path elsewhere = Files.createDirectories(tmp.resolve("elsewhere-env/lib"));
+        Files.createLink(elsewhere.resolve("data.bin"), m.db());
+        Path envDir = Files.createSymbolicLink(m.root().resolve("skills/_envs/probe_skill"), elsewhere.getParent());
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(envDir))) {
+            assertNotNull(l.refusal(), "the environment was bound where its link leads, database and all");
+            assertTrue(l.argv().isEmpty());
+        }
+    }
+
+    @Test
+    @DisplayName("a bind that is a link outside skills/ is refused: a handed path leading to another skill's code")
+    void aLinkOutsideSkillsIsRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        // Not under skills/, and leading to nothing the protected-path test forbids: only the
+        // link itself says it is one.
+        Path alias = Files.createSymbolicLink(tmp.resolve("alias.py"), m.otherSkill().resolve("skill.py"));
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(alias))) {
+            assertNotNull(l.refusal(), "another skill's code was bound through a link");
+            assertEquals("could not isolate this launch: " + alias + " is a link: tampered skill", l.refusal());
+        }
+    }
+
+    @Test
+    @DisplayName("a bind reached through a link below skills/ -- _envs/ swapped for one into backups/ -- is refused")
+    void aLinkBelowSkillsIsRefused() throws Exception {
+        var jail = jail("auto", switchable());
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        Path backup = Files.createDirectories(m.root().resolve("backups/probe_skill"));
+        Files.writeString(backup.resolve("ownclaw.db"), "canary-backup");
+        Path envs = m.root().resolve("skills/_envs");
+        Files.delete(envs);
+        Files.createSymbolicLink(envs, m.root().resolve("backups"));
+        // The environment itself is a directory; its parent is the link. The protected-path test
+        // lets it through, as it lets a skill's own directory inside generated/ through.
+        Path envDir = envs.resolve("probe_skill");
+        try (var l = jail.prepare(CMD, m.skillDir(), List.of(envDir))) {
+            assertNotNull(l.refusal(), "a backup was bound as the skill's environment");
+            assertEquals("could not isolate this launch: " + envDir + " is reached through a link below "
+                    + m.root().resolve("skills") + ": tampered skill", l.refusal());
+        }
+    }
+
+    @Test
     @DisplayName("a file hard-linked from outside the skill's directory is refused; a link within it is not")
     void hardLinkFromOutsideRefused() throws Exception {
         var jail = jail("auto", switchable());

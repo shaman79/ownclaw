@@ -166,11 +166,8 @@ class SkillJailHealthTest {
         assertEquals(true, h.get("canRunSkills"));
         assertTrue(String.valueOf(h.get("reason")).contains("not installed"), String.valueOf(h.get("reason")));
         // What the jail will hide once it is on, readable before bubblewrap is installed.
-        var roots = (List<?>) h.get("hiddenRoots");
-        assertFalse(roots.isEmpty());
-        for (Object r : roots) {
-            assertTrue(r.equals(m.root().toString()) || r.equals(m.root().toRealPath().toString()), roots.toString());
-        }
+        assertEquals(SkillJailRootsTest.withUserRuntime(List.of(m.root().toRealPath())).stream().map(Path::toString).toList(),
+                h.get("hiddenRoots"));
         assertEquals(absent().toString(), map(h, "bwrap").get("path"));
         assertEquals(false, map(h, "bwrap").get("present"));
         assertNull(map(h, "bwrap").get("version"));
@@ -188,7 +185,7 @@ class SkillJailHealthTest {
                 hostFacts.get("sysctls"));
         assertEquals(false, hostFacts.get("bwrapProfilePresent"));
         assertEquals(List.of(".config/", ".netrc", ".ssh/"), h.get("homeDotDirs"));
-        assertEquals("sudo apt install bubblewrap", h.get("installHint"));
+        assertEquals("sudo apt install bubblewrap, then sudo systemctl restart ownclaw", h.get("installHint"));
 
         assertEquals("Skill isolation: INACTIVE, skills run unjailed — why: /api/ops/health", jail.statusLine());
 
@@ -315,7 +312,7 @@ class SkillJailHealthTest {
         assertEquals("REFUSING", h.get("state"));
         assertEquals(false, h.get("canRunSkills"));
         assertTrue(String.valueOf(h.get("reason")).contains("not installed"));
-        assertEquals("sudo apt install bubblewrap", h.get("installHint"));
+        assertEquals("sudo apt install bubblewrap, then sudo systemctl restart ownclaw", h.get("installHint"));
 
         // A mistyped mode refuses; the next step is the setting, not an install.
         var typo = health(jail("requried", absent()));
@@ -329,7 +326,7 @@ class SkillJailHealthTest {
     void hintOnARestrictedUbuntu() throws Exception {
         host = hostRoot("1", "1", "15000");
         var absentHint = String.valueOf(health(jail("auto", absent())).get("installHint"));
-        assertTrue(absentHint.startsWith("sudo apt install bubblewrap -- but that alone is not enough here"), absentHint);
+        assertTrue(absentHint.startsWith("sudo apt install bubblewrap, then sudo systemctl restart ownclaw -- but that alone is not enough here"), absentHint);
         assertTrue(absentHint.contains("kernel.apparmor_restrict_unprivileged_userns=1"), absentHint);
         assertTrue(absentHint.contains("nothing is written automatically"), absentHint);
 
@@ -354,7 +351,7 @@ class SkillJailHealthTest {
         Files.writeString(host.resolve(SkillJail.BWRAP_PROFILE), "profile bwrap /usr/bin/bwrap flags=(unconfined) {}\n");
         var withProfile = health(jail("auto", absent()));
         assertEquals(true, map(withProfile, "host").get("bwrapProfilePresent"));
-        assertEquals("sudo apt install bubblewrap", withProfile.get("installHint"));
+        assertEquals("sudo apt install bubblewrap, then sudo systemctl restart ownclaw", withProfile.get("installHint"));
     }
 
     @Test
@@ -362,7 +359,7 @@ class SkillJailHealthTest {
     void hintWithUserNamespacesOff() throws Exception {
         host = hostRoot("absent", "0", "15000");
         var off = String.valueOf(health(jail("auto", absent())).get("installHint"));
-        assertTrue(off.startsWith("sudo apt install bubblewrap -- but that alone is not enough here: "
+        assertTrue(off.startsWith("sudo apt install bubblewrap, then sudo systemctl restart ownclaw -- but that alone is not enough here: "
                 + "unprivileged user namespaces are switched off"), off);
     }
 

@@ -860,9 +860,6 @@ public class PythonEnvironmentService {
         if (workDir == null) {
             scratch = Files.createTempDirectory("ownclaw-python-");
             workDir = scratch;
-        } else if (!Files.isDirectory(workDir, LinkOption.NOFOLLOW_LINKS)) {
-            // A link in its place would be bound read-write wherever it points.
-            throw new IOException(workDir + " is not a directory (missing, or a link); not provisioning into it");
         }
         try (SkillJail.Launch launch = jail.prepare(command, workDir, readOnly)) {
             if (launch.refusal() != null) {

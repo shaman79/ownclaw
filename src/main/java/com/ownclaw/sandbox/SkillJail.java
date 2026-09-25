@@ -37,7 +37,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
- * Puts every Python process OwnClaw starts for a skill inside an unprivileged bubblewrap jail.
+ * Puts every Python process OwnClaw starts on the host for skills inside an unprivileged
+ * bubblewrap jail: a skill's run, its syntax and load checks, and the venv, pip and version
+ * probes that build its environment. (The /setup wizard's {@code python --version} is the one
+ * Python started outside it.) A skill with system_packages runs in docker or podman instead when
+ * one is available ({@link ContainerSandbox}) -- refused while the jail refuses.
  * <p>
  * A skill is code the model wrote, and until now it ran as the service user with the service's
  * view of the disk: the database (the vault's master key, the JWT secret and every stored
@@ -47,11 +51,26 @@ import java.util.function.LongSupplier;
  * process can see. The host stays visible read-only, so a skill that inspects the machine still
  * works; a tmpfs is laid over each outermost directory the service keeps its state in, and only
  * the skill's own directory (writable), its authored files, and what the caller hands it
- * (read-only) are put back. A fresh PID namespace removes {@code /proc/<jvm>/environ} and
- * {@code /proc/<jvm>/root}, the routes around any hidden mount. The network is deliberately
- * shared: the property that matters -- a skill cannot read the database and post it anywhere --
- * comes from hiding the database, and skills that talk to the LAN, mail servers or Ollama keep
- * working.
+ * (read-only) are put back. A tmpfs goes over {@code /run/user} as well, where the service
+ * user's systemd user manager and session bus would start a process outside the jail when
+ * asked; and a fresh PID namespace removes {@code /proc/<jvm>/environ} and
+ * {@code /proc/<jvm>/root}. The network is deliberately shared: the property that matters -- a
+ * skill cannot read the database and post it anywhere -- comes from hiding the database, and
+ * skills that talk to the LAN, mail servers or Ollama keep working.
+ * <p>
+ * Accepted as consequences of that design:
+ * <ul>
+ *   <li>{@code --share-net} shares the abstract Unix-socket namespace too, so whatever on the
+ *       host listens on an abstract socket is reachable;</li>
+ *   <li>/dev is the host's, so {@code /dev/log} still reaches the system log;</li>
+ *   <li>loopback reaches the service's own HTTP port: a skill can call its API as any client
+ *       on the LAN can.</li>
+ * </ul>
+ * <p>
+ * Each launch walks what it binds, file by file ({@link #linkedOutside}), and when the run ends
+ * scans the process table for what is left of its jail. Measured on a desktop host with a warm
+ * disk cache: 5-10 µs a file -- 40-75 ms for a Python package tree of 7,000-8,000 files -- and
+ * about 30 ms for a table of 430 processes.
  * <p>
  * Three modes, from the root-owned {@code .env} only ({@code OWNCLAW_SANDBOX_ISOLATION}), so no
  * skill can switch it off:
@@ -204,6 +223,8 @@ public class SkillJail {
         List<Path> mustBeHidden() {
             var out = new ArrayList<>(List.of(database, dotEnv(), uploads(), generated, envsRoot()));
             if (logDir != null) out.add(logDir);
+            Path runtime = ownRuntimeDir();
+            if (runtime != null) out.add(runtime);
             return out;
         }
 
@@ -402,12 +423,17 @@ public class SkillJail {
             // not slip out from under the tmpfs because the check that saw it ran earlier.
             List<Path> roots = hiddenRoots(layout);
             Path dir = abs(workDir);
-            List<Path> ro = new ArrayList<>(authoredFiles(dir));
+            // Before anything is created in it: requirements.txt made through a linked directory
+            // would land wherever the link points.
+            refuseLink(dir, layout.skillsRoot());
+            List<Path> ro = new ArrayList<>(layout.generated().equals(dir.getParent())
+                    ? authoredFiles(dir) : List.of());
             String linked = linkedOutside(dir);
             if (linked != null) throw new IOException(linked);
             for (Path p : readOnly == null ? List.<Path>of() : readOnly) {
                 if (p == null) continue;
                 Path n = abs(p);
+                refuseLink(n, layout.skillsRoot());
                 if (!Files.exists(n)) {
                     log.warn("Not binding {} into the jail: it does not exist", n);
                     continue;
@@ -738,23 +764,41 @@ public class SkillJail {
         return a;
     }
 
+    /**
+     * Where systemd keeps each user's runtime directory, with the service user's session bus and
+     * the socket of its systemd user manager in it: asked over either, the manager starts a
+     * process as the service user outside any jail, which sees everything the jail hides. So it is
+     * hidden whenever it exists. It holds no system directory; the resolver's files are under
+     * /run/systemd, which stays visible.
+     */
+    static final Path USER_RUNTIME = Path.of("/run/user");
+
+    /** This process's own directory under {@link #USER_RUNTIME}, or null when there is none. */
+    static Path ownRuntimeDir() {
+        try {
+            Path mine = USER_RUNTIME.resolve(String.valueOf(Files.getAttribute(Path.of("/proc/self"), "unix:uid")));
+            return Files.isDirectory(mine) ? mine : null;
+        } catch (IOException | RuntimeException e) {
+            return null; // no /proc (Windows, macOS): no systemd user manager either
+        }
+    }
+
     static List<Path> hiddenRoots(Layout l) {
-        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir());
+        return hiddenRoots(l.cwd(), l.dataDir(), l.skillsRoot(), l.envsRoot(), l.logDir(), USER_RUNTIME);
     }
 
     /**
      * The outermost directories to lay a tmpfs over: each candidate and, when it exists, its
      * real path -- a data directory symlinked elsewhere is hidden at both ends. Candidates that
      * do not exist hide nothing and are left out (bubblewrap cannot create a mount point on the
-     * read-only host). Refuses a root that is '/' or holds a system directory, because hiding it
-     * would blank the interpreter or the jail's own /proc, /dev or /tmp.
+     * read-only host); so are nulls. Refuses a root that is '/' or holds a system directory,
+     * because hiding it would blank the interpreter or the jail's own /proc, /dev or /tmp.
      *
      * @throws IllegalStateException when a root would hide the system
      */
-    static List<Path> hiddenRoots(Path cwd, Path dbParent, Path generatedParent, Path envsRoot,
-                                  Path logDir) {
+    static List<Path> hiddenRoots(Path... candidates) {
         var all = new LinkedHashSet<Path>();
-        for (Path c : new Path[] {cwd, dbParent, generatedParent, envsRoot, logDir}) {
+        for (Path c : candidates) {
             if (c == null) continue;
             Path n = abs(c);
             if (!Files.exists(n)) continue;
@@ -823,13 +867,32 @@ public class SkillJail {
     }
 
     /**
-     * The authored files of a skill directory (a direct child of generated/), all three, as
-     * regular files. A missing requirements.txt is created empty: a skill that declares nothing
-     * must still find it read-only, or it could write one for the JVM to install from. Anything
-     * that is not a regular file -- a link planted before the jail existed -- refuses the launch.
+     * A bind source that is a link, or that is reached through one below {@code skills}, is
+     * refused: a bind mount -- bubblewrap's, or a container's -- takes whatever a link leads to,
+     * while {@link #linkedOutside} walks nothing through one and the protected-path test would
+     * see only where it leads. A link there was planted -- the service makes none -- by a skill
+     * that ran unjailed, before the jail existed, and can lead to the database, another skill, or
+     * into backups/ or logs/, whose insides that test lets through because a skill's own
+     * directory is inside generated/ in just the same way.
+     * <p>
+     * A link above skills/, or in a parent of a bind elsewhere, is followed: that is the owner's
+     * layout -- the data directory on another disk, say -- which no skill can write, and every
+     * check here works on where it leads. So does the mount: what is checked is what is bound.
      */
-    private List<Path> authoredFiles(Path workDir) throws IOException {
-        if (!layout.generated().equals(workDir.getParent())) return List.of();
+    static void refuseLink(Path p, Path skills) throws IOException {
+        if (Files.isSymbolicLink(p)) throw new IOException(p + " is a link: tampered skill");
+        if (p.startsWith(skills) && !real(p).equals(real(skills).resolve(skills.relativize(p)))) {
+            throw new IOException(p + " is reached through a link below " + skills + ": tampered skill");
+        }
+    }
+
+    /**
+     * The authored files of a skill directory, all three, as regular files, for a read-only bind
+     * each. A missing requirements.txt is created empty: a skill that declares nothing must still
+     * find it read-only, or it could write one for the JVM to install from. Anything that is not
+     * a regular file -- a link planted before the jail existed -- refuses the launch.
+     */
+    static List<Path> authoredFiles(Path workDir) throws IOException {
         var out = new ArrayList<Path>();
         for (String name : AUTHORED) {
             Path f = workDir.resolve(name);
@@ -1053,7 +1116,8 @@ public class SkillJail {
                     : "none: isolation is on. To refuse skills whenever it is not (fail closed), add "
                       + "OWNCLAW_SANDBOX_ISOLATION=required to .env and restart.";
         }
-        String install = present ? null : "sudo apt install bubblewrap";
+        // Then a restart: it ends whatever an earlier unjailed run left running outside any jail.
+        String install = present ? null : "sudo apt install bubblewrap, then sudo systemctl restart ownclaw";
         // A probe that ran to the end proves the namespaces were created, whatever the settings
         // suggest; then what is wrong is the jail, not the host.
         String blocked = s.selfCheck().isEmpty() ? usernsBlocked(sysctls, profile) : null;

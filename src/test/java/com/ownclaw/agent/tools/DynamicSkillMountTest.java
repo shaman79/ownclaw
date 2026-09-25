@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.sandbox.ContainerSandbox;
+import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -32,14 +34,20 @@ class DynamicSkillMountTest {
     static final class Recording extends ContainerSandbox {
         Map<String, String> volumes;
         String stdin;
+        int images;
+        int runs;
         Recording() { super(new OwnClawConfig()); }
         @Override public boolean isAvailable() { return true; }
         @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
-                                            SandboxManager.ProgressCallback cb) { return "test-image"; }
+                                            SandboxManager.ProgressCallback cb) {
+            images++;
+            return "test-image";
+        }
         @Override public SandboxResult execute(String image, String python, Path script, Path dir,
                                                String stdinJson, Map<String, String> env, int timeout,
                                                SandboxManager.ProgressCallback cb,
                                                Map<String, String> extraVolumes) {
+            runs++;
             volumes = extraVolumes;
             stdin = stdinJson;
             return new SandboxResult(0, "{\"success\": true, \"output\": \"read it\"}", "", 1, false);
@@ -134,6 +142,31 @@ class DynamicSkillMountTest {
         assertEquals(2, runs.size(), "the first run and the self-healed retry");
         assertNotNull(runs.get(1), "the retry is given the file too");
         assertEquals(runs.get(0), runs.get(1));
+    }
+
+    @Test
+    @DisplayName("while the jail refuses every launch, a container skill is refused too: no image, no run")
+    void aRefusingJailRefusesTheContainer(@TempDir Path tmp) throws Exception {
+        // Required isolation on a host without bubblewrap. The container never passes the jail,
+        // so without a check of its own it would be the one way around the refusal.
+        var layout = new SkillJail.Layout(tmp, tmp.resolve("data/ownclaw.db"), tmp.resolve("skills/generated"), null);
+        var jail = new SkillJail("required", tmp.resolve("no/bwrap").toString(), layout, List.of(),
+                System::currentTimeMillis);
+        assertEquals(SkillJail.State.REFUSING, jail.status().state());
+        Path skillDir = Files.createDirectories(tmp.resolve("skills/generated/nmap_scan"));
+        Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        var container = new Recording();
+        var env = new PythonEnvironmentService(new OwnClawConfig(), jail);
+        var skill = new DynamicSkill("nmap_scan", "scans", Map.of(), skillDir, false, false, 30,
+                new ProcessSandbox(env, new ObjectMapper(), jail), env, List.of(), null,
+                List.of("nmap"), null, container, null);
+
+        var result = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false, null, List.of()));
+
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().startsWith("isolation required but unavailable"), result.output());
+        assertEquals(0, container.images, "an image was built for a skill the jail refuses");
+        assertEquals(0, container.runs, "the container ran while the jail refused every launch");
     }
 
     @Test

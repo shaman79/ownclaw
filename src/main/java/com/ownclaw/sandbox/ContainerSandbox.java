@@ -32,17 +32,23 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>The container gets:
  * <ul>
- *   <li>The skill directory bind-mounted read-only at {@code /skill}</li>
+ *   <li>The skill directory bind-mounted read-write at {@code /skill}, with its SKILL.yaml,
+ *       skill.py and requirements.txt read-only on top -- refused, as the jail refuses a bind,
+ *       when the directory is a link, holds a hard link out, or an authored file is not a
+ *       regular file</li>
+ *   <li>Each file the task was handed, read-only</li>
  *   <li>{@code --network=host} so the skill can access the local network</li>
  *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) via {@code -e}</li>
  *   <li>JSON input on stdin, JSON output on stdout</li>
  * </ul>
+ * A run here never passes {@link SkillJail}, whatever its mode: the container is its isolation.
+ * So while the jail refuses every launch, {@code DynamicSkill} refuses a container run too.
  *
  * <p>Image layers are cached by Docker/Podman so repeated executions are fast.
  * Only the first run of a new system_packages combination triggers a build.
  *
- * <p>Falls back gracefully: if no container runtime is available, {@code isAvailable()}
- * returns false and the caller should use ProcessSandbox instead (with a warning).
+ * <p>If no container runtime is available, {@code isAvailable()} returns false and the skill
+ * runs through ProcessSandbox instead (with a warning), and so through the jail.
  */
 @Component
 public class ContainerSandbox {
@@ -508,7 +514,7 @@ public class ContainerSandbox {
      * @param imageTag  the container image to use (from ensureImage)
      * @param python    python executable (usually "python3" inside the container)
      * @param scriptPath path to the runner script (relative to skillDir)
-     * @param skillDir   skill directory — mounted read-write at /skill
+     * @param skillDir   skill directory — mounted read-write at /skill, its authored files read-only
      * @param stdinJson  JSON input for stdin
      * @param envVars    environment variables to inject
      * @param timeoutSec execution timeout
@@ -685,13 +691,13 @@ public class ContainerSandbox {
      * Build the docker/podman run command.
      */
     private List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
-                                         Path skillDir, Map<String, String> envVars) {
+                                         Path skillDir, Map<String, String> envVars) throws IOException {
         return buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, null);
     }
 
-    private List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
-                                         Path skillDir, Map<String, String> envVars,
-                                         Map<String, String> extraVolumes) {
+    List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
+                                 Path skillDir, Map<String, String> envVars,
+                                 Map<String, String> extraVolumes) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(containerRuntime);
         cmd.add("run");
@@ -699,9 +705,23 @@ public class ContainerSandbox {
         cmd.add("-i");              // interactive (for stdin)
         cmd.add("--network=host");  // access local network (for scanning, etc.)
 
-        // Bind-mount the skill directory at /skill (read-write for temp files)
+        // Bind-mount the skill directory at /skill (read-write for temp files), checked as the
+        // jail checks what it binds: the runtime follows a link to wherever it leads -- docker's
+        // daemon as root -- and a hard link out of the directory would be as writable as the rest.
+        Path dir = skillDir.toAbsolutePath().normalize();
+        SkillJail.refuseLink(dir, Path.of(config.getSkills().getGeneratedPath()).toAbsolutePath().normalize().getParent());
+        List<Path> authored = SkillJail.authoredFiles(dir);
+        String linked = SkillJail.linkedOutside(dir);
+        if (linked != null) throw new IOException(linked);
         cmd.add("-v");
-        cmd.add(skillDir.toAbsolutePath() + ":/skill");
+        cmd.add(dir + ":/skill");
+        // Its authored files read-only on top, as in the jail: a skill that rewrote its own
+        // SKILL.yaml could declare the credentials it wants, and its requirements.txt what the
+        // JVM installs next.
+        for (Path f : authored) {
+            cmd.add("-v");
+            cmd.add(f + ":/skill/" + f.getFileName() + ":ro");
+        }
 
         // Extra bind-mounts (e.g. uploads directory for attached files)
         if (extraVolumes != null) {

@@ -188,9 +188,12 @@ ownclaw:
     token: ${OWNCLAW_OPS_TOKEN:}
 
   sandbox:
-    # Skill isolation (SkillJail): every Python process started for a skill runs inside an
-    # unprivileged bubblewrap jail that sees the host read-only and cannot see the database,
-    # .env, uploads it was not handed, other skills, logs or backups. Network stays shared.
+    # Skill isolation (SkillJail): every Python process OwnClaw starts on the host for skills
+    # (their runs and checks, venv and pip) runs inside an unprivileged bubblewrap jail that
+    # sees the host read-only and cannot see the database, .env, uploads it was not handed,
+    # other skills, logs, backups or /run/user. Network stays shared. A skill with
+    # system_packages runs in docker/podman instead when one is available -- refused while
+    # the jail refuses.
     #   auto      jail when /usr/bin/bwrap is installed and passes its self-check. While
     #             bwrap is absent or cannot start a jail, skills run unjailed, with one
     #             warning. It refuses every launch when bwrap runs but the self-check fails,
@@ -202,7 +205,9 @@ ownclaw:
     # Without bwrap these still apply: pip and venv get the environment allow-list, the runner
     # and load-check scripts are created new under random names, and an authored file that is
     # a link or a hard link is refused, never read or written through.
-    # Install:  sudo apt install bubblewrap   (picked up within a minute, no restart)
+    # Install:  sudo apt install bubblewrap, then sudo systemctl restart ownclaw. The jail
+    #           would come up within a minute on its own, but a process an earlier unjailed
+    #           run left running stays outside any jail until the restart ends it.
     # Switch off: OWNCLAW_SANDBOX_ISOLATION=off in the root-owned .env, then restart. Taking
     # bwrap away once it has worked also needs that restart (or off): until then, auto refuses.
     isolation: ${OWNCLAW_SANDBOX_ISOLATION:auto}

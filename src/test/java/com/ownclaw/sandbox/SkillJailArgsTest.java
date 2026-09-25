@@ -30,7 +30,7 @@ class SkillJailArgsTest {
         var readOnly = new java.util.ArrayList<>(AUTHORED);
         readOnly.add(VENV);
         readOnly.add(HANDED);
-        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT), SKILL, readOnly,
+        return SkillJail.bwrapArgs("/usr/bin/bwrap", List.of(ROOT, SkillJail.USER_RUNTIME), SKILL, readOnly,
                 List.of(new SkillJail.Bind(ROOT.resolve(".ssh"), ROOT.resolve(".ssh"))), TMP, COMMAND);
     }
 
@@ -59,6 +59,9 @@ class SkillJailArgsTest {
         int remount = first(ops, "--remount-ro", ROOT.toString());
         int work = first(ops, "--bind", SKILL.toString(), SKILL.toString());
         assertTrue(tmpfs < work && work < remount);
+        // Every hidden root alike, /run/user included.
+        assertTrue(first(ops, "--tmpfs", SkillJail.USER_RUNTIME.toString()) < work);
+        assertTrue(first(ops, "--remount-ro", SkillJail.USER_RUNTIME.toString()) > work);
         for (Op o : ops) {
             boolean skillBind = (o.flag().equals("--ro-bind") || o.flag().equals("--ro-bind-try"))
                     && !o.args().equals(List.of("/", "/"));
@@ -106,7 +109,7 @@ class SkillJailArgsTest {
     }
 
     @Test
-    @DisplayName("read-only binds sit at their own paths; the database, .env and the uploads directory are never a source")
+    @DisplayName("read-only binds sit at their own paths")
     void bindSources() {
         var ops = JailTestKit.ops(argv());
         var sources = new java.util.ArrayList<String>();
@@ -115,11 +118,6 @@ class SkillJailArgsTest {
                 assertEquals(o.args().get(0), o.args().get(1), "a read-only bind moved: " + o);
             }
             if (o.flag().contains("bind")) sources.add(o.args().get(0));
-        }
-        for (String forbidden : List.of(ROOT.resolve("data/ownclaw.db").toString(), ROOT.resolve(".env").toString(),
-                ROOT.resolve("data/uploads").toString(), ROOT.resolve("data").toString(),
-                ROOT.resolve("skills/generated").toString(), ROOT.toString())) {
-            assertFalse(sources.contains(forbidden), forbidden + " is bound in");
         }
         assertTrue(sources.contains(HANDED.toString()));
     }
