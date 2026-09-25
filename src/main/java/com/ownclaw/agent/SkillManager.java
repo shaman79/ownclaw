@@ -383,11 +383,14 @@ public class SkillManager {
         // pulled in, for every skill ever deleted.
         boolean envsGone = pythonEnv.removeEnvironments(name);
         if (!dirGone || !envsGone) {
-            // A directory in it the service user cannot read -- a run's 0300 cache -- is left.
-            return "ERROR: Skill '" + name + "' is unregistered, but "
-                    + (dirGone ? "its environment" : skill.skillDir().toString())
-                    + " could not be fully removed: a directory in it cannot be read (the log names "
-                    + "it). Remove it on the host before creating a skill of this name again.";
+            // Say all that is left: removing only what is named, the owner would leave a stale
+            // environment for a later skill of this name.
+            var left = new ArrayList<String>();
+            if (!dirGone) left.add(skill.skillDir().toString());
+            if (!envsGone) left.add("its environment");
+            return "ERROR: Skill '" + name + "' is unregistered, but " + String.join(" and ", left)
+                    + " could not be fully removed (the log says why). Remove what is left on the host "
+                    + "before creating a skill of this name again.";
         }
         return "Skill '" + name + "' has been permanently deleted.";
     }

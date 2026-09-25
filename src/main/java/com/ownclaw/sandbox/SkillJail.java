@@ -454,8 +454,7 @@ public class SkillJail {
      *
      * @param command  the interpreter and its arguments, exactly as they would run unjailed
      * @param workDir  the only host directory the process may write (besides its private /tmp)
-     * @param readOnly host paths the process may read, each at its own path -- the skill's
-     *                 environment and the files this task was handed; nothing else
+     * @param readOnly host paths the process may read, each at its own path
      */
     public Launch prepare(List<String> command, Path workDir, List<Path> readOnly) {
         Evaluation e = current();
@@ -1040,7 +1039,7 @@ public class SkillJail {
      * can make one: a link cannot cross the jail's mounts. Links whose every name is under root
      * are the skill's own business. Returns why, or null -- always null where the file system
      * keeps no link count the JVM can read (Windows, where a container run still checks its
-     * binds): every file there has one name ({@link #nlink}), so there is nothing to find, and
+     * binds): the JVM cannot read a link count there ({@link #nlink}), so nothing is found, and
      * nothing is walked.
      * <p>
      * It changes nothing, and reads each name's attributes without following a link. A second
@@ -1346,7 +1345,6 @@ public class SkillJail {
             "LANG", "LC_ALL", "LC_CTYPE", "PYTHONIOENCODING",   // UTF-8 in and out
             "TZ",
             "TMPDIR", "TMP", "TEMP",
-            "VIRTUAL_ENV",          // set by PythonEnvironmentService for venv skills
             "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
             "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",       // Windows needs these to run at all
             "TEMPDIR", "USERPROFILE");

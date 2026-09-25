@@ -183,7 +183,9 @@ class SkillDeletionTest {
         try {
             String answer = manager.deleteSkill("cache_skill");
 
-            assertTrue(answer.startsWith("ERROR") && answer.contains(dir.toString()), answer);
+            // Both left: both said.
+            assertTrue(answer.startsWith("ERROR") && answer.contains(dir.toString())
+                    && answer.contains("its environment") && answer.contains("the log says why"), answer);
             assertFalse(answer.contains("permanently deleted"), answer);
             assertTrue(Files.exists(cache, LinkOption.NOFOLLOW_LINKS));
             assertFalse(dynamic.isDynamic("cache_skill"), "it is unregistered all the same");
@@ -194,6 +196,7 @@ class SkillDeletionTest {
             create("cache_skill", "def run(params):\n    return {'output': 'ok'}\n");
             answer = manager.deleteSkill("cache_skill");
             assertTrue(answer.startsWith("ERROR") && answer.contains("its environment"), answer);
+            assertFalse(answer.contains(dir.toString()), "the directory is gone, and still named: " + answer);
             assertTrue(Files.exists(envCache, LinkOption.NOFOLLOW_LINKS));
         } finally {
             if (Files.exists(cache, LinkOption.NOFOLLOW_LINKS)) {
