@@ -340,6 +340,29 @@ class ContainerRunCommandTest {
     }
 
     @Test
+    @DisplayName("the image tells nmap it has no raw sockets, as a run in it has none")
+    void theImageRunsNmapUnprivileged() throws Exception {
+        // The stand-in keeps the Dockerfile of the build context it is given, its last argument.
+        Path kept = tmp.resolve("Dockerfile.built");
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "case \"$1\" in version) exit 0;; image) exit 1;; run) echo 'Python 3.12.0'; exit 0;; esac\n"
+                + "for last in \"$@\"; do :; done\n"
+                + "cp \"$last/Dockerfile\" '" + kept + "'\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+
+        fake.ensureImage(List.of("nmap"), null, skillDir, null, null);
+
+        assertTrue(Files.readAllLines(kept).contains("ENV NMAP_UNPRIVILEGED=1"), Files.readString(kept));
+    }
+
+    @Test
     @DisplayName("with every thread of the common pool held, an image still builds: its output is read as it prints, and the image is checked")
     void aBuildIsReadWhateverThePoolIsDoing() throws Exception {
         // A build printing a line every 0.3 s for 6 s: unread, it looks stalled at the first

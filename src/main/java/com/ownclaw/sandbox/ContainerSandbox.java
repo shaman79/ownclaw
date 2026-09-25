@@ -351,6 +351,8 @@ public class ContainerSandbox {
             // Some system packages trigger ldconfig which can drop /usr/local/lib from cache.
             dockerfile.append("ENV LD_LIBRARY_PATH=/usr/local/lib\n");
             dockerfile.append("ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin\n");
+            // A run has no raw sockets (--cap-drop=NET_RAW), and nmap run as root assumes it has.
+            dockerfile.append("ENV NMAP_UNPRIVILEGED=1\n");
 
             // Install system packages
             if (systemPackages != null && !systemPackages.isEmpty()) {

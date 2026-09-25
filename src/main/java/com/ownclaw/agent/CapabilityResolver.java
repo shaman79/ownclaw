@@ -84,10 +84,12 @@ public class CapabilityResolver {
                             "otevřené.*porty", "skenování.*sítě"
                     ),
                     "network_scanner",
-                    "Scan local network using nmap: discover live hosts (ping scan + ARP), "
-                            + "then scan each host for open ports with service/version detection (-sV). "
-                            + "Identify device type via OS fingerprinting (-O) or service banners. "
-                            + "Output structured results: IP, hostname, MAC, vendor, device type, open ports with service names.",
+                    "Scan the local network with nmap as an unprivileged scanner: the container has no raw "
+                            + "sockets, so always pass --unprivileged. Discover live hosts with a TCP-connect "
+                            + "ping sweep (-sn --unprivileged), or skip discovery with -Pn, and read MAC addresses "
+                            + "from the neighbour table (/proc/net/arp). Then scan each host's ports with -sT -sV. "
+                            + "No -O, no -sS, no ARP ping: identify the device type from the service banners. "
+                            + "Output structured results: IP, hostname, MAC, device type, open ports with service names.",
                     List.of("nmap", "net-tools"),
                     List.of("python-nmap"),
                     "{ \"target\": { \"type\": \"string\", \"description\": \"Target network in CIDR notation (e.g. 192.168.1.0/24). "
@@ -122,23 +124,6 @@ public class CapabilityResolver {
                             + "\"record_type\": { \"type\": \"string\", \"description\": \"Record type (A, AAAA, MX, TXT, CNAME, NS, SOA, ANY)\", \"required\": false } }",
                     30,
                     List.of("dns", "lookup", "dig", "nslookup", "domain", "record")
-            ),
-
-            // ── Packet capture ──
-            new CapabilityPattern(
-                    "packet_capture",
-                    List.of("packet.*capture", "tcpdump", "sniff.*traffic", "network.*traffic",
-                            "capture.*packets?"),
-                    "packet_capture",
-                    "Capture network packets on a specified interface using tcpdump. "
-                            + "Filter by protocol, port, or host. Output summary or save pcap.",
-                    List.of("tcpdump"),
-                    List.of(),
-                    "{ \"interface\": { \"type\": \"string\", \"description\": \"Network interface (e.g. eth0)\", \"required\": false }, "
-                            + "\"filter\": { \"type\": \"string\", \"description\": \"BPF filter expression\", \"required\": false }, "
-                            + "\"count\": { \"type\": \"string\", \"description\": \"Number of packets to capture\", \"required\": false } }",
-                    60,
-                    List.of("packet", "capture", "tcpdump", "sniff", "traffic")
             ),
 
             // ── Media processing (ffmpeg) ──
