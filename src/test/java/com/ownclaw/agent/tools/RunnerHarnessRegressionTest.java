@@ -185,4 +185,18 @@ class RunnerHarnessRegressionTest {
         assertFalse(created.startsWith("ERROR"), created);
         assertEquals("skill|skill.py|SourceFileLoader|True|sibling", runSkill());
     }
+
+    @Test
+    @DisplayName("a skill may start worker processes: a worker that imports the runner again does not run a skill of its own")
+    void aSpawnedWorkerDoesNotRunTheRunner() throws Exception {
+        // spawn, as forkserver -- the default from Python 3.14 -- also does: each worker imports
+        // the main script again, as __mp_main__, before it takes work.
+        Files.writeString(skillDir.resolve("skill.py"), """
+                import multiprocessing
+                def run(params):
+                    with multiprocessing.get_context('spawn').Pool(2) as pool:
+                        return {'output': 'pool=' + str(pool.map(abs, [-1, -2]))}
+                """);
+        assertEquals("pool=[1, 2]", runSkill());
+    }
 }
