@@ -458,7 +458,7 @@ public class PythonEnvironmentService {
     public PythonResolution resolveExecution(Path skillDir, String skillName) {
         Path reqFile = skillDir.resolve("requirements.txt");
         try {
-            String declared = readRequirements(reqFile);
+            String declared = SkillJail.readAuthored(reqFile);
             if (declared == null || declared.isBlank()) {
                 return new PythonResolution(systemPython, Map.of(), null);
             }
@@ -512,7 +512,7 @@ public class PythonEnvironmentService {
         Path reqFile = skillDir.resolve("requirements.txt");
 
         try {
-            String declared = readRequirements(reqFile);
+            String declared = SkillJail.readAuthored(reqFile);
             if (declared == null || declared.isBlank()) {
                 // No dependencies — use system Python directly
                 return systemPython;
@@ -592,7 +592,7 @@ public class PythonEnvironmentService {
                 // Minimal Python installs often cannot create venvs.
                 // Fall back to target installs + PYTHONPATH.
                 persistRequirements(skillDir, packages);
-                String declared = readRequirements(skillDir.resolve("requirements.txt"));
+                String declared = SkillJail.readAuthored(skillDir.resolve("requirements.txt"));
                 String reqContent = declared == null ? "" : declared.strip();
                 Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
                 if (target == null) {
@@ -614,7 +614,7 @@ public class PythonEnvironmentService {
             persistRequirements(skillDir, packages);
 
             // Refresh hash cache so resolvePython() uses venv without re-install.
-            String declared = readRequirements(skillDir.resolve("requirements.txt"));
+            String declared = SkillJail.readAuthored(skillDir.resolve("requirements.txt"));
             if (declared != null && !declared.isBlank()) {
                 String reqHash = hash(declared.strip());
                 Files.createDirectories(venvDir);
@@ -760,7 +760,7 @@ public class PythonEnvironmentService {
 
         // A link here is refused, not followed: what is read is written back, into a file the
         // skill can read, so following a link to .env would hand the skill its contents.
-        String current = readRequirements(reqFile);
+        String current = SkillJail.readAuthored(reqFile);
         java.util.Set<String> existing = new java.util.LinkedHashSet<>();
         if (current != null) {
             for (String line : current.split("\\R")) {
@@ -831,7 +831,7 @@ public class PythonEnvironmentService {
      * writes is code the skill will import. When the jail is active the command sees the host
      * read-only, writes only {@code envDir}, reads {@code readOnly}, and sees none of the
      * service's state -- a link the skill left in its directory resolves inside the jail, where
-     * its target is hidden. When the jail is inactive the command runs directly, as before.
+     * its target is hidden. When the jail is inactive or off the command runs unjailed.
      * <p>
      * Either way the environment is the jail's allow-list. pip and venv used to inherit the
      * service's whole environment -- every API key and token .env holds -- while running that
@@ -893,19 +893,6 @@ public class PythonEnvironmentService {
             throw new IOException("'" + skillName + "' is not a plain skill name; not provisioning it");
         }
         return dir.toAbsolutePath().normalize();
-    }
-
-    /**
-     * requirements.txt as the skill declared it, or null when there is none. It is read from a
-     * directory the skill can write, so anything but a regular file -- a link to .env, a FIFO
-     * that would hang the read -- is refused rather than followed.
-     */
-    private static String readRequirements(Path reqFile) throws IOException {
-        if (!Files.exists(reqFile, LinkOption.NOFOLLOW_LINKS)) return null;
-        if (!Files.isRegularFile(reqFile, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException(reqFile + " is not a regular file (a link or something else): refusing to read it");
-        }
-        return readNoFollow(reqFile);
     }
 
     /**

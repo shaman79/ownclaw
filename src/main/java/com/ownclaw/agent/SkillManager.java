@@ -21,7 +21,6 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Stream;
@@ -53,8 +52,8 @@ public class SkillManager {
     private static final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 
     /**
-     * Imports the skill exactly as the runner does -- the same loader, from source, with the
-     * skill's directory last on sys.path -- and confirms {@code run} is callable.
+     * Loads the skill exactly as the runner does -- the same loader, from source -- and confirms
+     * {@code run} is callable.
      */
     private static final String LOAD_CHECK = DynamicSkill.SKILL_LOADER +
             "try:\n" +
@@ -170,14 +169,11 @@ public class SkillManager {
             Path codeFile = skillDir.resolve("skill.py");
             Path yamlFile = skillDir.resolve("SKILL.yaml");
             Path reqFile = skillDir.resolve("requirements.txt");
-            String tampered = tamperedAuthoredFile(skillDir);
-            if (tampered != null) {
-                log.warn("Refusing to update skill '{}': {}", name, tampered);
-                return "ERROR: " + tampered;
-            }
-            String previousCode = readAuthored(codeFile);
-            String previousYaml = readAuthored(yamlFile);
-            String previousRequirements = readAuthored(reqFile);
+            // Read before anything is written: a file that is not a regular one -- a link a skill
+            // left, pointing at .env -- throws here, and the skill is left untouched.
+            String previousCode = SkillJail.readAuthored(codeFile);
+            String previousYaml = SkillJail.readAuthored(yamlFile);
+            String previousRequirements = SkillJail.readAuthored(reqFile);
 
             SkillJail.writeAuthored(yamlFile,
                     buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
@@ -246,7 +242,7 @@ public class SkillManager {
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return null;
         try {
-            return readAuthored(skillOpt.get().skillDir().resolve("skill.py"));
+            return SkillJail.readAuthored(skillOpt.get().skillDir().resolve("skill.py"));
         } catch (IOException e) {
             log.warn("Failed to read skill code for '{}': {}", name, e.getMessage());
             return null;
@@ -269,21 +265,21 @@ public class SkillManager {
 
             // What is read here goes to the model, so a link at one of these names -- one a
             // skill left before it was isolated, pointing at .env -- is refused, not followed.
-            String yaml = readAuthored(skill.skillDir().resolve("SKILL.yaml"));
+            String yaml = SkillJail.readAuthored(skill.skillDir().resolve("SKILL.yaml"));
             if (yaml != null) {
                 sb.append("### SKILL.yaml\n```yaml\n");
                 sb.append(yaml);
                 sb.append("\n```\n\n");
             }
 
-            String code = readAuthored(skill.skillDir().resolve("skill.py"));
+            String code = SkillJail.readAuthored(skill.skillDir().resolve("skill.py"));
             if (code != null) {
                 sb.append("### skill.py\n```python\n");
                 sb.append(code);
                 sb.append("\n```\n\n");
             }
 
-            String requirements = readAuthored(skill.skillDir().resolve("requirements.txt"));
+            String requirements = SkillJail.readAuthored(skill.skillDir().resolve("requirements.txt"));
             if (requirements != null) {
                 sb.append("### requirements.txt\n```\n");
                 sb.append(requirements);
@@ -317,7 +313,7 @@ public class SkillManager {
         Path yamlFile = skillDir.resolve("SKILL.yaml");
 
         try {
-            String yaml = readAuthored(yamlFile);
+            String yaml = SkillJail.readAuthored(yamlFile);
             if (yaml == null) return "ERROR: Skill '" + name + "' has no SKILL.yaml.";
 
             // Remove existing credentials line if present
@@ -450,39 +446,6 @@ public class SkillManager {
             if (checkScript != null) {
                 try { Files.deleteIfExists(checkScript); } catch (IOException ignored) {}
             }
-        }
-    }
-
-    /**
-     * Why this skill's authored files cannot be touched, or null. Each must be absent or a
-     * regular file. The directory is the skill's own and writable by it: a link at one of these
-     * names -- left by a skill that ran before isolation, pointing at .env or the database --
-     * would have the snapshot below read its target and the writes land on it.
-     */
-    private static String tamperedAuthoredFile(Path skillDir) {
-        for (String file : SkillJail.AUTHORED) {
-            Path f = skillDir.resolve(file);
-            if (Files.exists(f, LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
-                return "the skill's " + file + " is not a regular file (a link or something else): "
-                        + "tampered skill, left untouched. Delete the skill and create it again.";
-            }
-        }
-        return null;
-    }
-
-    /**
-     * One of a skill's authored files, or null when it is absent. Anything but a regular file is
-     * refused rather than read -- a link is not followed, and a FIFO would hang the read -- and
-     * the open itself refuses a link that appears after the check.
-     */
-    private static String readAuthored(Path file) throws IOException {
-        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return null;
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException(file.getFileName() + " is not a regular file (a link or something else): "
-                    + "tampered skill, not reading it");
-        }
-        try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 

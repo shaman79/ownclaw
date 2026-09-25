@@ -8,14 +8,13 @@ import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolResult;
+import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ownclaw.users.AuthService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -136,26 +135,23 @@ public class SkillController {
         }
         result.put("parameters", params);
 
-        // Source files
+        // Source files, read as SkillManager reads them: a link at one of these names is
+        // refused, not followed into .env.
         try {
             Path skillDir = skill.skillDir();
 
-            Path yamlFile = skillDir.resolve("SKILL.yaml");
-            if (Files.exists(yamlFile)) {
-                result.put("yaml", Files.readString(yamlFile, StandardCharsets.UTF_8));
+            String yaml = SkillJail.readAuthored(skillDir.resolve("SKILL.yaml"));
+            if (yaml != null) {
+                result.put("yaml", yaml);
             }
 
-            Path codeFile = skillDir.resolve("skill.py");
-            if (Files.exists(codeFile)) {
-                result.put("code", Files.readString(codeFile, StandardCharsets.UTF_8));
+            String code = SkillJail.readAuthored(skillDir.resolve("skill.py"));
+            if (code != null) {
+                result.put("code", code);
             }
 
-            Path reqFile = skillDir.resolve("requirements.txt");
-            if (Files.exists(reqFile)) {
-                result.put("requirements", Files.readString(reqFile, StandardCharsets.UTF_8).strip());
-            } else {
-                result.put("requirements", "");
-            }
+            String requirements = SkillJail.readAuthored(skillDir.resolve("requirements.txt"));
+            result.put("requirements", requirements == null ? "" : requirements.strip());
         } catch (Exception e) {
             log.error("Failed to read skill files for '{}': {}", name, e.getMessage());
             result.put("error", "Failed to read source files: " + e.getMessage());

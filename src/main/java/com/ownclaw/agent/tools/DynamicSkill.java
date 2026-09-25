@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
+import com.ownclaw.sandbox.SkillJail;
 import com.ownclaw.skills.PythonEnvironmentService;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -148,52 +149,37 @@ public class DynamicSkill implements Tool {
     public String containerImage() { return containerImage; }
 
     /**
-     * Read the requirements.txt file content, or null if not present.
+     * Read the requirements.txt file content, or null if it is absent or not a regular file.
      */
     private String readRequirements() {
-        Path reqFile = skillDir.resolve("requirements.txt");
-        if (Files.exists(reqFile)) {
-            try {
-                return Files.readString(reqFile, java.nio.charset.StandardCharsets.UTF_8);
-            } catch (IOException e) {
-                log.warn("Failed to read requirements.txt for skill '{}': {}", name, e.getMessage());
-            }
+        try {
+            return SkillJail.readAuthored(skillDir.resolve("requirements.txt"));
+        } catch (IOException e) {
+            log.warn("Failed to read requirements.txt for skill '{}': {}", name, e.getMessage());
+            return null;
         }
-        return null;
     }
 
     /**
      * The opening of every script that loads a skill: the runner below, and SkillManager's load
      * check, so what the check proves is what runs.
      * <p>
-     * Both scripts are started from the skill's own directory, which the skill can write, and
-     * Python puts the directory of the script it runs FIRST on sys.path, ahead of the standard
-     * library. A json.py left there would be what {@code import json} loads -- in the harness as
-     * much as in the skill. So that entry comes off before anything else is imported, the
-     * harness makes its own imports, and only then is the directory put back, at the END: the
-     * skill's sibling modules still import, but can no longer stand in for the library's.
-     * <p>
-     * skill.py itself is compiled from its source every time. Importing it would let a
+     * The module is made as importlib makes it -- {@code __spec__}, {@code __loader__} and the
+     * rest are there, as they were when the runner imported it -- but skill.py is compiled from
+     * its source every time rather than loaded by the spec's loader. That loader would let a
      * {@code __pycache__/skill.*.pyc} in the same writable directory run in its place whenever
      * its header said it was current -- so what ran need not be what skill.py says, the file
      * that is read-only inside the jail and the one every review reads.
      */
     public static final String SKILL_LOADER = String.join("\n",
-        "import sys",
-        "if sys.path and not getattr(sys.flags, 'safe_path', False):",
-        "    del sys.path[0]",
-        "import os, io, json, types, builtins, traceback, inspect",
+        "import sys, os, io, json, builtins, traceback, inspect, importlib.util",
         "_skill_dir = os.path.dirname(os.path.abspath(__file__))",
-        "_real_skill_dir = os.path.realpath(_skill_dir)",
-        "sys.path[:] = [p for p in sys.path if os.path.realpath(p or os.curdir) != _real_skill_dir]",
-        "sys.path.append(_skill_dir)",
         "",
         "def _load_skill(inject=None):",
         "    path = os.path.join(_skill_dir, 'skill.py')",
         "    with open(path, 'rb') as f:",
         "        source = f.read()",
-        "    mod = types.ModuleType('skill')",
-        "    mod.__file__ = path",
+        "    mod = importlib.util.module_from_spec(importlib.util.spec_from_file_location('skill', path))",
         "    if inject:",
         "        mod.__dict__.update(inject)",
         "    exec(compile(source, path, 'exec', dont_inherit=True), mod.__dict__)",

@@ -93,6 +93,24 @@ public class SkillJail {
                 StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
     }
 
+    /**
+     * One of a skill's {@link #AUTHORED} files, or null when it is absent: the one way the JVM
+     * reads them. The directory is the skill's own and writable by it, so anything but a regular
+     * file is refused rather than read -- a link is not followed (one left pointing at .env would
+     * put it in front of the model or the owner's browser), and a FIFO would hang the read -- and
+     * the open itself refuses a link that appears after the check.
+     */
+    public static String readAuthored(Path file) throws IOException {
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return null;
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException(file.getFileName() + " is not a regular file (a link or something else): "
+                    + "tampered skill, not reading it");
+        }
+        try (var in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
     /** The name the self-check's shell runs under; lets a test double recognise the probe. */
     static final String PROBE_NAME = "ownclaw-jail-probe";
 

@@ -2211,7 +2211,9 @@ public class AgentLoop {
         sys.append("Contract: `def run(params)` → `{'output': str, 'success': bool}`. No unhandled exceptions.\n");
         sys.append("Always `def run(params):` — never keyword args. Use `params.get('key')`.\n");
         sys.append("```python\ndef run(params):\n    url = params.get('url', '')\n    resp = requests.get(url, timeout=30)\n    return {'success': True, 'output': resp.text}\n```\n");
-        sys.append("Local env, full access. Credentials as env vars. system_packages on PATH.\n");
+        sys.append("Credentials as env vars. system_packages on PATH. Keep anything that must last "
+                + "between runs in the current directory (the skill's own); /tmp is scratch and may "
+                + "be empty on every run.\n");
         sys.append("Files the user sent arrive as params['_attached_files']: a list of {'id','name',"
                 + "'content_type','path','container_path'}. Open 'path'; inside a container open "
                 + "'container_path'.\n");

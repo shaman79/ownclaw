@@ -6,6 +6,8 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.interfaces.web.SkillController;
 import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.RealBubblewrap;
 import com.ownclaw.sandbox.SkillJail;
@@ -44,6 +46,7 @@ class AuthoredFilesPreconditionTest {
     private Path generated;
     private Path secret;
     private SkillManager manager;
+    private DynamicSkillRegistry dynamic;
     private ToolRegistry tools;
     private PythonEnvironmentService env;
 
@@ -59,7 +62,7 @@ class AuthoredFilesPreconditionTest {
         env.init();
         var sandbox = new ProcessSandbox(env, new ObjectMapper(), jail);
         tools = new ToolRegistry(List.of());
-        var dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
+        dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
         manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);
     }
 
@@ -101,6 +104,14 @@ class AuthoredFilesPreconditionTest {
         String patched = manager.patchCredentials("greet_user", "SMTP_USER");
         assertFalse(patched.contains("canary-env-secret"), patched);
         assertEquals(SECRET, Files.readString(secret), "patchCredentials wrote through the link");
+
+        // The skills page reads the same files for the browser, by the same rule.
+        var jdbc = MigratedDatabase.at(root.resolve("page.db"));
+        var page = new SkillController(manager, dynamic, new SkillCuratorService(jdbc, null, tools, dynamic), null)
+                .getSkill("greet_user").getBody();
+        assertNotNull(page);
+        assertFalse(String.valueOf(page).contains("canary-env-secret"), "the link's target reached the page: " + page);
+        assertTrue(String.valueOf(page.get("error")).contains("tampered"), String.valueOf(page));
     }
 
     @ParameterizedTest

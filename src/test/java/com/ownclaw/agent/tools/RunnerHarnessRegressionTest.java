@@ -23,11 +23,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * What runs is skill.py as its source says, with the standard library as Python ships it: not a
- * {@code __pycache__/skill.*.pyc} left in the skill's writable directory, and not a module named
- * like the library's ({@code json.py}, {@code csv.py}) left beside it -- and the load check judges
- * the same source the run executes. Each plant is first shown to work on plain Python -- otherwise
- * "it did not change what ran" would prove nothing -- and then run through the real harness.
+ * What runs is skill.py as its source says, not a {@code __pycache__/skill.*.pyc} left in the
+ * skill's writable directory -- and the load check judges the same source the run executes. The
+ * plant is first shown to work on plain Python -- otherwise "it did not change what ran" would
+ * prove nothing -- and then run through the real harness. Apart from that the skill loads as it
+ * always did: a module importlib made, its own directory first on sys.path.
  */
 class RunnerHarnessRegressionTest {
 
@@ -110,14 +110,7 @@ class RunnerHarnessRegressionTest {
     @Test
     @DisplayName("the load check judges skill.py's source, not a planted __pycache__/skill.*.pyc")
     void theLoadCheckIgnoresAPlantedPyc() throws Exception {
-        var cfg = new OwnClawConfig();
-        cfg.getSkills().setGeneratedPath(tmp.resolve("generated").toString());
-        cfg.getSandbox().setPythonPath("python3");
-        var env = new PythonEnvironmentService(cfg);
-        var sandbox = new ProcessSandbox(env, new ObjectMapper());
-        var tools = new ToolRegistry(List.of());
-        var skills = new SkillManager(new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null),
-                tools, cfg, sandbox, env, null);
+        var skills = skillManager();
         String working = "def run(params):\n    return {'output': 'working'}\n";
         assertFalse(skills.createSkill(skill("load_probe", working)).startsWith("ERROR"));
         Path code = tmp.resolve("generated/load_probe/skill.py");
@@ -130,6 +123,17 @@ class RunnerHarnessRegressionTest {
         assertEquals(working, Files.readString(code), "the previous version was not kept");
     }
 
+    private SkillManager skillManager() {
+        var cfg = new OwnClawConfig();
+        cfg.getSkills().setGeneratedPath(tmp.resolve("generated").toString());
+        cfg.getSandbox().setPythonPath("python3");
+        var env = new PythonEnvironmentService(cfg);
+        var sandbox = new ProcessSandbox(env, new ObjectMapper());
+        var tools = new ToolRegistry(List.of());
+        return new SkillManager(new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null),
+                tools, cfg, sandbox, env, null);
+    }
+
     private static Map<String, Object> skill(String name, String code) {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("name", name);
@@ -140,33 +144,21 @@ class RunnerHarnessRegressionTest {
     }
 
     @Test
-    @DisplayName("a json.py or csv.py in the skill directory shadows neither the harness's modules nor the skill's")
-    void aShadowModuleDoesNotRun() throws Exception {
-        Files.writeString(skillDir.resolve("json.py"), """
-                def dumps(*args, **kwargs):
-                    return '{"success": true, "output": "shadow json"}'
-                def loads(*args, **kwargs):
-                    return {}
-                """);
-        // json is imported by the harness before the skill, and a module is imported once: the
-        // skill gets the harness's json whatever sys.path says by then. csv the harness never
-        // imports, so only the skill directory's place at the END of sys.path keeps the skill's
-        // import of it the library's.
-        Files.writeString(skillDir.resolve("csv.py"), "QUOTE_ALL = 'shadow csv'\n");
-        Files.writeString(skillDir.resolve("skill.py"), """
-                import csv
-                import json
-                import helper_mod
+    @DisplayName("the skill loads as it always did: __spec__ and importlib.util are there, its own modules come first")
+    void theSkillLoadsAsItAlwaysDid() throws Exception {
+        // A sibling named like a library module is what the skill imports, as it was before the
+        // harness compiled skill.py itself.
+        Files.writeString(skillDir.resolve("email.py"), "X = 'sibling'\n");
+        String code = """
+                import email, importlib, os
+                ORIGIN = os.path.basename(__spec__.origin)
                 def run(params):
-                    return {'output': 'source|' + json.dumps([1]) + '|' + helper_mod.VALUE + '|' + str(csv.QUOTE_ALL)}
-                """);
-        Path probe = Files.writeString(skillDir.resolve("probe_path.py"), "import json\nprint(json.__file__)\n");
-
-        Ran control = python(probe.toString());
-        assertEquals(skillDir.resolve("json.py").toRealPath().toString(), Path.of(control.out).toRealPath().toString(),
-                "a script's own directory must come first on plain Python, or this test proves nothing");
-
-        assertEquals("source|[1]|sibling ok|1", runSkill(),
-                "the standard library's json and csv, and the skill's sibling module still imported");
+                    return {'output': '|'.join([__spec__.name, ORIGIN, type(__loader__).__name__,
+                            str(importlib.util.find_spec('json') is not None), email.X])}
+                """;
+        // The load check makes the module the same way, so reading __spec__ on import passes it.
+        String created = skillManager().createSkill(skill("harness_probe", code));
+        assertFalse(created.startsWith("ERROR"), created);
+        assertEquals("skill|skill.py|SourceFileLoader|True|sibling", runSkill());
     }
 }
