@@ -74,7 +74,7 @@ public class ProcessSandbox implements SandboxManager {
         };
     }
 
-    private static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
+    static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
         log.warn("Sandbox killed {}: its output went past {} MB", scriptPath.getFileName(), OUTPUT_LIMIT >> 20);
         return new SandboxResult(-1, stdout, "Killed: the skill's output went past the "
                 + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);

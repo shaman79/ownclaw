@@ -5,6 +5,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -134,13 +136,79 @@ class ContainerRunCommandTest {
                 cmd.toString());
         assertFalse(cmd.contains("PATH"), "a host PATH was named: " + cmd);
 
-        Map<String, String> cli = ContainerSandbox.runProcess(cmd, envVars).environment();
+        Map<String, String> cli = ContainerSandbox.cli(cmd, envVars).environment();
         assertEquals("cred-canary", cli.get("SKILL_CRED"));
         assertNotEquals("/host/venv/bin", cli.get("PATH"), "the host venv's PATH replaced the CLI's own");
         for (String name : cli.keySet()) {
-            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || envVars.containsKey(name),
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || envVars.containsKey(name)
+                    || ContainerSandbox.RUNTIME_ENV.contains(name), "the runtime CLI was handed " + name);
+        }
+    }
+
+    @Test
+    @DisplayName("every start of the runtime CLI gets the daemon settings the service has, and nothing else of its environment")
+    void everyStartTalksToTheSameDaemon() {
+        // The run and the calls before it -- version, image inspect, build -- alike: an image
+        // built on one daemon and run against another is not there.
+        Map<String, String> cli = ContainerSandbox.cli(List.of("docker", "version"), Map.of()).environment();
+        for (String name : ContainerSandbox.RUNTIME_ENV) assertEquals(System.getenv(name), cli.get(name), name);
+        for (String name : cli.keySet()) {
+            assertTrue(SkillJail.ENV_ALLOWLIST.contains(name) || ContainerSandbox.RUNTIME_ENV.contains(name),
                     "the runtime CLI was handed " + name);
         }
+    }
+
+    @Test
+    @DisplayName("a run whose credential the runtime CLI would read as its own setting is refused, not started")
+    void aCredentialTheRuntimeReadsIsRefused() throws Exception {
+        for (String name : List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
+                "CONTAINERS_CONF", "REGISTRY_AUTH_FILE", "XDG_RUNTIME_DIR", "HTTP_PROXY", "https_proxy",
+                "No_Proxy", "HOME")) {
+            var e = assertThrows(IOException.class, () -> container.buildRunCommand("test-image", "python3",
+                    skillDir.resolve("_runner_x.py"), skillDir, Map.of(name, "unix:///elsewhere.sock"), null), name);
+            assertTrue(e.getMessage().contains(name), e.getMessage());
+        }
+        var result = container.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
+                Map.of("DOCKER_HOST", "unix:///elsewhere.sock"), 5, null, null);
+        assertFalse(result.isSuccess());
+        assertTrue(result.stderr().contains("DOCKER_HOST"), result.stderr());
+
+        List<String> cmd = container.buildRunCommand("test-image", "python3", skillDir.resolve("_runner_x.py"),
+                skillDir, Map.of("DOCKERHUB_TOKEN", "t", "SMTP_HOST", "h"), null);
+        assertTrue(cmd.contains("DOCKERHUB_TOKEN") && cmd.contains("SMTP_HOST"), cmd.toString());
+    }
+
+    @ParameterizedTest(name = "{0}, progress callback {1}")
+    @CsvSource({"1, false", "2, false", "1, true", "2, true"})
+    @DisplayName("a container run printing past the output limit on either stream is killed, and its result says why")
+    void pastTheOutputLimitIsKilled(int fd, boolean progress) throws Exception {
+        // A stand-in for the runtime's CLI: it answers `version`, and a run prints without end
+        // on the stream it is told, as a skill in the container would through it.
+        // One process throughout, with no child to hold the streams open once it is killed.
+        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "[ \"$1\" = version ] && exit 0\n"
+                + "c=x; i=0; while [ $i -lt 16 ]; do c=\"$c$c\"; i=$((i+1)); done\n"
+                + "n=0; while [ $n -le 256 ]; do printf '%s' \"$c\" >&" + fd + "; n=$((n+1)); done\n"
+                + "exec sleep 30\n");
+        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
+        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
+        config.getSandbox().setContainerRuntime(runtime.toString());
+        var fake = new ContainerSandbox(config);
+        fake.init();
+        assertEquals(runtime.toString(), fake.runtime());
+
+        long start = System.nanoTime();
+        var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
+                Map.of(), 60, progress ? (msg, pct) -> { } : null, null);
+        long ms = (System.nanoTime() - start) / 1_000_000;
+
+        assertFalse(result.isSuccess(), "a run past the output limit succeeded");
+        assertTrue(result.stderr().startsWith("Killed: the skill's output went past the 16 MB limit."),
+                result.stderr().substring(0, Math.min(200, result.stderr().length())));
+        assertTrue(ms < 20_000, "the run was left to go on for " + ms + " ms");
     }
 
     @Test

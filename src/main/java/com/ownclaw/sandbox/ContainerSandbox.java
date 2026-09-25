@@ -18,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -37,7 +38,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>Each file the task was handed, read-only</li>
  *   <li>{@code --network=host} so the skill can access the local network</li>
  *   <li>Environment variables (credentials, PYTHONIOENCODING, etc.) by name, {@code -e KEY},
- *       each value in the runtime CLI's own environment and never on its command line</li>
+ *       each value in the runtime CLI's own environment and never on its command line; a run
+ *       whose variable is one the CLI itself reads ({@link #readByRuntime}) is refused</li>
  *   <li>JSON input on stdin, JSON output on stdout</li>
  * </ul>
  * Every bind passes the jail's checks first ({@link SkillJail#checkBinds}), and the run is
@@ -56,6 +58,9 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ContainerSandbox {
 
     private static final Logger log = LoggerFactory.getLogger(ContainerSandbox.class);
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     /**
      * The Dockerfile line that installs a skill's requirements. A fourth place torch can be
@@ -157,7 +162,7 @@ public class ContainerSandbox {
 
     private boolean isRuntimeInstalled(String runtime) {
         try {
-            Process p = new ProcessBuilder(runtime, "version")
+            Process p = cli(List.of(runtime, "version"), Map.of())
                     .redirectErrorStream(true)
                     .start();
             drainStream(p.getInputStream());
@@ -178,7 +183,7 @@ public class ContainerSandbox {
         try {
             // Quick smoke test: ask podman to unshare a trivial command.
             // This exercises the same user-namespace code path that build uses.
-            Process p = new ProcessBuilder(podman, "unshare", "cat", "/proc/self/uid_map")
+            Process p = cli(List.of(podman, "unshare", "cat", "/proc/self/uid_map"), Map.of())
                     .redirectErrorStream(true)
                     .start();
             String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
@@ -222,24 +227,17 @@ public class ContainerSandbox {
     );
 
     /**
-     * Ensure a container image exists for the given system packages and pip requirements.
-     * Builds the image if not already built. Uses content-based hashing for cache keys.
-     * Tries the preferred image first, then config default, then fallback images.
+     * Ensure a container image exists for the given system packages and pip requirements,
+     * streaming build progress through the callback. Builds the image if not already built. Uses
+     * content-based hashing for cache keys. Tries the preferred image first, then config default,
+     * then fallback images.
      *
      * @param systemPackages   system packages to install (e.g. ["nmap", "net-tools"])
      * @param pipRequirements  pip requirements content (from requirements.txt), or null
      * @param skillDir         skill directory (for copying requirements.txt into build context)
      * @param preferredImage   preferred base image from SKILL.yaml (e.g. "python:3.11-slim"), or null
+     * @param progressCallback receives the build's progress; null for none
      * @return the image tag (e.g. "localhost/ownclaw-skill-a1b2c3d4")
-     */
-    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
-                              String preferredImage)
-            throws IOException, InterruptedException {
-        return ensureImage(systemPackages, pipRequirements, skillDir, preferredImage, null);
-    }
-
-    /**
-     * Ensure a container image exists, streaming build progress through the callback.
      */
     public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
                               String preferredImage, SandboxManager.ProgressCallback progressCallback)
@@ -318,7 +316,7 @@ public class ContainerSandbox {
 
     private boolean imageExists(String imageTag) {
         try {
-            Process p = new ProcessBuilder(containerRuntime, "image", "inspect", imageTag)
+            Process p = cli(List.of(containerRuntime, "image", "inspect", imageTag), Map.of())
                     .redirectErrorStream(true)
                     .start();
             drainStream(p.getInputStream());
@@ -449,7 +447,7 @@ public class ContainerSandbox {
             // gets killed by the stall detector.
             cmd.add(buildCtx.toAbsolutePath().toString());
 
-            Process p = new ProcessBuilder(cmd)
+            Process p = cli(cmd, Map.of())
                     .redirectErrorStream(true)
                     .start();
 
@@ -507,108 +505,35 @@ public class ContainerSandbox {
     // ────────────────────── Execution ──────────────────────
 
     /**
-     * Execute a Python script inside a container.
+     * Execute a Python script inside a container. With a progress callback, the progress lines
+     * the skill prints ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
+     * through it and left out of stdout; without one they stay in it. Past
+     * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream the runtime's CLI is killed, as it is
+     * when the run stalls.
      *
-     * @param imageTag  the container image to use (from ensureImage)
-     * @param python    python executable (usually "python3" inside the container)
-     * @param scriptPath path to the runner script (relative to skillDir)
-     * @param skillDir   skill directory — mounted read-write at /skill, its authored files read-only
-     * @param stdinJson  JSON input for stdin
-     * @param envVars    environment variables to inject
-     * @param timeoutSec execution timeout
+     * @param imageTag         the container image to use (from ensureImage)
+     * @param python           python executable (usually "python3" inside the container)
+     * @param scriptPath       path to the runner script (relative to skillDir)
+     * @param skillDir         skill directory — mounted read-write at /skill, its authored files read-only
+     * @param stdinJson        JSON input for stdin
+     * @param envVars          environment variables to inject
+     * @param timeoutSec       stall timeout: the run is killed after this many seconds without output
+     * @param progressCallback receives the skill's progress lines; null for none
+     * @param extraVolumes     the files the task was handed, host path to the path inside the
+     *                         container, each read-only; null for none
      * @return sandbox result
-     */
-    public SandboxResult execute(String imageTag, String python, Path scriptPath,
-                                 Path skillDir, String stdinJson,
-                                 Map<String, String> envVars, int timeoutSec) {
-        long startTime = System.currentTimeMillis();
-
-        try {
-            List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars);
-
-            Process process = runProcess(cmd, envVars).start();
-
-            // Write JSON input to stdin
-            if (stdinJson != null) {
-                try (OutputStream os = process.getOutputStream()) {
-                    os.write(stdinJson.getBytes(StandardCharsets.UTF_8));
-                    os.flush();
-                }
-            } else {
-                process.getOutputStream().close();
-            }
-
-            // Track output activity for stall detection.
-            AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
-
-            // Drain stderr async
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
-
-            // Drain stdout async
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(process.getInputStream(), lastActivity));
-
-            boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
-            long durationMs = System.currentTimeMillis() - startTime;
-
-            if (!finished) {
-                long stallSec = (System.currentTimeMillis() - lastActivity.get()) / 1000;
-                process.destroyForcibly();
-                try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-                String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-                log.warn("Container stalled (no output for {}s) — killed {} after {}ms total",
-                        stallSec, scriptPath.getFileName(), durationMs);
-                return new SandboxResult(-1, stdout, stderr, durationMs, true);
-            }
-
-            String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
-            String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-
-            int exitCode = process.exitValue();
-            log.debug("Container execution completed [exit={}] {} in {}ms",
-                    exitCode, scriptPath.getFileName(), durationMs);
-            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
-
-        } catch (IOException e) {
-            long durationMs = System.currentTimeMillis() - startTime;
-            String errMsg = "Container execution error: " + e.getMessage();
-            log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
-            return new SandboxResult(-1, "", errMsg, durationMs, false);
-        }
-    }
-
-    /**
-     * Execute with progress callback support.
-     * Progress lines are intercepted and removed from stdout.
-     */
-    public SandboxResult execute(String imageTag, String python, Path scriptPath,
-                                 Path skillDir, String stdinJson,
-                                 Map<String, String> envVars, int timeoutSec,
-                                 SandboxManager.ProgressCallback progressCallback) {
-        return execute(imageTag, python, scriptPath, skillDir, stdinJson, envVars, timeoutSec,
-                progressCallback, null);
-    }
-
-    /**
-     * Execute with progress callback and extra volume mounts.
      */
     public SandboxResult execute(String imageTag, String python, Path scriptPath,
                                  Path skillDir, String stdinJson,
                                  Map<String, String> envVars, int timeoutSec,
                                  SandboxManager.ProgressCallback progressCallback,
                                  Map<String, String> extraVolumes) {
-        if (progressCallback == null && extraVolumes == null) {
-            return execute(imageTag, python, scriptPath, skillDir, stdinJson, envVars, timeoutSec);
-        }
-
         long startTime = System.currentTimeMillis();
 
         try {
             List<String> cmd = buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, extraVolumes);
 
-            Process process = runProcess(cmd, envVars).start();
+            Process process = cli(cmd, envVars).start();
 
             if (stdinJson != null) {
                 try (OutputStream os = process.getOutputStream()) {
@@ -621,23 +546,23 @@ public class ContainerSandbox {
 
             // Track output activity for stall detection.
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
+            AtomicBoolean overLimit = new AtomicBoolean(false);
 
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
-                    () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
+            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() -> drainStreamWithActivity(
+                    ProcessSandbox.limited(process.getErrorStream(), process, overLimit), lastActivity));
 
-            // Read stdout line-by-line to intercept progress messages
+            // Read stdout line by line, to intercept progress messages
             CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
-                try (var reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                        ProcessSandbox.limited(process.getInputStream(), process, overLimit), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
                         String trimmed = line.trim();
-                        if (trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
+                        if (progressCallback != null && trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
                             try {
-                                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                                var node = mapper.readTree(trimmed);
+                                var node = MAPPER.readTree(trimmed);
                                 if ("progress".equals(node.path("type").asText(""))) {
                                     String msg = node.path("message").asText("Working...");
                                     Integer pct = node.has("percent") && !node.get("percent").isNull()
@@ -670,23 +595,23 @@ public class ContainerSandbox {
 
             String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
             String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
+            if (overLimit.get()) return ProcessSandbox.killedOverLimit(scriptPath, stdout, stderr, durationMs);
 
-            return new SandboxResult(process.exitValue(), stdout, stderr, durationMs, false);
+            int exitCode = process.exitValue();
+            log.debug("Container execution completed [exit={}] {} in {}ms",
+                    exitCode, scriptPath.getFileName(), durationMs);
+            return new SandboxResult(exitCode, stdout, stderr, durationMs, false);
 
         } catch (IOException e) {
             long durationMs = System.currentTimeMillis() - startTime;
-            return new SandboxResult(-1, "", "Container error: " + e.getMessage(), durationMs, false);
+            log.error("Container execution failed for {}: {}", scriptPath.getFileName(), e.getMessage());
+            return new SandboxResult(-1, "", "Container execution error: " + e.getMessage(), durationMs, false);
         }
     }
 
     /**
      * Build the docker/podman run command.
      */
-    private List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
-                                         Path skillDir, Map<String, String> envVars) throws IOException {
-        return buildRunCommand(imageTag, python, scriptPath, skillDir, envVars, null);
-    }
-
     List<String> buildRunCommand(String imageTag, String python, Path scriptPath,
                                  Path skillDir, Map<String, String> envVars,
                                  Map<String, String> extraVolumes) throws IOException {
@@ -733,8 +658,12 @@ public class ContainerSandbox {
         //
         // By name only: the process list shows a command line to every user on the host, so the
         // values -- the skill's credentials among them -- go in the CLI's own environment
-        // (runProcess), and the runtime passes each named one on.
+        // (cli), and the runtime passes each named one on.
         for (String key : forwarded(envVars).keySet()) {
+            if (readByRuntime(key)) {
+                throw new IOException("not run: the skill's variable " + key + " is one the container "
+                        + "runtime reads as its own setting; give the credential another name");
+            }
             cmd.add("-e");
             cmd.add(key);
         }
@@ -749,12 +678,40 @@ public class ContainerSandbox {
     }
 
     /**
-     * The runtime CLI's process for a run command: its environment is the jail's allow-list and
-     * the values of the variables {@link #buildRunCommand} names, which the runtime passes on.
+     * What the runtime CLI reads from its environment to find its daemon and its configuration.
+     * Every start of it is given these as the JVM has them, so the version check, the image
+     * lookup, the build, the image check and the run all talk to the same daemon.
      */
-    static ProcessBuilder runProcess(List<String> cmd, Map<String, String> envVars) {
-        ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(false);
-        SkillJail.applyEnvironment(pb, forwarded(envVars));
+    static final List<String> RUNTIME_ENV = List.of("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+            "CONTAINER_HOST", "CONTAINERS_CONF", "XDG_RUNTIME_DIR");
+
+    /**
+     * Whether the runtime CLI reads {@code name}, in any case, as a setting of its own -- where
+     * its daemon is, its configuration, its registry credentials, its proxy, its home. A skill's
+     * variable of that name would be in the CLI's environment for the run, and redirect it.
+     */
+    static boolean readByRuntime(String name) {
+        String n = name.toUpperCase(Locale.ROOT);
+        return n.startsWith("DOCKER_") || n.startsWith("CONTAINER_") || n.startsWith("CONTAINERS_")
+                || n.startsWith("XDG_")
+                || List.of("REGISTRY_AUTH_FILE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "HOME").contains(n);
+    }
+
+    /**
+     * Every start of the runtime CLI. Its environment is the jail's allow-list, the runtime's own
+     * {@link #RUNTIME_ENV} as the JVM has them, and, for a run, the values of the variables
+     * {@link #buildRunCommand} names, which the runtime passes on; nothing else of the JVM's.
+     *
+     * @param envVars a run's variables; {@code Map.of()} for every other call
+     */
+    static ProcessBuilder cli(List<String> cmd, Map<String, String> envVars) {
+        var env = new LinkedHashMap<String, String>(forwarded(envVars));
+        for (String name : RUNTIME_ENV) {
+            String value = System.getenv(name);
+            if (value != null) env.put(name, value);
+        }
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        SkillJail.applyEnvironment(pb, env);
         return pb;
     }
 
@@ -803,8 +760,7 @@ public class ContainerSandbox {
      */
     private boolean validateImage(String imageTag) {
         try {
-            Process p = new ProcessBuilder(containerRuntime, "run", "--rm", imageTag,
-                    "python3", "--version")
+            Process p = cli(List.of(containerRuntime, "run", "--rm", imageTag, "python3", "--version"), Map.of())
                     .redirectErrorStream(true)
                     .start();
             // Drain async so the 30s waitFor timeout is actually reachable.

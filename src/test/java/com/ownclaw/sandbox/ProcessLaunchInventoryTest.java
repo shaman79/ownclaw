@@ -43,13 +43,14 @@ class ProcessLaunchInventoryTest {
     //    SkillJail.prepare returned, which is the command itself only when the jail is inactive.
     //  - SkillJail: bubblewrap itself -- its version, and the self-check probe built by bwrapArgs.
     //  - SetupWizardService: `<python> --version`, to find an interpreter; it runs nothing else.
-    //  - ContainerSandbox: the container runtime (docker/podman); what it runs is in the container.
+    //  - ContainerSandbox: the container runtime (docker/podman), only through its one factory,
+    //    which gives it the allow-listed environment; what it runs is in the container.
     private static final Map<String, List<String>> ALLOWED = Map.of(
             "com/ownclaw/sandbox/ProcessSandbox.java", List.of("launch.argv()"),
             "com/ownclaw/skills/PythonEnvironmentService.java", List.of("launch.argv()"),
             "com/ownclaw/sandbox/SkillJail.java", List.of("bwrap.toString(), \"--version\"", "argv"),
             "com/ownclaw/config/SetupWizardService.java", List.of("cmd, \"--version\"", "pythonCmd, \"--version\""),
-            "com/ownclaw/sandbox/ContainerSandbox.java", List.of("*"));
+            "com/ownclaw/sandbox/ContainerSandbox.java", List.of("cmd"));
 
     private static Map<String, List<String>> launches() throws IOException {
         assertTrue(Files.isDirectory(MAIN), "run from the project directory: " + MAIN.toAbsolutePath());
@@ -102,7 +103,6 @@ class ProcessLaunchInventoryTest {
             assertNotNull(allowed, e.getKey() + " starts a process: " + e.getValue()
                     + ". A skill's Python goes through SandboxManager; anything else is added to this"
                     + " inventory only after checking it cannot run skill code beside the jail.");
-            if (allowed.contains("*")) continue;
             for (String args : e.getValue()) {
                 assertTrue(allowed.contains(args), e.getKey() + " starts `new ProcessBuilder(" + args
                         + ")`; allowed there: " + allowed);
@@ -110,6 +110,8 @@ class ProcessLaunchInventoryTest {
         }
         // The guard is only as good as its reading of the source: it must see the launches it guards.
         assertEquals(List.of("launch.argv()"), found.get("com/ownclaw/sandbox/ProcessSandbox.java"));
+        assertEquals(List.of("cmd"), found.get("com/ownclaw/sandbox/ContainerSandbox.java"),
+                "every start of the container runtime goes through its one factory");
         assertTrue(found.containsKey("com/ownclaw/skills/PythonEnvironmentService.java"));
     }
 
