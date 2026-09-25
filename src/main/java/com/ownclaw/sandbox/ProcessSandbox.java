@@ -150,10 +150,11 @@ public class ProcessSandbox implements SandboxManager {
     /**
      * Start {@code pb} -- a skill's Python, jailed or not, or the container runtime's run of one
      * -- and see it through: {@code stdinJson} on its stdin, both streams read within
-     * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. With a
-     * progress callback, progress lines the skill emits
-     * ({@code {"type":"progress","message":"...","percent":N}}) are intercepted and forwarded
-     * through it, and are NOT included in the final stdout; without one they stay in it.
+     * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. Progress lines
+     * the skill emits ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
+     * through the callback when there is one, and are never part of the final stdout: the result
+     * is parsed from it, and a progress line ahead of the result was read as the result -- a
+     * working skill failed its self-heal retry, which runs with no callback.
      * <p>
      * Each stream is read on a thread of its own ({@link #OWN_THREAD}), started first; the input
      * is written last, on a thread of its own too: a process that never reads it and never exits
@@ -189,15 +190,17 @@ public class ProcessSandbox implements SandboxManager {
                     lastActivity.set(System.currentTimeMillis());
                     String trimmed = line.trim();
 
-                    if (progressCallback != null && isProgressLine(trimmed)) {
+                    if (isProgressLine(trimmed)) {
                         try {
                             JsonNode node = PROGRESS.readTree(trimmed);
                             if ("progress".equals(node.path("type").asText(""))) {
-                                String msg = node.path("message").asText("Working...");
-                                Integer pct = node.has("percent") && !node.get("percent").isNull()
-                                        ? node.get("percent").asInt() : null;
-                                progressCallback.onProgress(msg, pct);
-                                continue; // Don't include progress lines in the result stdout
+                                if (progressCallback != null) {
+                                    String msg = node.path("message").asText("Working...");
+                                    Integer pct = node.has("percent") && !node.get("percent").isNull()
+                                            ? node.get("percent").asInt() : null;
+                                    progressCallback.onProgress(msg, pct);
+                                }
+                                continue; // never part of the result stdout
                             }
                         } catch (Exception e) {
                             log.debug("Failed to parse progress line: {}", trimmed);
