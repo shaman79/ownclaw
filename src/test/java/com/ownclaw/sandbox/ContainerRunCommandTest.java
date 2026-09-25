@@ -327,7 +327,8 @@ class ContainerRunCommandTest {
         config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
         config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
         config.getSandbox().setContainerRuntime(runtime.toString());
-        config.getSandbox().setStallTimeout(2);
+        // Well above the 5 s between two looks: every build is killed at the limit long before.
+        config.getSandbox().setStallTimeout(20);
         var fake = new ContainerSandbox(config);
         fake.init();
 
@@ -339,8 +340,8 @@ class ContainerRunCommandTest {
     }
 
     @Test
-    @DisplayName("the image tells nmap it has no raw sockets, as a run in it has none")
-    void theImageRunsNmapUnprivileged() throws Exception {
+    @DisplayName("the image sets what a run needs -- nmap told it has no raw sockets among it -- and the run command sets no variable at all")
+    void theImageSetsWhatARunNeeds() throws Exception {
         // The stand-in keeps the Dockerfile of the build context it is given, its last argument.
         Path kept = tmp.resolve("Dockerfile.built");
         Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
@@ -358,7 +359,13 @@ class ContainerRunCommandTest {
 
         fake.ensureImage(List.of("nmap"), null, skillDir, null, null);
 
-        assertTrue(Files.readAllLines(kept).contains("ENV NMAP_UNPRIVILEGED=1"), Files.readString(kept));
+        List<String> dockerfile = Files.readAllLines(kept);
+        for (String env : List.of("ENV PYTHONIOENCODING=utf-8", "ENV PYTHONUTF8=1", "ENV LD_LIBRARY_PATH=/usr/local/lib",
+                "ENV NMAP_UNPRIVILEGED=1")) {
+            assertTrue(dockerfile.contains(env), env + " is not in " + dockerfile);
+        }
+        List<String> run = command(skillDir);
+        assertFalse(run.stream().skip(1).anyMatch(a -> a.equals("-e") || a.startsWith("--env")), "the run sets a variable: " + run);
     }
 
     @Test

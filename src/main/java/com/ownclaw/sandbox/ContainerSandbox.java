@@ -616,14 +616,11 @@ public class ContainerSandbox {
             cmd.add(f + ":" + handed.getOrDefault(f.toString(), "/skill/" + f.getFileName()) + ":ro");
         }
 
-        // Ensure Python shared library is always findable at runtime
-        cmd.add("-e");
-        cmd.add("LD_LIBRARY_PATH=/usr/local/lib");
-
-        // Nothing of a host run's environment goes in. The image sets the encoding; the skill's
-        // credentials come on stdin, with its input; and PATH and PYTHONPATH name the host's
-        // virtualenv, which is not there -- passed in, they once replaced the image's own PATH,
-        // and the run failed with "python3: not found" before the skill ran a line.
+        // Nothing of a host run's environment goes in. The image sets the encoding and the
+        // library path; the skill's credentials come on stdin, with its input; and PATH and
+        // PYTHONPATH name the host's virtualenv, which is not there -- passed in, they once
+        // replaced the image's own PATH, and the run failed with "python3: not found" before the
+        // skill ran a line.
 
         cmd.add(imageTag);
 
