@@ -60,7 +60,7 @@ public class CredentialVault {
      * starting with a letter. A skill finds its credentials in its own environment under their
      * names, so each is the name of an environment variable. The one rule for such a name,
      * checked where one is stored ({@code /cred set}) and declared (skill_create,
-     * patchCredentials, SKILL.yaml).
+     * SKILL.yaml).
      */
     public static boolean validName(String name) {
         return name != null && NAME.matcher(name).matches();

@@ -102,9 +102,6 @@ class AuthoredFilesPreconditionTest {
         assertFalse(shown.contains("canary-env-secret"), "the link's target reached the model: " + shown);
         String code = manager.readSkillCode("greet_user");
         assertTrue(code == null || !code.contains("canary-env-secret"));
-        String patched = manager.patchCredentials("greet_user", "SMTP_USER");
-        assertFalse(patched.contains("canary-env-secret"), patched);
-        assertEquals(SECRET, Files.readString(secret), "patchCredentials wrote through the link");
 
         // The skills page reads the same files for the browser, by the same rule.
         var jdbc = MigratedDatabase.at(root.resolve("page.db"));

@@ -340,8 +340,8 @@ public class DynamicSkillRegistry {
 
     /**
      * The credential names a skill declares, upper-cased: the one parser for them, for SKILL.yaml
-     * and for skill_create and patchCredentials alike. A list, nested or not, or a string, each
-     * element a comma-separated list of names -- the model may send one stringified, as
+     * and for skill_create alike. A list, nested or not, or a string, each element a
+     * comma-separated list of names -- the model may send one stringified, as
      * "[IMAP_HOST, IMAP_PORT]", so brackets are dropped.
      *
      * @throws IllegalArgumentException at the first name that is not a

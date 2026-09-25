@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * The one rule for a credential's name -- the name of a variable in the skill's own environment
  * -- and the one parser for the names a skill declares, each place a name is made holding to
- * them: /cred set, skill_create, patchCredentials, SKILL.yaml.
+ * them: /cred set, skill_create, SKILL.yaml.
  */
 class CredentialNameRuleTest {
 
@@ -99,7 +99,6 @@ class CredentialNameRuleTest {
         p.put("credentials", "[SMTP_USER, api-key]");
         assertEquals("ERROR: " + REFUSED, manager.createSkill(p));
         assertFalse(Files.exists(generated.resolve("mail_sender")), "something was written");
-        assertEquals("ERROR: " + REFUSED, manager.patchCredentials("mail_sender", "SMTP_USER,API-KEY"));
 
         Path dir = Files.createDirectories(generated.resolve("mail_sender"));
         Files.writeString(dir.resolve("SKILL.yaml"),
