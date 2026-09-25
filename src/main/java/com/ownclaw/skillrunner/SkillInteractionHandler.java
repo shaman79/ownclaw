@@ -36,7 +36,7 @@ public class SkillInteractionHandler {
      *
      * @throws TimeoutException if the user doesn't respond within the timeout
      */
-    public String requestInputSilent(String userId, String taskId)
+    public String awaitAnswer(String userId, String taskId)
             throws TimeoutException, InterruptedException, ExecutionException {
         String key = userId + ":" + taskId;
 

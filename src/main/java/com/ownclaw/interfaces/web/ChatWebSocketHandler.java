@@ -444,7 +444,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         while (!current.complete()) {
             String input;
             try {
-                input = interactionHandler.requestInputSilent(userId, taskId);
+                input = interactionHandler.awaitAnswer(userId, taskId);
             } catch (TimeoutException e) {
                 sendSystemToUser(userId, "Setup wizard timed out waiting for input. Run `/setup` to try again.");
                 return;
