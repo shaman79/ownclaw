@@ -8,11 +8,13 @@ import com.ownclaw.agent.tools.*;
 import com.ownclaw.llm.*;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
+import com.ownclaw.privacy.PrivateIndex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.CancellationException;
 import java.util.stream.Collectors;
 
 /**
@@ -138,7 +140,7 @@ public class LocalExecutor {
     private List<String> unknownTools(DelegationPlan plan) {
         return plan.tools().stream()
                 .filter(n -> "skill_create".equals(n) || toolRegistry.find(n).isEmpty())
-                .distinct().limit(20)
+                .distinct()
                 .toList();
     }
 
@@ -209,7 +211,6 @@ public class LocalExecutor {
                 plan.tools());
     }
 
-    @SuppressWarnings("unchecked")
     private Outcome run(DelegationPlan plan, AgentContext parentContext) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
@@ -236,21 +237,16 @@ public class LocalExecutor {
         // sentence false the moment a run delegated twice, and the second delegation's {{1}}
         // forwarded the first one's traceback as the body of the morning email. Every result is
         // still recorded on the task too, under the task-wide handle the cloud and the ledger see.
+        // Whether the local model has read private data yet is the task's fact, not this loop's
+        // (AgentContext.localTierReadPrivate): set the moment one of its results is PRIVATE, in
+        // this delegation or in an earlier one of this task, which may have written what it read
+        // into a file or a note that this one reads back. From then on every result is PRIVATE
+        // and not indexed; see AgentContext.decide.
         List<Artifact> mine = new ArrayList<>();
-        // Whether the local model has read private data yet -- in this delegation, or in an
-        // earlier one of this task, which may have written what it read into a file or a note
-        // that this one reads back. From then on every result is PRIVATE and not indexed; see
-        // AgentContext.decide.
-        boolean tainted = parentContext.localTierReadPrivate();
-        // How much private text the local model may still be shown in full, for this whole
-        // delegation. On a file task it is the one reader of the file, so a 400-character excerpt
-        // would leave it answering from the first paragraph of a statement; but the budget is
-        // per delegation rather than per result: once it is spent, later results get the usual
-        // 1,500-character view, so the transcript (HISTORY_TAIL=8) holds at most about 20,500.
-        int readBudget = fileTask ? PRIVATE_READ_CHARS : 0;
-        // What the model was NOT shown, in the code's words, for the end of its answer: a model
-        // that read half a statement cannot be relied on to say so.
-        List<String> cuts = new ArrayList<>();
+        // The whole conversation, every turn of it, every result in full: nothing is dropped to
+        // make room. A delegation that outgrows the model's context window gets a plain error
+        // saying so (Ollama is asked never to drop messages itself), and fails like any other --
+        // the cloud takes the work back.
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
@@ -264,7 +260,23 @@ public class LocalExecutor {
         messages.add(LlmMessage.user(opening));
 
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
-                "Delegating to local LLM: " + truncate(plan.goal(), 100));
+                "Delegating to local LLM: " + plan.goal());
+
+        // No output limit is sent (a request cannot carry one): Ollama generates until the model
+        // stops or its context window -- the model's own -- is full. Capping output here used to
+        // starve thinking models, which spend part of the budget reasoning before they answer.
+        // format:json and tools are mutually exclusive in Ollama, so JSON mode is only asked for
+        // on the text protocol, where it is what holds the output shape.
+        // Every event of the streamed reply shows the task is alive, so a generation that runs
+        // for minutes is not taken for a stall; and a task stopped mid-reply ends the call there
+        // rather than when the model finishes.
+        LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
+                .withProgress(() -> {
+                    parentContext.markProgress();
+                    if (parentContext.isCancelled()) {
+                        throw new CancellationException("the task was stopped");
+                    }
+                });
 
         for (int step = 0; step < maxSteps; step++) {
             if (parentContext.isCancelled()) {
@@ -274,29 +286,27 @@ public class LocalExecutor {
                 return partial("Task cancelled during delegation.", mine);
             }
 
-            // Keep the conversation from outgrowing the window it has to answer in.
-            trimHistory(messages, mine);
-
             // THINK: ask local LLM for next action
             LlmResponse response;
             try {
-
-                // No output limit is sent (a request cannot carry one): Ollama generates until the
-                // model stops or its context window -- the model's own -- is full. Capping output
-                // here used to starve thinking models, which spend part of the budget reasoning
-                // before they answer.
-                // format:json and tools are mutually exclusive in Ollama, so JSON mode is
-                // only asked for on the text protocol, where it is what holds the output shape.
-                response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, !nativeTools, specs));
+                response = localProvider.chat(messages, request);
             } catch (Exception e) {
+                // A reply that is no answer -- cut off at the window, or holding a tool call that
+                // cannot be run -- was generated all the same, every token of it.
+                if (e instanceof LlmException failed && failed.reply() != null) {
+                    parentContext.addLocalTokens(failed.reply().totalTokens());
+                }
+                if (parentContext.isCancelled()) {
+                    return partial("Task cancelled during delegation.", mine);
+                }
                 // A delegation that outgrew the local model's context window fails with
                 // OutputTruncated, whose message names the window and its size.
                 String msg = String.valueOf(e.getMessage());
                 // After a private read the error can quote it -- a tool-call parse error echoes
                 // the model's raw output -- so then neither the cloud nor the log gets the
-                // message, only its type.
-                if (tainted) {
+                // message, only its type. OutputTruncated's message is written by the code (the
+                // limit and its size, nothing of the reply), so it is shown whatever was read.
+                if (parentContext.localTierReadPrivate() && !(e instanceof OutputTruncated)) {
                     String kept = e.getClass().getSimpleName()
                             + " (its text is kept out: this delegation had read private data)";
                     log.error("Local LLM call failed during delegation step {}: {}", step + 1, kept);
@@ -314,23 +324,36 @@ public class LocalExecutor {
             // watchdog with the task working normally. It would then be cancelled outright —
             // no email, and the valve never gets the chance to hand the registry back.
             parentContext.markProgress();
-            String raw = response.content();
 
-            // A native tool call is the answer; content is then usually empty and that is fine.
-            ExecutorAction action;
+            // No text and no tool call: a thinking model can spend its turn reasoning and then
+            // stop. Nothing was run, and the model is told exactly that; its turn stays in the
+            // transcript as the empty turn it was.
+            if (!response.hasToolCalls()
+                    && (response.content() == null || response.content().isBlank())) {
+                log.warn("Delegation step {}: the local model's reply had no text and no tool "
+                                + "call ({} tokens, stop reason {}).", step + 1,
+                        response.completionTokens(), response.stopDescription());
+                messages.add(LlmMessage.assistant(""));
+                messages.add(LlmMessage.user("Your previous reply was empty"
+                        + (response.stopReason() == null ? ""
+                                : " (stop reason: " + response.stopDescription() + ")")
+                        + ": no text and no tool call, so nothing was run. Continue from where "
+                        + "the task stands."));
+                continue;
+            }
+
+            // The turn: every tool call the model made, in its order -- or, on the text protocol,
+            // the one action its text holds. A native tool call is the answer; content is then
+            // usually empty and that is fine. A tools-capable model can still answer in prose;
+            // the text parser is the fallback, not dead code.
+            List<ExecutorAction> actions;
+            String raw;
             if (response.hasToolCalls()) {
-                ToolCall call = response.toolCalls().get(0);
-                action = "done".equals(call.name())
-                        ? ExecutorAction.done(str(call.arguments().get("summary")))
-                        : new ExecutorAction(false, null, call.name(), call.arguments());
-                raw = renderCall(call);
+                actions = response.toolCalls().stream().map(LocalExecutor::actionOf).toList();
+                raw = renderCalls(response.toolCalls());
             } else {
-                if (raw == null || raw.isBlank()) {
-                    return partial("Local LLM returned empty response", mine);
-                }
-                // A tools-capable model can still answer in prose; the text parser is the
-                // fallback, not dead code.
-                action = parseExecutorAction(raw);
+                raw = response.content();
+                actions = List.of(parseExecutorAction(raw));
             }
 
             // Finishing is finishing, whichever shape it arrives in.
@@ -341,229 +364,211 @@ public class LocalExecutor {
             // there is no such tool, and got "Tool 'done' not found". A real delegation did
             // this three times in a row and then died on max steps, having completed the work.
             // It had finished; there was no way to say so.
-            action = normalizeDone(action);
+            actions = actions.stream().map(LocalExecutor::normalizeDone).toList();
 
-            if (action.done) {
+            if (actions.size() == 1 && actions.get(0).done) {
+                ExecutorAction action = actions.get(0);
                 log.info("Delegation completed after {} steps. Summary length: {}",
                         step + 1, action.summary != null ? action.summary.length() : 0);
-                // If summary is empty, build one from collected results
-                // The conclusion AND the rows it was drawn from. The cloud tier is kept for
-                // its judgement, and a scheduled task shaped "fetch X, decide whether Y, act"
-                // would otherwise have it judge on a small model's paraphrase of the evidence
-                // -- today it reads up to 12,000 characters of the real output.
+                // The conclusion AND the rows it was drawn from. The cloud tier is kept for its
+                // judgement, and a scheduled task shaped "fetch X, decide whether Y, act" would
+                // otherwise have it judge on a small model's paraphrase of the evidence.
                 // The claim and the evidence travel together. Without the ledger the cloud reads
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.
                 // On a file task the summary is the user's answer, kept as a PRIVATE result of
                 // its own, which the cloud can hand on by its handle without reading it.
-                Artifact said = fileTask
-                        ? recordAnswer(parentContext, action.summary, mine, cuts) : null;
+                Artifact said = fileTask ? recordAnswer(parentContext, action.summary, mine) : null;
                 return completed(action.summary, plan.goal(), mine, said);
             }
 
-            if (action.tool == null || action.tool.isBlank()) {
-                // Local LLM produced something unparseable — try to recover
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user(nativeTools
-                        ? "That was not a tool call. Call a tool to do the work, or call done "
-                                + "with the summary if the goal is already reached."
-                        : "Invalid output. You must respond with JSON: "
-                                + "{\"tool\": \"name\", \"params\": {...}} to execute a tool, "
-                                + "or {\"done\": true, \"summary\": \"...\"} when finished."));
-                continue;
-            }
-
-            // Prevent skill_create — local executor cannot create skills
-            if ("skill_create".equals(action.tool)) {
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user(
-                        "ERROR: skill_create is not available during delegation. " +
-                        "Only existing tools can be used. Pick a different tool from the plan."));
-                continue;
-            }
-
-            // One resolution of the arguments, used by every check below and by the call itself.
-            // It was once computed twice, which is how a guard and the thing it guards drift
-            // apart.
-            References.Resolved refs = References.resolve(action.params, mine);
-            Map<String, Object> params = refs.params();
-
-            // If the model retyped an excerpt instead of referencing it, refuse before anything
-            // is written or sent -- and before the status line claims the tool is running.
-            // Cheap, deterministic, and it catches the exact failure observed in production.
-            String retyped = retypedExcerpt(params);
-            if (retyped != null) {
-                log.warn("Delegation step {}: '{}' was retyped from an excerpt — refused.",
-                        mine.size() + 1, retyped);
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("STOP. The '" + retyped + "' value you just wrote "
-                        + "contains the marker saying the middle was omitted, which means you "
-                        + "copied what was shown to you instead of the real text — most of it is "
-                        + "missing. Make the WHOLE value of '" + retyped + "' the reference {{N}} "
-                        + "for the step that produced it. Nothing else, no quotes around it, no "
-                        + "text before or after it."));
-                continue;
-            }
-
-            // A reference that could not be resolved: out of range, a missing field, a failed
-            // result, or reference-shaped text that is not the whole value. Each of these used to
-            // survive as literal text -- "$1.body" as the entire body of an email, sent, recorded
-            // green, with not one line in the log. Refused here, before anything runs.
-            if (!refs.ok()) {
-                log.warn("Delegation step {}: '{}' — reference refused.", mine.size() + 1,
-                        refs.refused());
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("Not run: the value of '" + refs.refused()
-                        + "' would have been sent as literal text. " + refs.reason() + " "
-                        + References.available(mine)));
-                continue;
-            }
-
-            // A change is attempted once per delegation, and made once per task. The cloud path
-            // has CriticAgent, which blocks an identical action after three tries; delegation
-            // never reaches it, so the only bound here was max_steps -- and an SMTP timeout can
-            // arrive AFTER the server accepted the message, so an unbounded retry of a "failed"
-            // send delivered a copy each time. A failed change is retried by the next attempt at
-            // the job (a new delegation, or the cloud once the fallback opens), where it is new;
-            // one that SUCCEEDED (by Artifact.succeeded, which reads an "ok": false envelope) is
-            // never repeated anywhere in the task. The earlier output is not shown: showing an
-            // earlier delegation's output is how a PRIVATE result reached the local model and
-            // then, reworded in its summary, the cloud.
-            Tool target = toolRegistry.find(action.tool).orElse(null);
-            Artifact triedHere = priorSideEffect(target, params, mine, false);
-            Artifact doneInTask = priorSideEffect(target, params, parentContext.artifacts(), true);
-            if (triedHere != null || doneInTask != null) {
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user(triedHere != null
-                        ? "Not run: you already made exactly this " + action.tool + " call in this "
-                                + "delegation, and it " + (triedHere.succeeded() ? "succeeded" : "FAILED")
-                                + ". A change is attempted once per delegation. Move on, or finish "
-                                + "and say what happened."
-                        : "Not run: an identical " + action.tool + " call already succeeded earlier "
-                                + "in this task. It changes something, so it is never done twice. "
-                                + "Move to the next step, or finish."));
-                continue;
-            }
-
-            // One thing neither guard catches: a value the model WROTE ITSELF, that is neither
-            // a reference nor a quoted excerpt -- its own paraphrase of a result, sent as if it
-            // were the result. There is no honest test for that (composing text is often
-            // exactly the job), so this does not block it. It leaves evidence, which is the
-            // difference between a quality regression someone can find and one nobody can.
-            String composed = composedPayload(action.tool, action.params, mine);
-            if (composed != null) {
-                log.warn("Delegation step {}: '{}' is {} characters the model wrote itself — "
-                                + "refused; a result must be forwarded, not rewritten.",
-                        mine.size() + 1, composed,
-                        String.valueOf(action.params.get(composed)).length());
-                messages.add(LlmMessage.assistant(raw));
-                messages.add(LlmMessage.user("STOP. The '" + composed + "' value is text you "
-                        + "wrote out yourself. A result must be forwarded exactly as it came, "
-                        + "never rewritten — rewriting is how a date, a line or a whole section "
-                        + "goes missing, and you cannot see what you dropped. "
-                        + References.available(mine)
-                        + " If none of them is what belongs here, this needs composing rather "
-                        + "than forwarding, which is not your job: stop calling this tool and "
-                        + "let the step fail."));
-                continue;
-            }
-
-            // ACT: execute the tool
-            statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
-                    "Delegate: running " + action.tool + "...");
-
-            long toolStartMs = System.currentTimeMillis();
-            ToolResult result = executeToolDirect(action.tool, params, parentContext);
-            long toolMs = System.currentTimeMillis() - toolStartMs;
-            boolean toolOk = result.success();
-            String toolResult = toolOk ? result.output() : "ERROR: " + result.output();
-
-            // The label, from facts already at hand -- and the record on the task, which is
-            // where the bytes live from now on. `params` is what actually ran (references
-            // substituted); `action.params` is what the model typed, and is the only one ever
-            // printed.
-            // After the local model has read private data, nothing more of this delegation is
-            // shown to the cloud: whatever it types can carry what it read, and a public tool that
-            // echoes its input -- or a file written and then read back -- hands that straight
-            // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
-            Tool ran = toolRegistry.find(action.tool).orElse(null);
-            Artifact.Decision decision = parentContext.decide(
-                    ran == null ? List.of() : ran.requiredCredentials(), refs.used(), tainted);
-            boolean wroteAfterPrivate = tainted;
-            Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
-                    toolResult, toolOk, decision);
-            mine.add(artifact);
-            if (artifact.isPrivate()) {
-                tainted = true;
-                parentContext.markLocalTierReadPrivate();
-            }
-            // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
-            // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
-            // error wrapped as "ok": false, so the delegation reported ok and the fallback never
-            // handed the job on -- no email, run recorded complete.
-            boolean worked = artifact.succeeded();
-
-            // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
-            // here, a skill used every single morning looks untouched to maintenance -- which
-            // retires skills for being unused. The telemetry has to follow the work.
-            // The arguments as WRITTEN, never resolved -- the resolved map carries the bytes of
-            // whatever {{N}} pointed at -- and in the task's numbering, because the repair prompt
-            // reads these rows next to rows from the cloud path. The row's label is what keeps it
-            // out of that prompt, and it is the artifact's label: PRIVATE for anything written
-            // after the model read private data.
-            // Arguments typed after the model read private data are not stored at all -- the
-            // label alone kept them out of the repair prompt, and "that label has been wrong
-            // before" is why this was a second defence to begin with.
-            curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
-                    worked, toolMs,
-                    worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
-                    worked ? null : toolResult, artifact.label());
-
-            log.info("Delegation step {} — {} {} (result: {} chars, {})",
-                    step + 1, artifact.handle() + " " + action.tool, worked ? "OK" : "FAIL",
-                    toolResult.length(), artifact.label());
-
-            // OBSERVE: feed result back to local LLM
-            // A private result on a file task is shown in full while the delegation's budget
-            // lasts; everything else as before. Whatever was cut is noted for the answer.
-            boolean readsForTheUser = fileTask && artifact.isPrivate();
-            int fullUpTo = readsForTheUser && readBudget > FEEDBACK_FULL_CHARS
-                    ? readBudget : FEEDBACK_FULL_CHARS;
-            if (readsForTheUser) {
-                readBudget = Math.max(0, readBudget - Math.min(toolResult.length(), fullUpTo));
-                if (toolResult.length() > fullUpTo) {
-                    cuts.add("Read the first " + String.format(Locale.ROOT, "%,d", excerptHead(fullUpTo))
-                            + " of " + String.format(Locale.ROOT, "%,d", toolResult.length())
-                            + " characters that " + action.tool + " returned; the rest did not fit, "
-                            + "so this answer covers only that part.");
+            // Every call of the turn, in its order, through the same guards, and none dropped:
+            // the model is told about each -- what it returned, or why it did not run. Each is
+            // resolved just before it runs, so a call can use a result from earlier in the turn.
+            int before = mine.size();
+            var replies = new ArrayList<String>();
+            for (int i = 0; i < actions.size(); i++) {
+                // Stop is looked at before every call, not only before every model call: pressed
+                // while one call of the turn runs, it stops the ones after it -- the send after
+                // the scan is exactly what Stop is for.
+                if (parentContext.isCancelled()) {
+                    return partial("Task cancelled during delegation.", mine);
                 }
+                ExecutorAction action = actions.get(i);
+                String reply = action.done
+                        ? "Not taken: done has to be the only call of its turn, so that your "
+                                + "summary is written after you have seen what the other calls "
+                                + "returned. Call it again, on its own, when the goal is reached."
+                        : act(action, parentContext, mine, nativeTools);
+                String name = action.done ? "done" : action.tool;
+                replies.add(actions.size() == 1 ? reply : "[call " + (i + 1) + " of "
+                        + actions.size() + (name == null || name.isBlank() ? "" : ": " + name)
+                        + "] " + reply);
+            }
+            String told = String.join("\n\n", replies);
+            if (mine.size() > before) {
+                // "Passed on verbatim" is false for a private result: the user sees it only
+                // through the summary, so the summary is where it has to be written.
+                told += "\n\n" + (fileTask
+                        ? "Continue, or " + (nativeTools
+                                ? "call done with the answer for the user"
+                                : "output {\"done\": true, \"summary\": \"the answer for the user\"}")
+                                + " — what the tools return here is private and reaches the user "
+                                + "only through your summary."
+                        : "Continue with the next step, or if all steps are done, " + (nativeTools
+                                ? "call done and say what you did — every result above is passed "
+                                        + "on verbatim, so do not retype it."
+                                : "output {\"done\": true, \"summary\": \"what you did\"}."));
             }
             messages.add(LlmMessage.assistant(raw));
-            messages.add(LlmMessage.user(
-                    // The handle every time -- a short result used to arrive without one, so the
-                    // model had to count for itself, and counting is where {{1}} went wrong.
-                    "Tool result " + ArtifactRef.handle(mine.size()) + " [" + action.tool + "] "
-                    + (worked ? "SUCCESS" : "FAILED") + ":\n" +
-                    feedback(toolResult, mine.size(), fullUpTo) + "\n\n" +
-                    // "Passed on verbatim" is false for a private result: the user sees it only
-                    // through the summary, so the summary is where it has to be written.
-                    (readsForTheUser
-                            ? "Continue, or " + (nativeTools
-                                    ? "call done with the answer for the user"
-                                    : "output {\"done\": true, \"summary\": \"the answer for the user\"}")
-                                    + " — this result is private and reaches them only through "
-                                    + "your summary."
-                            : "Continue with the next step, or if all steps are done, " +
-                            (nativeTools
-                                    ? "call done and say what you did — the result above is passed on "
-                                            + "verbatim, so do not retype it."
-                                    : "output {\"done\": true, \"summary\": \"what you did\"}."))));
+            messages.add(LlmMessage.user(told));
         }
 
         // Hit max steps without "done"
         log.warn("Delegation hit max steps ({}) for goal: {}", maxSteps, plan.goal());
         return partial("Delegation reached max steps (" + maxSteps + ")",
                 mine);
+    }
+
+    /**
+     * One call of the model's turn, through every guard, and run if none refuses it. Returns what
+     * the model is told about it: the result, or why the call did not run.
+     */
+    private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
+                       boolean nativeTools) {
+        if (action.tool == null || action.tool.isBlank()) {
+            // Local LLM produced something unparseable — tell it, so it can recover
+            return nativeTools
+                    ? "That was not a tool call. Call a tool to do the work, or call done "
+                            + "with the summary if the goal is already reached."
+                    : "Invalid output. You must respond with JSON: "
+                            + "{\"tool\": \"name\", \"params\": {...}} to execute a tool, "
+                            + "or {\"done\": true, \"summary\": \"...\"} when finished.";
+        }
+
+        // Prevent skill_create — local executor cannot create skills
+        if ("skill_create".equals(action.tool)) {
+            return "ERROR: skill_create is not available during delegation. "
+                    + "Only existing tools can be used. Pick a different tool from the plan.";
+        }
+
+        // One resolution of the arguments, used by every check below and by the call itself.
+        // It was once computed twice, which is how a guard and the thing it guards drift
+        // apart.
+        References.Resolved refs = References.resolve(action.params, mine);
+        Map<String, Object> params = refs.params();
+
+        // A reference that could not be resolved: out of range, a missing field, a failed
+        // result, or reference-shaped text that is not the whole value. Each of these used to
+        // survive as literal text -- "$1.body" as the entire body of an email, sent, recorded
+        // green, with not one line in the log. Refused here, before anything runs.
+        if (!refs.ok()) {
+            log.warn("Delegation step {}: '{}' — reference refused.", mine.size() + 1,
+                    refs.refused());
+            return "Not run: the value of '" + refs.refused()
+                    + "' would have been sent as literal text. " + refs.reason() + " "
+                    + References.available(mine);
+        }
+
+        // A change is attempted once per delegation, and made once per task. The cloud path
+        // has CriticAgent, which blocks an identical action after three tries; delegation
+        // never reaches it, so the only bound here was max_steps -- and an SMTP timeout can
+        // arrive AFTER the server accepted the message, so an unbounded retry of a "failed"
+        // send delivered a copy each time. A failed change is retried by the next attempt at
+        // the job (a new delegation, or the cloud once the fallback opens), where it is new;
+        // one that SUCCEEDED (by Artifact.succeeded, which reads an "ok": false envelope) is
+        // never repeated anywhere in the task. The earlier output is not shown: showing an
+        // earlier delegation's output is how a PRIVATE result reached the local model and
+        // then, reworded in its summary, the cloud.
+        Tool target = toolRegistry.find(action.tool).orElse(null);
+        Artifact triedHere = priorSideEffect(target, params, mine, false);
+        Artifact doneInTask = priorSideEffect(target, params, parentContext.artifacts(), true);
+        if (triedHere != null || doneInTask != null) {
+            return triedHere != null
+                    ? "Not run: you already made exactly this " + action.tool + " call in this "
+                            + "delegation, and it " + (triedHere.succeeded() ? "succeeded" : "FAILED")
+                            + ". A change is attempted once per delegation. Move on, or finish "
+                            + "and say what happened."
+                    : "Not run: an identical " + action.tool + " call already succeeded earlier "
+                            + "in this task. It changes something, so it is never done twice. "
+                            + "Move to the next step, or finish.";
+        }
+
+        // One thing neither guard catches: a result typed out again by hand instead of passed
+        // on by its reference -- which is where a date, a line or a whole section goes missing,
+        // and the model cannot see what it dropped. Text it composes itself is its own to send.
+        String copied = retyped(target, action.params, mine);
+        if (copied != null) {
+            log.warn("Delegation step {}: '{}' repeats part of an earlier result without being "
+                    + "all of it — refused.", mine.size() + 1, copied);
+            return "Not run: the '" + copied + "' value repeats part of an earlier result "
+                    + "without being all of it — a copy typed out by hand, which is how a date, a "
+                    + "line or a section goes missing. To pass a result on, make the WHOLE value "
+                    + "its reference: it is substituted exactly. " + References.available(mine)
+                    + " Text you compose yourself is fine; a partial copy of a result is not.";
+        }
+
+        // ACT: execute the tool
+        statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
+                "Delegate: running " + action.tool + "...");
+
+        long toolStartMs = System.currentTimeMillis();
+        ToolResult result = executeToolDirect(action.tool, params, parentContext);
+        long toolMs = System.currentTimeMillis() - toolStartMs;
+        // A finished call is progress. The calls of a turn run back to back, with no model call
+        // between them to say the task is alive, and the stall watchdog would otherwise count
+        // their run times together as silence.
+        parentContext.markProgress();
+        boolean toolOk = result.success();
+        String toolResult = toolOk ? result.output() : "ERROR: " + result.output();
+
+        // The label, from facts already at hand -- and the record on the task, which is
+        // where the bytes live from now on. `params` is what actually ran (references
+        // substituted); `action.params` is what the model typed, and is the only one ever
+        // printed.
+        // After the local model has read private data, nothing more of this delegation is
+        // shown to the cloud: whatever it types can carry what it read, and a public tool that
+        // echoes its input -- or a file written and then read back -- hands that straight
+        // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
+        boolean wroteAfterPrivate = parentContext.localTierReadPrivate();
+        Artifact.Decision decision = parentContext.decide(
+                target == null ? List.of() : target.requiredCredentials(), refs.used(),
+                wroteAfterPrivate);
+        Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
+                toolResult, toolOk, decision);
+        mine.add(artifact);
+        if (artifact.isPrivate()) parentContext.markLocalTierReadPrivate();
+        // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
+        // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
+        // error wrapped as "ok": false, so the delegation reported ok and the fallback never
+        // handed the job on -- no email, run recorded complete.
+        boolean worked = artifact.succeeded();
+
+        // Curation counts calls, and it only ever saw the cloud's. Once unattended work runs
+        // here, a skill used every single morning looks untouched to maintenance -- which
+        // retires skills for being unused. The telemetry has to follow the work.
+        // The arguments as WRITTEN, never resolved -- the resolved map carries the bytes of
+        // whatever {{N}} pointed at -- and in the task's numbering, because the repair prompt
+        // reads these rows next to rows from the cloud path. The row's label is what keeps it
+        // out of that prompt, and it is the artifact's label: PRIVATE for anything written
+        // after the model read private data.
+        // Arguments typed after the model read private data are not stored at all -- the
+        // label alone kept them out of the repair prompt, and "that label has been wrong
+        // before" is why this was a second defence to begin with.
+        curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
+                worked, toolMs,
+                worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
+                worked ? null : toolResult, artifact.label());
+
+        log.info("Delegation step {} — {} {} (result: {} chars, {})",
+                mine.size(), artifact.handle() + " " + action.tool, worked ? "OK" : "FAIL",
+                toolResult.length(), artifact.label());
+
+        // OBSERVE: the whole result, and its handle every time -- a short result used to arrive
+        // without one, so the model had to count for itself, and counting is where {{1}} went
+        // wrong.
+        return "Tool result " + ArtifactRef.handle(mine.size()) + " [" + action.tool + "] "
+                + (worked ? "SUCCESS" : "FAILED") + ":\n" + toolResult;
     }
 
     /**
@@ -754,7 +759,15 @@ public class LocalExecutor {
                 context.taskId(),
                 null,
                 context::isCancelled,
-                null,
+                // A skill's report_progress: shown to the owner, as the cloud path shows it, and
+                // progress for the stall watchdog. With no callback the sandbox leaves the line in
+                // the skill's stdout.
+                (message, percent) -> {
+                    context.markProgress();
+                    statusEmitter.emitForTask(context.userId(), context.taskId(),
+                            StatusMessage.Type.PROGRESS, "Delegate: " + toolName + ": " + message
+                                    + (percent == null ? "" : " (" + percent + "%)"));
+                },
                 // The four-argument constructor defaults these to empty, so a delegated skill
                 // could not see a file the task was given. That was survivable while delegation
                 // was the road not taken; it is not once unattended work runs through here.
@@ -833,158 +846,29 @@ public class LocalExecutor {
         }
     }
 
-    /**
-     * How many messages of conversation the executor carries forward.
-     * <p>
-     * The system prompt, the opening instruction, then this many of the most recent messages.
-     * Eight is four exchanges: enough to see what was just tried and what came back, and
-     * bounded so step nine costs what step three did.
-     */
-    private static final int HISTORY_TAIL = 8;
-
-    /**
-     * Drop the middle of the conversation, keeping a ledger of what it contained.
-     * <p>
-     * The real failure this prevents, from the 23 September menu run: by step 9 the history held
-     * eight exchanges on top of the system prompt and 27 tool schemas, the prompt had nearly
-     * filled a 24,576-token window, and the model spent the 4,954 tokens left on reasoning and
-     * never answered. That delegation burned 407 seconds and then failed, and the cloud did the
-     * work in fourteen. The owner's constraints ruled out the other two levers — the local model
-     * is to think freely and keep its full output budget — and the window was then a setting kept
-     * small for VRAM (it is now the model's own), so what had to shrink was the part nobody
-     * chose: the transcript.
-     * <p>
-     * Nothing is lost that matters, because results do not live here. The delegation's list
-     * holds every output in full, {@code {{N}}} still resolves against it, and the ledger says which
-     * numbers exist. That is the quiet dividend of passing by reference: the transcript can be
-     * cut without cutting the data.
-     */
-    static void trimHistory(List<LlmMessage> messages, List<Artifact> done) {
-        // system + opening instruction + the tail. Below that there is nothing to gain.
-        if (messages.size() <= HISTORY_TAIL + 2) return;
-
-        // The tail must begin with an assistant turn, or the roles stop alternating: after the
-        // opening user message the pattern is assistant, user, assistant, user...
-        int from = messages.size() - HISTORY_TAIL;
-        if ((from - 2) % 2 != 0) from++;
-
-        var ledger = new StringBuilder("Results available:\n");
-        for (int i = 0; i < done.size(); i++) {
-            ledger.append("  ").append(ArtifactRef.handle(i + 1)).append(" = ").append(done.get(i).tool())
-                  .append(done.get(i).succeeded() ? " (ok, " : " (FAILED — not referenceable, ")
-                  .append(done.get(i).output() == null ? 0 : done.get(i).output().length())
-                  .append(" chars)\n");
-        }
-        ledger.append("A successful result's full output is still available by reference — {{1}}, {{2}}, and so "
-                + "on, or {{N.field}} for a JSON result. The conversation above them has been dropped to "
-                + "leave room to answer in; the results themselves have not.");
-
-        // The ledger joins the opening instruction rather than following it, so the roles keep
-        // alternating: system, user, assistant, user, ... Two user turns in a row is something
-        // Ollama tolerates and other providers reject, and this loop should not depend on which.
-        var kept = new ArrayList<LlmMessage>();
-        kept.add(messages.get(0));
-        kept.add(LlmMessage.user(messages.get(1).content() + "\n\n" + ledger));
-        kept.addAll(messages.subList(from, messages.size()));
-        messages.clear();
-        messages.addAll(kept);
+    /** A native tool call as an action: {@code done} finishes, any other name is a tool to run. */
+    private static ExecutorAction actionOf(ToolCall call) {
+        return "done".equals(call.name())
+                ? ExecutorAction.done(str(call.arguments().get("summary")))
+                : new ExecutorAction(false, null, call.name(), call.arguments());
     }
 
-    /** The model's own tool call, written back into the history it will read next turn. */
-    private String renderCall(ToolCall call) {
-        try {
-            return mapper.writeValueAsString(Map.of(
-                    "tool", call.name(), "params", call.arguments()));
-        } catch (Exception e) {
-            return "{\"tool\": \"" + call.name() + "\"}";
+    /** The model's own tool calls, written back into the history it will read next turn. */
+    private String renderCalls(List<ToolCall> calls) {
+        var lines = new ArrayList<String>();
+        for (ToolCall call : calls) {
+            try {
+                lines.add(mapper.writeValueAsString(Map.of(
+                        "tool", call.name(), "params", call.arguments())));
+            } catch (Exception e) {
+                lines.add("{\"tool\": \"" + call.name() + "\"}");
+            }
         }
+        return String.join("\n", lines);
     }
 
     private static String str(Object o) {
         return o == null ? "" : o.toString();
-    }
-
-    /**
-     * How much of a result the model is shown before it is handed a reference instead.
-     * <p>
-     * Chosen because the failure it exists to stop is not hypothetical: a real delegation died
-     * on step 2 with {@code done_reason=length} after 23,121 characters of thinking, because
-     * step 1's 2,905-character digest had been fed back in full, and the model then had to
-     * generate the whole thing AGAIN into the next tool call. Both ends squeezed a 24,576-token
-     * window until nothing was left to answer with.
-     */
-    private static final int FEEDBACK_FULL_CHARS = 1500;
-
-    /**
-     * How much private text a delegation on a file task may be shown in full, across all its
-     * results. The local model is the only reader of the file, so it needs more than an excerpt
-     * to answer from; a few thousand tokens of what was then a 24,576-token window left the rest
-     * for the prompt, the model's thinking and the answer.
-     */
-    static final int PRIVATE_READ_CHARS = 16_000;
-
-    /**
-     * A tool result as the model should see it: in full when it is small, and otherwise an
-     * excerpt plus the reference that moves the real thing.
-     * <p>
-     * Capping what the model reads is only half of it. The other half is that it no longer has
-     * a reason to retype the result, because {@code {{N}}} carries the exact bytes — so the same
-     * change relieves the context window and removes the corruption it was fabricating dates
-     * into.
-     * <p>
-     * Not applied to the local model's <em>reasoning</em>, which the owner wants unconstrained,
-     * and not a token cap. This is about what goes IN.
-     */
-    static String feedback(String result, int stepNumber) {
-        return feedback(result, stepNumber, FEEDBACK_FULL_CHARS);
-    }
-
-    /**
-     * {@link #feedback(String, int)} with a different allowance: a result up to {@code fullUpTo}
-     * characters is shown whole, and a longer one is cut to that many. Only a file task's private
-     * results get more than the default -- there the local model is answering from them, not
-     * forwarding them (see {@link #PRIVATE_READ_CHARS}).
-     */
-    static String feedback(String result, int stepNumber, int fullUpTo) {
-        if (result == null) return "";
-        if (result.length() <= fullUpTo) return result;
-        int head = excerptHead(fullUpTo);
-        int tail = 150;
-        return result.substring(0, head)
-                + "\n\n" + OMISSION_MARKER + stepNumber + "}}⟧\n\n"
-                + result.substring(result.length() - tail)
-                + "\n\n[That is the beginning and the end of " + result.length() + " characters. "
-                + "The complete, exact text is " + ArtifactRef.handle(stepNumber) + ": make "
-                + ArtifactRef.handle(stepNumber) + " the WHOLE value of a parameter and it is "
-                + "substituted verbatim. If the result is JSON and you want one field of it, use "
-                + "{{" + stepNumber + ".fieldname}} the same way — e.g. {{" + stepNumber
-                + ".body_text}} for the text inside an envelope. "
-                + "You have not been shown the middle, so anything you type yourself will be "
-                + "missing it.]";
-    }
-
-    /**
-     * The canary. Its presence in a tool argument proves the model is retyping an excerpt.
-     * <p>
-     * Structural, because the instruction was not enough: a delegation wrote this very sentence
-     * into a file as though it were part of the digest, and reported success. Silent truncation
-     * of the owner's morning email is a worse failure than the crash it replaced, and it is the
-     * one failure the cloud cannot catch — the summary looks right and the ledger says the tool
-     * ran.
-     */
-    static final String OMISSION_MARKER = "⟦middle omitted — pass it on with {{";
-
-    /**
-     * How much of the start of a cut result is shown. With the default allowance: small enough
-     * to say what came back, too small to be worth copying. The first version showed 1,500
-     * characters and asked the model not to retype them; it retyped them -- annotation and all --
-     * straight into the next tool call, and the file it wrote was half a digest with this
-     * sentence in the middle of it. Telling a model not to do something it can do is the whole
-     * mistake this change exists to stop making. With a larger allowance the model is reading,
-     * not forwarding, so the head is the whole allowance less the tail.
-     */
-    private static int excerptHead(int fullUpTo) {
-        return fullUpTo > FEEDBACK_FULL_CHARS ? fullUpTo - 150 : 400;
     }
 
     /**
@@ -1004,55 +888,38 @@ public class LocalExecutor {
     }
 
     /**
-     * Text long enough that writing it by hand means reproducing something.
+     * The argument of a side-effecting call that repeats part of an earlier result without being
+     * all of it, or null.
      * <p>
-     * A warning first, and that was not enough. On 23 September the news digest went out as
-     * 2,073 characters the local model had written itself from a 2,745-character source: the
-     * log said so and the owner still read a rewritten digest. Composing prose is judgement, and
-     * judgement is the cloud's half of this architecture — so the local tier forwards results
-     * and does not author them. If a goal genuinely needs text composed, this delegation fails
-     * and the valve hands it to the tier that should have had it.
+     * That is a result typed out again by hand, the way a line or a date goes missing: on 23
+     * September the news digest went out as 2,073 characters the local model had written itself
+     * from a 2,745-character source. "Repeats" is the canary's own notion -- a
+     * {@link PrivateIndex#WINDOW}-character run of a result's text, normalised the way the canary
+     * normalises it -- applied to every result this delegation can reference. An argument
+     * byte-equal to a result is a perfect copy and passes, however wasteful; so does text the
+     * model composed itself, of any length: only a partial or altered copy is refused. A rewrite
+     * that shares no such run with any result is, as far as this can tell, composition, and
+     * passes too. Checked on the arguments as the model WROTE them, where a reference is a short
+     * token that repeats nothing, and only where a reference could have been written instead: a
+     * top-level string of a tool that changes something, against results that succeeded.
      */
-    private static final int COMPOSED_WARN_CHARS = 600;
-
-    /**
-     * Note a large text argument the model typed out itself on a tool that changes something.
-     * <p>
-     * Deliberately a warning and not a refusal. Writing prose into an email is a legitimate
-     * thing for a delegation to do, and a rule that guessed at the difference would block real
-     * work — the owner's standing objection to lists of do's and don'ts. But when the owner's
-     * digest arrives paraphrased instead of forwarded, this line is what makes the cause
-     * findable in a log rather than a mystery.
-     */
-    private String composedPayload(String tool, Map<String, Object> written,
-                                   List<Artifact> done) {
-        // The arguments as the MODEL WROTE them, before substitution. {{1.body_text}} is the
-        // correct way to forward a field, and the substituted value never equals a whole step
-        // output, so checking the resolved map reported every correct forward as a paraphrase --
-        // which is how the one signal for a real paraphrase turns into noise. Raw, the two cases
-        // separate themselves: "{{1.body_text}}" is fifteen characters and falls under the
-        // threshold, while a composed two-thousand-character body is identical either way.
-        if (written == null || done.isEmpty()) return null;
-        var t = toolRegistry.find(tool).orElse(null);
-        if (t == null || !t.hasSideEffects()) return null;
-        for (var e : written.entrySet()) {
-            if (!(e.getValue() instanceof String v) || v.length() < COMPOSED_WARN_CHARS) continue;
-            // Equal to a step's output means it was copied perfectly, which is only wasteful.
-            // A reference is the intended path and is short. Anything else is the model's own
-            // prose standing in for a result.
-            boolean isAPriorResult = done.stream().anyMatch(r -> v.equals(r.output()));
-            if (!isAPriorResult) return e.getKey();
-        }
-        return null;
-    }
-
-    /** The parameter that is quoting an excerpt back at us, or null when none is. */
-    static String retypedExcerpt(Map<String, Object> params) {
-        if (params == null) return null;
-        for (var e : params.entrySet()) {
-            if (e.getValue() instanceof String v && v.contains(OMISSION_MARKER)) {
-                return e.getKey();
+    static String retyped(Tool tool, Map<String, Object> written, List<Artifact> done) {
+        if (tool == null || !tool.hasSideEffects() || written == null) return null;
+        List<Artifact> forwardable = done.stream().filter(Artifact::succeeded).toList();
+        // The canary's index as the matcher, over results of a whole window or more: a shorter
+        // one is registered as a whole string, and a run shorter than a window is not a repeat.
+        var index = new PrivateIndex();
+        for (int i = 0; i < forwardable.size(); i++) {
+            String out = forwardable.get(i).output();
+            if (PrivateIndex.normalise(out).length() >= PrivateIndex.WINDOW) {
+                index.addPrivate(i + 1, out);
             }
+        }
+        if (index.isEmpty()) return null;
+        for (var e : written.entrySet()) {
+            if (!(e.getValue() instanceof String v)) continue;
+            if (forwardable.stream().anyMatch(r -> v.equals(r.output()))) continue;
+            if (index.firstHitIn(v) != null) return e.getKey();
         }
         return null;
     }
@@ -1167,8 +1034,8 @@ public class LocalExecutor {
         // the registry back and tells the cloud to finish the job, and "on failure, try a
         // fundamentally different approach" then means sending a second digest. CriticAgent
         // cannot stop it: the delegation's calls are not in the cloud's trajectory, so that send
-        // is a first-time action. So what already succeeded goes FIRST, where head-and-tail
-        // truncation cannot drop it, not as a tick buried in a ledger.
+        // is a first-time action. So what already succeeded goes FIRST, the first thing the
+        // cloud reads, not a tick buried in a ledger.
         String head = "";
         if (anyFailed && !results.isEmpty()) {
             String ran = results.stream().filter(Artifact::succeeded).map(r -> r.tool())
@@ -1199,18 +1066,15 @@ public class LocalExecutor {
      * answer from it; the one text written from it is this summary, and it used to be withheld
      * and then dropped, which left the user with no answer at all. Kept, it is a handle the cloud
      * can deliver without reading. Indexed, so the canary looks for it in every later request of
-     * the task. In the task's numbering, like any summary; and ending with the code's own note of
-     * what the model was not shown, which the model cannot be relied on to mention.
+     * the task. In the task's numbering, like any summary.
      */
-    static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> mine,
-                                 List<String> cuts) {
+    static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> mine) {
         if (summary == null || summary.isBlank() || mine.stream().noneMatch(Artifact::isPrivate)) {
             return null;
         }
         String read = mine.stream().filter(Artifact::isPrivate).map(Artifact::handle)
                 .collect(Collectors.joining(", "));
-        String text = References.proseForTask(summary, mine)
-                + (cuts.isEmpty() ? "" : "\n\n" + String.join("\n", cuts));
+        String text = References.proseForTask(summary, mine);
         return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
                         List.of("written by the local model after reading " + read)));
@@ -1238,7 +1102,7 @@ public class LocalExecutor {
               .append(r.isPrivate() ? "(arguments withheld)"
                       : String.valueOf(References.argsForTask(r.written(), results)))
               .append("\n")
-              .append(r.isPrivate() ? r.describe() : truncate(r.output(), 20_000));
+              .append(r.isPrivate() ? r.describe() : r.output());
         }
         return sb.toString();
     }
@@ -1257,10 +1121,7 @@ public class LocalExecutor {
                 var r = results.get(i);
                 sb.append(r.handle()).append(" [").append(r.tool()).append("] ")
                         .append(r.succeeded() ? "OK" : "FAIL").append(": ")
-                        // Failures keep far more: a truncated traceback is a traceback that
-                        // cannot be acted on, and this is the only copy that reaches the cloud.
-                        .append(r.isPrivate() ? r.describe()
-                                : truncate(r.output(), r.success() ? 2000 : 20_000)).append("\n");
+                        .append(r.isPrivate() ? r.describe() : r.output()).append("\n");
             }
         }
         return sb.toString();
@@ -1277,7 +1138,7 @@ public class LocalExecutor {
             } else {
                 sb.append("### ").append(r.handle()).append(": ").append(r.tool())
                         .append(r.succeeded() ? " ✓" : " ✗")
-                        .append("\n").append(truncate(r.output(), 5000)).append("\n\n");
+                        .append("\n").append(r.output()).append("\n\n");
             }
         }
         return sb.toString();
@@ -1286,11 +1147,6 @@ public class LocalExecutor {
     private static String getStr(Map<String, Object> map, String key) {
         Object v = map.get(key);
         return v != null ? v.toString() : null;
-    }
-
-    private static String truncate(String s, int maxLen) {
-        if (s == null) return "";
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     /**

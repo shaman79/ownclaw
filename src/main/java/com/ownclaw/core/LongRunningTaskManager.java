@@ -11,10 +11,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.List;
-import java.util.Map;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -26,12 +23,14 @@ import java.util.concurrent.ConcurrentHashMap;
  *       progress line), the task is registered here.</li>
  *   <li>The skill emits structured progress lines on stdout
  *       ({@code {"type":"progress","message":"Scanning 45/255 hosts","percent":18}}).
- *       The sandbox intercepts these and calls {@link #reportProgress}.</li>
+ *       The sandbox intercepts these, and for a tool the agent loop calls itself they reach
+ *       {@link #reportProgress}; inside a delegation they are shown to the user directly.</li>
  *   <li>Each progress report also counts as a heartbeat.  If no heartbeat arrives within
  *       {@code stall-timeout} seconds, the task is marked as <b>stalled</b> and the user
  *       is notified.</li>
- *   <li>On completion (success or failure), the task is finalized and the user sees a
- *       summary notification.</li>
+ *   <li>On completion (success or failure), the task is finalized: its result or error is
+ *       stored whole in the task's row, and the user is told that it finished or failed, how
+ *       long that text is and the task's id -- not the text itself.</li>
  * </ol>
  *
  * <p>Task state is persisted to the {@code long_running_tasks} table so that
@@ -86,6 +85,10 @@ public class LongRunningTaskManager {
 
     /**
      * Register a new long-running task.
+     * <p>
+     * The description is stored whole in the task's row, and only there: the event and the log
+     * line name the task and its skill. The event's summary also goes to the log, and a log is
+     * not where the owner's words belong.
      *
      * @param taskId      unique task identifier (from AgentContext)
      * @param userId      the owning user
@@ -102,10 +105,10 @@ public class LongRunningTaskManager {
         activeHeartbeats.put(taskId, new TaskHeartbeat(userId, System.currentTimeMillis()));
 
         eventLog.info(userId, taskId, "task.long_running.started",
-                "Long-running task registered: " + description);
+                "Long-running task registered: " + skillName + " — task " + taskId);
 
-        log.info("Long-running task registered: taskId={} user={} skill={} desc={}",
-                taskId, userId, skillName, description);
+        log.info("Long-running task registered: taskId={} user={} skill={}",
+                taskId, userId, skillName);
     }
 
     // ── Progress reporting ──
@@ -169,13 +172,14 @@ public class LongRunningTaskManager {
     // ── Completion ──
 
     /**
-     * Mark a task as successfully completed.
-     */
-    /**
      * Mark a task finished, whatever state it was left in.
      * <p>
      * Deliberately unguarded on status: a task that was wrongly declared stalled and then
      * finished must be able to say so.
+     * <p>
+     * The result is stored whole in the task's row. The owner's status line, the event and the
+     * log say where it is and how long it is ({@link #reference}) rather than carrying it: a
+     * whole tool output is no status line, and a cut one is a result with its end missing.
      */
     public void complete(String taskId, String resultSummary) {
         jdbc.update("""
@@ -185,17 +189,18 @@ public class LongRunningTaskManager {
             WHERE task_id = ?
             """, resultSummary, taskId);
 
+        String line = reference("finished", resultSummary, taskId);
         TaskHeartbeat hb = activeHeartbeats.remove(taskId);
         if (hb != null) {
-            statusEmitter.emit(hb.userId, StatusMessage.Type.COMPLETED,
-                    resultSummary != null ? resultSummary : "Long-running task completed.");
-            eventLog.info(hb.userId, taskId, "task.long_running.completed", resultSummary);
+            statusEmitter.emit(hb.userId, StatusMessage.Type.COMPLETED, line);
+            eventLog.info(hb.userId, taskId, "task.long_running.completed", line);
         }
-        log.info("Long-running task completed: taskId={}", taskId);
+        log.info(line);
     }
 
     /**
-     * Mark a task as failed.
+     * Mark a task as failed. The error is stored whole in the task's row, and referred to like
+     * a result (see {@link #complete}).
      */
     public void fail(String taskId, String errorMessage) {
         jdbc.update("""
@@ -204,13 +209,19 @@ public class LongRunningTaskManager {
             WHERE task_id = ?
             """, errorMessage, taskId);
 
+        String line = reference("failed", errorMessage, taskId);
         TaskHeartbeat hb = activeHeartbeats.remove(taskId);
         if (hb != null) {
-            statusEmitter.emit(hb.userId, StatusMessage.Type.FAILED,
-                    "Long-running task failed: " + errorMessage);
-            eventLog.error(hb.userId, taskId, "task.long_running.failed", errorMessage);
+            statusEmitter.emit(hb.userId, StatusMessage.Type.FAILED, line);
+            eventLog.error(hb.userId, taskId, "task.long_running.failed", line);
         }
-        log.error("Long-running task failed: taskId={} error={}", taskId, errorMessage);
+        log.error(line);
+    }
+
+    /** "Long-running task finished, 12,345 chars — task abc": where the text is, and its size. */
+    static String reference(String how, String text, String taskId) {
+        return String.format(Locale.ROOT, "Long-running task %s, %,d chars — task %s",
+                how, text == null ? 0 : text.length(), taskId);
     }
 
     /**
@@ -283,79 +294,6 @@ public class LongRunningTaskManager {
      */
     public boolean isActive(String taskId) {
         return activeHeartbeats.containsKey(taskId);
-    }
-
-    /**
-     * Get the status of a long-running task.
-     *
-     * @return a map of task fields, or null if not found
-     */
-    public Map<String, Object> getTaskStatus(String taskId) {
-        List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT task_id, user_id, description, skill_name, status,
-                   progress_pct, progress_msg, heartbeat_at, started_at,
-                   completed_at, error_message, result_summary
-            FROM long_running_tasks WHERE task_id = ?
-            """, taskId);
-        return rows.isEmpty() ? null : rows.get(0);
-    }
-
-    /**
-     * Get all active long-running tasks for a user.
-     */
-    public List<Map<String, Object>> getActiveTasks(String userId) {
-        return jdbc.queryForList("""
-            SELECT task_id, description, skill_name, status,
-                   progress_pct, progress_msg, heartbeat_at, started_at
-            FROM long_running_tasks
-            WHERE user_id = ? AND status IN ('running', 'stalled')
-            ORDER BY started_at DESC
-            """, userId);
-    }
-
-    /**
-     * Get recent long-running tasks for a user (all statuses).
-     */
-    public List<Map<String, Object>> getRecentTasks(String userId, int limit) {
-        return jdbc.queryForList("""
-            SELECT task_id, description, skill_name, status,
-                   progress_pct, progress_msg, started_at, completed_at
-            FROM long_running_tasks
-            WHERE user_id = ?
-            ORDER BY started_at DESC
-            LIMIT ?
-            """, userId, limit);
-    }
-
-    /**
-     * Format a human-readable status summary of a user's active tasks.
-     * Used by the agent to answer "what tasks are running?" questions.
-     */
-    public String formatActiveTasksSummary(String userId) {
-        List<Map<String, Object>> tasks = getActiveTasks(userId);
-        if (tasks.isEmpty()) {
-            return "No long-running tasks are currently active.";
-        }
-
-        StringBuilder sb = new StringBuilder("Active long-running tasks:\n");
-        for (Map<String, Object> task : tasks) {
-            sb.append("• ").append(task.get("description"));
-            String status = (String) task.get("status");
-            sb.append(" [").append(status).append("]");
-
-            Object pct = task.get("progress_pct");
-            if (pct != null) {
-                sb.append(" — ").append(pct).append("%");
-            }
-
-            Object msg = task.get("progress_msg");
-            if (msg != null) {
-                sb.append(" (").append(msg).append(")");
-            }
-
-            sb.append("\n");
-        }
-        return sb.toString().strip();
     }
 
     // ── Internal ──

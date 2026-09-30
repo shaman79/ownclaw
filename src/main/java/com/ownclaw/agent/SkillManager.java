@@ -8,6 +8,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -73,6 +74,23 @@ public class SkillManager {
 
     // ────────────────────── Create / Update ──────────────────────
 
+    /** A lowercase letter, then lowercase letters, digits and underscores. */
+    private static final java.util.regex.Pattern SKILL_NAME_SHAPE =
+            java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");
+
+    /**
+     * What a skill may be called: the one rule, for creating one and for recording which one.
+     * <p>
+     * The name is a directory, a Python-friendly identifier, and the tool's name on every
+     * request -- where the model providers accept at most 64 characters
+     * ({@link ToolSchemas#isApiSafeName}). A longer name used to be accepted here and then left
+     * out of every tools array, so the skill existed and nothing could call it.
+     */
+    public static boolean isSkillName(String name) {
+        return name != null && SKILL_NAME_SHAPE.matcher(name).matches()
+                && ToolSchemas.isApiSafeName(name);
+    }
+
     /**
      * Create (or update) a Python skill.
      *
@@ -86,9 +104,10 @@ public class SkillManager {
         String code = str(params, "code");
         // --- Validate ---
 
-        if (name == null || !name.matches("[a-z][a-z0-9_]*")) {
-            return "ERROR: Invalid skill name. Must start with a lowercase letter and " +
-                    "contain only lowercase letters, digits, and underscores.";
+        if (!isSkillName(name)) {
+            return "ERROR: Invalid skill name. It must start with a lowercase letter, contain only "
+                    + "lowercase letters, digits and underscores, and be at most 64 characters "
+                    + "long: it is the tool's name, and the model providers accept no longer one.";
         }
 
         // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.

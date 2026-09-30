@@ -79,6 +79,19 @@ public class ContainerSandbox {
         this.config = config;
     }
 
+    /**
+     * With the runtimes given rather than detected, so a test can stand in for docker and
+     * podman ({@code fallback} may be null). A factory, not a second constructor: Spring builds
+     * this bean through its one constructor, and with two it found none it could use and the
+     * application did not start.
+     */
+    static ContainerSandbox withRuntimes(OwnClawConfig config, String runtime, String fallback) {
+        var sandbox = new ContainerSandbox(config);
+        sandbox.containerRuntime = runtime;
+        sandbox.fallbackRuntime = fallback;
+        return sandbox;
+    }
+
     @PostConstruct
     public void init() {
         detectRuntime();
@@ -254,8 +267,10 @@ public class ContainerSandbox {
             return imageTag;
         }
 
-        // Try building with each candidate base image in order
-        IOException lastError = null;
+        // Try building with each candidate base image in order. Every candidate's failure is kept,
+        // in order and whole: the preferred image's own error is usually the one that matters,
+        // and keeping only the last candidate's reported a fallback image's instead.
+        var failures = new StringBuilder();
         int candidateIndex = 0;
         for (String baseImage : candidates) {
             candidateIndex++;
@@ -281,11 +296,10 @@ public class ContainerSandbox {
             } catch (IOException e) {
                 log.warn("Base image '{}' failed: {}. Trying next candidate...",
                         baseImage, truncate(e.getMessage(), 200));
-                lastError = e;
+                failures.append("\n\n").append(baseImage).append(": ").append(e.getMessage());
             }
         }
-        throw new IOException("All base image candidates failed. Last error: "
-                + (lastError != null ? lastError.getMessage() : "unknown"));
+        throw new IOException("All base image candidates failed." + failures);
     }
 
     /**
@@ -386,15 +400,15 @@ public class ContainerSandbox {
                 String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx, progressCallback);
                 if (fallbackError != null) {
                     throw new IOException("Container image build failed with both runtimes.\n"
-                            + containerRuntime + ": " + truncate(buildError, 1000) + "\n"
-                            + fallbackRuntime + ": " + truncate(fallbackError, 1000));
+                            + containerRuntime + ": " + buildError + "\n"
+                            + fallbackRuntime + ": " + fallbackError);
                 }
                 // Fallback succeeded — switch runtimes for future calls
                 log.info("Fallback runtime '{}' succeeded. Switching primary runtime.", buildRuntime);
                 containerRuntime = buildRuntime;
             } else if (buildError != null) {
                 throw new IOException("Container image build failed (" + buildRuntime + "):\n"
-                        + truncate(buildError, 2000));
+                        + buildError);
             }
 
             log.info("Successfully built container image '{}' with {}", imageTag, containerRuntime);
@@ -402,11 +416,13 @@ public class ContainerSandbox {
             // Validate the built image: verify python3 is actually usable.
             // This catches cases where the base image was pulled from a wrong registry
             // (Podman doesn't default to Docker Hub) or layers are broken.
-            if (!validateImage(imageTag)) {
+            String unusable = validateImage(imageTag);
+            if (unusable != null) {
                 builtImages.remove(imageTag);
                 throw new IOException("Container image '" + imageTag + "' built but python3 is not "
                         + "usable inside it. The base image may have been pulled from a wrong registry. "
-                        + "Check that '" + baseImage + "' is reachable.");
+                        + "Check that '" + baseImage + "' is reachable. 'python3 --version' in it: "
+                        + unusable);
             }
 
         } finally {
@@ -455,8 +471,9 @@ public class ContainerSandbox {
             AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
 
             // Read output line-by-line to stream build progress to the user.
-            // Also feeds lastBuildActivity for stall detection.
-            StringBuilder outputBuf = new StringBuilder();
+            // Also feeds lastBuildActivity for stall detection. Synchronized, because a stalled
+            // build reports what it had printed while this reader may still be appending.
+            StringBuffer outputBuf = new StringBuffer();
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
                 try (var reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
@@ -465,11 +482,10 @@ public class ContainerSandbox {
                         lastBuildActivity.set(System.currentTimeMillis());
                         outputBuf.append(line).append('\n');
                         if (progressCallback != null) {
-                            // Summarize the line for the UI — strip ANSI codes and truncate
+                            // The line for the UI, whole — ANSI colour codes stripped
                             String clean = line.replaceAll("\\x1B\\[[0-9;]*m", "").trim();
                             if (!clean.isEmpty()) {
-                                progressCallback.onProgress(
-                                        "\uD83D\uDCE6 " + truncate(clean, 120), null);
+                                progressCallback.onProgress("\uD83D\uDCE6 " + clean, null);
                             }
                         }
                     }
@@ -485,7 +501,8 @@ public class ContainerSandbox {
                 p.destroyForcibly();
                 try { p.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 outputFuture.cancel(true);
-                return "Build stalled (no output for " + stallSec + "s)";
+                return "Build stalled (no output for " + stallSec + "s). Its output until then:\n"
+                        + outputBuf;
             }
 
             String output = outputFuture.join();
@@ -636,7 +653,10 @@ public class ContainerSandbox {
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
                         String trimmed = line.trim();
-                        if (trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
+                        // Without a callback (extra volumes alone bring a run here) a progress
+                        // line stays in stdout, as it does on the plain path.
+                        if (progressCallback != null && trimmed.startsWith("{")
+                                && trimmed.contains("\"progress\"")) {
                             try {
                                 var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                                 var node = mapper.readTree(trimmed);
@@ -777,8 +797,11 @@ public class ContainerSandbox {
     /**
      * Validate that a built container image actually has a working python3.
      * Catches broken images early (wrong registry pull, missing layers, etc.)
+     *
+     * @return null when it has, or why not: the check's exit code and whole output, which is the
+     *         actual reason and goes to the skill's result with the rest of the build's evidence
      */
-    private boolean validateImage(String imageTag) {
+    private String validateImage(String imageTag) {
         try {
             Process p = new ProcessBuilder(containerRuntime, "run", "--rm", imageTag,
                     "python3", "--version")
@@ -794,19 +817,19 @@ public class ContainerSandbox {
                 p.destroyForcibly();
                 outputFuture.cancel(true);
                 log.warn("Image validation timed out for '{}'", imageTag);
-                return false;
+                return "no answer within 30s";
             }
             String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
             if (p.exitValue() != 0) {
                 log.warn("Image validation failed for '{}': exit={}, output={}",
                         imageTag, p.exitValue(), truncate(output, 500));
-                return false;
+                return "exit " + p.exitValue() + ": " + output;
             }
             log.debug("Image validation passed for '{}': {}", imageTag, output.strip());
-            return true;
+            return null;
         } catch (Exception e) {
             log.warn("Image validation error for '{}': {}", imageTag, e.getMessage());
-            return false;
+            return "error: " + e.getMessage();
         }
     }
 

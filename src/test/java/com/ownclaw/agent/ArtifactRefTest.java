@@ -184,16 +184,19 @@ class ArtifactRefTest {
     }
 
     @Test
-    @DisplayName("a name the descriptor did not cut is never matched by prefix")
-    void prefixMatchingIsOnlyForCutNames() {
+    @DisplayName("a field is its exact name or its position -- never a name's beginning")
+    void noPrefixMatching() {
         var ns = List.of(new Artifact(1, "render", Map.of(), Map.of(),
                 "{\"ok\":true,\"body_html\":\"<html>PRIVATE</html>\"}", true, Label.PRIVATE, List.of()));
-        for (String v : List.of("{{1.body}}", "{{1.b}}", "{{1.o}}")) {
+        for (String v : List.of("{{1.body}}", "{{1.b}}", "{{1.o}}", "{{1.body_h…}}", "{{1.#0}}", "{{1.#3}}")) {
             assertFalse(References.resolve(Map.of("body", v), ns).ok(),
                     "\"$1.o\" once matched ok, and the email's whole body was \"true\": " + v);
         }
         assertEquals("<html>PRIVATE</html>",
-                References.resolve(Map.of("body", "{{1.body_h…}}"), ns).params().get("body"));
+                References.resolve(Map.of("body", "{{1.body_html}}"), ns).params().get("body"));
+        assertEquals("<html>PRIVATE</html>",
+                References.resolve(Map.of("body", "{{1.#2}}"), ns).params().get("body"));
+        assertEquals("true", References.resolve(Map.of("body", "{{ 1 . #1 }}"), ns).params().get("body"));
     }
 
     @Test
@@ -223,5 +226,15 @@ class ArtifactRefTest {
         assertNull(ArtifactRef.parse("$1"), "the old syntax is not a reference any more");
         assertEquals("{{4.body_text}}", new ArtifactRef(4, "body_text").toString());
         assertEquals("{{4}}", ArtifactRef.handle(4));
+
+        // #k is a field's position, 1-based, in key order.
+        assertEquals(new ArtifactRef(3, "#7"), ArtifactRef.parse("{{3.#7}}"));
+        assertEquals(7, ArtifactRef.parse("{{3.#7}}").position());
+        assertEquals("{{3.#7}}", new ArtifactRef(3, "#7").toString());
+        assertNull(ArtifactRef.parse("{{3.body_text}}").position(), "a name is not a position");
+        for (String name : List.of("#0", "#", "#7a", "# 7", "#1234567890")) {
+            assertNull(new ArtifactRef(3, name).position(), name);
+        }
+        assertTrue(ArtifactRef.looksLikeReference("{{3.#7}}"), "and a slip around it is refused, not sent");
     }
 }

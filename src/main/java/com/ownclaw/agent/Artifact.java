@@ -1,7 +1,6 @@
 package com.ownclaw.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.privacy.Label;
 
@@ -44,24 +43,6 @@ import java.util.Map;
 public record Artifact(int n, String tool, Map<String, Object> written,
                        Map<String, Object> resolved, String output, boolean success,
                        Label label, List<String> why, boolean indexed) {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    /** How many top-level field names a descriptor shows, and how long each may be. */
-    static final int MAX_FIELDS = 12;
-    static final int MAX_FIELD_NAME = 24;
-
-    /** How many names the reference list may carry. Names are short; the descriptor's cap is not. */
-    static final int MAX_REFERENCE_NAMES = 48;
-
-    /**
-     * Characters the descriptor may spend naming fields past {@link #MAX_FIELDS}.
-     * <p>
-     * Bounded by length rather than by count, because the thing to avoid is a descriptor that
-     * has become the content, and twelve was too few to be a limit on NAMES: an imap envelope
-     * puts {@code body_text} past the twelfth key, and a field the cloud is never shown is a
-     * field it cannot reference — so it composed the email from the description instead.
-     */
-    static final int MAX_OVERFLOW_NAME_CHARS = 240;
 
     public Artifact {
         // Not Map.copyOf: it rejects a null VALUE, and a tool call carrying one is ordinary —
@@ -160,50 +141,46 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public boolean succeeded() {
         if (!success) return false;
-        if (output == null) return true;
-        String t = output.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return true;
-        try {
-            // The whole top level, not the descriptor's first twelve keys: an "ok" in thirteenth
-            // place was read as success. A string "false" counts too; some skills write one.
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return true;
-            for (String key : List.of("ok", "success")) {
-                JsonNode v = node.get(key);
-                if (v != null && (v.isBoolean() ? !v.asBoolean() : "false".equalsIgnoreCase(v.asText()))) {
-                    return false;
-                }
+        JsonNode node = ToolResult.jsonObject(output);
+        if (node == null) return true;
+        // The whole top level: when the descriptor listed only the first twelve keys, an "ok"
+        // in thirteenth place was read as success. A string "false" counts too; some skills
+        // write one.
+        for (String key : List.of("ok", "success")) {
+            JsonNode v = node.get(key);
+            if (v != null && (v.isBoolean() ? !v.asBoolean() : "false".equalsIgnoreCase(v.asText()))) {
+                return false;
             }
-            return true;
-        } catch (Exception e) {
-            return true;
         }
+        return true;
     }
 
     /**
      * What may be said about a PRIVATE artifact: everything except its content.
      * <p>
-     * Top-level booleans are shown WITH their values. A success envelope around a failure —
+     * Every top-level field of a JSON result is listed, and offered as a reference. Top-level
+     * booleans are shown WITH their values. A success envelope around a failure —
      * {@code {"ok": false, "error": "..."}} — is the normal shape of a skill result, and a
      * descriptor that hid {@code ok=false} would have the cloud report a send that never
      * happened. Everything else is shown as a kind and a size: a string is where the data is,
-     * and a number can BE the data — a balance, a count of unread messages.
+     * and a number can BE the data — a balance, a count of unread messages. A field's name is
+     * shown only when it is shorter than a canary window; a longer one is named by its position
+     * ({@link ArtifactRef#toField}).
      */
     public String describe() {
         var sb = new StringBuilder(handle()).append(' ').append(tool)
                 .append(succeeded() ? " ✓" : " ✗").append(" — ").append(label);
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
-        Shape shape = shapeOf(output);
+        Shape shape = shapeOf(n, output);
+        sb.append(" · ").append(shape.kind()).append(" · ")
+          .append(String.format("%,d", output.length())).append(" chars");
         if (isPrivate() && !indexed) {
             // A result hidden because of WHEN it was made came from a tool fed by what the model
             // typed after reading private data. Its key names and booleans are not a skill's
             // schema but possibly that data -- a key-value store or a listing keyed by its input
             // echoes it straight into a field name. So: that it happened, and how big.
-            return sb.append(" · ").append(shape.kind()).append(" · ")
-                    .append(String.format("%,d", output.length())).append(" chars").toString();
+            return sb.toString();
         }
-        sb.append(" · ").append(shape.kind()).append(" · ")
-          .append(String.format("%,d", output.length())).append(" chars");
         if (!success && !shape.isJson()) {
             sb.append(" (text withheld; skill_usage row via ops)");
         }
@@ -218,29 +195,14 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         // so it writes the email from the description and the owner gets a confident message
         // with no menu in it. A template ("pass <handle>.<field>") was worse, beside a field list
         // that annotates its names: the cloud composed "body_text (string, 48 chars)" into the
-        // reference, which resolved to nothing, and the literal went out as the body. So: the exact strings, in
-        // one list, for every field -- including those past the annotated twelve, since an imap
-        // envelope puts body_text well beyond them. Cut short like the annotated names, because a
-        // full-length name would be a window of the private text; the resolver takes a cut name
-        // by its prefix. The substitution happens here, so naming the handle discloses nothing.
+        // reference, which resolved to nothing, and the literal went out as the body. So: the
+        // exact strings, in one list, one for every field. The substitution happens here, so
+        // naming the handle discloses nothing.
         // Not for a result that failed: the resolver refuses it, so offering it was an
         // instruction the next step could not carry out.
         if (!succeeded()) return sb.toString();
         sb.append(" · use: ").append(handle());
-        int budget = MAX_OVERFLOW_NAME_CHARS, shown = 0;
-        for (String name : referenceOrder(output)) {
-            String cut = name.length() > MAX_FIELD_NAME
-                    ? name.substring(0, MAX_FIELD_NAME) + "…" : name;
-            String token = ", " + new ArtifactRef(n, cut);
-            if (budget - token.length() < 0) break;
-            budget -= token.length();
-            sb.append(token);
-            shown++;
-        }
-        // Counted from the JSON rather than from the name list, which is itself capped: taking
-        // the remainder from that list told the cloud 22 fields were unnamed when 34 were.
-        int unnamed = topLevelKeyCount(output) - shown;
-        if (unnamed > 0) sb.append(" +").append(unnamed).append(" more");
+        for (ArtifactRef ref : shape.refs()) sb.append(", ").append(ref);
         sb.append(" — any of these as the whole value of a tool argument, when you have a tool "
                 + "that takes it; the text is substituted here");
         return sb.toString();
@@ -248,8 +210,8 @@ public record Artifact(int n, String tool, Map<String, Object> written,
 
     /**
      * The single substitution point. A PUBLIC result enters the trajectory as it is, byte for
-     * byte as today; a PRIVATE one enters as its descriptor, with no structured data — the
-     * structured map is the same content in another shape.
+     * byte as today; a PRIVATE one enters as its descriptor, with metadata about the artifact in
+     * place of its bytes.
      */
     public static AgentObservation asObservation(Artifact a, ToolResult r, long durationMs) {
         if (a.isPrivate()) {
@@ -261,134 +223,60 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                             "label", a.label().name(), "chars", a.output().length()))),
                     durationMs);
         }
-        return new AgentObservation(a.tool(), a.success(), r.output(),
-                r.structured() == null ? Map.of() : r.structured(), durationMs);
+        return new AgentObservation(a.tool(), a.success(), r.output(), Map.of(), durationMs);
     }
 
     /**
-     * Field names in the order worth offering as references: text fields largest first, then
-     * everything else in key order.
-     * <p>
-     * The list is budgeted, so its order decides which fields get named at all. Key order spent
-     * the budget on the envelope -- from, to, subject, date, uid, flags -- and an imap result's
-     * body_text, thirteenth or later, was never offered, so the cloud had nothing to forward and
-     * wrote the email itself. The content a task forwards is text, and it is the biggest text in
-     * the result. A boolean or a count is not something anyone passes along as a body.
+     * Every top-level field of a JSON object result, in key order, as the reference to it --
+     * the same references the descriptor offers the cloud. None for anything else.
      */
-    static List<String> referenceOrder(String text) {
-        if (text == null || text.isBlank()) return List.of();
-        String t = text.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return List.of();
-        try {
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return List.of();
-            var textual = new ArrayList<Map.Entry<String, Integer>>();
-            var rest = new ArrayList<String>();
-            var it = node.fields();
-            while (it.hasNext() && textual.size() + rest.size() < MAX_REFERENCE_NAMES) {
-                var e = it.next();
-                if (e.getValue().isTextual()) {
-                    textual.add(Map.entry(e.getKey(), e.getValue().asText().length()));
-                } else {
-                    rest.add(e.getKey());
-                }
-            }
-            // Stable, so equal lengths keep key order.
-            textual.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
-            var out = new ArrayList<String>();
-            for (var e : textual) out.add(e.getKey());
-            out.addAll(rest);
-            return List.copyOf(out);
-        } catch (Exception e) {
-            return List.of();
-        }
-    }
-
-    /** How many top-level keys a JSON object result has; 0 for anything that is not one. */
-    static int topLevelKeyCount(String text) {
-        if (text == null || text.isBlank()) return 0;
-        String t = text.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return 0;
-        try {
-            JsonNode node = MAPPER.readTree(t);
-            return node != null && node.isObject() ? node.size() : 0;
-        } catch (Exception e) {
-            return 0;
-        }
+    static List<ArtifactRef> fieldRefs(int handle, String text) {
+        return shapeOf(handle, text).refs();
     }
 
     /**
-     * The top-level field names EXACTLY as the JSON spells them, for telling a model what it
-     * may reference.
-     * <p>
-     * Parsed here rather than unwrapped from the descriptor's list. That list truncates a name
-     * longer than {@link #MAX_FIELD_NAME} and marks the cut with an ellipsis, and a model told
-     * to reference a name exactly copies the ellipsis with it: {@code {{1.rendered_html_for_ema…}}}
-     * resolves to nothing, and the unresolved-reference guard does not recognise it as a
-     * reference either, so the literal travels on as the argument. Untruncated here, bounded
-     * there; the two lists answer different questions.
+     * kind ("json" | "text"); each top-level field as the descriptor lists it, annotated with
+     * its kind and size; the value of each boolean field; and the reference to each field -- all
+     * in key order, every field, and each field named as {@link ArtifactRef#toField} names it.
      */
-    public static List<String> jsonFieldNames(String text) {
-        if (text == null || text.isBlank()) return List.of();
-        String t = text.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return List.of();
-        try {
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return List.of();
-            var names = new ArrayList<String>();
-            // Bounded, but not at MAX_FIELDS. That cap is the descriptor's, and applying it here
-            // hid the thirteenth key from the local model too -- on an imap envelope body_text
-            // sits past the twelfth, so the one field the task needed could be named by nobody.
-            var it = node.fieldNames();
-            while (it.hasNext() && names.size() < MAX_REFERENCE_NAMES) names.add(it.next());
-            return List.copyOf(names);
-        } catch (Exception e) {
-            return List.of();
-        }
-    }
-
-    /** kind ("json" | "text" | "error"), field names, and primitive values, of a result. */
-    record Shape(String kind, List<String> fields, Map<String, String> primitives) {
+    record Shape(String kind, List<String> fields, Map<String, String> primitives,
+                 List<ArtifactRef> refs) {
         boolean isJson() { return "json".equals(kind); }
     }
 
-    static Shape shapeOf(String text) {
-        if (text == null || text.isBlank()) return new Shape("text", List.of(), Map.of());
-        String t = text.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return new Shape("text", List.of(), Map.of());
-        try {
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return new Shape("text", List.of(), Map.of());
-            var fields = new ArrayList<String>();
-            var primitives = new java.util.LinkedHashMap<String, String>();
-            var it = node.fields();
-            while (it.hasNext() && fields.size() < MAX_FIELDS) {
-                var e = it.next();
-                String name = e.getKey().length() > MAX_FIELD_NAME
-                        ? e.getKey().substring(0, MAX_FIELD_NAME) + "…" : e.getKey();
-                JsonNode v = e.getValue();
-                if (v.isBoolean()) {
-                    // Booleans only. ok=false must be visible -- a success envelope around a
-                    // failure is the normal shape of a skill result and hiding it would have the
-                    // cloud report a send that never happened. A NUMBER can be the secret itself
-                    // (a balance, a count of messages), so it gets its kind and nothing more.
-                    primitives.put(name, v.asText());
-                    fields.add(name);
-                } else if (v.isNumber()) {
-                    fields.add(name + " (number)");
-                } else if (v.isTextual()) {
-                    fields.add(name + " (string, " + String.format("%,d", v.asText().length()) + " chars)");
-                } else if (v.isArray()) {
-                    fields.add(name + " (array, " + v.size() + ")");
-                } else if (v.isObject()) {
-                    fields.add(name + " (object, " + v.size() + " fields)");
-                } else {
-                    fields.add(name);
-                }
+    static Shape shapeOf(int handle, String text) {
+        JsonNode node = ToolResult.jsonObject(text);
+        if (node == null) return new Shape("text", List.of(), Map.of(), List.of());
+        var fields = new ArrayList<String>();
+        var primitives = new java.util.LinkedHashMap<String, String>();
+        var refs = new ArrayList<ArtifactRef>();
+        var it = node.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            ArtifactRef ref = ArtifactRef.toField(handle, e.getKey(), refs.size() + 1);
+            refs.add(ref);
+            String name = ref.field();
+            JsonNode v = e.getValue();
+            if (v.isBoolean()) {
+                // Booleans only. ok=false must be visible -- a success envelope around a
+                // failure is the normal shape of a skill result and hiding it would have the
+                // cloud report a send that never happened. A NUMBER can be the secret itself
+                // (a balance, a count of messages), so it gets its kind and nothing more.
+                primitives.put(name, v.asText());
+                fields.add(name);
+            } else if (v.isNumber()) {
+                fields.add(name + " (number)");
+            } else if (v.isTextual()) {
+                fields.add(name + " (string, " + String.format("%,d", v.asText().length()) + " chars)");
+            } else if (v.isArray()) {
+                fields.add(name + " (array, " + v.size() + ")");
+            } else if (v.isObject()) {
+                fields.add(name + " (object, " + v.size() + " fields)");
+            } else {
+                fields.add(name);
             }
-            return new Shape("json", List.copyOf(fields), Map.copyOf(primitives));
-        } catch (Exception e) {
-            return new Shape("text", List.of(), Map.of());
         }
+        return new Shape("json", List.copyOf(fields),
+                java.util.Collections.unmodifiableMap(primitives), List.copyOf(refs));
     }
 }

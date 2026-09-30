@@ -13,7 +13,8 @@ import java.util.Map;
  * @param goal        what the delegation should achieve (natural language)
  * @param steps       ordered list of tool calls to execute
  * @param checkpoints quality criteria to verify before marking as done
- * @param maxSteps    maximum number of executor steps (tool calls + retries)
+ * @param maxSteps    maximum number of executor steps: turns of the local model, each of which
+ *                    runs every tool call it makes
  * @param tools       the tools the cloud says this delegation needs (see LocalExecutor.offered)
  */
 public record DelegationPlan(

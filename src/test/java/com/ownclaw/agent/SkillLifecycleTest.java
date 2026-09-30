@@ -117,6 +117,38 @@ class SkillLifecycleTest {
     }
 
     @Test
+    @DisplayName("the name rule: a lowercase identifier the providers accept as a tool name")
+    void theSkillNameRule() {
+        String longest = "s" + "k".repeat(63);
+        for (String ok : List.of("a", "web_fetch", "check_email_2", longest)) {
+            assertTrue(SkillManager.isSkillName(ok), ok);
+        }
+        for (String bad : java.util.Arrays.asList(null, "", "Web_fetch", "9lives", "_x", "web-fetch",
+                "web fetch", "wéb", longest + "s")) {
+            assertFalse(SkillManager.isSkillName(bad), String.valueOf(bad));
+        }
+    }
+
+    @Test
+    @DisplayName("a 64-character name is created and offered; a 65-character one is refused plainly")
+    void aNameTheProviderRefusesIsNotCreated() {
+        // A longer name used to be accepted, then left out of every tools array without a word:
+        // the skill existed and nothing could call it.
+        String longest = "s" + "k".repeat(63);
+        String result = create(longest, "The longest name a provider accepts.", WORKING_CODE);
+        assertFalse(result.startsWith("ERROR"), result);
+        assertEquals(List.of(longest), com.ownclaw.agent.tools.ToolSchemas.build(List.of(),
+                registry.all(), List.of()).stream().map(com.ownclaw.llm.ToolSpec::name).toList());
+
+        String tooLong = longest + "s";
+        String refused = create(tooLong, "One character too many.", WORKING_CODE);
+        assertTrue(refused.startsWith("ERROR: Invalid skill name") && refused.contains("64 characters"),
+                refused);
+        assertFalse(Files.exists(generated.resolve(tooLong)), "nothing is written");
+        assertTrue(registry.find(tooLong).isEmpty());
+    }
+
+    @Test
     @DisplayName("a module with no run() is rejected")
     void moduleWithoutRunIsRejected() {
         String result = create("no_entry_point", "Has no run function.",

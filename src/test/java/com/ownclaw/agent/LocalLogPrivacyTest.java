@@ -13,6 +13,8 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.MalformedToolCall;
+import com.ownclaw.llm.OutputTruncated;
 import com.ownclaw.llm.Replies;
 import com.ownclaw.observability.ChatStatusEmitter;
 import org.junit.jupiter.api.DisplayName;
@@ -116,6 +118,64 @@ class LocalLogPrivacyTest {
             assertFalse(outcome.text().contains("48,213.07"), outcome.text());
             assertTrue(outcome.text().contains("Local LLM call failed"), outcome.text());
             assertFalse(logged(appender).contains("48,213.07"), logged(appender));
+        } finally {
+            release(appender);
+        }
+    }
+
+    @Test
+    @DisplayName("after a private read, a full context window is still said plainly: the code wrote that message")
+    void aFullWindowIsSaidPlainly() {
+        var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
+        LlmProvider llm = new LlmProvider() {
+            int calls;
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                if (calls++ == 0) return Replies.of(call("read_statement", Map.of()), 1, 1);
+                throw new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, 262_144,
+                        Replies.of("", 250_000, 12_144, 0, 0, "length"));
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "full"; }
+        };
+        var ctx = fileTask();
+        var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
+                new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
+                .execute(plan("summarise the statement"), ctx);
+
+        assertTrue(outcome.text().contains("Local LLM call failed: [ollama] the conversation is longer "
+                + "than the model's 262,144-token context window"), outcome.text());
+        assertFalse(outcome.ok(), "a failed delegation: the cloud takes the work back");
+        assertEquals(2 + 262_144, ctx.localTokens(), "the cut-off reply was generated, and is counted");
+    }
+
+    @Test
+    @DisplayName("a tool call that cannot be run is counted, and after a private read its text stays out")
+    void aMalformedCallIsCountedAndKeptOut() {
+        var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
+        LlmProvider llm = new LlmProvider() {
+            int calls;
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                if (calls++ == 0) return Replies.of(call("read_statement", Map.of()), 1, 1);
+                // The model's own arguments, quoting what it read: the message is its text.
+                throw new MalformedToolCall("ollama", new LlmResponse("", List.of(),
+                        "tool call 'send' has arguments that are not a JSON object: " + SECRET,
+                        "stop", null, null, null, null,
+                        List.of(new LlmResponse.Usage(null, 900, 40, 0, 0))));
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "malformed"; }
+        };
+        var appender = capture();
+        try {
+            var ctx = fileTask();
+            var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
+                    new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
+                    .execute(plan("summarise the statement"), ctx);
+
+            assertFalse(outcome.text().contains(SECRET), outcome.text());
+            assertTrue(outcome.text().contains("MalformedToolCall (its text is kept out"), outcome.text());
+            assertFalse(logged(appender).contains(SECRET), "nor in the log");
+            assertEquals(2 + 940, ctx.localTokens(), "the reply was generated, and is counted");
         } finally {
             release(appender);
         }

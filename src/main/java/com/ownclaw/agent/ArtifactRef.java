@@ -1,5 +1,7 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.privacy.PrivateIndex;
+
 import java.util.regex.Pattern;
 
 /**
@@ -18,7 +20,8 @@ import java.util.regex.Pattern;
  *
  * @param handle 1-based position in whichever list the reference is resolved against — the
  *               delegation's own results for the local model, the task's for the cloud
- * @param field  the JSON field, or null for the whole output
+ * @param field  the JSON field, or null for the whole output: its name, or {@code #k} for the
+ *               k-th field in key order ({@link #position})
  */
 public record ArtifactRef(int handle, String field) {
 
@@ -102,6 +105,44 @@ public record ArtifactRef(int handle, String field) {
     /** How the n-th result is named to whoever is reading. */
     public static String handle(int n) {
         return "{{" + n + "}}";
+    }
+
+    /**
+     * k for a field written {@code #k} -- {@code {{3.#7}}} is the seventh field of result 3, in
+     * key order -- or null for a field named by its name. Always a position: a key that is itself
+     * spelled {@code #7} is referenced by its own position, which {@link #toField} offers.
+     */
+    public Integer position() {
+        if (field == null || field.length() < 2 || field.length() > MAX_HANDLE_DIGITS + 1
+                || field.charAt(0) != '#') {
+            return null;
+        }
+        for (int i = 1; i < field.length(); i++) {
+            if (field.charAt(i) < '0' || field.charAt(i) > '9') return null;
+        }
+        int k = Integer.parseInt(field.substring(1));
+        return k < 1 ? null : k;
+    }
+
+    /**
+     * The reference to the field {@code name}, the {@code position}-th in key order of result
+     * {@code handle}: by its name when the name is shorter than a canary window and this grammar
+     * reads it back as that same name; otherwise by its position, {@code {{handle.#position}}}.
+     * <p>
+     * A name of a whole window or more is withheld because a key can be data -- an address, a
+     * sentence a skill keyed its output by -- and a window of a PRIVATE result is exactly what
+     * the canary refuses to send, so a descriptor carrying one would leak it and then be refused.
+     * Its length is measured as the canary measures it, after {@link PrivateIndex#normalise},
+     * which can lengthen a name: a dotted capital I lowercases to two characters, a ligature
+     * unfolds into two letters. A name the grammar would read differently (padded with spaces,
+     * holding braces, or spelled like a position) could never resolve. The position always does,
+     * and says nothing.
+     */
+    public static ArtifactRef toField(int handle, String name, int position) {
+        var byName = new ArtifactRef(handle, name);
+        return PrivateIndex.normalise(name).length() < PrivateIndex.WINDOW
+                && byName.equals(parse(byName.toString())) && byName.position() == null
+                ? byName : new ArtifactRef(handle, "#" + position);
     }
 
     /** The reference exactly as the model has to write it. */

@@ -76,8 +76,8 @@ public class ResultDelivery {
      * after a failure is what runs on a bad morning. On that run every result was withheld and
      * this line said nothing at all.
      * <p>
-     * Known limit, stated rather than papered over: a PUBLIC direct call keeps its skill's own
-     * structured output and is not counted, so on a mixed run {@code total} is a floor.
+     * Known limit, stated rather than papered over: a PUBLIC direct call reports no artifacts on
+     * its observation and is not counted, so on a mixed run {@code total} is a floor.
      */
     static String withheldLine(AgentResult result) {
         if (result == null || result.trajectory() == null) return "";
