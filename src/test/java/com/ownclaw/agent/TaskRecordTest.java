@@ -97,7 +97,7 @@ class TaskRecordTest {
                 "SyntaxError: invalid syntax (see result 1)",
                 "3. ✓ openwrt_audit · 1m 20s → result 2, 174,617 chars, private (credentials (2))",
                 "4. ✗ _thinking — the reply was empty ×2",
-                "5. ✓ skill_manage · 3ms"), TaskRecord.steps(rows.trace()));
+                "5. ✓ skill_manage delete · 3ms"), TaskRecord.steps(rows.trace()));
         // Mutations: drop the skill from the row, drop the codegen calls, keep the handle, or
         // cut the reason -> this line no longer matches.
     }
@@ -152,6 +152,15 @@ class TaskRecordTest {
         var other = AgentLoop.stepDetails(ctx, new AgentAction("web_search", Map.of("name", "openwrt_audit"), ""),
                 AgentObservation.failure("web_search", "ERROR", 1), 3);
         assertFalse(other.containsKey("skill"), "only skill_create and skill_manage name a skill");
+        var managed = AgentLoop.stepDetails(ctx, new AgentAction(AgentAction.SKILL_MANAGE,
+                Map.of("action", "delete", "name", "openwrt_audit"), ""),
+                AgentObservation.success(AgentAction.SKILL_MANAGE, "deleted", Map.of(), 1), 4);
+        assertEquals("openwrt_audit", managed.get("skill"), "skill_manage names its skill too");
+        assertEquals("delete", managed.get("skillAction"));
+        var unknown = AgentLoop.stepDetails(ctx, new AgentAction(AgentAction.SKILL_MANAGE,
+                Map.of("action", "rm -rf", "name", "openwrt_audit"), ""),
+                AgentObservation.failure(AgentAction.SKILL_MANAGE, "ERROR", 1), 5);
+        assertFalse(unknown.containsKey("skillAction"), "an action skill_manage does not have is not recorded");
     }
 
     @Test

@@ -151,6 +151,9 @@ public class TaskTraceService {
                     // skill_create and skill_manage: which skill. Absent on rows from before it was
                     // recorded.
                     s.put("skill", d.hasNonNull("skill") ? d.path("skill").asText() : null);
+                    // skill_manage: which action -- read, delete, list, analyze. Absent on rows from
+                    // before it was recorded.
+                    s.put("skillAction", d.hasNonNull("skillAction") ? d.path("skillAction").asText() : null);
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));

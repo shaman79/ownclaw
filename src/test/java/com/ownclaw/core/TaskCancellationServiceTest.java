@@ -31,7 +31,7 @@ class TaskCancellationServiceTest {
         assertEquals("you pressed Stop", s.why("u1", "t1", before));
         assertNull(s.why("u1", "t1", System.currentTimeMillis() + 1_000), "a task started later runs");
         assertNull(s.why("u2", "t1", before), "another user's tasks run");
-        assertNotNull(s.stoppedAt("u1"));
+        assertEquals("you pressed Stop", s.why("u1", null, before), "a task queued before it, not yet started");
         s.request("u1", "t1", "a stop request from the ops API");
         assertEquals("a stop request from the ops API", s.why("u1", "t1", before), "the task's own request is the more specific");
     }

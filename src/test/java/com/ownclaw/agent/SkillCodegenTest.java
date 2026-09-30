@@ -168,14 +168,33 @@ class SkillCodegenTest {
                 + "server error), so nothing was created.", failed);
 
         rig.cloud.codegen.add(c -> new LlmResponse("I would write a class for this.", 10, 10, 0, 0, "end_turn"));
-        assertEquals("ERROR: the reply for 'openwrt_audit' held no Python code with def run(params), so "
-                + "nothing was created.", rig.loop.generateSkillCodeWithCloud(spec(), task()).error());
+        assertEquals("ERROR: the reply for 'openwrt_audit' held no Python code, so nothing was created.",
+                rig.loop.generateSkillCodeWithCloud(spec(), task()).error());
 
-        rig.cloud.codegen.add(c -> new LlmResponse("", 10, 10, 0, 0, "refusal", List.of(), "cyber",
+        rig.cloud.codegen.add(c -> new LlmResponse("```python\nimport json\nprint(json.dumps(1))\n```", 10, 10, 0, 0, "end_turn"));
+        assertEquals("ERROR: the reply for 'openwrt_audit' held Python code but no def run(params), which every "
+                + "skill needs, so nothing was created.", rig.loop.generateSkillCodeWithCloud(spec(), task()).error());
+
+        rig.cloud.codegen.add(c -> new LlmResponse("", 2_000, 300, 0, 0, "refusal", List.of(), "cyber",
                 "claude-opus-5", 128_000, 1_000_000));
-        assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), task()).error().startsWith(
+        var declined = task();
+        assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), declined).error().startsWith(
                 "ERROR: the model declined to write the code for 'openwrt_audit' ([anthropic] the model "
                         + "declined this request (stop reason: refusal, category: cyber))"));
+        assertEquals(2_300, declined.cloudTokens(), "a declined reply was billed, so it is counted");
+
+        rig.cloud.codegen.add(c -> { throw new com.ownclaw.llm.EgressRefused("anthropic", 2, "openwrt_audit", 1, "user", 10); });
+        String refused = rig.loop.generateSkillCodeWithCloud(spec(), task()).error();
+        assertTrue(refused.startsWith("ERROR: the request for the code of 'openwrt_audit' was not sent ("), refused);
+
+        rig.cloud.codegen.add(c -> {
+            throw new com.ownclaw.llm.OutputTruncated("anthropic", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
+                    1_000_000, null);
+        });
+        String tooLong = rig.loop.generateSkillCodeWithCloud(spec(), task()).error();
+        assertTrue(tooLong.startsWith("ERROR: the request for the code of 'openwrt_audit' did not fit ([anthropic] "
+                + "the conversation is longer than the model's 1,000,000-token context window"), tooLong);
+        assertFalse(tooLong.contains("one reply"), "a request too long is not a reply cut off: " + tooLong);
 
         rig.cloud.available = false;
         assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), task()).error().contains(
@@ -213,6 +232,17 @@ class SkillCodegenTest {
         assertEquals(0, ctx2.cloudTokens());
         assertEquals(0, offline.jdbc.queryForObject("SELECT count(*) FROM token_usage", Integer.class),
                 "local tokens reached the cloud budget");
+    }
+
+    @Test
+    @DisplayName("a reply is priced as the model that wrote it, which a fallback can make another than the one asked")
+    void pricedAsTheModelThatWroteIt(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.codegen.add(c -> new LlmResponse("```python\n" + module("") + "\n```", 1_000_000, 0, 0, 0,
+                "end_turn", List.of(), null, "claude-sonnet-5", 64_000, 1_000_000));
+        rig.loop.generateSkillCodeWithCloud(spec(), task());
+        assertEquals(2.0, rig.jdbc.queryForObject("SELECT cost_usd FROM token_usage WHERE user_id = 'u1'", Double.class),
+                1e-9, "a million input tokens at the $2 of the model that answered, not the $5 of the one asked");
     }
 
     @Test

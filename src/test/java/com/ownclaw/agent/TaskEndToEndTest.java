@@ -12,6 +12,7 @@ import java.util.Map;
 
 import static com.ownclaw.agent.AssistantPartsTest.tool;
 import static com.ownclaw.agent.LoopRig.*;
+import static com.ownclaw.observability.ChatStatusEmitter.StatusMessage.Type;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -26,6 +27,24 @@ class TaskEndToEndTest {
 
     static String session(LoopRig rig) {
         return rig.chat.createSession("u1", "Network");
+    }
+
+    /** A skill that fails, saying {@code output}. */
+    static Tool failing(String name, String output) {
+        return new Tool() {
+            public String name() { return name; }
+            public String description() { return "test skill " + name; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public List<String> requiredCredentials() { return List.of(); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p, com.ownclaw.agent.tools.ToolExecutionContext c) {
+                return com.ownclaw.agent.tools.ToolResult.failure(output);
+            }
+        };
+    }
+
+    /** Every user message of the {@code thinkCall}-th think call, as one text. */
+    static String sentTo(LoopRig rig, int thinkCall) {
+        return String.join("\n", userParts(rig.cloud.calls("think").get(thinkCall)));
     }
 
     @Test
@@ -322,5 +341,194 @@ class TaskEndToEndTest {
         assertTrue(observed.indexOf("Task: router audit") < observed.indexOf("Task: audit of the NAS"),
                 "two words in common before one");
         assertFalse(observed.contains("lunch menu"), observed);
+    }
+
+    @Test
+    @DisplayName("a finished answer that places a result holding a vault value keeps the value out of every row and screen")
+    void aFinishedAnswerIsScrubbed(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(
+                tool("openwrt_audit", List.of("OPENWRT_USER", "OPENWRT_PASS"), p -> AUDIT),
+                tool("lan_inventory", List.of(), p -> "main router, admin password " + PASSWORD)));
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        rig.vault.storeCredential("u1", "OPENWRT_PASS", PASSWORD);
+        String session = session(rig);
+
+        rig.cloud.think.add(call("openwrt_audit", Map.of()));
+        rig.cloud.think.add(respond("{{1}}"));
+        AgentResult audit = rig.turn(session, "audit the routers");
+        assertEquals(AgentResult.TerminationReason.COMPLETED, audit.terminationReason(), audit.response());
+        assertEquals(AgentLoop.PRIVATE_RESULT_HEADER + AUDIT.replace(PASSWORD, "«vault:OPENWRT_PASS»"), audit.ownerText());
+
+        rig.cloud.think.add(call("lan_inventory", Map.of()));
+        rig.cloud.think.add(respond("{{1}}"));
+        AgentResult inventory = rig.turn(session, "and the inventory?");
+        assertEquals("main router, admin password «vault:OPENWRT_PASS»", inventory.response());
+
+        for (var row : rig.jdbc.queryForList("SELECT content, private_content FROM conversations")) {
+            assertFalse(String.valueOf(row.get("content")).contains(PASSWORD), "saved for later prompts: " + row);
+            assertFalse(String.valueOf(row.get("private_content")).contains(PASSWORD), "saved for the owner's screen: " + row);
+        }
+        // Mutation: TaskEnding returns a finished answer untouched -> the password in both rows.
+    }
+
+    @Test
+    @DisplayName("an exception whose message quotes a private result ends without that message")
+    void anExceptionQuotingAPrivateResultIsWithheld(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(tool("openwrt_audit", List.of("OPENWRT_PASS"), p -> AUDIT)));
+        rig.cloud.think.add(call("openwrt_audit", Map.of()));
+        rig.cloud.think.add(c -> { throw new IllegalStateException("could not read the reply near: " + AUDIT.substring(0, 160)); });
+
+        AgentResult r = rig.turn(session(rig), "audit the routers");
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
+        assertTrue(r.response().startsWith("**Stopped:** an internal error: IllegalStateException (its message quotes "
+                + "a private result; it is in the log).\n\n"), r.response());
+        String audit = PrivateIndex.normalise(AUDIT);
+        String said = PrivateIndex.normalise(r.response());
+        for (int i = 0; i + PrivateIndex.WINDOW <= audit.length(); i++) {
+            assertFalse(said.contains(audit.substring(i, i + PrivateIndex.WINDOW)), "the ending quotes the audit at " + i);
+        }
+        // Mutation: never withhold the message -> the audit's first lines are in the chat.
+    }
+
+    @Test
+    @DisplayName("a Stop during the last step ends the task as stopped, not as out of steps")
+    void aStopInTheLastStepIsAStop(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(tool("slow_scan", List.of(), p -> {
+            try {
+                Thread.sleep(800);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "scanned";
+        })));
+        rig.config.getTasks().setMaxPlanSteps(1);
+        rig.cloud.think.add(call("slow_scan", Map.of()));
+        var stop = new Thread(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                return;
+            }
+            rig.cancellation.requestAll("u1", "you pressed Stop");
+        });
+        stop.start();
+        AgentResult r = rig.turn(session(rig), "scan the network");
+        stop.join();
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** you pressed Stop.\n\n"), r.response());
+        assertFalse(r.response().contains("continue"), "no invitation to carry on after Stop: " + r.response());
+        // Mutation: fall through to the step limit -> MAX_STEPS, "Reply continue".
+    }
+
+    @Test
+    @DisplayName("a skill_create step is timed from its first code call: the writing is most of what it takes")
+    void aSkillCreateStepIncludesItsCode(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.think.add(call(AgentAction.SKILL_CREATE, Map.of("name", "openwrt_audit",
+                "description", "Audit every OpenWrt router.", "parameters", "{}")));
+        rig.cloud.codegen.add(silent(400, SkillCodegenTest.finished(SkillCodegenTest.module(""))));
+        rig.cloud.think.add(respond("done"));
+        AgentResult r = rig.turn(session(rig), "build an audit skill");
+        long ms = rig.jdbc.queryForObject("SELECT json_extract(details, '$.durationMs') FROM events "
+                + "WHERE event_type = 'step' AND task_id = ?", Long.class, r.taskId());
+        assertTrue(ms >= 400, "the step took " + ms + " ms, and its code call alone 400");
+        // Mutation: start the clock after the code is written -> a few ms.
+    }
+
+    @Test
+    @DisplayName("recall writes the handles of past tasks as words: here they would name this task's results")
+    void recalledHandlesAreWords(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "aaaa0001",
+                "Task: router audit\nResponse: see {{2}} and {{3.body_text}}", true, List.of());
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "router")));
+        rig.cloud.think.add(respond("ok"));
+        rig.turn(session(rig), "what did the audit find?");
+        String observed = sentTo(rig, 1);
+        assertTrue(observed.contains("Response: see result 2 and result 3.body_text"), observed);
+        // Mutation: hand the episodes over as stored -> "see {{2}}", this task's second result.
+    }
+
+    @Test
+    @DisplayName("recall names the words it did not look for, and says so when there is none to look for")
+    void recallSaysWhatItLookedFor(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "aaaa0001",
+                "Task: reboot the AP in the hall", true, List.of());
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "the AP")));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "the and")));
+        rig.cloud.think.add(respond("ok"));
+        rig.turn(session(rig), "when did I last reboot the AP?");
+        String observed = sentTo(rig, 2);
+        assertTrue(observed.contains("1 past task matches 'the AP' (not looked for: the — words and letters nearly "
+                + "every task has), most relevant first:"), observed);
+        assertTrue(observed.contains("Task: reboot the AP in the hall"), observed);
+        assertTrue(observed.contains("ERROR: 'the and' has no word to look for (not looked for: the, and"), observed);
+    }
+
+    @Test
+    @DisplayName("a task stopped before it began -- a file, and no local model -- leaves no episode")
+    void anEarlyStopIsNotRemembered(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        String pdf = rig.files.store("u1", "statement.pdf", "application/pdf",
+                new java.io.ByteArrayInputStream("%PDF-1.7 binary".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        AgentResult r = rig.loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf));
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
+        assertEquals(1, rig.jdbc.queryForObject(
+                "SELECT count(*) FROM events WHERE event_type = 'task_completed' AND task_id = ?", Integer.class, r.taskId()));
+        assertEquals(0, rig.jdbc.queryForObject("SELECT count(*) FROM agent_memory WHERE memory_type = 'episode'",
+                Integer.class), "nothing was done, so there is nothing to remember");
+    }
+
+    @Test
+    @DisplayName("an empty vault: the model is told the owner types /cred set, not to ask for values")
+    void anEmptyVaultPointsAtCredSet(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.think.add(call(AgentAction.CREDENTIAL_MANAGE, Map.of("action", "list")));
+        rig.cloud.think.add(respond("ok"));
+        rig.turn(session(rig), "which credentials do I have?");
+        String observed = sentTo(rig, 1);
+        assertTrue(observed.contains("No credentials stored. Ask the user to type this in the chat"), observed);
+        assertTrue(observed.contains("/cred set KEY <value>"), observed);
+    }
+
+    @Test
+    @DisplayName("the task's message is recorded whole: its task_completed row and its episode")
+    void theMessageIsRecordedWhole(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        String message = "check every host on the network " + "and each open port with its service ".repeat(12);
+        rig.cloud.think.add(respond("done"));
+        AgentResult r = rig.turn(session(rig), message);
+        assertEquals(message, rig.jdbc.queryForObject(
+                "SELECT summary FROM events WHERE event_type = 'task_completed' AND task_id = ?", String.class, r.taskId()));
+        assertEquals("Task: " + message + "\nSteps: 0\nOutcome: COMPLETED\nResponse: done", rig.jdbc.queryForObject(
+                "SELECT content FROM agent_memory WHERE memory_type = 'episode' AND task_id = ?", String.class, r.taskId()));
+    }
+
+    @Test
+    @DisplayName("what the activity panel and debug mode are sent is whole: a failure, a result, the prompt")
+    void theActivityIsWhole(@TempDir Path tmp) throws Exception {
+        String failure = "Traceback (most recent call last): " + "frame ".repeat(100);
+        String big = "row ".repeat(15_000);
+        var rig = new LoopRig(tmp, List.of(failing("probe", failure), tool("dump", List.of(), p -> big)));
+        rig.debug.toggle("u1");
+        var seen = rig.statuses();
+        String message = "inspect the hosts " + "and every service on them ".repeat(40);
+        rig.cloud.think.add(call("probe", Map.of()));
+        rig.cloud.think.add(call("dump", Map.of()));
+        rig.cloud.think.add(respond("done"));
+        rig.turn(session(rig), message);
+
+        assertTrue(seen.stream().anyMatch(m -> m.type() == Type.WARNING && m.text().equals("probe ✗ " + failure)),
+                "the failure's status line");
+        assertTrue(seen.stream().anyMatch(m -> m.data() != null && "observe".equals(m.data().get("category"))
+                && big.equals(m.data().get("output"))), "the result in the observe detail");
+        assertTrue(seen.stream().anyMatch(m -> m.data() != null && "think".equals(m.data().get("category"))
+                && String.valueOf(m.data().get("prompt")).contains(message)), "the prompt in the think detail");
+        assertTrue(seen.stream().anyMatch(m -> m.type() == Type.DEBUG && m.text().startsWith("TOOL RESULT [dump] OK (")
+                && m.text().endsWith("ms)\n" + big)), "the result in debug mode");
+        // Mutations: put back the 100-character status cut, the 1,000 and 800-character detail
+        // cuts, or the 50,000-character debug cut.
     }
 }

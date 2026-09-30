@@ -16,6 +16,7 @@ import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.observability.TaskTraceService;
+import com.ownclaw.privacy.PrivateIndex;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -270,15 +271,37 @@ public class AgentLoop {
     }
 
     /**
-     * Why an exception ended the task: its type, and its message unless the canary finds a
-     * private result's text in it -- the ending is read by later prompts, and the log has it.
+     * Why an exception ended the task: its type, and its message unless it holds a private
+     * result's text the gateway would not send ({@link #leakIn}) -- the ending is read by later
+     * prompts, and the log has it.
      */
     static String internalError(RuntimeException e, AgentContext context) {
         String message = e.getMessage();
-        boolean quotesPrivate = message != null && context.privateIndex().firstHitIn(message) != null;
+        boolean quotesPrivate = leakIn(context, message) != null;
         return "an internal error: " + e.getClass().getSimpleName()
                 + (message == null ? "" : quotesPrivate ? " (its message quotes a private result; it is in the log)"
                         : ": " + message);
+    }
+
+    /**
+     * The first run of a PRIVATE result in {@code text} that the gateway would refuse to send, or
+     * null: the gateway's own question of a part -- every run the canary finds, each excused when
+     * {@link AgentContext#isAllowedLeak} says the cloud was already given it -- asked of text kept
+     * for later prompts, where no canary knows this task's results. So what is withheld here is
+     * exactly what the door would stop: a public digest that a later private confirmation quotes
+     * is not.
+     */
+    static PrivateIndex.Hit leakIn(AgentContext context, String text) {
+        if (text == null) return null;
+        String normalised = PrivateIndex.normalise(text);
+        PrivateIndex.Hit hit;
+        for (int from = 0; (hit = context.privateIndex().firstHitInNormalised(normalised, from)) != null;
+             from = hit.offset() + 1) {
+            String window = normalised.substring(hit.offset(),
+                    Math.min(hit.offset() + hit.length(), normalised.length()));
+            if (!context.isAllowedLeak(hit.handle(), window)) return hit;
+        }
+        return null;
     }
 
     /**
@@ -348,12 +371,13 @@ public class AgentLoop {
     }
 
     /**
-     * The chat a task came from: every message of the session its own message was saved in,
+     * The chat a task came from: the conversation of the session its own message was saved in
+     * -- every question before it and every answer so far ({@link ConversationService#contextOf}),
      * oldest first, each whole -- and, under the answer of each earlier task there that finished,
      * the record of what that task did ({@code recordOf}; see {@link TaskRecord}). A task that
      * ended otherwise answered with its ending, which already carries the record.
      * <p>
-     * Every message, because a message left out is one the next task cannot know was said: the
+     * All of it, because a message left out is one the next task cannot know was said: the
      * window this replaced showed at most fifteen, and older ones only as the local model's
      * 200-word summary of their first 1,500 characters each. A chat longer than the model's
      * context window ends its task with the provider's plain message that it is.
@@ -460,6 +484,9 @@ public class AgentLoop {
      * does not place its handle -- "Done, see above" is a likely reply from a model that never
      * saw the answer -- because relying on the cloud to remember is an instruction, and this is
      * the one answer the task exists for.
+     * <p>
+     * Every result an answer shows in full is marked on the context ({@link AgentContext#markShown}),
+     * so the ending of a task that asked a question does not show it a second time.
      */
     static Answer answerFor(String written, AgentContext ctx) {
         String text = written == null ? "" : written;
@@ -486,6 +513,8 @@ public class AgentLoop {
                 // The cloud was shown this text already; nothing here is new to it.
                 response = value;
             }
+            // Only the whole result: a field of it ({{2.body_text}}) shows part of it.
+            if (ArtifactRef.parse(text).field() == null) ctx.markShown(placed);
         }
 
         return withLocalAnswers(new Answer(response, ownerText, null), placed, ctx);
@@ -502,6 +531,7 @@ public class AgentLoop {
         for (Artifact x : ctx.artifacts()) {
             if ("local_answer".equals(x.tool()) && (placed == null || placed.n() != x.n())) {
                 owed.append("\n\n").append(PRIVATE_HEADER).append(x.output());
+                ctx.markShown(x);
             }
         }
         if (owed.length() == 0) return a;
@@ -1139,6 +1169,11 @@ public class AgentLoop {
             injectReflection(context, action);
         }
 
+        // A stop that came during the last step -- the owner's, the ops API's, the stall
+        // watchdog's -- is how this task ended, not the step limit: ended as MAX_STEPS, its
+        // ending invited "continue" to the owner who had just pressed Stop.
+        if (context.isCancelled()) return stopped(context);
+
         // maxSteps, not completed: the task did NOT finish and must not be stored as a
         // successful episode. Its ending invites the owner to reply "continue".
         log.warn("Task {} hit max steps ({})", context.taskId(), maxSteps);
@@ -1261,6 +1296,9 @@ public class AgentLoop {
         return Artifact.asObservation(artifact, result, durationMs);
     }
 
+    /** What skill_manage can do: the cases of {@link #executeSkillManage}. */
+    static final List<String> SKILL_MANAGE_ACTIONS = List.of("read", "delete", "list", "analyze");
+
     /**
      * Dispatch a skill_manage action to the appropriate SkillManager method.
      */
@@ -1273,7 +1311,7 @@ public class AgentLoop {
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
             case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress());
-            default -> "ERROR: Unknown action '" + action + "'. Use one of: read, delete, list, analyze";
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
     }
 
@@ -1393,26 +1431,35 @@ public class AgentLoop {
     }
 
     /**
-     * memory_manage action=recall: every past task of this user that shares a word with the
-     * query, whole, most relevant first. Asked for, where "Past Experience" used to put the
-     * three best keyword matches into every task's prompt unasked -- unrelated tasks from other
-     * chats, and failures filed as [SUCCESS]. Handles in them named another task's results, so
-     * they are written as words.
+     * memory_manage action=recall: every past task of this user that has a word of the query,
+     * whole, most relevant first. Asked for, where "Past Experience" used to put the three best
+     * keyword matches into every task's prompt unasked -- unrelated tasks from other chats, and
+     * failures filed as [SUCCESS]. The words that were not looked for are named, so "no match" is
+     * never said of a word nobody looked for. Handles in the tasks named another task's results,
+     * so they are written as words.
      */
     private String recall(String userId, String query) {
         if (query == null || query.isBlank()) {
             return "ERROR: 'query' parameter is required for action='recall': words that appear "
                     + "in the task to find.";
         }
-        List<AgentMemory.MemoryEntry> found;
+        AgentMemory.Recall recalled;
         try {
-            found = memory.recallEpisodes(userId, query);
+            recalled = memory.recallEpisodes(userId, query);
         } catch (Exception e) {
             return "ERROR: could not read past tasks: " + e.getMessage();
         }
-        if (found.isEmpty()) return "No past task matches '" + query + "'.";
+        String skipped = recalled.skipped().isEmpty() ? ""
+                : " (not looked for: " + String.join(", ", recalled.skipped())
+                        + " — words and letters nearly every task has)";
+        if (recalled.words().isEmpty()) {
+            return "ERROR: '" + query + "' has no word to look for" + skipped + ". Ask with words "
+                    + "the task itself would contain: a host, a name, a skill, a term.";
+        }
+        List<AgentMemory.MemoryEntry> found = recalled.episodes();
+        if (found.isEmpty()) return "No past task matches '" + query + "'" + skipped + ".";
         var sb = new StringBuilder(found.size() + (found.size() == 1 ? " past task matches '" : " past tasks match '"))
-                .append(query).append("', most relevant first:");
+                .append(query).append("'").append(skipped).append(", most relevant first:");
         for (int i = 0; i < found.size(); i++) {
             AgentMemory.MemoryEntry e = found.get(i);
             sb.append("\n\n--- ").append(i + 1).append(" of ").append(found.size()).append(", ")
@@ -1969,10 +2016,13 @@ public class AgentLoop {
 
             String code = extractPythonCode(reply.content());
             if (code == null || !code.contains("def run(")) {
-                log.warn("Skill '{}': a reply of {} chars held no Python code with def run(params)",
-                        name, reply.content() == null ? 0 : reply.content().length());
-                return Codegen.failed("the reply for '" + name + "' held no Python code with "
-                        + "def run(params), so nothing was created.");
+                log.warn("Skill '{}': a reply of {} chars held {}", name,
+                        reply.content() == null ? 0 : reply.content().length(),
+                        code == null ? "no Python code" : "Python code without def run(params)");
+                return Codegen.failed(code == null
+                        ? "the reply for '" + name + "' held no Python code, so nothing was created."
+                        : "the reply for '" + name + "' held Python code but no def run(params), which "
+                                + "every skill needs, so nothing was created.");
             }
             String syntaxError = skillManager.checkPythonSyntax(code);
             if (syntaxError == null) {
@@ -2317,6 +2367,12 @@ public class AgentLoop {
                 && action.params().get("name") instanceof String skill && SkillManager.isSkillName(skill)) {
             details.put("skill", skill);
         }
+        // And what a skill_manage step did -- one of its actions, or nothing: a skill written and
+        // then deleted was reported as kept.
+        if (action.isSkillManage() && action.params().get("action") instanceof String what
+                && SKILL_MANAGE_ACTIONS.contains(what)) {
+            details.put("skillAction", what);
+        }
         details.put("success", obs.success());
         details.put("durationMs", obs.durationMs());
         details.put("localTokens", context.localTokens());
@@ -2352,10 +2408,10 @@ public class AgentLoop {
         }
         // A delegation's failure text is its own words plus whatever the local model and its
         // server said, which after a private read can quote that data -- so then, none. Nor
-        // when the text holds anything the canary would refuse to send: a PUBLIC step can fail
+        // when the text holds anything the gateway would refuse to send: a PUBLIC step can fail
         // quoting a file a delegation wrote private data into.
         boolean withhold = action.isDelegate() && context.localTierReadPrivate()
-                || context.privateIndex().firstHitIn(String.valueOf(obs.output())) != null;
+                || leakIn(context, obs.output()) != null;
         stepOutcome(details, obs, claimed, withhold, context.secretValues());
         return details;
     }

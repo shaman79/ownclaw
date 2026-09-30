@@ -5,16 +5,18 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.stream.Collectors;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 /**
  * SQLite-backed implementation of AgentMemory.
  *
- * Episodic memory is recalled by keyword: every episode that shares a word with the query
+ * Episodic memory is recalled by keyword: every episode that has a word of the query
  * (lightweight, no embeddings). This is effective for the single-user or small-scale scenario
  * and avoids external dependencies for vector search.
  *
@@ -47,9 +49,14 @@ public class SqliteAgentMemory implements AgentMemory {
     }
 
     @Override
-    public List<MemoryEntry> recallEpisodes(String userId, String query) {
-        List<String> keywords = extractKeywords(query);
-        if (keywords.isEmpty()) return List.of();
+    public Recall recallEpisodes(String userId, String query) {
+        var words = new ArrayList<String>();
+        var skipped = new ArrayList<String>();
+        for (String w : queryWords(query)) {
+            (STOP_WORDS.contains(w) || w.codePointCount(0, w.length()) < 2 ? skipped : words).add(w);
+        }
+        if (words.isEmpty()) return new Recall(List.of(), List.copyOf(skipped), List.of());
+        List<Predicate<String>> finders = words.stream().map(SqliteAgentMemory::finder).toList();
         // Scored here rather than in SQL: every episode is compared with every word -- LIKE with
         // two bound parameters per word runs into SQLite's parameter limit on a long query, and
         // lowercases only ASCII, so "Škoda" never matched "škoda". Newest first, and the sort is
@@ -66,15 +73,26 @@ public class SqliteAgentMemory implements AgentMemory {
                 ),
                 userId);
         record Scored(MemoryEntry entry, long relevance) {}
-        return episodes.stream()
+        return new Recall(List.copyOf(words), List.copyOf(skipped), episodes.stream()
                 .map(e -> {
                     String text = (String.join(",", e.tags()) + " " + e.content()).toLowerCase(Locale.ROOT);
-                    return new Scored(e, keywords.stream().filter(text::contains).count());
+                    return new Scored(e, finders.stream().filter(f -> f.test(text)).count());
                 })
                 .filter(s -> s.relevance() > 0)
                 .sorted(Comparator.comparingLong(Scored::relevance).reversed())
                 .map(Scored::entry)
-                .toList();
+                .toList());
+    }
+
+    /**
+     * Whether an episode's lowercased text has this word: anywhere for a word of three
+     * characters or more -- "audit" finds "audited" -- and as a whole word for one of two, which
+     * would be found inside too many others: "ap" is in "map", "ip" in "script".
+     */
+    private static Predicate<String> finder(String word) {
+        if (word.codePointCount(0, word.length()) > 2) return text -> text.contains(word);
+        Pattern whole = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}])");
+        return text -> whole.matcher(text).find();
     }
 
     @Override
@@ -135,33 +153,29 @@ public class SqliteAgentMemory implements AgentMemory {
         }
     }
 
-    /**
-     * The words of a query worth looking for: every distinct word of three or more characters
-     * that is not a stop word, lowercased.
-     */
-    private List<String> extractKeywords(String query) {
+    /** Words nearly every task has: looked for, they would find every episode. */
+    private static final java.util.Set<String> STOP_WORDS = java.util.Set.of(
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "can", "shall", "to", "of", "in", "for",
+            "on", "with", "at", "by", "from", "as", "into", "through", "during",
+            "before", "after", "above", "below", "between", "and", "but", "or",
+            "not", "no", "nor", "so", "yet", "both", "either", "neither", "each",
+            "every", "all", "any", "few", "more", "most", "some", "such", "than",
+            "too", "very", "just", "about", "up", "out", "if", "then", "else",
+            "when", "where", "why", "how", "what", "which", "who", "whom", "this",
+            "that", "these", "those", "i", "me", "my", "we", "our", "you", "your",
+            "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
+            "please", "want", "need", "like", "get", "make", "help"
+    );
+
+    /** The distinct words of a query, lowercased, in order. */
+    private static List<String> queryWords(String query) {
         if (query == null || query.isBlank()) return List.of();
-
-        var stopWords = java.util.Set.of(
-                "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-                "have", "has", "had", "do", "does", "did", "will", "would", "could",
-                "should", "may", "might", "can", "shall", "to", "of", "in", "for",
-                "on", "with", "at", "by", "from", "as", "into", "through", "during",
-                "before", "after", "above", "below", "between", "and", "but", "or",
-                "not", "no", "nor", "so", "yet", "both", "either", "neither", "each",
-                "every", "all", "any", "few", "more", "most", "some", "such", "than",
-                "too", "very", "just", "about", "up", "out", "if", "then", "else",
-                "when", "where", "why", "how", "what", "which", "who", "whom", "this",
-                "that", "these", "those", "i", "me", "my", "we", "our", "you", "your",
-                "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
-                "please", "want", "need", "like", "get", "make", "help"
-        );
-
         return Arrays.stream(query.toLowerCase(Locale.ROOT).split("[\\s,.;:!?()\\[\\]{}\"']+"))
-                .filter(w -> w.length() > 2)
-                .filter(w -> !stopWords.contains(w))
+                .filter(w -> !w.isEmpty())
                 .distinct()
-                .collect(Collectors.toList());
+                .toList();
     }
 
     /**

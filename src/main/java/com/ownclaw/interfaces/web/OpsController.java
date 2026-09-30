@@ -556,9 +556,10 @@ public class OpsController {
         }
         return ResponseEntity.ok(Map.of("cancelRequested", true, "userId", userId,
                 "scope", taskId != null && !taskId.isBlank() ? taskId : "all tasks for this user",
-                "caveat", "Cancellation is observed inside a step as well as between them: a "
-                        + "running tool or delegation polls it, and the task's think, code-writing "
-                        + "and analysis calls end at the next event of their streamed reply. A call "
+                "caveat", "Cancellation is observed inside a step as well as between them: the "
+                        + "task's think, code-writing and analysis calls end at the next event of "
+                        + "their streamed reply, and a delegation stops before its next step. A "
+                        + "running skill is not interrupted: the task stops when it returns. A call "
                         + "that has gone silent ends only at its read timeout."));
     }
 

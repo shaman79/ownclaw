@@ -81,6 +81,45 @@ class ChatContextTest {
     }
 
     @Test
+    @DisplayName("a question typed after the task's own is left out; an answer that came while it waited is read")
+    void onlyWhatWasSaidBeforeIt(@TempDir Path tmp) throws Exception {
+        var db = db(tmp);
+        String session = db.conversations().createSession("u1", "Network");
+        db.conversations().saveMessage("u1", session, "user", "EARLIER question");
+        db.conversations().saveMessage("u1", session, "user", "QUEUED question, still running");
+        String current = db.conversations().saveMessage("u1", session, "user", "CURRENT question");
+        db.conversations().saveMessage("u1", session, "user", "LATER question, typed while CURRENT waited");
+        db.conversations().saveMessage("u1", session, "assistant", "QUEUED answer", List.of(), "a1b2c3d4");
+
+        String shown = contextOf(db, current);
+        assertEquals("### The conversation so far\nUSER: EARLIER question\nUSER: QUEUED question, still running"
+                + "\nASSISTANT: QUEUED answer", shown);
+        // Mutations: read every row of the session -> the later question is presented as asked
+        // before this one; read only the rows before this one -> the answer the owner's follow-up
+        // builds on is missing.
+    }
+
+    @Test
+    @DisplayName("a command's reply is not the conversation: /files names files, and none of it goes to the cloud")
+    void commandRepliesStayOut(@TempDir Path tmp) throws Exception {
+        var db = db(tmp);
+        String session = db.conversations().createSession("u1", "Statements");
+        db.conversations().saveMessage("u1", session, "user", "summarise my statement");
+        db.conversations().saveMessage("u1", session, "assistant", AgentLoop.PRIVATE_NOTE);
+        // What the chat kept of a command before replies stopped being saved, and what the setup
+        // wizard still keeps.
+        db.conversations().saveMessage("u1", session, "system",
+                "### Uploaded files\n- `f1` vypis_123456789.pdf (15 B, 2026-09-30)");
+        String asked = db.conversations().saveMessage("u1", session, "user", "and last month's?");
+
+        String shown = contextOf(db, asked);
+        assertFalse(shown.contains("vypis") || shown.contains("123456789") || shown.contains("SYSTEM"),
+                "a file's name went into a cloud prompt: " + shown);
+        assertTrue(shown.contains("USER: summarise my statement\nASSISTANT: " + AgentLoop.PRIVATE_NOTE), shown);
+        // Mutation: read role != 'status' again -> the /files listing, file name and all.
+    }
+
+    @Test
     @DisplayName("a chat task sees its chat; an unattended one, and one no message came with, do not")
     void onlyChatTasksSeeTheChat(@TempDir Path tmp) throws Exception {
         var db = db(tmp);

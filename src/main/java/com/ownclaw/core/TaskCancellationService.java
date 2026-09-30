@@ -62,8 +62,11 @@ public class TaskCancellationService {
     /**
      * Why this task should stop, or null when nothing has asked it to.
      *
-     * @param taskStartedAtMs when this task began; a user-wide Stop only covers tasks that were
-     *                        already running when it was pressed
+     * @param taskStartedAtMs when this task began -- or, for one still waiting in the queue, when
+     *                        it was queued: a user-wide Stop covers only what was already there
+     *                        when it came. Asked with the start alone, work that was waiting when
+     *                        Stop was pressed would start after it, read as new work, and run --
+     *                        though the owner queued it, changed his mind and pressed Stop.
      */
     public String why(String userId, String taskId, long taskStartedAtMs) {
         String own = taskId == null ? null : stoppedTasks.get(taskId);
@@ -75,20 +78,6 @@ public class TaskCancellationService {
     /** Whether this task should stop, given when it started. */
     public boolean isCancelled(String userId, String taskId, long taskStartedAtMs) {
         return why(userId, taskId, taskStartedAtMs) != null;
-    }
-
-    /**
-     * When this user last pressed Stop, or null if they never have.
-     * <p>
-     * Exposed so the queue can drop work that was already waiting when Stop was pressed.
-     * {@link #isCancelled} cannot answer that: it compares against when a task STARTED, and a
-     * queued task starts after the Stop, so it looks like new work and runs. From the user's
-     * side it is not new work — they queued it, then changed their mind, and watched it start
-     * anyway.
-     */
-    public Long stoppedAt(String userId) {
-        Stop all = userId == null ? null : stoppedAll.get(userId);
-        return all == null ? null : all.atMs();
     }
 
     /**

@@ -105,7 +105,8 @@ public class AgentContext {
      * <p>
      * Every check inside a step reads this -- the per-step check in {@code LocalExecutor}, the
      * {@code context::isCancelled} supplier handed to every tool, the {@link #progress} hook of
-     * every model call -- so a stop reaches a running step, not only the top of the next one.
+     * the task's model calls -- so a stop reaches a running step wherever that step checks, not
+     * only the top of the next one. A skill does not check: it runs until it returns.
      */
     public boolean isCancelled() {
         if (stalled != null) return true;
@@ -344,6 +345,19 @@ public class AgentContext {
         return artifacts.isEmpty() ? java.util.Optional.empty()
                 : java.util.Optional.of(artifacts.get(artifacts.size() - 1));
     }
+
+    /** See {@link #markShown}. */
+    private final java.util.Set<Integer> shown = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * The task's answer or question shows this result in full: the one it placed, and each local
+     * answer it carries for the owner ({@code AgentLoop.answerFor}). The ending of a task waiting
+     * for an answer then lists it as shown above instead of repeating it.
+     */
+    public void markShown(Artifact a) { shown.add(a.n()); }
+
+    /** Whether the task's answer or question shows this result in full. See {@link #markShown}. */
+    public boolean isShown(Artifact a) { return shown.contains(a.n()); }
 
     public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }
 

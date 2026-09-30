@@ -25,14 +25,25 @@ public interface AgentMemory {
     void storeEpisode(String userId, String taskId, String summary, boolean outcome, List<String> tags);
 
     /**
-     * Every episode of this user that shares a word with the query, whole: the most words in
-     * common first, and the newest first among equals. None when the query has no word to look
-     * for. Asked for by the agent (memory_manage action=recall), never put into a prompt unasked.
+     * Every episode of this user that has a word of the query, whole: the most words in common
+     * first, and the newest first among equals. Asked for by the agent (memory_manage
+     * action=recall), never put into a prompt unasked.
      *
      * @param userId the user to search memories for
      * @param query  words to look for
      */
-    List<MemoryEntry> recallEpisodes(String userId, String query);
+    Recall recallEpisodes(String userId, String query);
+
+    /**
+     * What a recall looked for, and what it found.
+     *
+     * @param words    the words of the query that were looked for, lowercased, in order
+     * @param skipped  the words that were not: ones nearly every task has -- "the", "and", a
+     *                 single letter -- which would find every episode; so the caller can say so
+     * @param episodes every episode with at least one of {@code words}, as above; none when
+     *                 there is no word to look for
+     */
+    record Recall(List<String> words, List<String> skipped, List<MemoryEntry> episodes) {}
 
     /**
      * Store a semantic fact — a distilled piece of knowledge.

@@ -3,13 +3,15 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.AgentResult.TerminationReason;
 import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.EgressRefused;
+import com.ownclaw.privacy.PrivateIndex;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * How a task that did not finish ends, written by code: why it stopped, what it did (its
- * {@link TaskRecord}), what it produced and where each result is now, and what comes next.
+ * How a task ends, written by code: for a task that did not finish, why it stopped, what it did
+ * (its {@link TaskRecord}), what it produced and where each result is now, and what comes next.
  * <p>
  * The ending is the task's chat row, so it is also what the next turn reads about the task and
  * what its episode stores. Each exit of the loop used to type its own sentence -- "Task was
@@ -20,7 +22,11 @@ import java.util.Map;
  * Two texts. {@code response}, which every later prompt, the history and the episode read, holds
  * each PUBLIC result in full and no PRIVATE one. {@code ownerText}, which only the owner's own
  * screens show, is the same with the private results in full after it. Both are scrubbed of vault
- * values and name results in words, never by handle ({@link TaskRecord#inWords}).
+ * values -- a finished answer's too, the one thing done to it. The ending's own lines, and the
+ * question of a task waiting for an answer, name results in words, never by handle
+ * ({@link TaskRecord#inWords}): the next task, which reads them and carries the work on, numbers
+ * its results from 1 again, so a handle copied from here would resolve to one of those. A result
+ * quoted in full is quoted as it was written -- a template's {{1}} is its text, not a handle.
  */
 final class TaskEnding {
 
@@ -28,31 +34,31 @@ final class TaskEnding {
 
     /**
      * The ending of {@code r}, written around the loop's why ({@code r.response()}); a question
-     * keeps the question on top. A finished answer is returned as it is.
+     * keeps the question on top. A finished answer is returned as the model placed it, with vault
+     * values scrubbed out.
      *
      * @param trace the task's rows as {@code TaskTraceService} parses them -- the steps it did
      */
     static AgentResult apply(AgentResult r, AgentContext ctx, Map<String, Object> trace) {
-        if (r.terminationReason() == TerminationReason.COMPLETED) return r;
+        if (r.terminationReason() == TerminationReason.COMPLETED) {
+            return texts(r, scrubbed(r.response(), ctx), scrubbed(r.ownerText(), ctx));
+        }
         boolean question = r.awaitingUser();
         var ending = new StringBuilder();
-        if (!question) ending.append("**Stopped:** ").append(sentence(r.response())).append("\n\n");
-        String did = did(ctx, trace);
-        ending.append(did);
+        if (!question) ending.append(words("**Stopped:** " + sentence(r.response()) + "\n\n", ctx));
+        ending.append(words(did(ctx, trace), ctx));
         var privateResults = new StringBuilder();
-        ending.append(produced(ctx, trace, (r.ownerText() == null ? "" : r.ownerText()) + did, privateResults));
+        ending.append(produced(ctx, trace, privateResults));
         String next = next(r.terminationReason());
         if (next != null) {
             ending.append("\n\n**Next:** ").append(next)
                   .append(" Every step is on this task's page: task ").append(ctx.taskId()).append('.');
         }
 
-        String response = question ? r.response() + "\n\n" + ending : ending.toString();
-        String ownerText = question && r.ownerText() != null ? r.ownerText() + "\n\n" + ending : null;
+        String response = question ? words(r.response(), ctx) + "\n\n" + ending : ending.toString();
+        String ownerText = question && r.ownerText() != null ? words(r.ownerText(), ctx) + "\n\n" + ending : null;
         if (privateResults.length() > 0) ownerText = (ownerText != null ? ownerText : response) + privateResults;
-        return new AgentResult(r.success(), chatSafe(response, ctx), r.trajectory(), r.totalSteps(),
-                r.totalDurationMs(), r.terminationReason(), r.taskId(),
-                ownerText == null ? null : chatSafe(ownerText, ctx));
+        return texts(r, response, ownerText);
     }
 
     /**
@@ -95,42 +101,50 @@ final class TaskEnding {
 
     /**
      * Every result of the task and where it is now, then the public ones in full; the private
-     * ones in full go to {@code privateResults}, for the owner's text only. A result whose text is
-     * already above -- the question showed it, or it is how a step failed -- is not repeated. A
-     * file the owner sent is described, never repeated: he has it.
+     * ones in full go to {@code privateResults}, for the owner's text only.
+     * <p>
+     * A result already on the screen is not repeated: one the question placed, or the text of a
+     * failed step, which its line in "What it did" shows -- when the text there is exactly the
+     * result's, which it is not when the result holds what reads as a handle, written above in
+     * words. Only those: a result that merely occurs somewhere in the text above (a count of 3 in
+     * "3 steps") is still shown. A file the owner sent is described, never repeated: he has it.
      */
-    private static String produced(AgentContext ctx, Map<String, Object> trace, String above,
-                                   StringBuilder privateResults) {
+    private static String produced(AgentContext ctx, Map<String, Object> trace, StringBuilder privateResults) {
+        Set<String> failures = TaskRecord.reasons(trace);
         var list = new StringBuilder();
         var publicResults = new StringBuilder();
         for (Artifact a : ctx.artifacts()) {
             String name = "result " + a.n() + " (" + a.tool() + ")";
+            String heading = "**" + name + (a.succeeded() ? "" : ", failed") + ":**\n\n";
+            String text = scrubbed(a.output(), ctx);
             list.append("\n- ").append(name).append(": ").append(a.succeeded() ? "" : "failed, ")
                 .append(String.format(Locale.ROOT, "%,d chars", a.output().length()))
                 .append(a.isPrivate() ? ", private (" + String.join("; ", a.why()) + ")" : ", public");
+            // The gateway's own question of the text: a run of a private result the cloud was
+            // never given. Such a public result goes where the private one does.
+            PrivateIndex.Hit repeats = a.isPrivate() ? null : AgentLoop.leakIn(ctx, a.output());
             if ("attachment".equals(a.tool()) || a.output().isEmpty()) {
                 list.append('.');
-            } else if (above.contains(a.output()) || above.contains(chatSafe(a.output(), ctx).strip())) {
+            } else if ((ctx.isShown(a) || failures.contains(text)) && TaskRecord.inWords(text).equals(text)) {
                 list.append(" — shown above.");
-            } else if (a.isPrivate() || ctx.privateIndex().firstHitIn(a.output()) != null) {
-                // A public result that repeats a private one's text is kept from the cloud like it.
+            } else if (a.isPrivate() || repeats != null) {
                 list.append(a.isPrivate() ? " — shown to you only, never to the cloud model."
-                        : " — it repeats text of a private result, so it is shown to you only.");
+                        : " — it repeats text of result " + repeats.handle() + " ("
+                                + ctx.artifacts().get(repeats.handle() - 1).tool() + "), which is private, "
+                                + "so it is shown to you only.");
                 privateResults.append("\n\n")
                         .append("local_answer".equals(a.tool()) ? AgentLoop.PRIVATE_HEADER : AgentLoop.PRIVATE_RESULT_HEADER)
-                        .append("**").append(name).append(a.succeeded() ? "" : ", failed").append(":**\n\n")
-                        .append(a.output());
+                        .append(heading).append(text);
             } else {
                 list.append(" — in full below.");
-                publicResults.append("\n\n**").append(name).append(a.succeeded() ? "" : ", failed").append(":**\n\n")
-                        .append(a.output());
+                publicResults.append("\n\n").append(heading).append(text);
             }
         }
-        for (String skill : TaskRecord.skillsCreated(trace)) {
-            list.append("\n- The skill ").append(skill).append(": created, and kept for later tasks.");
+        for (String skill : TaskRecord.skillsKept(trace)) {
+            list.append("\n- The skill ").append(skill).append(": written, and kept for later tasks.");
         }
         return list.length() == 0 ? "\n\n**What it produced:** nothing."
-                : "\n\n**What it produced:**" + list + publicResults;
+                : "\n\n**What it produced:**" + words(list.toString(), ctx) + publicResults;
     }
 
     /** What the owner can do next -- only what is true for this ending. */
@@ -144,8 +158,18 @@ final class TaskEnding {
         };
     }
 
-    /** Scrubbed of vault values, then handles written as words -- in that order, so a value is scrubbed whole. */
-    private static String chatSafe(String text, AgentContext ctx) {
-        return TaskRecord.inWords(CloudGateway.scrub(text, ctx.secretValues()).text());
+    private static AgentResult texts(AgentResult r, String response, String ownerText) {
+        return new AgentResult(r.success(), response, r.trajectory(), r.totalSteps(),
+                r.totalDurationMs(), r.terminationReason(), r.taskId(), ownerText);
+    }
+
+    /** What OwnClaw wrote: scrubbed of vault values, then handles written as words -- in that order, so a value is scrubbed whole. */
+    private static String words(String text, AgentContext ctx) {
+        return TaskRecord.inWords(scrubbed(text, ctx));
+    }
+
+    /** A result, or a finished answer: as it was written but for vault values. */
+    private static String scrubbed(String text, AgentContext ctx) {
+        return text == null ? null : CloudGateway.scrub(text, ctx.secretValues()).text();
     }
 }

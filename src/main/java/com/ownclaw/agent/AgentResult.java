@@ -4,10 +4,12 @@ package com.ownclaw.agent;
  * The final result of an agent execution.
  *
  * @param success        whether the task was completed successfully
- * @param response       the final response message to the user. For every ending but COMPLETED
- *                       and NEEDS_INPUT the loop sets it to why the task stopped, a clause ("you
- *                       pressed Stop"), and {@link TaskEnding} writes the ending around it before
- *                       anything reads it
+ * @param response       the final response message to the user. For every ending of a task the
+ *                       loop ran but COMPLETED and NEEDS_INPUT, the loop sets it to why the task
+ *                       stopped, a clause ("you pressed Stop"), and {@link TaskEnding} writes the
+ *                       ending around it before anything reads it. The queue's own results -- a
+ *                       task dropped before it started, a run that failed outside the loop, a
+ *                       full queue -- are whole sentences the queue writes
  * @param trajectory     the full execution trajectory
  * @param totalSteps     number of action-observation cycles
  * @param totalDurationMs wall-clock time of the entire execution

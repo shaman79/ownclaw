@@ -139,6 +139,8 @@ final class LoopRig {
     final FileStorageService files;
     final EventLogService events;
     final CredentialVault vault;
+    final ChatStatusEmitter emitter = new ChatStatusEmitter();
+    final DebugSessionService debug = new DebugSessionService();
     final AgentLoop loop;
 
     LoopRig(Path dir, List<Tool> tools) throws Exception {
@@ -169,7 +171,6 @@ final class LoopRig {
         config.getMentor().setProvider("anthropic");
         config.getTasks().setStallTimeout(stallTimeoutSec);
         Files.createDirectories(dir.resolve("uploads"));
-        var emitter = new ChatStatusEmitter();
         events = new EventLogService(jdbc);
         files = new FileStorageService(jdbc, config);
         chat = new ConversationService(jdbc);
@@ -183,7 +184,7 @@ final class LoopRig {
         skills = new Skills(curator);
         loop = new AgentLoop(engine.make(registry, config, router),
                 new CriticAgent(registry), registry, emitter, config, router, new SqliteAgentMemory(jdbc),
-                curator, skills, new DebugSessionService(),
+                curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null, null, files);
     }
@@ -194,6 +195,13 @@ final class LoopRig {
         AgentResult r = loop.executeFull("u1", text, false, row, List.of());
         chat.saveMessage("u1", session, "assistant", r.response(), List.of(), r.taskId(), r.ownerText());
         return r;
+    }
+
+    /** Every status the task emits for u1, in order, from now on. */
+    List<ChatStatusEmitter.StatusMessage> statuses() {
+        var seen = new CopyOnWriteArrayList<ChatStatusEmitter.StatusMessage>();
+        emitter.subscribe("u1", seen, seen::add);
+        return seen;
     }
 
     /** Ticks the stall watchdog every 50 ms until closed, as the scheduler does every 30 s. */

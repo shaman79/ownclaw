@@ -1,10 +1,13 @@
 package com.ownclaw.agent;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * What a task did, as OwnClaw recorded it: one line per step, made from the task's rows in
@@ -14,11 +17,11 @@ import java.util.Map;
  * ({@link AgentLoop#loadConversationContext}) -- so the owner, the task page and the next turn
  * read one record, and "what happened?" is answered from it instead of by running the work again.
  * <p>
- * It is made of what the step rows hold: tool and skill names, outcomes, durations, the model
- * calls a step made, each result's label and size -- and, for a failed step whose result was not
- * private, how it failed, with vault values already scrubbed ({@link AgentLoop#stepOutcome}).
- * Nothing else of a result; and never the request or an attachment's name, which other rows of
- * the task hold.
+ * It is made of what the step rows hold: tool and skill names, what a skill_manage step did,
+ * outcomes, durations, the model calls a step made, each result's label and size -- and, for a
+ * failed step whose result was not private, how it failed, with vault values already scrubbed
+ * ({@link AgentLoop#stepOutcome}). Nothing else of a result; and never the request or an
+ * attachment's name, which other rows of the task hold.
  * <p>
  * Results are named in words, never by handle: {{2}} named a result of that task, and in the task
  * that reads the record it names another one, so a handle copied from here would resolve to it.
@@ -59,14 +62,33 @@ final class TaskRecord {
         return maps(trace.get("steps")).size();
     }
 
-    /** The skills the task's skill_create steps wrote, in order. */
-    static List<String> skillsCreated(Map<String, Object> trace) {
-        var out = new ArrayList<String>();
+    /**
+     * The skills the task's skill_create steps wrote and no later step deleted, in the order they
+     * were last written.
+     */
+    static List<String> skillsKept(Map<String, Object> trace) {
+        var kept = new LinkedHashSet<String>();
         for (Map<String, Object> step : maps(trace.get("steps"))) {
-            if (AgentAction.SKILL_CREATE.equals(step.get("tool")) && Boolean.TRUE.equals(step.get("ok"))
-                    && step.get("skill") != null) {
-                out.add(String.valueOf(step.get("skill")));
+            if (!Boolean.TRUE.equals(step.get("ok")) || step.get("skill") == null) continue;
+            String skill = String.valueOf(step.get("skill"));
+            if (AgentAction.SKILL_CREATE.equals(step.get("tool"))) {
+                kept.remove(skill);
+                kept.add(skill);
+            } else if (AgentAction.SKILL_MANAGE.equals(step.get("tool")) && "delete".equals(step.get("skillAction"))) {
+                kept.remove(skill);
             }
+        }
+        return List.copyOf(kept);
+    }
+
+    /**
+     * How each failed step failed, as its row keeps it -- the text its line shows. A result whose
+     * text is one of these is on the screen already.
+     */
+    static Set<String> reasons(Map<String, Object> trace) {
+        var out = new HashSet<String>();
+        for (Map<String, Object> step : maps(trace.get("steps"))) {
+            if (step.get("reason") instanceof String how) out.add(how);
         }
         return out;
     }
@@ -122,12 +144,14 @@ final class TaskRecord {
     }
 
     /**
-     * One step: how it went, what ran, how long, the model calls it made beyond the one that
-     * chose it, what it produced, and how it failed.
+     * One step: how it went, what ran -- for skill_manage, which action on which skill -- how
+     * long, the model calls it made beyond the one that chose it, what it produced, and how it
+     * failed.
      */
     private static String line(Map<String, Object> step, List<Map<String, Object>> calls) {
         var sb = new StringBuilder(Boolean.TRUE.equals(step.get("ok")) ? "✓ " : "✗ ");
         sb.append(step.get("tool"));
+        if (step.get("skillAction") != null) sb.append(' ').append(step.get("skillAction"));
         if (step.get("skill") != null) sb.append(' ').append(step.get("skill"));
         long ms = number(step.get("durationMs"));
         if (ms > 0) sb.append(" · ").append(duration(ms));
