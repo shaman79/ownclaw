@@ -700,6 +700,35 @@ class DelegationBehaviourTest {
     }
 
     @Test
+    @DisplayName("a delegation's local call carries the task's hook: Stop ends it while the model is still loading")
+    void stopEndsASilentLocalCall() throws Exception {
+        var ctx = task();
+        var stop = new java.util.concurrent.atomic.AtomicBoolean();
+        ctx.setExternalCancel(stop::get);
+        var ollama = new com.ownclaw.llm.SilentOllama();
+        var stopper = new Thread(() -> {
+            try {
+                ollama.awaitCall();
+            } catch (InterruptedException e) {
+                return;
+            }
+            stop.set(true);                  // the Stop button...
+            ctx.interruptCall();             // ...and what the loop does on hearing it
+        });
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        long t0 = System.currentTimeMillis();
+        stopper.start();
+        var outcome = executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), ctx);
+        stopper.join();
+
+        assertTrue(System.currentTimeMillis() - t0 < 5_000, "the silence was waited out after Stop");
+        assertTrue(outcome.text().startsWith("Delegation incomplete: Task cancelled during delegation."),
+                outcome.text());
+        // Mutation: a hook of the delegation's own, which holds no cancel -> the silent server
+        // fails the test after 30 s.
+    }
+
+    @Test
     @DisplayName("the owner's status line names the whole goal")
     void theStatusLineIsWhole() {
         var emitter = new ChatStatusEmitter();

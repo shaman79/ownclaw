@@ -104,9 +104,9 @@ public class CommandHandler {
                 // the agent as an ordinary message. The Stop button worked; the documented
                 // command did not.
                 cancellationService.requestAll(userId, "you sent /cancel");
-                yield Optional.of("Cancelling. The task's own model calls end at the next part "
-                        + "of their reply, and a delegation stops before its next step; a skill "
-                        + "that is running is not interrupted, so the task stops when it returns.");
+                yield Optional.of("Cancelling. A model call the task is waiting on ends at once, "
+                        + "and a delegation stops before its next step; a skill that is running is "
+                        + "not interrupted, so the task stops when it returns.");
             }
             case "/status" -> Optional.of(statusText());
             case "/tokens" -> {

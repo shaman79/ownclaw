@@ -79,7 +79,7 @@ class OpenAiProvider implements LlmProvider {
                 .post(RequestBody.create(requestBody(messages, reqConfig, model).toString(), JSON_TYPE))
                 .build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        return StreamedCall.send(httpClient, request, "openai", reqConfig.progress(), response -> {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 int code = response.code();
@@ -93,9 +93,7 @@ class OpenAiProvider implements LlmProvider {
                 throw new LlmException("openai", "HTTP " + response.code() + " with no body", 0, null);
             }
             return read(responseBody.source(), model, reqConfig.progress());
-        } catch (IOException e) {
-            throw new LlmException("openai", "Connection failed: " + e.getMessage(), 0, e);
-        }
+        });
     }
 
     /** The request body for one call. Package-private so a test can see exactly what would be sent. */

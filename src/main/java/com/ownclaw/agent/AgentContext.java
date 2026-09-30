@@ -30,6 +30,8 @@ public class AgentContext {
 
     /** What the stall watchdog stopped this task on, or null. See {@link #stall}. */
     private volatile String stalled;
+    /** How to end the model call this task is waiting on, or null. See {@link #progress}. */
+    private volatile Runnable callInFlight;
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
     private String conversationSummary;
@@ -123,10 +125,23 @@ public class AgentContext {
 
     /**
      * The stall watchdog's stop, with the facts it stopped on: from here {@link #isCancelled()}
-     * is true, and the task ends STALLED saying them. The first facts are kept.
+     * is true, a model call the task is waiting on is ended ({@link #interruptCall}), and the
+     * task ends STALLED saying them. The first facts are kept.
      */
     public void stall(String facts) {
         if (stalled == null) stalled = facts;
+        interruptCall();
+    }
+
+    /**
+     * End the model call this task is waiting on, if it is waiting on one. A stop is otherwise
+     * heard on the next event of the reply ({@link #progress}), and a call that sends nothing --
+     * Ollama loading the model and reading the prompt, a cloud call before its first event --
+     * has no next event: it ran until its read timeout, most of an hour for Ollama.
+     */
+    public void interruptCall() {
+        Runnable cancel = callInFlight;
+        if (cancel != null) cancel.run();
     }
 
     /** What the stall watchdog stopped this task on, or null when it has not. */
@@ -136,12 +151,23 @@ public class AgentContext {
      * The hook for every model call made on this task's behalf ({@code withProgress}): each event
      * of the streamed reply is progress, so the stall watchdog sees a long call that is still
      * answering as alive; and once the task has been stopped, the next event ends the call by
-     * throwing {@code TaskCancelledException}, instead of the stop waiting minutes for it.
+     * throwing {@code TaskCancelledException}, instead of the stop waiting minutes for it. While
+     * the call runs its cancel is kept here, so a stop ends it before any event too
+     * ({@link #interruptCall}); one stopped before the call was under way ends it at once.
      */
     public com.ownclaw.llm.LlmProgress progress() {
-        return () -> {
-            markProgress();
-            if (isCancelled()) throw new com.ownclaw.core.TaskCancellationService.TaskCancelledException(taskId);
+        return new com.ownclaw.llm.LlmProgress() {
+            @Override
+            public void onProgress() {
+                markProgress();
+                if (isCancelled()) throw new com.ownclaw.core.TaskCancellationService.TaskCancelledException(taskId);
+            }
+
+            @Override
+            public void calling(Runnable cancel) {
+                callInFlight = cancel;
+                if (cancel != null && isCancelled()) cancel.run();
+            }
         };
     }
 

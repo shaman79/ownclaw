@@ -106,6 +106,46 @@ class TaskEndToEndTest {
         // Mutation: the watchdog asks through the cancellation service with no mark -> CANCELLED.
     }
 
+    @Test
+    @DisplayName("Stop ends a model call that has sent nothing yet -- a local model still loading -- at once")
+    void stopEndsASilentCall(@TempDir Path tmp) throws Exception {
+        var ollama = new com.ownclaw.llm.SilentOllama();
+        var rig = new LoopRig(tmp, List.of(), 600, ollama.provider());
+        rig.cloud.available = false;         // the local model does the thinking, and is loading
+        var stop = new Thread(() -> {
+            try {
+                ollama.awaitCall();
+            } catch (InterruptedException e) {
+                return;
+            }
+            rig.cancellation.requestAll("u1", "you pressed Stop");
+        });
+        long t0 = System.currentTimeMillis();
+        stop.start();
+        AgentResult r = rig.turn(session(rig), "check the network");
+        stop.join();
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertTrue(System.currentTimeMillis() - t0 < 5_000, "the silence was waited out after Stop");
+        assertTrue(r.response().startsWith("**Stopped:** you pressed Stop.\n\n"), r.response());
+        // Mutation: the Stop request ends no call -> the silent server fails the test after 30 s.
+    }
+
+    @Test
+    @DisplayName("the stall watchdog ends a model call that has sent nothing: STALLED at once, not at the read timeout")
+    void theWatchdogEndsASilentCall(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(), 1, new com.ownclaw.llm.SilentOllama().provider());
+        rig.cloud.available = false;
+        long t0 = System.currentTimeMillis();
+        AgentResult r;
+        try (var ticking = rig.watchdog()) {
+            r = rig.turn(session(rig), "check the network");
+        }
+        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
+        assertTrue(System.currentTimeMillis() - t0 < 6_000, "ended past the 1 s limit, not at a timeout");
+        assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
+    }
+
     static final String PASSWORD = "x7Qp-2Lm-9Rt-Wq4z";
     static final String AUDIT = String.join("\n",
             "# Network audit", "## 192.0.2.1 (main router)", "wireless.guest.ssid='guest-net'",

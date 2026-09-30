@@ -174,7 +174,7 @@ class AnthropicProvider implements LlmProvider {
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
                 .build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        return StreamedCall.send(httpClient, request, "anthropic", reqConfig.progress(), response -> {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 int code = response.code();
@@ -190,9 +190,7 @@ class AnthropicProvider implements LlmProvider {
                 throw new LlmException("anthropic", "HTTP " + response.code() + " with no body", 0, null);
             }
             return read(responseBody.source(), model, modelLimits, reqConfig.progress(), withFallbacks);
-        } catch (IOException e) {
-            throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
-        }
+        });
     }
 
     /**

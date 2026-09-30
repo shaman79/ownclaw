@@ -118,6 +118,9 @@ public class AgentLoop {
         this.scheduledTaskService = scheduledTaskService;
         this.localExecutor = localExecutor;
         this.fileStorage = fileStorage;
+        // A Stop ends the model call a stopped task is waiting on at once, as the stall
+        // watchdog's stop does (AgentContext#stall): see interruptStopped.
+        if (cancellationService != null) cancellationService.onRequest(this::interruptStopped);
     }
 
     /**
@@ -2452,6 +2455,18 @@ public class AgentLoop {
     // ── Stall watchdog ──
 
     /**
+     * End the model call each running task that now reads as stopped is waiting on. Run after
+     * every stop request (TaskCancellationService#onRequest): the task hears the stop on the next
+     * event of the reply, and a call that sends nothing -- a local model still loading, a cloud
+     * call before its first event -- has no next event.
+     */
+    private void interruptStopped() {
+        for (AgentContext ctx : inFlight.values()) {
+            if (ctx.isCancelled()) ctx.interruptCall();
+        }
+    }
+
+    /**
      * Tasks currently inside the loop, so the stall watchdog can see them: a task that hangs
      * hangs INSIDE a step -- in a tool call, or a model call that never returns -- and while it
      * does, no check on its own thread runs.
@@ -2479,11 +2494,12 @@ public class AgentLoop {
      * answering is alive. A task idle past the stall timeout is marked stalled with the facts
      * ({@link AgentContext#stall}): it then reads as stopped wherever it checks -- the top of the
      * next step, the next event of a streamed reply, the supplier a tool polls -- unwinds like a
-     * task the owner stopped, and ends STALLED saying why.
+     * task the owner stopped, and ends STALLED saying why. A model call it is waiting on is ended
+     * too, silent or not: the hook holds the call's cancel.
      *
-     * <p>Cooperative, not a kill switch: a call that has gone silent altogether ends only at its
-     * provider's read timeout, and a tool that does not poll at its own. Interrupting threads
-     * mid-call instead would risk a half-written skill directory or a dangling sandbox process.
+     * <p>Cooperative for everything else: a tool that does not poll runs until it returns.
+     * Interrupting threads mid-call instead would risk a half-written skill directory or a
+     * dangling sandbox process.
      */
     @Scheduled(fixedDelay = 30_000L)
     public void cancelStalledTasks() {

@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.concurrent.CancellationException;
 import java.util.stream.Collectors;
 
 /**
@@ -267,16 +266,12 @@ public class LocalExecutor {
         // starve thinking models, which spend part of the budget reasoning before they answer.
         // format:json and tools are mutually exclusive in Ollama, so JSON mode is only asked for
         // on the text protocol, where it is what holds the output shape.
-        // Every event of the streamed reply shows the task is alive, so a generation that runs
-        // for minutes is not taken for a stall; and a task stopped mid-reply ends the call there
-        // rather than when the model finishes.
+        // The task's own hook, as its think and code calls carry: every event of the streamed
+        // reply shows the task is alive, so a generation that runs for minutes is not taken for
+        // a stall; and a Stop or the watchdog ends the call -- mid-reply, or while the model is
+        // still loading and has sent nothing -- rather than when the model finishes.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
-                .withProgress(() -> {
-                    parentContext.markProgress();
-                    if (parentContext.isCancelled()) {
-                        throw new CancellationException("the task was stopped");
-                    }
-                });
+                .withProgress(parentContext.progress());
 
         for (int step = 0; step < maxSteps; step++) {
             if (parentContext.isCancelled()) {

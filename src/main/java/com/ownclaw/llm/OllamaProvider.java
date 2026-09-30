@@ -47,8 +47,8 @@ public class OllamaProvider implements LlmProvider {
                 // prompt is read at about 100 tokens a second with the model's 262,144-token
                 // window, so a prompt that fills the window is some 47 minutes of silence. An hour
                 // covers that; only a server that has stopped answering is silent for longer.
-                // Stop and the stall watchdog hear from this call only once lines arrive
-                // (LlmProgress), so nothing ends that first silence sooner.
+                // A caller need not wait it out: the call's cancel is handed to its progress
+                // hook (LlmProgress#calling), so Stop and the stall watchdog end it at once.
                 .readTimeout(60, TimeUnit.MINUTES)
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .build());
@@ -118,7 +118,7 @@ public class OllamaProvider implements LlmProvider {
                 .url(endpoint(baseUrl, "/api/chat"))
                 .post(RequestBody.create(body.toString(), JSON))
                 .build();
-        try (Response response = http.newCall(request).execute()) {
+        return StreamedCall.send(http, request, "ollama", progress, response -> {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 String error = responseBody != null ? responseBody.string() : "";
@@ -128,9 +128,7 @@ public class OllamaProvider implements LlmProvider {
                 throw new LlmException("ollama", "HTTP " + response.code() + " with no body", 0, null);
             }
             return read(responseBody.source(), contextLength, progress, mapper);
-        } catch (IOException e) {
-            throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);
-        }
+        });
     }
 
     /** The reply, line by line, until the one with {@code "done": true}. */

@@ -2,8 +2,10 @@ package com.ownclaw.core;
 
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Tracks requests to stop tasks, per task and per user -- and who made each one.
@@ -44,9 +46,23 @@ public class TaskCancellationService {
 
     private record Stop(long atMs, String why) {}
 
+    /** Told after every request: see {@link #onRequest}. */
+    private final List<Runnable> onRequest = new CopyOnWriteArrayList<>();
+
+    /**
+     * Run {@code listener} after every stop request. The agent loop ends the model calls its
+     * stopped tasks are waiting on: a task hears a stop where it checks for one, and a call that
+     * sends nothing -- a local model still loading, a cloud call before its first event -- has
+     * nowhere to check.
+     */
+    public void onRequest(Runnable listener) {
+        onRequest.add(listener);
+    }
+
     /** Stop one specific task, saying why. */
     public void request(String userId, String taskId, String why) {
         if (taskId != null) stoppedTasks.putIfAbsent(taskId, why);
+        onRequest.forEach(Runnable::run);
     }
 
     /**
@@ -57,6 +73,7 @@ public class TaskCancellationService {
      */
     public void requestAll(String userId, String why) {
         if (userId != null) stoppedAll.put(userId, new Stop(System.currentTimeMillis(), why));
+        onRequest.forEach(Runnable::run);
     }
 
     /**
@@ -95,7 +112,8 @@ public class TaskCancellationService {
 
     /**
      * Thrown into a model call when its task has been stopped: the call's progress hook throws
-     * it on the next event of the streamed reply, so a Stop or the stall watchdog ends the call
+     * it on the next event of the streamed reply -- or, for a call ended before any event, when
+     * its provider asks the hook once more -- so a Stop or the stall watchdog ends the call
      * instead of waiting for it to finish. The loop turns it into the task's ending.
      */
     public static class TaskCancelledException extends RuntimeException {

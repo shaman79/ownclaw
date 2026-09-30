@@ -35,4 +35,27 @@ class TaskCancellationServiceTest {
         s.request("u1", "t1", "a stop request from the ops API");
         assertEquals("a stop request from the ops API", s.why("u1", "t1", before), "the task's own request is the more specific");
     }
+
+    @Test
+    @DisplayName("every request, for one task or for all, is heard at once: a silent model call ends on it")
+    void everyRequestIsHeard() {
+        var s = new TaskCancellationService();
+        var heard = new java.util.concurrent.atomic.AtomicInteger();
+        s.onRequest(heard::incrementAndGet);
+        s.request("u1", "t1", "a stop request from the ops API");
+        assertEquals(1, heard.get(), "a stop for one task");
+        s.requestAll("u1", "you pressed Stop");
+        assertEquals(2, heard.get(), "and Stop");
+    }
+
+    @Test
+    @DisplayName("a model call made after the task was stopped is ended as soon as it is under way")
+    void aCallAfterTheStopEndsAtOnce() {
+        // Stop can land between the loop's check and the call: nothing was running to end then.
+        var ctx = new com.ownclaw.agent.AgentContext("u1", "t1", "check the network");
+        ctx.setExternalCancel(() -> true);
+        var ended = new java.util.concurrent.atomic.AtomicBoolean();
+        ctx.progress().calling(() -> ended.set(true));
+        assertTrue(ended.get());
+    }
 }
