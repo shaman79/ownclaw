@@ -27,6 +27,9 @@ class AnthropicStreamingTest {
     static final String MESSAGES = "/v1/messages";
     static final String LIMITS =
             "{\"id\":\"claude-opus-5\",\"display_name\":\"Claude Opus 5\",\"max_input_tokens\":1000000,\"max_tokens\":128000}";
+    static final String MODELS_4_8 = "/v1/models/claude-opus-4-8";
+    static final String LIMITS_4_8 =
+            "{\"id\":\"claude-opus-4-8\",\"display_name\":\"Claude Opus 4.8\",\"max_input_tokens\":1000000,\"max_tokens\":64000}";
 
     // ── the stream, event by event ──
 
@@ -103,6 +106,47 @@ class AnthropicStreamingTest {
         return ev(d) + ev(node("message_stop"));
     }
 
+    /** The last two events, with the message_delta's delta and usage as given. */
+    static String stop(ObjectNode delta, ObjectNode usage) {
+        ObjectNode d = node("message_delta");
+        d.set("delta", delta);
+        d.set("usage", usage);
+        return ev(d) + ev(node("message_stop"));
+    }
+
+    /** A refusal's delta: its category and the model it names to retry on, either of them null. */
+    static ObjectNode refusal(String category, String recommendedModel) {
+        ObjectNode delta = JSON.createObjectNode().put("stop_reason", "refusal");
+        delta.putNull("stop_sequence");
+        ObjectNode details = delta.putObject("stop_details").put("type", "refusal");
+        if (category == null) details.putNull("category"); else details.put("category", category);
+        if (recommendedModel == null) details.putNull("recommended_model");
+        else details.put("recommended_model", recommendedModel);
+        return delta;
+    }
+
+    static ObjectNode outputTokens(int output) {
+        return JSON.createObjectNode().put("output_tokens", output);
+    }
+
+    /** One entry of usage.iterations: "message" for a model that declined, "fallback_message" for the one that served. */
+    static ObjectNode iteration(String type, String model, int input, int output) {
+        return JSON.createObjectNode().put("type", type).put("model", model).put("input_tokens", input)
+                .put("output_tokens", output).put("cache_creation_input_tokens", 0)
+                .put("cache_read_input_tokens", 0);
+    }
+
+    static ObjectNode fallbackBlock(String from, String to) {
+        ObjectNode fallback = node("fallback");
+        fallback.putObject("from").put("model", from);
+        fallback.putObject("to").put("model", to);
+        return fallback;
+    }
+
+    static LlmResponse.Usage usage(String model, int input, int output) {
+        return new LlmResponse.Usage(model, input, output, 0, 0);
+    }
+
     static int events(String stream) {
         return stream.split("\nevent: ", -1).length;   // the first event has no newline before it
     }
@@ -114,9 +158,13 @@ class AnthropicStreamingTest {
     }
 
     static AnthropicProvider provider(FakeHttp http) {
+        return provider(http, "claude-opus-5");
+    }
+
+    static AnthropicProvider provider(FakeHttp http, String model) {
         var config = new OwnClawConfig();
         config.getMentor().setAnthropicApiKey("test-key");
-        config.getMentor().setAnthropicModel("claude-opus-5");
+        config.getMentor().setAnthropicModel(model);
         return new AnthropicProvider(config, JSON, http.client());
     }
 
@@ -157,8 +205,11 @@ class AnthropicStreamingTest {
         provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(TOOLS));
 
         var sent = http.to(MESSAGES).get(0);
-        assertEquals(AnthropicProvider.FALLBACK_BETA, sent.header("anthropic-beta"));
+        assertEquals(AnthropicProvider.FALLBACK_BETA + "," + AnthropicProvider.CONTEXT_WINDOW_BETA,
+                sent.header("anthropic-beta"));
         assertEquals("server-side-fallback-2026-07-01", AnthropicProvider.FALLBACK_BETA);
+        assertEquals("model-context-window-exceeded-2025-08-26", AnthropicProvider.CONTEXT_WINDOW_BETA,
+                "a model older than 4.5 stops at its window instead of refusing input plus max_tokens over it");
         JsonNode body = JSON.readTree(sent.body());
         assertEquals(128_000, body.path("max_tokens").asInt(), "the Models API's max_tokens, not a number of ours");
         assertTrue(body.path("stream").asBoolean());
@@ -196,19 +247,23 @@ class AnthropicStreamingTest {
     }
 
     @Test
-    @DisplayName("a complete reply whose tool input is not valid JSON is an error, never a call with guessed arguments")
+    @DisplayName("a complete reply whose tool input is not valid JSON offers no call, and the check refuses it")
     void malformedToolInput() {
         var http = api(start("claude-opus-5", 10, 0, 0)
                 + tool(0, "toolu_3", "shell_exec", "{\"command\": \"say \"hi\"\"}") + end("tool_use", null, 9));
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
-        assertFalse(e instanceof OutputTruncated || e instanceof ProviderRefused);
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertFalse(r.hasToolCalls(), "never a call with guessed arguments");
+        var e = assertThrows(MalformedToolCall.class, () -> r.requireComplete("anthropic"));
         assertTrue(e.getMessage().contains("'shell_exec'"), e.getMessage());
+        assertSame(r, e.reply(), "with the reply, whose tokens were billed");
 
         // Strict: a valid object followed by anything else is not read as the object alone.
         var trailing = api(start("claude-opus-5", 10, 0, 0)
                 + tool(0, "toolu_5", "shell_exec", "{\"command\": \"ls\"} {\"command\": \"rm -rf /srv\"}")
                 + end("tool_use", null, 9));
-        assertThrows(LlmException.class, () -> provider(trailing).chat(ASK, LlmRequestConfig.DEFAULT));
+        LlmResponse t = provider(trailing).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertFalse(t.hasToolCalls());
+        assertThrows(MalformedToolCall.class, () -> t.requireComplete("anthropic"));
     }
 
     @Test
@@ -295,6 +350,185 @@ class AnthropicStreamingTest {
         assertEquals(1, r.toolCalls().size());
         assertEquals("toolu_fallback", r.toolCalls().get(0).id(), "the declined model's call is not the reply's");
         assertEquals("claude-opus-4-8", r.model(), "the model that finished the reply");
+    }
+
+    @Test
+    @DisplayName("a turn Anthropic sends straight to the fallback model (sticky routing) has no fallback block: message_start names the model")
+    void stickyTurn() {
+        var http = api(start("claude-opus-4-8", 50, 0, 0) + text(0, "answer") + end("end_turn", null, 3));
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertEquals("answer", r.content());
+        assertEquals("claude-opus-4-8", r.model(), "not the requested claude-opus-5");
+        assertEquals(List.of(usage("claude-opus-4-8", 50, 3)), r.usage(), "billed to the model that ran it");
+    }
+
+    @Test
+    @DisplayName("a fallback part-way through: each attempt is billed at its own model, from usage.iterations")
+    void aFallbackMidReplyBillsEveryAttempt() {
+        ObjectNode total = JSON.createObjectNode().put("input_tokens", 412).put("output_tokens", 264);
+        total.putArray("iterations").add(iteration("message", "claude-opus-5", 535, 900))
+                .add(iteration("fallback_message", "claude-opus-4-8", 412, 264));
+        var http = api(start("claude-opus-5", 535, 0, 0) + text(0, "Here is ")
+                + blockStart(1, fallbackBlock("claude-opus-5", "claude-opus-4-8")) + blockStop(1)
+                + text(2, "the plan.") + stop(JSON.createObjectNode().put("stop_reason", "end_turn"), total));
+
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+
+        assertEquals("Here is the plan.", r.content());
+        assertEquals("claude-opus-4-8", r.model());
+        assertEquals(List.of(usage("claude-opus-5", 535, 900), usage("claude-opus-4-8", 412, 264)), r.usage(),
+                "the top-level usage describes only the attempt that served");
+        assertEquals(535 + 412, r.promptTokens());
+        assertEquals(900 + 264, r.completionTokens(), "the declined attempt's output was billed too");
+    }
+
+    @Test
+    @DisplayName("an earlier attempt that declined before writing anything is counted as unbilled: the reply does not say its category")
+    void anEarlierDeclineBeforeOutputIsNotBilled() {
+        ObjectNode total = JSON.createObjectNode().put("input_tokens", 412).put("output_tokens", 264);
+        total.putArray("iterations").add(iteration("message", "claude-opus-5", 535, 0))
+                .add(iteration("fallback_message", "claude-opus-4-8", 412, 264));
+        var http = api(start("claude-opus-4-8", 412, 0, 0)
+                + blockStart(0, fallbackBlock("claude-opus-5", "claude-opus-4-8")) + blockStop(0)
+                + text(1, "answer") + stop(JSON.createObjectNode().put("stop_reason", "end_turn"), total));
+        assertEquals(List.of(usage("claude-opus-4-8", 412, 264)),
+                provider(http).chat(ASK, LlmRequestConfig.DEFAULT).usage());
+    }
+
+    @Test
+    @DisplayName("a refusal before any output is billed only in the categories Anthropic bills that in")
+    void aRefusalBeforeAnyOutputIsBilledByItsCategory() {
+        for (String category : new String[] {"cyber", "general_harms", null}) {
+            LlmResponse r = provider(api(start("claude-opus-5", 412, 0, 0)
+                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, LlmRequestConfig.DEFAULT);
+            assertTrue(r.refused());
+            assertEquals(List.of(), r.usage(), category + " is not billed before any output");
+            assertEquals(0, r.promptTokens());
+        }
+        for (String category : new String[] {"bio", "frontier_llm", "reasoning_extraction"}) {
+            LlmResponse r = provider(api(start("claude-opus-5", 412, 0, 0)
+                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, LlmRequestConfig.DEFAULT);
+            assertEquals(List.of(usage("claude-opus-5", 412, 0)), r.usage(), category + " is billed");
+        }
+        LlmResponse midStream = provider(api(start("claude-opus-5", 412, 0, 0) + text(0, "Sure, the")
+                + stop(refusal("cyber", null), outputTokens(7)))).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertEquals(List.of(usage("claude-opus-5", 412, 7)), midStream.usage(),
+                "output streamed before a refusal is billed, whatever the category");
+    }
+
+    @Test
+    @DisplayName("a refusal Anthropic did not re-run, naming a model to retry on, is sent to that model once, without fallbacks")
+    void aRefusalThatNamesAModelIsRetriedOnItOnce() throws Exception {
+        // Declined while a tool call was still streaming: the one decline Anthropic's own
+        // fallback does not re-run on a stream.
+        String declined = start("claude-opus-5", 900, 0, 0)
+                + blockStart(0, node("tool_use").put("id", "toolu_1").put("name", "respond"))
+                + delta(0, node("input_json_delta").put("partial_json", "{\"message\": \"The scan found"))
+                + blockStop(0) + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(40));
+        String answered = start("claude-opus-4-8", 900, 0, 0)
+                + tool(0, "toolu_2", "respond", "{\"message\": \"Two hosts are up.\"}") + end("tool_use", null, 12);
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MODELS_4_8, 200, LIMITS_4_8)
+                .on(MESSAGES, 200, "text/event-stream", declined)
+                .on(MESSAGES, 200, "text/event-stream", answered);
+        var seen = new AtomicInteger();
+
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(TOOLS)
+                .withProgress(seen::incrementAndGet));
+
+        assertEquals("tool_use", r.stopReason());
+        assertEquals("claude-opus-4-8", r.model());
+        assertEquals(List.of("toolu_2"), r.toolCalls().stream().map(ToolCall::id).toList(),
+                "the declined model's half-written call is not the reply's");
+        assertEquals(List.of(usage("claude-opus-5", 900, 40), usage("claude-opus-4-8", 900, 12)), r.usage(),
+                "both attempts were billed");
+        var sent = http.to(MESSAGES);
+        assertEquals(2, sent.size());
+        JsonNode retry = JSON.readTree(sent.get(1).body());
+        assertEquals("claude-opus-4-8", retry.path("model").asText());
+        assertFalse(retry.has("fallbacks"), "a direct retry, so it cannot chain");
+        assertEquals(64_000, retry.path("max_tokens").asInt(), "the retry model's own maximum");
+        assertEquals(AnthropicProvider.CONTEXT_WINDOW_BETA, sent.get(1).header("anthropic-beta"));
+        assertEquals(JSON.readTree(sent.get(0).body()).path("messages"), retry.path("messages"),
+                "the same conversation");
+        assertEquals(events(declined) + events(answered), seen.get(), "the hook heard both streams");
+        assertEquals(http.opened.get(), http.closed.get());
+    }
+
+    @Test
+    @DisplayName("a refusal that names no model to retry on stands: one request, and no answer")
+    void aRefusalThatNamesNoModelStands() {
+        var http = api(start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
+                + stop(refusal("cyber", null), outputTokens(3)));
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertTrue(r.refused());
+        assertEquals(1, http.to(MESSAGES).size());
+        assertThrows(ProviderRefused.class, () -> r.requireComplete("anthropic"));
+    }
+
+    @Test
+    @DisplayName("the retry is made once: a refusal from the named model is the answer, billed for both attempts")
+    void theRetryIsMadeOnce() {
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MODELS_4_8, 200, LIMITS_4_8)
+                .on(MESSAGES, 200, "text/event-stream", start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
+                        + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3)))
+                .on(MESSAGES, 200, "text/event-stream", start("claude-opus-4-8", 900, 0, 0) + text(0, "I")
+                        + stop(refusal("cyber", "claude-opus-4-7"), outputTokens(1)));
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertTrue(r.refused());
+        assertEquals("claude-opus-4-8", r.model());
+        assertEquals(2, http.to(MESSAGES).size(), "not a third time, though the second refusal names a model too");
+        assertEquals(List.of(usage("claude-opus-5", 900, 3), usage("claude-opus-4-8", 900, 1)), r.usage());
+    }
+
+    @Test
+    @DisplayName("a retry that fails leaves the refusal, with the tokens it was billed")
+    void aFailedRetryLeavesTheRefusal() {
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MODELS_4_8, 200, LIMITS_4_8)
+                .on(MESSAGES, 200, "text/event-stream", start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
+                        + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3)))
+                .json(MESSAGES, 400, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"no\"}}");
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertTrue(r.refused(), "the decline is why there is no answer");
+        assertEquals("claude-opus-5", r.model());
+        assertEquals(List.of(usage("claude-opus-5", 900, 3)), r.usage());
+        assertEquals(2, http.to(MESSAGES).size());
+    }
+
+    @Test
+    @DisplayName("what the progress hook throws during the retry still reaches the caller unchanged")
+    void theHookCanStopTheRetry() {
+        String declined = start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
+                + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3));
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MODELS_4_8, 200, LIMITS_4_8)
+                .on(MESSAGES, 200, "text/event-stream", declined)
+                .on(MESSAGES, 200, "text/event-stream", start("claude-opus-4-8", 900, 0, 0) + text(0, "ok") + end("end_turn", null, 1));
+        var stop = new Stopped();
+        var seen = new AtomicInteger();
+        int firstOfTheRetry = events(declined) + 1;
+        var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT
+                .withProgress(() -> { if (seen.incrementAndGet() == firstOfTheRetry) throw stop; })));
+        assertSame(stop, thrown, "not taken for a failed retry");
+        assertEquals(http.opened.get(), http.closed.get());
+    }
+
+    @Test
+    @DisplayName("an event whose data is not JSON fails the call; it is never skipped")
+    void anEventThatIsNotJsonFailsTheCall() {
+        String cut = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+                + "\"delta\":{\"type\":\"text_del\n\n";
+        var http = api(start("claude-opus-5", 5, 0, 0) + text(0, "one ") + cut + text(2, "three")
+                + end("end_turn", null, 3));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        assertTrue(e.getMessage().contains("not JSON"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("a stream that stops in the middle of its last event is incomplete, though that event was message_stop")
+    void aLastEventCutOffIsIncomplete() {
+        String whole = start("claude-opus-5", 5, 0, 0) + text(0, "all of it") + end("end_turn", null, 3);
+        var http = api(whole.substring(0, whole.length() - 1));   // no blank line after message_stop
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        assertTrue(e.getMessage().contains("before message_stop"), e.getMessage());
     }
 
     @Test

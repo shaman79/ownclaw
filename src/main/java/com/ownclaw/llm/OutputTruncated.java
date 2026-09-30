@@ -9,7 +9,8 @@ import java.util.Locale;
  * with the reply, or already before it -- is longer than the model's context window. Those are
  * the model's own limits, not settings of this application, and sending the same request again
  * reaches them again. Thrown by {@link LlmResponse#requireComplete} for a reply that stopped at a
- * limit, and by the providers for a request the provider refused as too long for the window.
+ * limit, and by the providers for a request the provider refused as too long for the window --
+ * which has no {@link #reply()}.
  */
 public final class OutputTruncated extends LlmException {
 
@@ -18,7 +19,6 @@ public final class OutputTruncated extends LlmException {
 
     private final Limit limit;
     private final Integer tokens;
-    private final LlmResponse reply;
 
     /**
      * @param limit  which limit was reached
@@ -27,22 +27,15 @@ public final class OutputTruncated extends LlmException {
      *               before any reply
      */
     public OutputTruncated(String provider, Limit limit, Integer tokens, LlmResponse reply) {
-        super(provider, describe(limit, tokens));
+        super(provider, describe(limit, tokens), 0, null, reply);
         this.limit = limit;
         this.tokens = tokens;
-        this.reply = reply;
     }
 
     public Limit limit() { return limit; }
 
     /** The limit's size in tokens, or null when the provider does not say what it is. */
     public Integer tokens() { return tokens; }
-
-    /**
-     * The cut-off reply, for its token counts -- every token of it is billed -- or null when
-     * there was none. Its content is not an answer.
-     */
-    public LlmResponse reply() { return reply; }
 
     private static String describe(Limit limit, Integer tokens) {
         return switch (limit) {

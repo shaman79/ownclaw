@@ -110,9 +110,11 @@ public class OpsService {
         this.curatorService = curatorService;
         this.mapper = mapper;
         this.localModelCheck = localModelCheck;
-        // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
-        // longer than a normal call would. A hung Ollama therefore blocks one ops request
-        // for up to this long; that is acceptable for a probe and is stated in the response.
+        // The longest silence this client allows. The probe's chat round-trip is streamed, and
+        // Ollama sends nothing until the model is loaded -- minutes for a cold 20+ GB model --
+        // so this allows for a load. A hung Ollama therefore blocks one ops request for up to
+        // this long, which is acceptable for a probe and is stated in the response; a model that
+        // is writing keeps it for as long as its reply takes, since the reply has no output limit.
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(240, TimeUnit.SECONDS)
@@ -215,7 +217,7 @@ public class OpsService {
         m.put("url", url);
         m.put("configuredModel", want);
         try {
-            JsonNode tags = getJson(url + "/api/tags");
+            JsonNode tags = getJson(com.ownclaw.llm.OllamaProvider.endpoint(url, "/api/tags"));
             List<String> installed = new ArrayList<>();
             for (JsonNode n : tags.path("models")) installed.add(n.path("name").asText());
             m.put("reachable", true);
@@ -238,7 +240,7 @@ public class OpsService {
         String model = config.getExecutor().getModel();
 
         try {
-            JsonNode ps = getJson(url + "/api/ps");
+            JsonNode ps = getJson(com.ownclaw.llm.OllamaProvider.endpoint(url, "/api/ps"));
             var loaded = new ArrayList<Map<String, Object>>();
             for (JsonNode n : ps.path("models")) {
                 loaded.add(Map.of("name", n.path("name").asText(),
@@ -251,7 +253,7 @@ public class OpsService {
         }
 
         try {
-            JsonNode show = postJson(url + "/api/show", Map.of("model", model));
+            JsonNode show = postJson(com.ownclaw.llm.OllamaProvider.endpoint(url, "/api/show"), Map.of("model", model));
             var caps = new ArrayList<String>();
             for (JsonNode c : show.path("capabilities")) caps.add(c.asText());
             String template = show.path("template").asText("");
@@ -288,18 +290,19 @@ public class OpsService {
             long t0 = System.currentTimeMillis();
             var body = mapper.createObjectNode();
             body.put("model", model);
-            body.put("stream", false);
             var messages = body.putArray("messages");
             messages.addObject().put("role", "system")
                     .put("content", "Reply with exactly the word " + canary + " and nothing else.");
             messages.addObject().put("role", "user").put("content", "hello");
             body.putObject("options").put("temperature", 0);
             // No num_predict -- an output cap made a thinking model spend it all on reasoning
-            // and look unable to follow a system message -- and the same num_ctx, truncate and
-            // shift as every local call: a probe with other settings would make Ollama load the
-            // model again, which takes minutes, for the probe and again for the next real call.
-            com.ownclaw.llm.OllamaProvider.contextSettings(body, localModelCheck.contextLength(model));
-            JsonNode r = postJson(url + "/api/chat", body);
+            // and look unable to follow a system message -- and sent the way every local call is
+            // sent: streamed, so the client's timeout bounds the silence between lines rather
+            // than the reply, and with the same num_ctx, truncate and shift, since a probe with
+            // other settings would make Ollama load the model again, which takes minutes, for the
+            // probe and again for the next real call.
+            JsonNode r = com.ownclaw.llm.OllamaProvider.streamChat(http, url, body,
+                    localModelCheck.contextLength(model), com.ownclaw.llm.LlmProgress.NONE, mapper);
             String content = r.path("message").path("content").asText("");
             // A thinking model answers in two parts, so the canary may legitimately appear in
             // the reasoning of a model that never wrote the answer.
@@ -357,11 +360,14 @@ public class OpsService {
             m.put("ok", false);
             m.put("error", String.valueOf(e.getMessage()));
             if (e instanceof java.io.InterruptedIOException
+                    || e.getCause() instanceof java.io.InterruptedIOException
                     || String.valueOf(e.getMessage()).toLowerCase(Locale.ROOT).contains("timeout")) {
-                m.put("diagnosis", "Timed out. The usual cause is a cold model load — a 20+ GB model "
-                        + "can take minutes to become resident. Check GET /api/ops/ollama 'loaded', "
-                        + "warm the model, then run this again. A repeat timeout on a warm model means "
-                        + "the host is too slow for the local tier at this model size.");
+                m.put("diagnosis", "Timed out: Ollama sent nothing for too long. It sends nothing "
+                        + "until the model is loaded and the prompt read, so the usual cause is a cold "
+                        + "model load — a 20+ GB model can take minutes to become resident. Check GET "
+                        + "/api/ops/ollama 'loaded', warm the model, then run this again. A repeat "
+                        + "timeout on a warm model means the host is too slow for the local tier at "
+                        + "this model size.");
             }
         }
         return m;

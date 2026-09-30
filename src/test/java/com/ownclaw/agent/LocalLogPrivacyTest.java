@@ -13,6 +13,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.observability.ChatStatusEmitter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -103,7 +104,7 @@ class LocalLogPrivacyTest {
             LlmProvider llm = new LlmProvider() {
                 int calls;
                 public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
-                    if (calls++ == 0) return new LlmResponse(call("read_statement", Map.of()), 1, 1);
+                    if (calls++ == 0) return Replies.of(call("read_statement", Map.of()), 1, 1);
                     throw new LlmException("ollama", "HTTP 500: error parsing tool call: raw='" + SECRET + "'", 500, null);
                 }
                 public boolean isAvailable() { return true; }

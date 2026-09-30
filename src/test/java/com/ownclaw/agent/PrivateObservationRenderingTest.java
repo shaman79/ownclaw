@@ -13,6 +13,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.privacy.Label;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -86,7 +87,7 @@ class PrivateObservationRenderingTest {
 
     private static CloudGateway gateway(List<EgressLedger.Row> rows) {
         LlmProvider fake = new LlmProvider() {
-            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) { return new LlmResponse("ok", 1, 1); }
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) { return Replies.of("ok", 1, 1); }
             public boolean isAvailable() { return true; }
             public boolean supportsTools() { return true; }
             public String name() { return "anthropic"; }

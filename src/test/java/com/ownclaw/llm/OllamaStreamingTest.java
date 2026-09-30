@@ -189,7 +189,7 @@ class OllamaStreamingTest {
         var provider = provider(config(), http);
 
         provider.chat(ASK, LlmRequestConfig.DEFAULT);
-        provider.chat(ASK, new LlmRequestConfig("small-model:latest", null, false, null));
+        provider.chat(ASK, new LlmRequestConfig("small-model:latest", null, false));
         provider.chat(ASK, LlmRequestConfig.DEFAULT);
 
         var chats = http.to(CHAT);
@@ -237,6 +237,44 @@ class OllamaStreamingTest {
         assertEquals("good:latest", body.path("model").asText());
         assertEquals(131_072, body.path("options").path("num_ctx").asInt());
         assertEquals(1, http.to(SHOW).size(), "the check's own /api/show supplied it");
+    }
+
+    @Test
+    @DisplayName("a server URL written with a trailing slash or a /v1 suffix works for every call: tags, show and chat")
+    void aLooseUrlWorksEverywhere() {
+        var config = config();
+        config.getExecutor().setUrl(URL + "/v1/");
+        var http = new FakeHttp()
+                .json("/api/tags", 200, "{\"models\":[{\"name\":\"" + MODEL + "\"}]}")
+                .json(SHOW, 200, show("qwen35moe", 262_144))
+                .on(CHAT, 200, "application/x-ndjson", line("ok", null) + last("stop", 1, 1));
+        var check = new LocalModelCheck(config, JSON, http.client());
+        var status = check.status();
+        assertTrue(status.ok(), status.detail());
+        var provider = new OllamaProvider(config, JSON, check, http.client());
+        assertTrue(provider.isAvailable());
+        assertEquals("ok", provider.chat(ASK, LlmRequestConfig.DEFAULT).content());
+        assertEquals(List.of("/api/tags", "/api/show", "/api/tags", "/api/chat"),
+                http.sent.stream().map(s -> s.request().url().encodedPath()).toList());
+
+        assertEquals("http://ollama.example.org:11434", OllamaProvider.baseUrl("  http://ollama.example.org:11434//  "));
+        assertEquals("http://ollama.example.org:11434", OllamaProvider.baseUrl("http://ollama.example.org:11434/v1"));
+        assertEquals("http://ollama.example.org:11434/api/show",
+                OllamaProvider.endpoint("http://ollama.example.org:11434/", "/api/show"));
+    }
+
+    @Test
+    @DisplayName("the silence allowed before Ollama's first line covers a cold load and a prompt that fills the window")
+    void theFirstLineMayBeLongInComing() throws Exception {
+        // Ollama writes nothing until the model is loaded and the whole prompt read. Measured on
+        // the production host: about 3 minutes to load, about 100 prompt tokens a second with the
+        // model's 262,144-token window.
+        var field = OllamaProvider.class.getDeclaredField("httpClient");
+        field.setAccessible(true);
+        long allowedMs = ((okhttp3.OkHttpClient) field.get(new OllamaProvider(config(), JSON, null))).readTimeoutMillis();
+        long neededMs = (3 * 60 + 262_144 / 100) * 1000L;
+        assertTrue(allowedMs >= neededMs, "a prompt that fits the window must not fail as a timeout: "
+                + allowedMs + " ms allowed, " + neededMs + " ms needed");
     }
 
     @Test

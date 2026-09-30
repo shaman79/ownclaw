@@ -6,6 +6,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.llm.ToolCall;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -165,7 +166,7 @@ class StepModeGateTest {
     }
 
     private static LlmResponse respondCall(String message) {
-        return new LlmResponse("", 10, 5, 0, 0, "tool_use",
+        return Replies.of("", 10, 5, 0, 0, "tool_use",
                 List.of(new ToolCall("t1", AgentAction.RESPOND, Map.of("message", message))));
     }
 
@@ -226,7 +227,7 @@ class StepModeGateTest {
 
         // Then native tools go off — the documented kill switch — and the step offers nothing.
         engine(config(false, true)).decideNextActionFull(ctx,
-                answering(true, new LlmResponse("{\"tool\":\"respond\",\"params\":{}}", 1, 1)));
+                answering(true, Replies.of("{\"tool\":\"respond\",\"params\":{}}", 1, 1)));
 
         assertNull(ctx.offeredTools(),
                 "toolsFor is the only writer, so without an explicit clear the last restriction "

@@ -40,10 +40,16 @@ public class OllamaProvider implements LlmProvider {
                           @org.springframework.context.annotation.Lazy LocalModelCheck localModelCheck) {
         this(ownClawConfig, mapper, localModelCheck, new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
-                // The reply is streamed, so this is the longest silence allowed between two lines.
-                // Ollama's first line comes only after it has loaded the model and read the whole
-                // prompt, which on this hardware takes minutes for a cold model or a long prompt.
-                .readTimeout(600, TimeUnit.SECONDS)
+                // The reply is streamed, so this bounds the silence between two lines, and the
+                // longest silence comes before the first: Ollama writes nothing, not even its
+                // headers, until it has loaded the model and read the whole prompt. Measured on
+                // the production host on 2026-09-30, a cold load takes about 3 minutes and the
+                // prompt is read at about 100 tokens a second with the model's 262,144-token
+                // window, so a prompt that fills the window is some 47 minutes of silence. An hour
+                // covers that; only a server that has stopped answering is silent for longer.
+                // Stop and the stall watchdog hear from this call only once lines arrive
+                // (LlmProgress), so nothing ends that first silence sooner.
+                .readTimeout(60, TimeUnit.MINUTES)
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .build());
     }
@@ -58,8 +64,26 @@ public class OllamaProvider implements LlmProvider {
     }
 
     /**
-     * The context settings every {@code /api/chat} request this application sends carries --
-     * this provider's, the ops probe's and the /setup benchmark's.
+     * An Ollama server's URL as the API is addressed from it: surrounding whitespace, trailing
+     * slashes and an OpenAI-style "/v1" suffix dropped, because the native API lives at the root.
+     * The one rule for it -- this provider, the startup check, the ops probe and the setup wizard
+     * all address Ollama through here, so a URL that works for one of them works for all of them.
+     */
+    public static String baseUrl(String url) {
+        String base = url == null ? "" : url.strip().replaceAll("/+$", "");
+        return base.endsWith("/v1") ? base.substring(0, base.length() - 3).replaceAll("/+$", "") : base;
+    }
+
+    /** The URL of the Ollama endpoint {@code path} ("/api/chat", "/api/show", ...) at {@code url}. */
+    public static String endpoint(String url, String path) {
+        return baseUrl(url) + path;
+    }
+
+    /**
+     * One {@code POST /api/chat}, streamed and read to its last line. Every /api/chat this
+     * application sends goes through here -- this provider's, the ops probe's and the /setup
+     * speed sample's -- so every one streams, carries the same context settings, and is read and
+     * reported the same way.
      * <p>
      * num_ctx is the model's own context length ({@link LocalModelCheck#contextLength}), and it
      * and shift are the same in every request because a request whose num_ctx or shift differs
@@ -67,13 +91,93 @@ public class OllamaProvider implements LlmProvider {
      * host. truncate and shift are off: left on, Ollama silently drops the oldest messages of a
      * prompt that does not fit, and silently slides the window during a reply that fills it.
      * Off, the first is an error and the second a reply that ends with done_reason "length" --
-     * both reported as the context window they are.
+     * both reported as the context window they are. Nothing here sets num_predict: the model
+     * writes until it stops or its window is full.
+     * <p>
+     * The progress hook hears every line, and whatever it throws leaves through here untouched,
+     * closing the stream.
+     *
+     * @param http          the client, whose read timeout bounds the silence between two lines
+     * @param body          the request; its stream, truncate, shift and num_ctx are set here
+     * @param contextLength the model's own context window
+     * @return the last line ({@code "done": true}), with its {@code message} holding what every
+     *         line carried: all of the content, all of the thinking and every tool call
+     * @throws OutputTruncated when Ollama says the prompt is longer than the window
+     * @throws LlmException    for any other error Ollama reports, a line that is not JSON, a
+     *                         connection that fails, or a stream that ends before its last line
      */
-    public static void contextSettings(ObjectNode body, int contextLength) {
+    public static JsonNode streamChat(OkHttpClient http, String baseUrl, ObjectNode body,
+                                      int contextLength, LlmProgress progress, ObjectMapper mapper) {
+        body.put("stream", true);
         body.put("truncate", false);
         body.put("shift", false);
         ObjectNode options = body.has("options") ? (ObjectNode) body.get("options") : body.putObject("options");
         options.put("num_ctx", contextLength);
+
+        Request request = new Request.Builder()
+                .url(endpoint(baseUrl, "/api/chat"))
+                .post(RequestBody.create(body.toString(), JSON))
+                .build();
+        try (Response response = http.newCall(request).execute()) {
+            ResponseBody responseBody = response.body();
+            if (!response.isSuccessful()) {
+                String error = responseBody != null ? responseBody.string() : "";
+                throw failure("HTTP " + response.code() + ": " + error, response.code(), contextLength);
+            }
+            if (responseBody == null) {
+                throw new LlmException("ollama", "HTTP " + response.code() + " with no body", 0, null);
+            }
+            return read(responseBody.source(), contextLength, progress, mapper);
+        } catch (IOException e) {
+            throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);
+        }
+    }
+
+    /** The reply, line by line, until the one with {@code "done": true}. */
+    private static JsonNode read(BufferedSource source, int contextLength, LlmProgress progress,
+                                 ObjectMapper mapper) throws IOException {
+        var content = new StringBuilder();
+        var thinking = new StringBuilder();
+        ArrayNode toolCalls = mapper.createArrayNode();
+        String line;
+        while ((line = source.readUtf8Line()) != null) {
+            if (line.isBlank()) continue;
+            progress.onProgress();
+            JsonNode chunk = StreamedReply.parse("ollama", mapper, line);
+            if (chunk.hasNonNull("error")) {
+                throw failure("the reply stream reported: " + chunk.path("error").asText(), 0, contextLength);
+            }
+            JsonNode message = chunk.path("message");
+            content.append(message.path("content").asText(""));
+            // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
+            // separate field before writing the answer to content. It is not part of the answer.
+            thinking.append(message.path("thinking").asText(""));
+            for (JsonNode call : message.path("tool_calls")) toolCalls.add(call);
+            if (!chunk.path("done").asBoolean(false)) continue;
+
+            ObjectNode last = chunk.deepCopy();
+            ObjectNode whole = last.putObject("message");
+            whole.put("role", "assistant");
+            whole.put("content", content.toString());
+            whole.put("thinking", thinking.toString());
+            whole.set("tool_calls", toolCalls);
+            return last;
+        }
+        throw new LlmException("ollama",
+                "the reply stream ended before its last line (\"done\": true), so the reply is incomplete", 0, null);
+    }
+
+    /**
+     * An error Ollama reported. A prompt longer than num_ctx -- which truncate:false makes an
+     * error instead of silently dropped messages -- is reported as the context window it is.
+     */
+    private static LlmException failure(String message, int status, int contextLength) {
+        String m = message.toLowerCase(Locale.ROOT);
+        if (m.contains("exceed_context_size") || m.contains("exceeds the available context size")
+                || m.contains("exceeds the context length")) {
+            return new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, contextLength, null);
+        }
+        return new LlmException("ollama", message, status, null);
     }
 
     @Override
@@ -84,7 +188,6 @@ public class OllamaProvider implements LlmProvider {
 
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
-        body.put("stream", true);
 
         // Keep the model resident between calls.
         //
@@ -115,9 +218,7 @@ public class OllamaProvider implements LlmProvider {
             body.put("format", "json");
         }
 
-        // No num_predict, ever: the model writes until it stops or its context window is full.
         body.putObject("options").put("temperature", temperature);
-        contextSettings(body, contextLength);
 
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
@@ -136,108 +237,56 @@ public class OllamaProvider implements LlmProvider {
             m.put("content", msg.content());
         }
 
-        String url = config.getUrl().replaceAll("/+$", "") + "/api/chat";
-        Request request = new Request.Builder()
-                .url(url)
-                .post(RequestBody.create(body.toString(), JSON))
-                .build();
-
-        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
-            ResponseBody responseBody = response.body();
-            if (!response.isSuccessful()) {
-                String error = responseBody != null ? responseBody.string() : "";
-                throw failure("HTTP " + response.code() + ": " + error, response.code(), contextLength);
-            }
-            if (responseBody == null) {
-                throw new LlmException("ollama", "HTTP " + response.code() + " with no body", 0, null);
-            }
-            // The one check every reply passes before a caller sees it -- here, because local
-            // calls have no gateway to apply it.
-            return read(responseBody.source(), model, contextLength, reqConfig.progress())
-                    .requireComplete("ollama");
-        } catch (IOException e) {
-            throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);
-        }
+        JsonNode last = streamChat(httpClient, config.getUrl(), body, contextLength, reqConfig.progress(), mapper);
+        // The one check every reply passes before a caller sees it -- here, because local calls
+        // have no gateway to apply it.
+        return response(last, model, contextLength).requireComplete("ollama");
     }
 
-    /**
-     * The reply, line by line, until the one with {@code "done": true}. The progress hook hears
-     * every line, and whatever it throws leaves through here untouched, closing the stream.
-     */
-    private LlmResponse read(BufferedSource source, String model, int contextLength,
-                             LlmProgress progress) throws IOException {
+    /** The reply {@link #streamChat} read, as the response every provider gives. */
+    private LlmResponse response(JsonNode last, String model, int contextLength) {
         var reply = new StreamedReply("ollama", mapper);
-        int thinkingChars = 0;
-        int calls = 0;
-        String line;
-        while ((line = source.readUtf8Line()) != null) {
-            if (line.isBlank()) continue;
-            progress.onProgress();
-            JsonNode chunk = reply.parse(line);
-            if (chunk.hasNonNull("error")) {
-                throw failure("the reply stream reported: " + chunk.path("error").asText(), 0, contextLength);
-            }
-            JsonNode message = chunk.path("message");
-            reply.text(message.path("content").asText(""));
-            // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
-            // separate field before writing the answer to content. It is not part of the answer.
-            thinkingChars += message.path("thinking").asText("").length();
-            // Ollama sends each tool call whole, its arguments an object -- like Anthropic's
-            // input and unlike OpenAI's string -- and they go through the same strict parse.
-            for (JsonNode tc : message.path("tool_calls")) {
-                int index = calls++;
-                reply.call(index, tc.path("id").asText(null), tc.path("function").path("name").asText(null),
-                        tc.path("function").path("arguments").toString());
-                reply.close(index);
-            }
-            if (!chunk.path("done").asBoolean(false)) continue;
+        JsonNode message = last.path("message");
+        reply.text(message.path("content").asText(""));
+        // Ollama sends each tool call whole, its arguments an object -- like Anthropic's input
+        // and unlike OpenAI's string -- and they go through the same strict parse.
+        int index = 0;
+        for (JsonNode tc : message.path("tool_calls")) {
+            reply.call(index, tc.path("id").asText(null), tc.path("function").path("name").asText(null),
+                    tc.path("function").path("arguments").toString());
+            reply.close(index++);
+        }
 
-            int promptTokens = chunk.path("prompt_eval_count").asInt(0);
-            int completionTokens = chunk.path("eval_count").asInt(0);
-            long promptDurationNs = chunk.path("prompt_eval_duration").asLong(0);
-            long evalDurationNs = chunk.path("eval_duration").asLong(0);
-            if (completionTokens > 0 && evalDurationNs > 0) {
-                double tps = completionTokens / (evalDurationNs / 1_000_000_000.0);
-                if (promptTokens > 0 && promptDurationNs > 0) {
-                    double ptps = promptTokens / (promptDurationNs / 1_000_000_000.0);
-                    log.debug("Ollama [{}]: {} prompt ({} tok/s) + {} completion ({} tok/s)",
-                            model, promptTokens, String.format(Locale.US, "%.1f", ptps),
-                            completionTokens, String.format(Locale.US, "%.1f", tps));
-                } else {
-                    log.debug("Ollama [{}]: {} prompt + {} completion ({} tok/s)",
-                            model, promptTokens, completionTokens, String.format(Locale.US, "%.1f", tps));
-                }
+        int promptTokens = last.path("prompt_eval_count").asInt(0);
+        int completionTokens = last.path("eval_count").asInt(0);
+        long promptDurationNs = last.path("prompt_eval_duration").asLong(0);
+        long evalDurationNs = last.path("eval_duration").asLong(0);
+        if (completionTokens > 0 && evalDurationNs > 0) {
+            double tps = completionTokens / (evalDurationNs / 1_000_000_000.0);
+            if (promptTokens > 0 && promptDurationNs > 0) {
+                double ptps = promptTokens / (promptDurationNs / 1_000_000_000.0);
+                log.debug("Ollama [{}]: {} prompt ({} tok/s) + {} completion ({} tok/s)",
+                        model, promptTokens, String.format(Locale.US, "%.1f", ptps),
+                        completionTokens, String.format(Locale.US, "%.1f", tps));
             } else {
-                log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
+                log.debug("Ollama [{}]: {} prompt + {} completion ({} tok/s)",
+                        model, promptTokens, completionTokens, String.format(Locale.US, "%.1f", tps));
             }
-            if (thinkingChars > 0) {
-                log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinkingChars);
-            }
-            // No output limit was sent, so a "length" here is the context window filling up.
-            return reply.response(promptTokens, completionTokens, 0, 0,
-                    chunk.path("done_reason").asText(null), null, model, null, contextLength);
+        } else {
+            log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
         }
-        throw new LlmException("ollama",
-                "the reply stream ended before its last line (\"done\": true), so the reply is incomplete", 0, null);
-    }
-
-    /**
-     * An error Ollama reported. A prompt longer than num_ctx -- which truncate:false makes an
-     * error instead of silently dropped messages -- is reported as the context window it is.
-     */
-    private static LlmException failure(String message, int status, int contextLength) {
-        String m = message.toLowerCase(Locale.ROOT);
-        if (m.contains("exceed_context_size") || m.contains("exceeds the available context size")
-                || m.contains("exceeds the context length")) {
-            return new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, contextLength, null);
+        int thinkingChars = message.path("thinking").asText("").length();
+        if (thinkingChars > 0) {
+            log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinkingChars);
         }
-        return new LlmException("ollama", message, status, null);
+        // No output limit was sent, so a "length" here is the context window filling up.
+        return reply.response(List.of(new LlmResponse.Usage(model, promptTokens, completionTokens, 0, 0)),
+                last.path("done_reason").asText(null), null, model, null, contextLength);
     }
 
     @Override
     public boolean isAvailable() {
-        String url = config.getUrl().replaceAll("/+$", "") + "/api/tags";
-        Request request = new Request.Builder().url(url).get().build();
+        Request request = new Request.Builder().url(endpoint(config.getUrl(), "/api/tags")).get().build();
         try (Response response = httpClient.newCall(request).execute()) {
             return response.isSuccessful();
         } catch (IOException e) {
@@ -263,18 +312,4 @@ public class OllamaProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getModel(); }
-
-    /**
-     * Return an OkHttpClient with the read timeout from reqConfig (if set),
-     * otherwise use the default httpClient. Uses newBuilder() so the
-     * connection pool and dispatcher are shared.
-     */
-    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
-        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
-            return httpClient.newBuilder()
-                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
-                    .build();
-        }
-        return httpClient;
-    }
 }

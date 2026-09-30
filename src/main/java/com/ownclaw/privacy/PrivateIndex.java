@@ -9,9 +9,10 @@ import java.util.Locale;
  * <p>
  * Every PRIVATE artifact of a task is indexed here as hashes of its 32-character windows, and
  * every outbound cloud body is checked against them before the socket opens -- all of it but
- * the model's own replayed turns, which it wrote itself (see CloudGateway). That is what
- * makes privacy a property of the code path rather than of a prompt builder's carefulness: the
- * builders can be wrong about what they rendered and this still refuses the call.
+ * the replayed assistant turns, which hold nothing derived from a private input (see
+ * CloudGateway). That is what makes privacy a property of the code path rather than of a prompt
+ * builder's carefulness: the builders can be wrong about what they rendered and this still
+ * refuses the call.
  * <p>
  * It holds hashes and integers only — no field of type String, CharSequence, char[] or any
  * collection of them, and a test pins that by reflection. The roadmap's warning was that an

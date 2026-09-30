@@ -5,6 +5,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.llm.OllamaProvider;
 import com.ownclaw.llm.OllamaSemaphore;
 import org.junit.jupiter.api.DisplayName;
@@ -59,7 +60,7 @@ class ConversationPrivateContentTest {
             @Override
             public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config) {
                 messages.forEach(m -> sent.add(m.content()));
-                return new LlmResponse("The owner asked about a statement and was answered privately.", 1, 1);
+                return Replies.of("The owner asked about a statement and was answered privately.", 1, 1);
             }
         };
         var compressor = new ConversationCompressor(jdbc, local, new OllamaSemaphore());

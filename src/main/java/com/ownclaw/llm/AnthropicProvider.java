@@ -11,8 +11,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -31,8 +33,13 @@ import java.util.regex.Pattern;
  *   ({@code GET /v1/models/{model}}) reports together with the context window
  * - Returns usage.input_tokens / usage.output_tokens, plus the two cache counters
  * - Newer models reject sampling parameters — see {@link #supportsSampling(String)}
- * - A request the model's safety classifiers decline is re-run on the fallback model Anthropic
- *   recommends, inside the same call ({@code "fallbacks": "default"})
+ * - A request the model's safety classifiers decline is re-run by Anthropic, inside the same
+ *   call, on the fallback model it recommends for the refusal's category
+ *   ({@code "fallbacks": "default"}). Anthropic skips that for a decline while a tool call is
+ *   still streaming and when the fallback model is rate limited or overloaded; when the refusal
+ *   then names a model to retry on directly ({@code stop_details.recommended_model}), this
+ *   provider sends the request to that model, once. A refusal that names none stands, and
+ *   reaches the caller as {@link ProviderRefused}.
  */
 // Not a bean, and not public: CloudGateway is the only thing that constructs this, and a
 // test walks the source tree to keep it so. Every cloud call goes through the door.
@@ -45,11 +52,28 @@ class AnthropicProvider implements LlmProvider {
 
     /**
      * The beta that {@code "fallbacks": "default"} requires. Anthropic's recommendation for every
-     * claude-opus-5 caller: a declined request is handed to the model Anthropic picks for the
-     * refusal's category -- a cyber-category decline to Opus 4.8 -- instead of ending in a
-     * refusal. It is the only beta this provider sends.
+     * claude-opus-5 caller: Anthropic re-runs a declined request, inside the same call, on the
+     * model it picks for the refusal's category -- a cyber-category decline on Opus 4.8 -- except
+     * in the cases the class note names. Sent, comma-separated with {@link #CONTEXT_WINDOW_BETA},
+     * on every request that asks for fallbacks; the retry on a model a refusal names asks for
+     * none and sends only the other.
      */
     static final String FALLBACK_BETA = "server-side-fallback-2026-07-01";
+
+    /**
+     * Sent on every request. max_tokens here is always the model's own maximum, so input plus
+     * max_tokens can exceed the context window long before the input alone does. Claude 4.5 and
+     * newer accept that and stop with model_context_window_exceeded if the reply reaches the
+     * window; an older model -- the yaml default is one -- fails such a request validation
+     * outright unless this beta asks for the newer behaviour.
+     */
+    static final String CONTEXT_WINDOW_BETA = "model-context-window-exceeded-2025-08-26";
+
+    /**
+     * The refusal categories Anthropic bills even when the model declined before writing
+     * anything. A decline before any output in any other category, or in none, is not billed.
+     */
+    private static final Set<String> BILLED_BEFORE_OUTPUT = Set.of("bio", "frontier_llm", "reasoning_extraction");
 
     /**
      * Matches a modern model id: {@code claude-<family>-<major>[-<minor>][-<date>]}.
@@ -61,6 +85,9 @@ class AnthropicProvider implements LlmProvider {
 
     /** What the Models API says about one model: its maximum output and its context window. */
     record ModelLimits(int maxOutputTokens, int contextWindow) {}
+
+    /** One request's reply, and the model its refusal names to retry on directly, or null. */
+    private record Attempt(LlmResponse reply, String retryOn) {}
 
     private final OwnClawConfig.Mentor config;
     private final ObjectMapper mapper;
@@ -93,30 +120,61 @@ class AnthropicProvider implements LlmProvider {
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
-        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "anthropic");
+        String model = reqConfig.model() != null ? reqConfig.model() : config.getAnthropicModel();
+        Attempt first = RateLimitBackoff.execute(() -> send(messages, reqConfig, model, true), "anthropic");
+        if (first.retryOn() == null) return first.reply();
+
+        // Anthropic declined without running its fallback and named the model to retry on
+        // directly. Once, and without fallbacks, so it cannot chain: a refusal from that model is
+        // the answer. The reply is the retry's, billed for both attempts.
+        log.warn("Anthropic [{}] declined ({}) without running its fallback; retrying once on {}, "
+                        + "the model the refusal names", first.reply().model(),
+                first.reply().stopDescription(), first.retryOn());
+        LlmResponse retry;
+        try {
+            retry = RateLimitBackoff.execute(
+                    () -> send(messages, reqConfig, first.retryOn(), false), "anthropic").reply();
+        } catch (LlmException e) {
+            // The rescue failed. The decline is still why there is no answer, and its tokens were
+            // billed, so it is the refusal the caller gets.
+            log.warn("Anthropic: the retry on {} failed ({}); the refusal stands", first.retryOn(),
+                    e.getMessage());
+            return first.reply();
+        }
+        var usage = new ArrayList<>(first.reply().usage());
+        usage.addAll(retry.usage());
+        return new LlmResponse(retry.content(), retry.toolCalls(), retry.invalidToolCall(),
+                retry.stopReason(), retry.stopDetail(), retry.model(), retry.maxOutputTokens(),
+                retry.contextWindow(), usage);
     }
 
-    private LlmResponse chatInternal(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
+    /**
+     * One request to {@code model}: with Anthropic's server-side fallbacks, or -- the retry on a
+     * model a refusal named -- without them.
+     */
+    private Attempt send(List<LlmMessage> messages, LlmRequestConfig reqConfig, String model,
+                         boolean withFallbacks) {
         String apiKey = config.getAnthropicApiKey();
         if (apiKey == null || apiKey.isBlank()) {
             throw new LlmException("anthropic", "API key not configured");
         }
 
-        String model = reqConfig.model() != null ? reqConfig.model() : config.getAnthropicModel();
         ModelLimits modelLimits = limits(model, apiKey);
 
         ObjectNode body = requestBody(messages, reqConfig, model, modelLimits.maxOutputTokens());
+        if (!withFallbacks) body.remove("fallbacks");
 
         Request request = new Request.Builder()
                 .url(BASE_URL + "/messages")
                 .header("x-api-key", apiKey)
                 .header("anthropic-version", API_VERSION)
-                .header("anthropic-beta", FALLBACK_BETA)
+                .header("anthropic-beta", withFallbacks
+                        ? FALLBACK_BETA + "," + CONTEXT_WINDOW_BETA : CONTEXT_WINDOW_BETA)
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
                 .build();
 
-        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
+        try (Response response = httpClient.newCall(request).execute()) {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 int code = response.code();
@@ -131,7 +189,7 @@ class AnthropicProvider implements LlmProvider {
             if (responseBody == null) {
                 throw new LlmException("anthropic", "HTTP " + response.code() + " with no body", 0, null);
             }
-            return read(responseBody.source(), model, modelLimits, reqConfig.progress());
+            return read(responseBody.source(), model, modelLimits, reqConfig.progress(), withFallbacks);
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
         }
@@ -140,15 +198,20 @@ class AnthropicProvider implements LlmProvider {
     /**
      * The reply, event by event. The progress hook hears every event, pings included, and
      * whatever it throws leaves through here untouched, closing the stream on its way out.
+     *
+     * @param withFallbacks whether the request asked for fallbacks, so a refusal naming a model
+     *                      to retry on is one to retry
      */
-    private LlmResponse read(BufferedSource source, String requestedModel, ModelLimits modelLimits,
-                             LlmProgress progress) throws IOException {
+    private Attempt read(BufferedSource source, String requestedModel, ModelLimits modelLimits,
+                         LlmProgress progress, boolean withFallbacks) throws IOException {
         var events = new ServerSentEvents(source);
         var reply = new StreamedReply("anthropic", mapper);
         String servedModel = requestedModel;
         String stopReason = null;
         String stopDetail = null;
+        String recommendedModel = null;
         int input = 0, output = 0, cacheWrite = 0, cacheRead = 0;
+        JsonNode iterations = null;
         boolean stopped = false;
 
         ServerSentEvents.Event event;
@@ -159,13 +222,16 @@ class AnthropicProvider implements LlmProvider {
                 case "message_start" -> {
                     JsonNode message = data.path("message");
                     // The model that is answering. When the requested model declined before
-                    // writing anything, this already names the fallback model.
+                    // writing anything, this already names the fallback model -- and so it does
+                    // on the turns after a decline, which Anthropic keeps sending straight to the
+                    // model that answered it (sticky routing), with no fallback block to say so.
                     servedModel = message.path("model").asText(servedModel);
                     JsonNode usage = message.path("usage");
                     input = count(usage, "input_tokens", input);
                     output = count(usage, "output_tokens", output);
                     cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
                     cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                    if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
                 }
                 case "content_block_start" -> {
                     int index = data.path("index").asInt();
@@ -200,12 +266,15 @@ class AnthropicProvider implements LlmProvider {
                     JsonNode delta = data.path("delta");
                     stopReason = delta.path("stop_reason").asText(stopReason);
                     // Only a refusal has details, and even then they may be null.
-                    stopDetail = delta.path("stop_details").path("category").asText(stopDetail);
+                    JsonNode details = delta.path("stop_details");
+                    stopDetail = details.path("category").asText(stopDetail);
+                    recommendedModel = details.path("recommended_model").asText(recommendedModel);
                     JsonNode usage = data.path("usage");
                     input = count(usage, "input_tokens", input);
                     output = count(usage, "output_tokens", output);
                     cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
                     cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                    if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
                 }
                 case "message_stop" -> stopped = true;
                 case "error" -> throw streamError(data.path("error"));
@@ -225,8 +294,42 @@ class AnthropicProvider implements LlmProvider {
         }
         // Carry the cache counters through. input_tokens excludes both of them, so dropping them
         // understates the billed input by most of the prompt on a cached conversation.
-        return reply.response(input, output, cacheWrite, cacheRead, stopReason, stopDetail,
-                servedModel, modelLimits.maxOutputTokens(), modelLimits.contextWindow());
+        boolean refused = "refusal".equals(stopReason);
+        var billed = new ArrayList<LlmResponse.Usage>();
+        if (iterations != null && !iterations.isEmpty()) {
+            // Every attempt, each billed on its own: the top-level counts describe only the one
+            // that produced this message. An earlier attempt declined; it is billed when it wrote
+            // something first. One that declined before writing anything is billed only in some
+            // categories, and the reply does not say which it declined in, so it is counted as
+            // unbilled -- which is right for a cyber decline, the one Anthropic documents its
+            // default fallback for.
+            for (int i = 0; i < iterations.size(); i++) {
+                JsonNode attempt = iterations.get(i);
+                int attemptOutput = count(attempt, "output_tokens", 0);
+                boolean last = i == iterations.size() - 1;
+                if (last ? billed(refused, attemptOutput, stopDetail) : attemptOutput > 0) {
+                    billed.add(new LlmResponse.Usage(attempt.path("model").asText(servedModel),
+                            count(attempt, "input_tokens", 0), attemptOutput,
+                            count(attempt, "cache_creation_input_tokens", 0),
+                            count(attempt, "cache_read_input_tokens", 0)));
+                }
+            }
+        } else if (billed(refused, output, stopDetail)) {
+            billed.add(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead));
+        }
+        LlmResponse response = reply.response(billed, stopReason, stopDetail, servedModel,
+                modelLimits.maxOutputTokens(), modelLimits.contextWindow());
+        boolean retry = withFallbacks && refused && recommendedModel != null && !recommendedModel.isBlank();
+        return new Attempt(response, retry ? recommendedModel : null);
+    }
+
+    /**
+     * Whether an attempt that ended this way is billed: every attempt that wrote something is,
+     * and one refused before writing anything only in the categories Anthropic bills for that.
+     */
+    private static boolean billed(boolean refused, int outputTokens, String category) {
+        return !refused || outputTokens > 0
+                || (category != null && BILLED_BEFORE_OUTPUT.contains(category));
     }
 
     /** A counter from a usage object, or {@code otherwise} when the object does not carry it. */
@@ -511,13 +614,4 @@ class AnthropicProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getAnthropicModel(); }
-
-    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
-        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
-            return httpClient.newBuilder()
-                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
-                    .build();
-        }
-        return httpClient;
-    }
 }

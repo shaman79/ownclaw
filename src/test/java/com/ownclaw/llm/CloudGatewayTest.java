@@ -25,12 +25,15 @@ class CloudGatewayTest {
         final List<List<LlmMessage>> calls = new ArrayList<>();
         final List<LlmRequestConfig> configs = new ArrayList<>();
         RuntimeException failWith;
+        /** Tell the request's progress hook about an event before answering, as a stream does. */
+        boolean streams;
         String name = "anthropic";
         String model = "claude-opus-5";
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             calls.add(m); configs.add(c);
             if (failWith != null) throw failWith;
-            return new LlmResponse("ok", 120, 7, 30, 90, "end_turn");
+            if (streams) c.progress().onProgress();
+            return Replies.of("ok", 120, 7, 30, 90, "end_turn");
         }
         public boolean isAvailable() { return true; }
         public boolean supportsTools() { return true; }
@@ -410,6 +413,31 @@ class CloudGatewayTest {
                 "and it is written after the send, so it carries the tokens like any other");
         assertNotNull(rows.last().refusalRef(), "naming what would have been refused");
         // Mutation: treat OBSERVE as silent -> decision is SENT.
+    }
+
+    @Test
+    @DisplayName("the progress hook reaches the provider, with tools or without, and what it throws comes back unchanged")
+    void theProgressHookGoesThroughTheDoor() {
+        // Stop and the stall watchdog end an in-flight cloud call through this hook, and every
+        // cloud call goes through the door.
+        var provider = new Recording(); provider.streams = true; var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var stop = new IllegalStateException("stopped by the owner");
+        LlmProgress hook = () -> { throw stop; };
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+                .withProgress(hook);
+
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)),
+                "not wrapped, not replaced");
+        assertSame(hook, provider.configs.get(0).progress());
+        assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
+
+        var withTools = cfg.withTools(List.of(new ToolSpec("fx_rates", "Rates.", Map.of("type", "object"))));
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), withTools)));
+        assertSame(hook, provider.configs.get(1).progress(),
+                "the request the door rebuilds around the scrubbed tools keeps the hook");
+        // Mutation: send the request without its hook -> the provider has none to tell, and the
+        // call cannot be stopped.
     }
 
     @Test

@@ -23,7 +23,7 @@ class AnthropicCacheTest {
 
     private JsonNode body(List<LlmMessage> messages, boolean tools) {
         var specs = tools ? List.of(new ToolSpec("respond", "answer", Map.of("type", "object"))) : null;
-        return provider.requestBody(messages, new LlmRequestConfig(null, null, false, null, specs),
+        return provider.requestBody(messages, new LlmRequestConfig(null, null, false, specs),
                 "claude-opus-5", 128_000);
     }
 

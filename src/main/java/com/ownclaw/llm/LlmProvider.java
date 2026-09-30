@@ -16,7 +16,9 @@ public interface LlmProvider {
      * @return the provider's response -- through the cloud gateway or the local provider, only
      *         one that passed {@link LlmResponse#requireComplete}
      * @throws LlmException on network errors, rate limits, or invalid responses; a refused
-     *         reply is a {@link ProviderRefused}, one cut off by a limit an {@link OutputTruncated}
+     *         reply is a {@link ProviderRefused}, one cut off by a limit an {@link OutputTruncated},
+     *         and one holding a tool call whose arguments do not parse a {@link MalformedToolCall}
+     *         -- each with the reply, whose tokens were billed ({@link LlmException#reply()})
      */
     LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config);
 

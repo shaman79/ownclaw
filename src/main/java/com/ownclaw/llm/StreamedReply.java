@@ -20,7 +20,7 @@ import java.util.Map;
  * text (Anthropic, OpenAI) or as one object (Ollama, which is handed in as its JSON text) and are
  * parsed strictly once the call is complete: no lenient reading, no trailing text. Anthropic does
  * not check a streamed tool input itself, so a malformed one reaches this parser as it was
- * written.
+ * written, and the reply says so ({@link LlmResponse#invalidToolCall}) rather than offering it.
  */
 final class StreamedReply {
 
@@ -48,6 +48,11 @@ final class StreamedReply {
 
     /** One event or line of the stream, as JSON. */
     JsonNode parse(String event) {
+        return parse(provider, mapper, event);
+    }
+
+    /** One event or line of {@code provider}'s stream, as JSON; anything else fails the call. */
+    static JsonNode parse(String provider, ObjectMapper mapper, String event) {
         try {
             return mapper.readTree(event);
         } catch (JsonProcessingException e) {
@@ -104,21 +109,17 @@ final class StreamedReply {
     }
 
     /**
-     * The reply. A complete reply with a tool call whose arguments did not parse is not
-     * returned: running the call without them, or dropping it and taking the text for the
-     * answer, would both be the wrong thing. An incomplete one is returned as it is, for
-     * {@link LlmResponse#requireComplete} to reject with the reason that matters.
+     * The reply. A tool call whose arguments did not parse is not among its calls; the reply
+     * names it instead, and {@link LlmResponse#requireComplete} -- which the cloud gateway applies
+     * after writing the call's ledger row -- refuses the reply for it, unless the reply was
+     * refused or cut off, which is then the reason that matters.
+     *
+     * @param usage every attempt the reply was billed for
      */
-    LlmResponse response(int promptTokens, int completionTokens, int cacheWriteTokens,
-                         int cacheReadTokens, String stopReason, String stopDetail, String model,
-                         Integer maxOutputTokens, Integer contextWindow) {
+    LlmResponse response(List<LlmResponse.Usage> usage, String stopReason, String stopDetail,
+                         String model, Integer maxOutputTokens, Integer contextWindow) {
         for (Integer index : List.copyOf(open.keySet())) close(index);
-        LlmResponse response = new LlmResponse(text.toString(), promptTokens, completionTokens,
-                cacheWriteTokens, cacheReadTokens, stopReason, List.copyOf(calls), stopDetail, model,
-                maxOutputTokens, contextWindow);
-        if (malformed != null && response.complete()) {
-            throw new LlmException(provider, malformed, 0, null);
-        }
-        return response;
+        return new LlmResponse(text.toString(), calls, malformed, stopReason, stopDetail, model,
+                maxOutputTokens, contextWindow, usage);
     }
 }

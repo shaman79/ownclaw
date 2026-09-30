@@ -137,6 +137,18 @@ class OpenAiStreamingTest {
     }
 
     @Test
+    @DisplayName("arguments that are not a JSON object: no call is offered, and the check refuses the reply with its tokens")
+    void malformedArguments() {
+        var http = api(toolFragment(0, "call_1", "shell_exec", "{\"command\": ")
+                + toolFragment(0, null, null, "ls -la}") + finish("tool_calls") + usage(10, 5, 0) + DONE);
+        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        assertFalse(r.hasToolCalls(), "not a call with empty arguments");
+        var e = assertThrows(MalformedToolCall.class, () -> r.requireComplete("openai"));
+        assertTrue(e.getMessage().contains("'shell_exec'"), e.getMessage());
+        assertEquals(5, e.reply().completionTokens());
+    }
+
+    @Test
     @DisplayName("finish_reason length: cut off at the model's output limit, whose size OpenAI does not state")
     void length() {
         var http = api(content("a long answer tha") + finish("length") + usage(10, 5, 0) + DONE);

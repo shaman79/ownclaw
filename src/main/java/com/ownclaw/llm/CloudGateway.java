@@ -24,9 +24,9 @@ import java.util.Map;
  * fixed order — refuse if unclassified, scrub vault values, check the canary, send, record,
  * then hand back only a reply that is complete — so privacy is a property of the code path. A
  * prompt builder can be wrong about what it rendered and the call is still refused -- in every
- * part but an assistant turn, which holds the model's own earlier output and is not scanned
- * (see the canary loop); a new call site next month either carries a context or does not get
- * through.
+ * part but an assistant turn, which replays the model's earlier turns, holds nothing derived from
+ * a tool result or other private input, and is not scanned (see the canary loop); a new call site
+ * next month either carries a context or does not get through.
  * <p>
  * Deliberately not a policy engine. There is one mode switch, {@code ENFORCE} or {@code OBSERVE},
  * and OBSERVE changes exactly one thing: a canary hit is sent and recorded as such instead of
@@ -122,7 +122,7 @@ public final class CloudGateway implements LlmProvider {
             }
         }
 
-        // (c) The canary: every part the model did not write itself, before the socket opens.
+        // (c) The canary: every part but the replayed assistant turns, before the socket opens.
         String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
         // A tool description or schema is authored by the cloud at skill_create or by the
@@ -168,20 +168,26 @@ public final class CloudGateway implements LlmProvider {
         boolean leaked = false;
         for (Part part : parts) {
             if (leaked) break;
-            // An assistant part is the model's own earlier output, replayed: the actions it chose
+            // An assistant part replays the model's earlier turns: the actions it chose
             // (ThinkingEngine renders them as JSON), a reply of its that could not be parsed, the
-            // code generator's previous answer. The model wrote it in answer to requests that
-            // passed this loop, and it is only ever shown descriptors of PRIVATE results, so
-            // nothing in it is new to the cloud. Scanned, it was refused whenever a private
-            // result repeated the model's own words the way JSON prints them: a task ended on a
-            // skill spec the cloud had written at its first step, because a later private result
-            // quoted the report headings that spec had dictated. The allowance for the cloud's
-            // own words could not excuse it -- it compares each argument as typed, and the replay
-            // is JSON, so a window that starts at a quote or spans an escape never matches.
+            // code generator's previous answer -- and the few turns the code writes in the model's
+            // place: the fixed note that a think call failed, the reflection the loop injects, a
+            // skill_create the CapabilityResolver built from its templates. What the model wrote,
+            // it wrote in answer to requests that passed this loop, having only ever been shown
+            // descriptors of PRIVATE results; what the code writes there holds nothing it read.
+            // So nothing in an assistant part is new to the cloud. Scanned, it was refused
+            // whenever a private result repeated the model's own words the way JSON prints them:
+            // a task ended on a skill spec the cloud had written at its first step, because a
+            // later private result quoted the report headings that spec had dictated. The
+            // allowance for the cloud's own words could not excuse it -- it compares each argument
+            // as typed, and the replay is JSON, so a window that starts at a quote or spans an
+            // escape never matches.
             //
-            // Sound only while nothing but model output goes into an assistant message:
-            // AssistantPartsTest pins that the replay carries a reference as the model wrote it,
-            // never the bytes it resolves to. The vault check above still covers these parts.
+            // Sound only while nothing derived from a tool result or other private input is put
+            // into an assistant message. AssistantPartsTest pins that through the real renderer:
+            // a replay carries a reference as the model wrote it, never the bytes it resolves to,
+            // and the turns the code writes carry no private text either. The vault check above
+            // still covers these parts.
             if ("assistant".equals(part.kind())) continue;
             String normalised = PrivateIndex.normalise(part.text());
             int from = 0;

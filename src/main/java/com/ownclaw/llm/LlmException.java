@@ -7,19 +7,35 @@ public class LlmException extends RuntimeException {
 
     private final String provider;
     private final int httpStatus;
+    private final LlmResponse reply;
 
     public LlmException(String provider, String message) {
         this(provider, message, 0, null);
     }
 
     public LlmException(String provider, String message, int httpStatus, Throwable cause) {
+        this(provider, message, httpStatus, cause, null);
+    }
+
+    /** A failure that came with a reply: the provider answered, and its answer is no answer. */
+    protected LlmException(String provider, String message, int httpStatus, Throwable cause,
+                           LlmResponse reply) {
         super("[" + provider + "] " + message, cause);
         this.provider = provider;
         this.httpStatus = httpStatus;
+        this.reply = reply;
     }
 
     public String getProvider() { return provider; }
     public int getHttpStatus() { return httpStatus; }
+
+    /**
+     * The reply the provider sent, when the call failed because that reply is no answer --
+     * refused ({@link ProviderRefused}), cut off ({@link OutputTruncated}), or holding a tool call
+     * that cannot be run ({@link MalformedToolCall}) -- for its token counts: every one of them
+     * was billed. Null when there was no reply. Its content is not an answer.
+     */
+    public LlmResponse reply() { return reply; }
 
     public boolean isRateLimit() { return httpStatus == 429; }
     public boolean isAuthError() { return httpStatus == 401 || httpStatus == 403; }

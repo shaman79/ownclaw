@@ -79,7 +79,7 @@ class OpenAiProvider implements LlmProvider {
                 .post(RequestBody.create(requestBody(messages, reqConfig, model).toString(), JSON_TYPE))
                 .build();
 
-        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
+        try (Response response = httpClient.newCall(request).execute()) {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 int code = response.code();
@@ -200,7 +200,8 @@ class OpenAiProvider implements LlmProvider {
         int uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
         log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
                 servedModel, promptTokens, cachedPromptTokens, completionTokens);
-        return reply.response(uncachedPromptTokens, completionTokens, 0, cachedPromptTokens,
+        return reply.response(List.of(new LlmResponse.Usage(servedModel, uncachedPromptTokens,
+                        completionTokens, 0, cachedPromptTokens)),
                 finishReason, null, servedModel, null, null);
     }
 
@@ -274,18 +275,4 @@ class OpenAiProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getModel(); }
-
-    /**
-     * Return an OkHttpClient with the read timeout from reqConfig (if set),
-     * otherwise use the default httpClient. Uses newBuilder() so the
-     * connection pool and dispatcher are shared.
-     */
-    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
-        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
-            return httpClient.newBuilder()
-                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
-                    .build();
-        }
-        return httpClient;
-    }
 }

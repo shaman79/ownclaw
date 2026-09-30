@@ -41,11 +41,10 @@ public final class ModelPricing {
     // models not listed here fall back to the unknown-Claude entry.
     private static final Map<String, Rates> RATES = new LinkedHashMap<>();
     static {
-        // Cache reads at 0.025x the input rate; Claude Mythos 5.1 has the same per-token price,
-        // and whether it shares that cache-read rate was open at launch, so it keeps 0.1x.
-        RATES.put("claude-fable-5-1",   new Rates(10.00, 50.00, 12.50, 0.25));
-        RATES.put("claude-mythos-5-1",  Rates.of(10.00, 50.00));
+        RATES.put("claude-fable-5-1",   new Rates(10.00, 50.00, 12.50, 0.25));   // reads at 0.025x
         RATES.put("claude-fable-5",     Rates.of(10.00, 50.00));
+        // Claude Mythos 5.1 too, by prefix: it has Fable 5.1's per-token price, and whether it
+        // shares Fable 5.1's cache-read rate was open at launch, so it keeps 0.1x.
         RATES.put("claude-mythos-5",    Rates.of(10.00, 50.00));
         RATES.put("claude-opus-5-5",    new Rates(4.00, 20.00, 5.00, 0.20));   // reads at 0.05x
         RATES.put("claude-opus-5",      Rates.of(5.00, 25.00));
@@ -95,10 +94,18 @@ public final class ModelPricing {
              + (cacheReadTokens   * r.cacheRead()  / 1_000_000.0);
     }
 
-    /** Convenience for a response that carries its own counters. */
+    /**
+     * Estimated USD for one reply: every attempt it was billed for, each at the rates of the
+     * model that ran it -- a model that declined part-way and the fallback model that finished
+     * need not cost the same -- and at {@code model}'s rates for an attempt that does not say.
+     */
     public static double costUsd(String model, LlmResponse response) {
         if (response == null) return 0.0;
-        return costUsd(model, response.promptTokens(), response.completionTokens(),
-                response.cacheCreationTokens(), response.cacheReadTokens());
+        double total = 0.0;
+        for (LlmResponse.Usage u : response.usage()) {
+            total += costUsd(u.model() != null ? u.model() : model, u.promptTokens(),
+                    u.completionTokens(), u.cacheCreationTokens(), u.cacheReadTokens());
+        }
+        return total;
     }
 }

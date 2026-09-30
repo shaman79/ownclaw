@@ -23,7 +23,7 @@ class ToolRequestConfigTest {
     @Test
     @DisplayName("a config without tools is unchanged, so no existing call site behaves differently")
     void defaultsAreInert() {
-        var c = new LlmRequestConfig(null, null, true, null);
+        var c = new LlmRequestConfig(null, null, true);
         assertNull(c.tools());
         assertFalse(c.hasTools());
         assertTrue(c.jsonMode(), "the text protocol still asks for JSON");
@@ -34,11 +34,10 @@ class ToolRequestConfigTest {
     @DisplayName("withTools preserves every other setting")
     void withToolsPreservesTheRest() {
         LlmProgress hook = () -> { };
-        var base = new LlmRequestConfig("m", 0.3, false, 600).withProgress(hook);
+        var base = new LlmRequestConfig("m", 0.3, false).withProgress(hook);
         var withTools = base.withTools(SOME_TOOLS);
         assertEquals("m", withTools.model());
         assertEquals(0.3, withTools.temperature());
-        assertEquals(600, withTools.readTimeoutSec());
         assertSame(hook, withTools.progress(), "the gateway's withTools must not drop the hook");
         assertSame(hook, withTools.withEgress(null).progress());
         assertTrue(withTools.hasTools());
@@ -58,7 +57,7 @@ class ToolRequestConfigTest {
     @Test
     @DisplayName("an empty tool list counts as no tools")
     void emptyIsNotTools() {
-        assertFalse(new LlmRequestConfig(null, null, false, null)
+        assertFalse(new LlmRequestConfig(null, null, false)
                 .withTools(List.of()).hasTools(),
                 "sending an empty tools array would turn on the native path with nothing to call");
     }
@@ -66,7 +65,7 @@ class ToolRequestConfigTest {
     @Test
     @DisplayName("a response without tool calls reports none rather than null")
     void responseDefaultsToNoCalls() {
-        var r = new LlmResponse("hello", 10, 5, 0, 0, "end_turn");
+        var r = Replies.of("hello", 10, 5, 0, 0, "end_turn");
         assertNotNull(r.toolCalls(), "callers iterate this without a null check");
         assertFalse(r.hasToolCalls());
     }
@@ -74,7 +73,7 @@ class ToolRequestConfigTest {
     @Test
     @DisplayName("a response carrying tool calls reports them")
     void responseWithCalls() {
-        var r = new LlmResponse("", 10, 5, 0, 0, "tool_use",
+        var r = Replies.of("", 10, 5, 0, 0, "tool_use",
                 List.of(new ToolCall("id_1", "shell_exec", Map.of("command", "hostname"))));
         assertTrue(r.hasToolCalls());
         assertEquals("shell_exec", r.toolCalls().get(0).name());

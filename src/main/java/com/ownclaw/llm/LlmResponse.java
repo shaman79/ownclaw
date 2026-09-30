@@ -1,61 +1,77 @@
 package com.ownclaw.llm;
 
+import java.util.List;
+import java.util.function.ToIntFunction;
+
 /**
  * Unified LLM response across all providers.
  *
- * @param content              the generated text
- * @param promptTokens         input tokens as the provider reports them — see the caching note
- * @param completionTokens     output tokens
- * @param cacheCreationTokens  input tokens written to the prompt cache this call (0 if unsupported)
- * @param cacheReadTokens      input tokens served from the prompt cache this call (0 if unsupported)
- * @param stopReason           why the model stopped, as the provider said it ("end_turn",
- *                             "tool_use", "max_tokens", "refusal", "length", "stop", ...), or null
- * @param stopDetail           what the provider adds to that reason -- on Anthropic, the category
- *                             of a refusal ("cyber", ...), which it may leave out -- or null
- * @param model                the model that wrote the reply, as the provider named it -- not
- *                             necessarily the one asked for: Anthropic can hand a declined request
- *                             to a fallback model -- or null when the provider did not say
- * @param maxOutputTokens      the output limit the reply was written under (the model's own
- *                             maximum), or null when the request set none
- * @param contextWindow        the model's context window, or null when the provider does not
- *                             say what it is
+ * @param content          the generated text
+ * @param toolCalls        the tool calls the model asked for, each with arguments that parsed
+ * @param invalidToolCall  why a tool call the model wrote is not among {@code toolCalls} -- its
+ *                         arguments are not a JSON object -- or null when every call parsed
+ * @param stopReason       why the model stopped, as the provider said it ("end_turn",
+ *                         "tool_use", "max_tokens", "refusal", "length", "stop", ...), or null
+ * @param stopDetail       what the provider adds to that reason -- on Anthropic, the category
+ *                         of a refusal ("cyber", ...), which it may leave out -- or null
+ * @param model            the model that wrote the reply, as the provider named it -- not
+ *                         necessarily the one asked for: Anthropic can hand a declined request
+ *                         to a fallback model -- or null when the provider did not say
+ * @param maxOutputTokens  the output limit the reply was written under (the model's own
+ *                         maximum), or null when the request set none
+ * @param contextWindow    the model's context window, or null when the provider does not
+ *                         say what it is
+ * @param usage            every attempt this reply was billed for, each with the model that ran
+ *                         it; the token counts below are their sums
  */
 public record LlmResponse(
     String content,
-    int promptTokens,
-    int completionTokens,
-    int cacheCreationTokens,
-    int cacheReadTokens,
+    List<ToolCall> toolCalls,
+    String invalidToolCall,
     String stopReason,
-    java.util.List<ToolCall> toolCalls,
     String stopDetail,
     String model,
     Integer maxOutputTokens,
-    Integer contextWindow
+    Integer contextWindow,
+    List<Usage> usage
 ) {
-    /** A reply described by its stop reason alone -- what a fake provider in a test returns. */
-    public LlmResponse(String content, int promptTokens, int completionTokens,
-                       int cacheCreationTokens, int cacheReadTokens, String stopReason,
-                       java.util.List<ToolCall> toolCalls) {
-        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens,
-                stopReason, toolCalls, null, null, null, null);
-    }
+    /**
+     * What one attempt at a reply was billed for, and the model that ran it (null when the
+     * provider did not say). A reply is usually one attempt. Anthropic bills more than one when a
+     * model declines part-way and its fallback model finishes the reply, and this application's
+     * own retry on the model a refusal names adds another.
+     *
+     * @param promptTokens input tokens as the provider reports them -- see the caching note
+     */
+    public record Usage(String model, int promptTokens, int completionTokens,
+                        int cacheCreationTokens, int cacheReadTokens) {}
 
-    /** Without native tool calls. */
-    public LlmResponse(String content, int promptTokens, int completionTokens,
-                       int cacheCreationTokens, int cacheReadTokens, String stopReason) {
-        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens,
-                stopReason, java.util.List.of());
-    }
-
-    /** For providers with no prompt cache, or calls that did not touch one. */
-    public LlmResponse(String content, int promptTokens, int completionTokens) {
-        this(content, promptTokens, completionTokens, 0, 0, null);
+    public LlmResponse {
+        toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
+        usage = usage == null ? List.of() : List.copyOf(usage);
     }
 
     /** Whether the model asked to call a tool. */
     public boolean hasToolCalls() {
-        return toolCalls != null && !toolCalls.isEmpty();
+        return !toolCalls.isEmpty();
+    }
+
+    /** Input tokens billed for this reply, over every attempt, as the provider reports them. */
+    public int promptTokens() { return sum(Usage::promptTokens); }
+
+    /** Output tokens billed for this reply, over every attempt. */
+    public int completionTokens() { return sum(Usage::completionTokens); }
+
+    /** Input tokens written to the prompt cache, over every attempt (0 if unsupported). */
+    public int cacheCreationTokens() { return sum(Usage::cacheCreationTokens); }
+
+    /** Input tokens served from the prompt cache, over every attempt (0 if unsupported). */
+    public int cacheReadTokens() { return sum(Usage::cacheReadTokens); }
+
+    private int sum(ToIntFunction<Usage> counter) {
+        int total = 0;
+        for (Usage u : usage) total += counter.applyAsInt(u);
+        return total;
     }
 
     /**
@@ -81,39 +97,32 @@ public record LlmResponse(
      * applies it after writing the call's ledger row, the local provider before it returns. A
      * refused reply throws {@link ProviderRefused}. A reply cut off by a limit throws
      * {@link OutputTruncated} naming the limit and its size: Anthropic's "max_tokens" is the
-     * model's maximum output and its "model_context_window_exceeded" the context window; a
-     * "length" (OpenAI, Ollama) is the output limit when the request set one and the context
-     * window when it did not, which is always the case on Ollama, where no output limit is sent.
-     * Before this, a cut-off reply looked exactly like a malformed one and was parsed, salvaged
-     * or retried as if it were the model's whole answer.
+     * model's maximum output and its "model_context_window_exceeded" the context window. A
+     * "length" is the context window when no output limit was sent and the window is known --
+     * Ollama, which is always sent the model's own window and never an output limit -- and
+     * otherwise the model's maximum output: OpenAI states neither, and no output limit is sent
+     * to it either, so its "length" is taken to be the model's own maximum. A reply that is
+     * whole but holds a tool call whose arguments did not parse throws {@link MalformedToolCall}:
+     * running the call without them, or dropping it and taking the text for the answer, would
+     * both be wrong. Each carries this reply, so its billed tokens can still be counted.
      *
      * @param provider the provider's name, for the exception
      */
     public LlmResponse requireComplete(String provider) {
-        LlmException notAnAnswer = incompleteness(provider);
-        if (notAnAnswer != null) throw notAnAnswer;
-        return this;
-    }
-
-    /** Whether {@link #requireComplete} lets this reply through. For the providers' own use. */
-    boolean complete() {
-        return incompleteness("") == null;
-    }
-
-    private LlmException incompleteness(String provider) {
-        if (refused()) return new ProviderRefused(provider, this);
+        if (refused()) throw new ProviderRefused(provider, this);
         if ("max_tokens".equals(stopReason)) {
-            return new OutputTruncated(provider, OutputTruncated.Limit.MAX_OUTPUT, maxOutputTokens, this);
+            throw new OutputTruncated(provider, OutputTruncated.Limit.MAX_OUTPUT, maxOutputTokens, this);
         }
         if ("model_context_window_exceeded".equals(stopReason)) {
-            return new OutputTruncated(provider, OutputTruncated.Limit.CONTEXT_WINDOW, contextWindow, this);
+            throw new OutputTruncated(provider, OutputTruncated.Limit.CONTEXT_WINDOW, contextWindow, this);
         }
         if ("length".equals(stopReason)) {
-            return maxOutputTokens == null && contextWindow != null
+            throw maxOutputTokens == null && contextWindow != null
                     ? new OutputTruncated(provider, OutputTruncated.Limit.CONTEXT_WINDOW, contextWindow, this)
                     : new OutputTruncated(provider, OutputTruncated.Limit.MAX_OUTPUT, maxOutputTokens, this);
         }
-        return null;
+        if (invalidToolCall != null) throw new MalformedToolCall(provider, this);
+        return this;
     }
 
     /**
@@ -121,7 +130,7 @@ public record LlmResponse(
      * total on a provider with prompt caching — use {@link #billedInputTokens()} for that.
      */
     public int totalTokens() {
-        return promptTokens + completionTokens;
+        return promptTokens() + completionTokens();
     }
 
     /**
@@ -140,11 +149,11 @@ public record LlmResponse(
      * separately.
      */
     public int billedInputTokens() {
-        return promptTokens + cacheCreationTokens + cacheReadTokens;
+        return promptTokens() + cacheCreationTokens() + cacheReadTokens();
     }
 
     /** True when this call touched a prompt cache in either direction. */
     public boolean usedCache() {
-        return cacheCreationTokens > 0 || cacheReadTokens > 0;
+        return cacheCreationTokens() > 0 || cacheReadTokens() > 0;
     }
 }

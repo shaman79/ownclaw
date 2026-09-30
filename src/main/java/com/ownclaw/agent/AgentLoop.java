@@ -2065,8 +2065,7 @@ public class AgentLoop {
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
                     0.2,    // low temperature for precise code generation
-                    false,  // no JSON mode — we want raw Python code
-                    null    // use provider default read timeout
+                    false   // no JSON mode — we want raw Python code
             ).withEgress(context.egress("codegen"));
 
             ScheduledFuture<?> heartbeat = startLlmHeartbeat(context.userId(),
@@ -2691,8 +2690,9 @@ public class AgentLoop {
      *
      * <p>Honest about its limits: cancellation is cooperative. A task in the middle of a model
      * call cannot notice until the call returns -- a streamed reply returns when the model
-     * stops, or after the provider's read timeout of silence (600 s for Ollama) -- so this bounds
-     * a stall by the stall timeout PLUS however long that call still runs.
+     * stops, or after the provider's read timeout of silence (an hour for Ollama, which sends
+     * nothing until it has loaded the model and read the prompt) -- so this bounds a stall by
+     * the stall timeout PLUS however long that call still runs.
      * That is a real improvement on never noticing, and it is not a kill switch. Making it one
      * would mean interrupting threads mid-call, which risks leaving a half-written skill
      * directory or a dangling sandbox process behind.

@@ -97,8 +97,8 @@ public class LocalModelCheck {
     /**
      * A local model's context window in tokens: {@code <general.architecture>.context_length}
      * from Ollama's {@code /api/show}. Every {@code /api/chat} this application sends carries it
-     * as num_ctx ({@link OllamaProvider#contextSettings}), so the local model always has its
-     * whole window and never one chosen for it.
+     * as num_ctx ({@link OllamaProvider#streamChat}), so the local model always has its whole
+     * window and never one chosen for it.
      * <p>
      * Known from the first {@code /api/show} made for the model, whoever made it; for a model
      * none has been made for yet -- a substitute chosen at runtime, a model named by a request --
@@ -403,7 +403,7 @@ public class LocalModelCheck {
     }
 
     private List<String> installedModels(String url) throws Exception {
-        Request req = new Request.Builder().url(url + "/api/tags").get().build();
+        Request req = new Request.Builder().url(OllamaProvider.endpoint(url, "/api/tags")).get().build();
         try (Response resp = http.newCall(req).execute()) {
             String body = resp.body() == null ? "" : resp.body().string();
             if (!resp.isSuccessful()) {
@@ -421,9 +421,7 @@ public class LocalModelCheck {
     private JsonNode show(String url, String model) throws Exception {
         RequestBody body = RequestBody.create(
                 mapper.writeValueAsString(java.util.Map.of("model", model)), JSON);
-        // Trailing slashes trimmed as OllamaProvider trims them: every local call now asks here
-        // first, so a URL that /api/chat accepts has to work here too.
-        Request req = new Request.Builder().url(url.replaceAll("/+$", "") + "/api/show").post(body).build();
+        Request req = new Request.Builder().url(OllamaProvider.endpoint(url, "/api/show")).post(body).build();
         try (Response resp = http.newCall(req).execute()) {
             String text = resp.body() == null ? "" : resp.body().string();
             if (!resp.isSuccessful()) {

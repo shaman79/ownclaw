@@ -10,6 +10,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.privacy.Label;
 import org.junit.jupiter.api.DisplayName;
@@ -44,7 +45,7 @@ class DelegationBehaviourTest {
         Scripted(String... r) { replies.addAll(List.of(r)); }
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             calls.add(List.copyOf(m));
-            return new LlmResponse(replies.isEmpty() ? done("finished") : replies.poll(), 1, 1);
+            return Replies.of(replies.isEmpty() ? done("finished") : replies.poll(), 1, 1);
         }
         public boolean isAvailable() { return true; }
         public String name() { return "scripted"; }

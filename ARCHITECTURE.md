@@ -1386,7 +1386,7 @@ ownclaw:
     url: http://localhost:11434
     model: qwen2.5:14b
     temperature: 0.3
-    context_window: 16384       # tokens
+    # no context-window setting: num_ctx is the model's own context_length, read from /api/show
 
   # Cloud LLM (Orchestrator — always drives main agent loop)
   mentor:

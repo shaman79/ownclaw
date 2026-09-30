@@ -77,7 +77,7 @@ class ChatContextTest {
         var jdbc = com.ownclaw.conversation.MigratedDatabase.at(tmp.resolve("m.db"));
         var local = new com.ownclaw.llm.OllamaProvider(new OwnClawConfig(), new com.fasterxml.jackson.databind.ObjectMapper(), null) {
             @Override public com.ownclaw.llm.LlmResponse chat(List<com.ownclaw.llm.LlmMessage> m, com.ownclaw.llm.LlmRequestConfig c) {
-                return new com.ownclaw.llm.LlmResponse("Summary: the owner and the assistant talked about earlier things.", 1, 1);
+                return com.ownclaw.llm.Replies.of("Summary: the owner and the assistant talked about earlier things.", 1, 1);
             }
         };
         var compressor = new ConversationCompressor(jdbc, local, new com.ownclaw.llm.OllamaSemaphore());

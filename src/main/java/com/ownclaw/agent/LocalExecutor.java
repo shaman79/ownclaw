@@ -288,7 +288,7 @@ public class LocalExecutor {
                 // format:json and tools are mutually exclusive in Ollama, so JSON mode is
                 // only asked for on the text protocol, where it is what holds the output shape.
                 response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, !nativeTools, null, specs));
+                        new LlmRequestConfig(null, null, !nativeTools, specs));
             } catch (Exception e) {
                 // A delegation that outgrew the local model's context window fails with
                 // OutputTruncated, whose message names the window and its size.

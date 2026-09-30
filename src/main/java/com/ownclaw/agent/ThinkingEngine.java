@@ -111,8 +111,7 @@ public class ThinkingEngine {
                 // JSON mode is for the TEXT protocol. With native tools it is actively harmful:
                 // it pushes the model to put JSON in the text body instead of emitting a
                 // tool_use block, which is the one thing this change exists to stop.
-                !nativeTools,
-                null    // use provider default read timeout
+                !nativeTools
         );
         // On whose behalf. Without this the gateway refuses the call -- which is the point:
         // a call site that forgets is stopped, not silently unscanned.
@@ -738,8 +737,7 @@ public class ThinkingEngine {
             LlmRequestConfig req = new LlmRequestConfig(
                     null,
                     0.0,
-                    true,
-                    null
+                    true
             );
 
             LlmResponse resp = local.chat(messages, req);
