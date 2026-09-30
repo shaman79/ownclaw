@@ -497,6 +497,96 @@ class DelegationBehaviourTest {
     }
 
     @Test
+    @DisplayName("done first in a turn waits too: the calls after it run")
+    void doneFirstInATurnIsNotTaken() {
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Replies(
+                turn(new ToolCall("a", "daily_menu_fetcher", Map.of())),
+                turn(new ToolCall("b", "done", Map.of("summary", "menu emailed")),
+                        new ToolCall("c", "smtp_send_email",
+                                Map.of("to", "petr@example.com", "body", "{{1.body_text}}"))),
+                turn(new ToolCall("d", "done", Map.of("summary", "Menu emailed to Petr."))));
+
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+
+        assertEquals(1, smtp.calls.size(), "taking the done would have dropped the send unrun and unsaid");
+        assertTrue(llm.toldAfter(1).contains("[call 1 of 2: done] Not taken"), llm.toldAfter(1));
+        assertTrue(outcome.text().startsWith("Menu emailed to Petr."), outcome.text());
+    }
+
+    @Test
+    @DisplayName("Stop pressed during a call of a turn: the calls after it do not run")
+    void stopMidTurnRunsNothingMore() {
+        var ctx = task();
+        var scan = new FakeTool("net_scan", false, List.of(), p -> {
+            ctx.cancel();                      // the owner presses Stop while the scan runs
+            return ToolResult.success("3 hosts up");
+        });
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Replies(turn(new ToolCall("a", "net_scan", Map.of()),
+                new ToolCall("b", "smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1}}"))));
+
+        var outcome = executor(llm, new Usage(), scan, smtp).execute(plan("scan and email"), ctx);
+
+        assertEquals(1, scan.calls.size());
+        assertTrue(smtp.calls.isEmpty(), "the send ran after Stop: " + outcome.text());
+        assertTrue(outcome.text().startsWith("Delegation incomplete: Task cancelled during delegation."),
+                outcome.text());
+        assertTrue(outcome.text().contains("{{1}} [net_scan] OK: 3 hosts up"), "what ran is kept");
+    }
+
+    @Test
+    @DisplayName("a finished call is progress: the calls of a turn are not one long silence")
+    void aFinishedCallIsProgress() {
+        var ctx = task();
+        long[] quietAtSecond = {-1};
+        var first = new FakeTool("scan_a", false, List.of(), p -> {
+            try { Thread.sleep(300); } catch (InterruptedException e) { throw new IllegalStateException(e); }
+            return ToolResult.success("subnet A: 3 hosts up");
+        });
+        var second = new FakeTool("scan_b", false, List.of(), p -> {
+            quietAtSecond[0] = ctx.msSinceLastProgress();
+            return ToolResult.success("subnet B: 2 hosts up");
+        });
+        var llm = new Replies(turn(new ToolCall("a", "scan_a", Map.of()), new ToolCall("b", "scan_b", Map.of())));
+
+        executor(llm, new Usage(), first, second).execute(plan("scan both subnets"), ctx);
+
+        assertTrue(quietAtSecond[0] >= 0 && quietAtSecond[0] < 150, "the watchdog counted the first "
+                + "call's 300 ms as silence: " + quietAtSecond[0] + " ms");
+    }
+
+    @Test
+    @DisplayName("a skill's progress report reaches the owner and keeps the task alive")
+    void aSkillsProgressIsShownAndCounted() {
+        var ctx = task();
+        var emitter = new ChatStatusEmitter();
+        var lines = new ArrayList<String>();
+        emitter.subscribe("u1", "test", m -> lines.add(m.text()));
+        long[] quiet = {-1, -1};
+        var scan = new Tool() {
+            public String name() { return "net_scan"; }
+            public String description() { return "scans"; }
+            public Map<String, ToolParam> inputSchema() { return Map.of(); }
+            public ToolResult execute(Map<String, Object> p, ToolExecutionContext c) {
+                try { Thread.sleep(30); } catch (InterruptedException e) { throw new IllegalStateException(e); }
+                quiet[0] = ctx.msSinceLastProgress();
+                c.progressCallback().onProgress("Scanning 1/3", 33);
+                quiet[1] = ctx.msSinceLastProgress();
+                return ToolResult.success("3 hosts up");
+            }
+        };
+        var llm = new Scripted(call("net_scan", Map.of()), done("scanned"));
+
+        new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of(scan)), emitter,
+                new Usage()).execute(plan("scan"), ctx);
+
+        assertTrue(lines.contains("Delegate: net_scan: Scanning 1/3 (33%)"), lines.toString());
+        assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0], quiet[0] + " then " + quiet[1] + " ms");
+    }
+
+    @Test
     @DisplayName("a result typed out again is refused; text the model composes itself goes out")
     void retypedIsRefusedComposedIsSent() {
         // A 600-character rule refused both: the local tier could not write an email at all.

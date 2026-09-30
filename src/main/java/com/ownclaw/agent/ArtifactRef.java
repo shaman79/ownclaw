@@ -1,5 +1,7 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.privacy.PrivateIndex;
+
 import java.util.regex.Pattern;
 
 /**
@@ -130,12 +132,15 @@ public record ArtifactRef(int handle, String field) {
      * A name of a whole window or more is withheld because a key can be data -- an address, a
      * sentence a skill keyed its output by -- and a window of a PRIVATE result is exactly what
      * the canary refuses to send, so a descriptor carrying one would leak it and then be refused.
-     * A name the grammar would read differently (padded with spaces, holding braces, or spelled
-     * like a position) could never resolve. The position always does, and says nothing.
+     * Its length is measured as the canary measures it, after {@link PrivateIndex#normalise},
+     * which can lengthen a name: a dotted capital I lowercases to two characters, a ligature
+     * unfolds into two letters. A name the grammar would read differently (padded with spaces,
+     * holding braces, or spelled like a position) could never resolve. The position always does,
+     * and says nothing.
      */
     public static ArtifactRef toField(int handle, String name, int position) {
         var byName = new ArtifactRef(handle, name);
-        return name.length() < com.ownclaw.privacy.PrivateIndex.WINDOW
+        return PrivateIndex.normalise(name).length() < PrivateIndex.WINDOW
                 && byName.equals(parse(byName.toString())) && byName.position() == null
                 ? byName : new ArtifactRef(handle, "#" + position);
     }

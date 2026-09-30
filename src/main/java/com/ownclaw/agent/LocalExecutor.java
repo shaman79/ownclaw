@@ -387,6 +387,12 @@ public class LocalExecutor {
             int before = mine.size();
             var replies = new ArrayList<String>();
             for (int i = 0; i < actions.size(); i++) {
+                // Stop is looked at before every call, not only before every model call: pressed
+                // while one call of the turn runs, it stops the ones after it -- the send after
+                // the scan is exactly what Stop is for.
+                if (parentContext.isCancelled()) {
+                    return partial("Task cancelled during delegation.", mine);
+                }
                 ExecutorAction action = actions.get(i);
                 String reply = action.done
                         ? "Not taken: done has to be the only call of its turn, so that your "
@@ -508,6 +514,10 @@ public class LocalExecutor {
         long toolStartMs = System.currentTimeMillis();
         ToolResult result = executeToolDirect(action.tool, params, parentContext);
         long toolMs = System.currentTimeMillis() - toolStartMs;
+        // A finished call is progress. The calls of a turn run back to back, with no model call
+        // between them to say the task is alive, and the stall watchdog would otherwise count
+        // their run times together as silence.
+        parentContext.markProgress();
         boolean toolOk = result.success();
         String toolResult = toolOk ? result.output() : "ERROR: " + result.output();
 
@@ -748,7 +758,15 @@ public class LocalExecutor {
                 context.taskId(),
                 null,
                 context::isCancelled,
-                null,
+                // A skill's report_progress: shown to the owner, as the cloud path shows it, and
+                // progress for the stall watchdog. With no callback the sandbox leaves the line in
+                // the skill's stdout.
+                (message, percent) -> {
+                    context.markProgress();
+                    statusEmitter.emitForTask(context.userId(), context.taskId(),
+                            StatusMessage.Type.PROGRESS, "Delegate: " + toolName + ": " + message
+                                    + (percent == null ? "" : " (" + percent + "%)"));
+                },
                 // The four-argument constructor defaults these to empty, so a delegated skill
                 // could not see a file the task was given. That was survivable while delegation
                 // was the road not taken; it is not once unattended work runs through here.

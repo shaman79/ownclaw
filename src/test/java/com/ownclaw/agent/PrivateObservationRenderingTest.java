@@ -68,7 +68,7 @@ class PrivateObservationRenderingTest {
         ctx.setUnattended(true);
         var decision = Artifact.labelFor(credentials, List.of());
         var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, decision);
-        var obs = Artifact.asObservation(a, ToolResult.success(output, Map.of("k", "v")), 10);
+        var obs = Artifact.asObservation(a, ToolResult.success(output), 10);
         ctx.trajectory().record(new AgentAction(tool, Map.of(), "fetching"), obs);
         return ctx;
     }

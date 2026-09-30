@@ -1,7 +1,6 @@
 package com.ownclaw.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.privacy.Label;
 
@@ -44,8 +43,6 @@ import java.util.Map;
 public record Artifact(int n, String tool, Map<String, Object> written,
                        Map<String, Object> resolved, String output, boolean success,
                        Label label, List<String> why, boolean indexed) {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public Artifact {
         // Not Map.copyOf: it rejects a null VALUE, and a tool call carrying one is ordinary —
@@ -144,25 +141,18 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      */
     public boolean succeeded() {
         if (!success) return false;
-        if (output == null) return true;
-        String t = output.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return true;
-        try {
-            // The whole top level: when the descriptor listed only the first twelve keys, an "ok"
-            // in thirteenth place was read as success. A string "false" counts too; some skills
-            // write one.
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return true;
-            for (String key : List.of("ok", "success")) {
-                JsonNode v = node.get(key);
-                if (v != null && (v.isBoolean() ? !v.asBoolean() : "false".equalsIgnoreCase(v.asText()))) {
-                    return false;
-                }
+        JsonNode node = ToolResult.jsonObject(output);
+        if (node == null) return true;
+        // The whole top level: when the descriptor listed only the first twelve keys, an "ok"
+        // in thirteenth place was read as success. A string "false" counts too; some skills
+        // write one.
+        for (String key : List.of("ok", "success")) {
+            JsonNode v = node.get(key);
+            if (v != null && (v.isBoolean() ? !v.asBoolean() : "false".equalsIgnoreCase(v.asText()))) {
+                return false;
             }
-            return true;
-        } catch (Exception e) {
-            return true;
         }
+        return true;
     }
 
     /**
@@ -220,8 +210,8 @@ public record Artifact(int n, String tool, Map<String, Object> written,
 
     /**
      * The single substitution point. A PUBLIC result enters the trajectory as it is, byte for
-     * byte as today; a PRIVATE one enters as its descriptor, with no structured data — the
-     * structured map is the same content in another shape.
+     * byte as today; a PRIVATE one enters as its descriptor, with metadata about the artifact in
+     * place of its bytes.
      */
     public static AgentObservation asObservation(Artifact a, ToolResult r, long durationMs) {
         if (a.isPrivate()) {
@@ -233,8 +223,7 @@ public record Artifact(int n, String tool, Map<String, Object> written,
                             "label", a.label().name(), "chars", a.output().length()))),
                     durationMs);
         }
-        return new AgentObservation(a.tool(), a.success(), r.output(),
-                r.structured() == null ? Map.of() : r.structured(), durationMs);
+        return new AgentObservation(a.tool(), a.success(), r.output(), Map.of(), durationMs);
     }
 
     /**
@@ -256,46 +245,38 @@ public record Artifact(int n, String tool, Map<String, Object> written,
     }
 
     static Shape shapeOf(int handle, String text) {
-        var notJson = new Shape("text", List.of(), Map.of(), List.of());
-        if (text == null || text.isBlank()) return notJson;
-        String t = text.strip();
-        if (!(t.startsWith("{") && t.endsWith("}"))) return notJson;
-        try {
-            JsonNode node = MAPPER.readTree(t);
-            if (node == null || !node.isObject()) return notJson;
-            var fields = new ArrayList<String>();
-            var primitives = new java.util.LinkedHashMap<String, String>();
-            var refs = new ArrayList<ArtifactRef>();
-            var it = node.fields();
-            while (it.hasNext()) {
-                var e = it.next();
-                ArtifactRef ref = ArtifactRef.toField(handle, e.getKey(), refs.size() + 1);
-                refs.add(ref);
-                String name = ref.field();
-                JsonNode v = e.getValue();
-                if (v.isBoolean()) {
-                    // Booleans only. ok=false must be visible -- a success envelope around a
-                    // failure is the normal shape of a skill result and hiding it would have the
-                    // cloud report a send that never happened. A NUMBER can be the secret itself
-                    // (a balance, a count of messages), so it gets its kind and nothing more.
-                    primitives.put(name, v.asText());
-                    fields.add(name);
-                } else if (v.isNumber()) {
-                    fields.add(name + " (number)");
-                } else if (v.isTextual()) {
-                    fields.add(name + " (string, " + String.format("%,d", v.asText().length()) + " chars)");
-                } else if (v.isArray()) {
-                    fields.add(name + " (array, " + v.size() + ")");
-                } else if (v.isObject()) {
-                    fields.add(name + " (object, " + v.size() + " fields)");
-                } else {
-                    fields.add(name);
-                }
+        JsonNode node = ToolResult.jsonObject(text);
+        if (node == null) return new Shape("text", List.of(), Map.of(), List.of());
+        var fields = new ArrayList<String>();
+        var primitives = new java.util.LinkedHashMap<String, String>();
+        var refs = new ArrayList<ArtifactRef>();
+        var it = node.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            ArtifactRef ref = ArtifactRef.toField(handle, e.getKey(), refs.size() + 1);
+            refs.add(ref);
+            String name = ref.field();
+            JsonNode v = e.getValue();
+            if (v.isBoolean()) {
+                // Booleans only. ok=false must be visible -- a success envelope around a
+                // failure is the normal shape of a skill result and hiding it would have the
+                // cloud report a send that never happened. A NUMBER can be the secret itself
+                // (a balance, a count of messages), so it gets its kind and nothing more.
+                primitives.put(name, v.asText());
+                fields.add(name);
+            } else if (v.isNumber()) {
+                fields.add(name + " (number)");
+            } else if (v.isTextual()) {
+                fields.add(name + " (string, " + String.format("%,d", v.asText().length()) + " chars)");
+            } else if (v.isArray()) {
+                fields.add(name + " (array, " + v.size() + ")");
+            } else if (v.isObject()) {
+                fields.add(name + " (object, " + v.size() + " fields)");
+            } else {
+                fields.add(name);
             }
-            return new Shape("json", List.copyOf(fields),
-                    java.util.Collections.unmodifiableMap(primitives), List.copyOf(refs));
-        } catch (Exception e) {
-            return notJson;
         }
+        return new Shape("json", List.copyOf(fields),
+                java.util.Collections.unmodifiableMap(primitives), List.copyOf(refs));
     }
 }

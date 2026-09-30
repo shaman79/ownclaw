@@ -1,7 +1,7 @@
 package com.ownclaw.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.tools.ToolResult;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,8 +21,6 @@ import java.util.Map;
  * them — never over substituted content, which may legitimately begin with anything.
  */
 final class References {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private References() {}
 
@@ -199,19 +197,16 @@ final class References {
      * One field of a JSON result, or null: the field of exactly that name, or for {@code #k} the
      * k-th in key order. Never a guess: matching a name by its beginning turned refusals into
      * silent wrong answers -- "body" matched body_html, "o" matched ok, and the owner got an
-     * email whose whole body was "true".
+     * email whose whole body was "true". A result is JSON as {@link ToolResult#jsonObject} reads
+     * it, the reading the descriptor that offered the field was made from.
      */
     private static String field(String output, ArtifactRef ref) {
-        try {
-            JsonNode node = MAPPER.readTree(output);
-            if (node == null || !node.isObject()) return null;
-            Integer k = ref.position();
-            JsonNode value = k == null ? node.get(ref.field()) : nth(node, k);
-            if (value == null || value.isNull()) return null;
-            return value.isTextual() ? value.asText() : value.toString();
-        } catch (Exception ex) {
-            return null;
-        }
+        JsonNode node = ToolResult.jsonObject(output);
+        if (node == null) return null;
+        Integer k = ref.position();
+        JsonNode value = k == null ? node.get(ref.field()) : nth(node, k);
+        if (value == null || value.isNull()) return null;
+        return value.isTextual() ? value.asText() : value.toString();
     }
 
     /** The k-th field of an object, in key order, or null when it has fewer. */

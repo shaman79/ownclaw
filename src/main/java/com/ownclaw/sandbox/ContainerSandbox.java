@@ -79,10 +79,17 @@ public class ContainerSandbox {
         this.config = config;
     }
 
-    /** With the runtime given rather than detected, so a test can stand in for docker. */
-    ContainerSandbox(OwnClawConfig config, String runtime) {
-        this.config = config;
-        this.containerRuntime = runtime;
+    /**
+     * With the runtimes given rather than detected, so a test can stand in for docker and
+     * podman ({@code fallback} may be null). A factory, not a second constructor: Spring builds
+     * this bean through its one constructor, and with two it found none it could use and the
+     * application did not start.
+     */
+    static ContainerSandbox withRuntimes(OwnClawConfig config, String runtime, String fallback) {
+        var sandbox = new ContainerSandbox(config);
+        sandbox.containerRuntime = runtime;
+        sandbox.fallbackRuntime = fallback;
+        return sandbox;
     }
 
     @PostConstruct
@@ -409,11 +416,13 @@ public class ContainerSandbox {
             // Validate the built image: verify python3 is actually usable.
             // This catches cases where the base image was pulled from a wrong registry
             // (Podman doesn't default to Docker Hub) or layers are broken.
-            if (!validateImage(imageTag)) {
+            String unusable = validateImage(imageTag);
+            if (unusable != null) {
                 builtImages.remove(imageTag);
                 throw new IOException("Container image '" + imageTag + "' built but python3 is not "
                         + "usable inside it. The base image may have been pulled from a wrong registry. "
-                        + "Check that '" + baseImage + "' is reachable.");
+                        + "Check that '" + baseImage + "' is reachable. 'python3 --version' in it: "
+                        + unusable);
             }
 
         } finally {
@@ -644,7 +653,10 @@ public class ContainerSandbox {
                     while ((line = reader.readLine()) != null) {
                         lastActivity.set(System.currentTimeMillis());
                         String trimmed = line.trim();
-                        if (trimmed.startsWith("{") && trimmed.contains("\"progress\"")) {
+                        // Without a callback (extra volumes alone bring a run here) a progress
+                        // line stays in stdout, as it does on the plain path.
+                        if (progressCallback != null && trimmed.startsWith("{")
+                                && trimmed.contains("\"progress\"")) {
                             try {
                                 var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                                 var node = mapper.readTree(trimmed);
@@ -785,8 +797,11 @@ public class ContainerSandbox {
     /**
      * Validate that a built container image actually has a working python3.
      * Catches broken images early (wrong registry pull, missing layers, etc.)
+     *
+     * @return null when it has, or why not: the check's exit code and whole output, which is the
+     *         actual reason and goes to the skill's result with the rest of the build's evidence
      */
-    private boolean validateImage(String imageTag) {
+    private String validateImage(String imageTag) {
         try {
             Process p = new ProcessBuilder(containerRuntime, "run", "--rm", imageTag,
                     "python3", "--version")
@@ -802,19 +817,19 @@ public class ContainerSandbox {
                 p.destroyForcibly();
                 outputFuture.cancel(true);
                 log.warn("Image validation timed out for '{}'", imageTag);
-                return false;
+                return "no answer within 30s";
             }
             String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
             if (p.exitValue() != 0) {
                 log.warn("Image validation failed for '{}': exit={}, output={}",
                         imageTag, p.exitValue(), truncate(output, 500));
-                return false;
+                return "exit " + p.exitValue() + ": " + output;
             }
             log.debug("Image validation passed for '{}': {}", imageTag, output.strip());
-            return true;
+            return null;
         } catch (Exception e) {
             log.warn("Image validation error for '{}': {}", imageTag, e.getMessage());
-            return false;
+            return "error: " + e.getMessage();
         }
     }
 

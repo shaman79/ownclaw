@@ -23,12 +23,14 @@ import java.util.concurrent.ConcurrentHashMap;
  *       progress line), the task is registered here.</li>
  *   <li>The skill emits structured progress lines on stdout
  *       ({@code {"type":"progress","message":"Scanning 45/255 hosts","percent":18}}).
- *       The sandbox intercepts these and calls {@link #reportProgress}.</li>
+ *       The sandbox intercepts these, and for a tool the agent loop calls itself they reach
+ *       {@link #reportProgress}; inside a delegation they are shown to the user directly.</li>
  *   <li>Each progress report also counts as a heartbeat.  If no heartbeat arrives within
  *       {@code stall-timeout} seconds, the task is marked as <b>stalled</b> and the user
  *       is notified.</li>
- *   <li>On completion (success or failure), the task is finalized and the user sees a
- *       summary notification.</li>
+ *   <li>On completion (success or failure), the task is finalized: its result or error is
+ *       stored whole in the task's row, and the user is told that it finished or failed, how
+ *       long that text is and the task's id -- not the text itself.</li>
  * </ol>
  *
  * <p>Task state is persisted to the {@code long_running_tasks} table so that

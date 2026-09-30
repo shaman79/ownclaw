@@ -316,6 +316,25 @@ class DelegationSafetyTest {
     }
 
     @Test
+    @DisplayName("a short result quoted in composed text is not a copy: it is shorter than a window")
+    void aShortResultMayBeQuoted() {
+        var done = List.of(step("net_scan", Map.of(), "3 hosts up at 192.0.2.10"));
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                        Map.of("body", "Good morning. The scan found 3 hosts up at 192.0.2.10 today."), done),
+                "a 24-character result is a fact to mention, not a text to forward");
+    }
+
+    @Test
+    @DisplayName("an exact copy of any earlier result passes, not only of the latest")
+    void anExactCopyOfAnyResultPasses() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest),
+                step("weather", Map.of(), "Brno: 14 °C, light rain until noon, then clearing"));
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", digest), done),
+                "byte for byte the first result: nothing was retyped wrong");
+    }
+
+    @Test
     @DisplayName("only where a reference could be written instead: a change, a forwardable result")
     void retypingIsJudgedOnlyWhereAReferenceWorks() {
         String digest = digest();

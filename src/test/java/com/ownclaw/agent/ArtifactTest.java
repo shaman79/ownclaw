@@ -2,6 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.privacy.Label;
+import com.ownclaw.privacy.PrivateIndex;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -152,22 +153,21 @@ class ArtifactTest {
     // ── asObservation: the substitution point ──
 
     @Test
-    @DisplayName("a PUBLIC result enters the trajectory byte for byte, structured data included")
+    @DisplayName("a PUBLIC result enters the trajectory byte for byte")
     void publicIsUnchanged() {
-        var r = ToolResult.success("the digest text", Map.of("count", 8));
+        var r = ToolResult.success("the digest text");
         var a = new Artifact(1, "daily_news_digest", Map.of(), Map.of(), r.output(), true,
                 Label.PUBLIC, List.of());
 
         var obs = Artifact.asObservation(a, r, 12);
         assertEquals("the digest text", obs.output(), "exactly as today");
-        assertEquals(Map.of("count", 8), obs.structured());
         assertTrue(obs.success());
     }
 
     @Test
-    @DisplayName("a PRIVATE result enters the trajectory as its descriptor, with no structured data")
+    @DisplayName("a PRIVATE result enters the trajectory as its descriptor, with metadata for its bytes")
     void privateIsSubstituted() {
-        var r = ToolResult.success(PRIVATE_JSON, Map.of("body_text", "confidential"));
+        var r = ToolResult.success(PRIVATE_JSON);
         var a = privateResult("smtp_send_email", PRIVATE_JSON, false);
 
         var obs = Artifact.asObservation(a, r, 12);
@@ -175,12 +175,10 @@ class ArtifactTest {
         assertFalse(obs.success(), "the outcome is not hidden with the content");
         assertFalse(obs.output().contains("confidential"));
 
-        // The skill's own structured map is the same content in another shape and never
-        // travels. What replaces it is metadata about the artifact -- the shape the delegation
-        // already reports -- so a privately-executed direct call is still countable by the
-        // withheld line, which otherwise printed nothing and read as "nothing was withheld".
-        assertFalse(obs.structured().containsKey("body_text"),
-                "the skill's own keys are content and must not survive");
+        // What travels in place of the bytes is metadata about the artifact -- the shape the
+        // delegation already reports -- so a privately-executed direct call is still countable
+        // by the withheld line, which otherwise printed nothing and read as "nothing was
+        // withheld". None of the content is in it.
         assertFalse(String.valueOf(obs.structured()).contains("confidential"));
         assertEquals(List.of(Map.of("n", a.n(), "tool", "smtp_send_email",
                         "label", "PRIVATE", "chars", PRIVATE_JSON.length())),
@@ -307,6 +305,57 @@ class ArtifactTest {
         assertTrue(d.contains("{{2." + shortest + "}}"), d);
         assertTrue(d.contains("{{2.#2}}"), d);
         assertFalse(d.contains(longest), d);
+    }
+
+    @Test
+    @DisplayName("a name is measured as the canary measures it: one that normalises to a window is a position")
+    void namesAreMeasuredAfterNormalising() {
+        // 31 characters as written; the dotted capital I lowercases to two, so the canary sees 32
+        // -- a whole window of the private result, which the descriptor printed, and the gateway
+        // then refused every cloud call that carried the descriptor.
+        String key = "İnvoice_reference_for_2026_0930";
+        assertEquals(31, key.length());
+        assertEquals(PrivateIndex.WINDOW, PrivateIndex.normalise(key).length());
+        var ctx = new AgentContext("u1", "t1", "which invoice was it?");
+        Artifact a = ctx.addArtifact("invoice_lookup", Map.of(), Map.of(),
+                "{\"ok\": true, \"" + key + "\": \"value 4711\"}", true,
+                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+
+        String d = a.describe();
+        assertNull(ctx.privateIndex().firstHitIn(d), "the canary finds its own window in: " + d);
+        assertTrue(d.contains("use: {{1}}, {{1.ok}}, {{1.#2}}"), d);
+
+        // A ligature unfolds the same way: sixteen of them are a window, fifteen are not.
+        assertEquals("#1", ArtifactRef.toField(1, "ﬁ".repeat(16), 1).field());
+        assertEquals("ﬁ".repeat(15), ArtifactRef.toField(1, "ﬁ".repeat(15), 1).field());
+    }
+
+    @Test
+    @DisplayName("one reading of a JSON output: two objects in a row are text to every reader")
+    void oneReadingOfAJsonOutput() {
+        // A record per host, as a scanner prints them. Read leniently, its first record was the
+        // result: that record's ok:false failed the whole call and its fields were offered, while
+        // a skill's output was kept whole by a strict reading -- the two disagreed on what an
+        // envelope is.
+        String records = "{\"ok\": false, \"host\": \"192.0.2.1\"}\n{\"ok\": true, \"host\": \"192.0.2.2\"}";
+        var a = new Artifact(1, "net_scan", Map.of(), Map.of(), records, true, Label.PRIVATE,
+                List.of("credentials (1)"));
+
+        assertTrue(a.succeeded(), "one record's ok is not the call's");
+        assertTrue(a.describe().contains(" · text · "), a.describe());
+        assertFalse(References.resolve(Map.of("v", "{{1.host}}"), List.of(a)).ok(),
+                "no field of one record resolves");
+        assertTrue(References.resolve(Map.of("v", "{{1}}"), List.of(a)).ok());
+    }
+
+    @Test
+    @DisplayName("booleans are shown in key order")
+    void booleansKeepTheirOrder() {
+        String json = "{\"ok\": true, \"sent\": false, \"queued\": true, \"retried\": false, "
+                + "\"archived\": true, \"flagged\": false}";
+        String d = privateResult("smtp_send_email", json, true).describe();
+        assertTrue(d.contains(" · ok=true · sent=false · queued=true · retried=false · archived=true"
+                + " · flagged=false · "), "the order the skill wrote them in, every time: " + d);
     }
 
     @Test

@@ -1,7 +1,10 @@
 package com.ownclaw.agent.tools;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -172,15 +175,17 @@ public class DynamicSkill implements Tool {
      *
      * <p>Skills can call {@code report_progress(message, percent=None)} to emit
      * structured progress updates for long-running tasks.  These are intercepted
-     * by the sandbox and forwarded to the user's chat in real time.
+     * by the sandbox and forwarded to the user's chat in real time -- when the caller
+     * gave a progress callback; otherwise they stay in stdout, before the result line
+     * ({@link #parseOutput}).
      */
     private static final String RUNNER_HARNESS = String.join("\n",
         "import sys, json, os, io, importlib.util, traceback, inspect",
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
-        "# The message is emitted as a JSON line on the real stdout and",
-        "# intercepted by the sandbox — it never reaches the final output.",
+        "# The message is emitted as a JSON line on the real stdout, before the",
+        "# result line, and intercepted by the sandbox when the caller listens for it.",
         "_real_stdout = sys.__stdout__",
         "",
         "def report_progress(message, percent=None):",
@@ -408,8 +413,9 @@ public class DynamicSkill implements Tool {
             }
             return toolResult;
         } catch (Exception e) {
-            log.error("Dynamic skill '{}' execution failed: {}", name, e.getMessage());
-            return ToolResult.failure("Execution error: " + e.getMessage());
+            String message = String.valueOf(e.getMessage());
+            log.error("Dynamic skill '{}' execution failed: {}", name, firstLineOf(message));
+            return ToolResult.failure("Execution error: " + message);
         } finally {
             inFlight.decrementAndGet();
             // Clean up the temp runner script
@@ -463,9 +469,20 @@ public class DynamicSkill implements Tool {
                         inputJson, healedEnv, timeoutSec);
             }
         } catch (Exception e) {
-            log.error("Self-heal retry failed for skill '{}': {}", name, e.getMessage());
+            log.error("Self-heal retry failed for skill '{}': {}", name,
+                    firstLineOf(String.valueOf(e.getMessage())));
             return null;
         }
+    }
+
+    /**
+     * An exception's message for the log: its first line and its size. A failed image build's
+     * message carries every base image's whole build log -- the skill's result is where that
+     * goes, not the log the ops API serves.
+     */
+    private static String firstLineOf(String message) {
+        String first = message.lines().findFirst().orElse("");
+        return first + " (" + message.length() + " chars)";
     }
 
     /**
@@ -488,12 +505,16 @@ public class DynamicSkill implements Tool {
 
     /**
      * Parse the Python script's stdout into a ToolResult.
-     * Expected JSON: {"success": true, "output": "text", "data": {}}, which the runner harness
-     * prints as the last line. Nothing else the process wrote is dropped: stdout printed before
-     * that line (a subprocess writes to it directly) and a {@code data} dict are folded into the
-     * output, and stderr is appended whether the skill succeeded or not -- a failure is exactly
-     * when its warnings and log lines are the evidence. Output that is not JSON at all is shown
-     * whole, as a failure.
+     * <p>
+     * The runner harness prints the skill's result last, as one line of JSON:
+     * {@code {"success": true, "output": "text"}} and whatever else the skill returned. All of
+     * that is the output: {@code output} alone when nothing else it returned holds anything -- as
+     * text, or as JSON when it is not a string -- and otherwise the whole object as printed, so
+     * that no key is dropped and an {@code "ok": false} stays where Artifact.succeeded reads it.
+     * Nothing else the process wrote is dropped either ({@link #withStream}): stdout printed before
+     * that line -- by a subprocess, or a progress report nobody intercepted -- and stderr, whether
+     * the skill succeeded or not: a failure is exactly when its warnings are the evidence. Output
+     * whose last line is not a JSON object is shown whole, as a failure.
      *
      * @param stdout the script's standard output
      * @param stderr the script's standard error
@@ -507,20 +528,14 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
+        // Read from the end: the harness's line is the last one. An earlier line can be a JSON
+        // object too -- a progress report, what curl printed -- and reading from the top took it
+        // for the result and lost the result.
         String text = stdout.strip();
-        String line = text;
-        String before = "";
-        Map<String, Object> parsed = jsonObject(line);
-        if (parsed == null) {
-            // Not JSON as a whole: the harness's line is the last one, and whatever a subprocess
-            // wrote to stdout directly comes before it.
-            int cut = text.lastIndexOf('\n');
-            if (cut >= 0) {
-                line = text.substring(cut + 1).strip();
-                parsed = jsonObject(line);
-                before = text.substring(0, cut).strip();
-            }
-        }
+        int cut = text.lastIndexOf('\n');
+        String line = text.substring(cut + 1).strip();
+        String before = cut < 0 ? "" : text.substring(0, cut).strip();
+        ObjectNode parsed = ToolResult.jsonObject(line);
         if (parsed == null) {
             // Non-JSON output from the runner harness means something went wrong.
             // Treat as failure so the agent gets a signal to investigate.
@@ -532,23 +547,26 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix.");
         }
 
-        boolean success = Boolean.TRUE.equals(parsed.get("success"));
-        String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : line;
+        boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
+        JsonNode returned = parsed.get("output");
+        // Everything the skill returned. Taking "output" alone dropped every other key -- a
+        // message id, a data list, and an "ok": false that the harness had put the skill's
+        // print()s beside, so a failed send read as a success. A key that holds nothing (a
+        // data dict left empty) does not make the object the output.
+        boolean outputAlone = returned != null && parsed.properties().stream()
+                .allMatch(e -> "output".equals(e.getKey()) || "success".equals(e.getKey())
+                        || holdsNothing(e.getValue()));
+        String output = !outputAlone ? line
+                : returned.isTextual() ? returned.asText() : returned.toString();
 
         // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
-        if (success && output.startsWith("ERROR:")) {
+        if (success && returned != null && returned.isTextual()
+                && returned.asText().startsWith("ERROR:")) {
             log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
             success = false;
         }
 
-        // A skill's data dict is part of what it returned. Kept on the side, no record and no
-        // prompt ever showed it; folded in, it is read and referenced with the rest. (Without an
-        // "output" key the whole printed dict is the output, data included.)
-        if (parsed.containsKey("output") && parsed.get("data") instanceof Map<?, ?> data
-                && !data.isEmpty()) {
-            output = output + "\n[data: " + mapper.valueToTree(data) + "]";
-        }
-        output = output + printed("skill stdout", before);
+        output = withStream(output, "skill stdout", before);
 
         // Treat empty output content as failure even if success=true
         if (success && (output.isBlank() || "null".equals(output))) {
@@ -561,17 +579,33 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
-        output = output + printed("stderr", stderr);
+        output = withStream(output, "stderr", stderr);
         return success ? ToolResult.success(output) : ToolResult.failure(output);
     }
 
-    /** The text as a JSON object, or null when it is not one. */
-    private static Map<String, Object> jsonObject(String text) {
-        try {
-            return mapper.readValue(text, new TypeReference<>() {});
-        } catch (Exception e) {
-            return null;
-        }
+    /** A value with nothing in it: null, "", {} or []. */
+    private static boolean holdsNothing(JsonNode value) {
+        return value.isNull() || value.isTextual() && value.asText().isEmpty()
+                || value.isContainerNode() && value.isEmpty();
+    }
+
+    /**
+     * {@code output} with what the process also wrote to {@code stream}; as it was when that is
+     * blank. An output that is a JSON object ({@link ToolResult#jsonObject}) gets it as one more
+     * key, before the closing brace of the skill's own text and never one the skill returned
+     * itself: text after the object hid an {@code "ok": false} from Artifact.succeeded and every
+     * field from the descriptor. Any other output gets it as a labelled block after the text.
+     */
+    private static String withStream(String output, String stream, String text) {
+        if (text == null || text.isBlank()) return output;
+        ObjectNode object = ToolResult.jsonObject(output);
+        if (object == null) return output + printed(stream, text);
+        String key = stream;
+        while (object.has(key)) key = "_" + key;
+        String t = output.strip();
+        int close = t.lastIndexOf('}');
+        return t.substring(0, close) + (object.isEmpty() ? "" : ", ") + TextNode.valueOf(key) + ": "
+                + TextNode.valueOf(text.strip()) + "}";
     }
 
     /** {@code text} labelled as what the process wrote to {@code stream}; nothing when blank. */
