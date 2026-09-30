@@ -164,14 +164,19 @@ public record Artifact(int n, String tool, Map<String, Object> written,
      * descriptor that hid {@code ok=false} would have the cloud report a send that never
      * happened. Everything else is shown as a kind and a size: a string is where the data is,
      * and a number can BE the data — a balance, a count of unread messages. A field's name is
-     * shown only when it is shorter than a canary window; a longer one is named by its position
-     * ({@link ArtifactRef#toField}).
+     * shown only when it is shorter than a canary window ({@link ArtifactRef#toField}) and the
+     * descriptor carrying it carries no window of this result ({@link #withheld}); any other is
+     * named by its position.
      */
     public String describe() {
+        return render(shapeOf(n, output, withheld()));
+    }
+
+    /** The descriptor, its fields named as {@code shape} names them. */
+    private String render(Shape shape) {
         var sb = new StringBuilder(handle()).append(' ').append(tool)
                 .append(succeeded() ? " ✓" : " ✗").append(" — ").append(label);
         if (!why.isEmpty()) sb.append(" (").append(String.join("; ", why)).append(')');
-        Shape shape = shapeOf(n, output);
         sb.append(" · ").append(shape.kind()).append(" · ")
           .append(String.format("%,d", output.length())).append(" chars");
         if (isPrivate() && !indexed) {
@@ -228,23 +233,86 @@ public record Artifact(int n, String tool, Map<String, Object> written,
 
     /**
      * Every top-level field of a JSON object result, in key order, as the reference to it --
-     * the same references the descriptor offers the cloud. None for anything else.
+     * the references the descriptor offers the cloud. None for anything else.
      */
-    static List<ArtifactRef> fieldRefs(int handle, String text) {
-        return shapeOf(handle, text).refs();
+    List<ArtifactRef> fieldRefs() {
+        return shapeOf(n, output, withheld()).refs();
+    }
+
+    /**
+     * The positions of the fields whose names the descriptor withholds though they are shorter
+     * than a window: the ones that would make it carry a window of this result.
+     * <p>
+     * A key can be data -- the address a mail summary is keyed by -- and the descriptor prints
+     * it between separators: after "fields: " or ", ", before " (number)" or "=true", between
+     * "{{1." and "}}". With the space before it a name of 31 characters is a whole window, with
+     * ", " before it and " (" after it one of 28; so when the result also mentions the key in its
+     * text -- "5 new messages from" the address -- the descriptor holds a window of the result,
+     * and the gateway refuses every request that carries it, on every run of the skill. No
+     * length rules that out: it depends on what surrounds the name. So the canary is asked, of
+     * the descriptor as it is written and as a think prompt sends it, on lines of its own
+     * ({@code PrivateIndex.firstLeakInResult}), against this result's own windows. In each run it
+     * finds, the longest name the run holds is offered by its position instead, and the
+     * descriptor is asked again until it holds no run; a run that holds no whole name withholds
+     * every name.
+     * <p>
+     * Only for a PRIVATE result that is indexed: any other shows no name ({@link #render}), or
+     * holds nothing the canary looks for. A later private result that mentions a key the same way
+     * is a collision the door refuses, like any other.
+     */
+    private java.util.Set<Integer> withheld() {
+        var byPosition = new java.util.HashSet<Integer>();
+        if (!isPrivate() || !indexed) return byPosition;
+        com.ownclaw.privacy.PrivateIndex own = null;
+        while (true) {
+            Shape shape = shapeOf(n, output, byPosition);
+            var shown = new java.util.LinkedHashMap<Integer, String>();   // position -> name, normalised
+            for (int k = 1; k <= shape.refs().size(); k++) {
+                ArtifactRef ref = shape.refs().get(k - 1);
+                if (ref.position() == null) shown.put(k, com.ownclaw.privacy.PrivateIndex.normalise(ref.field()));
+            }
+            if (shown.isEmpty()) return byPosition;
+            if (own == null) {
+                own = new com.ownclaw.privacy.PrivateIndex();
+                own.addPrivate(n, output);
+            }
+            var runs = new ArrayList<String>();
+            // Every run it is asked about excused, the scan reads on to the end and asks about each.
+            own.firstLeakInResult(render(shape), (handle, run) -> runs.add(run));
+            if (runs.isEmpty()) return byPosition;
+            var withhold = new java.util.HashSet<Integer>();
+            for (String run : runs) {
+                int longest = 0;
+                var longestNames = new ArrayList<Integer>();
+                for (var name : shown.entrySet()) {
+                    int length = name.getValue().length();
+                    if (length < longest || !run.contains(name.getValue())) continue;
+                    if (length > longest) longestNames.clear();
+                    longest = length;
+                    longestNames.add(name.getKey());
+                }
+                withhold.addAll(longestNames);
+            }
+            byPosition.addAll(withhold.isEmpty() ? shown.keySet() : withhold);
+        }
     }
 
     /**
      * kind ("json" | "text"); each top-level field as the descriptor lists it, annotated with
      * its kind and size; the value of each boolean field; and the reference to each field -- all
-     * in key order, every field, and each field named as {@link ArtifactRef#toField} names it.
+     * in key order, every field.
      */
     record Shape(String kind, List<String> fields, Map<String, String> primitives,
                  List<ArtifactRef> refs) {
         boolean isJson() { return "json".equals(kind); }
     }
 
-    static Shape shapeOf(int handle, String text) {
+    /**
+     * The shape of {@code text}, each field named as {@link ArtifactRef#toField} names it -- but
+     * for the fields at the positions in {@code byPosition}, named by their position
+     * ({@link #withheld}).
+     */
+    static Shape shapeOf(int handle, String text, java.util.Set<Integer> byPosition) {
         JsonNode node = ToolResult.jsonObject(text);
         if (node == null) return new Shape("text", List.of(), Map.of(), List.of());
         var fields = new ArrayList<String>();
@@ -253,7 +321,9 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         var it = node.fields();
         while (it.hasNext()) {
             var e = it.next();
-            ArtifactRef ref = ArtifactRef.toField(handle, e.getKey(), refs.size() + 1);
+            int position = refs.size() + 1;
+            ArtifactRef ref = byPosition.contains(position) ? ArtifactRef.atPosition(handle, position)
+                    : ArtifactRef.toField(handle, e.getKey(), position);
             refs.add(ref);
             String name = ref.field();
             JsonNode v = e.getValue();

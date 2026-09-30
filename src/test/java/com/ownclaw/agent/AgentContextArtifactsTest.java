@@ -149,20 +149,22 @@ class AgentContextArtifactsTest {
     }
 
     @Test
-    @DisplayName("text only this machine holds is no excuse: a recalled past task is not one")
-    void pastTasksAreNotAnExcuse() {
-        // Past tasks used to be put into the first message as "## Past Experience", so a run of
-        // them was material the cloud had been given. They are recalled on request now, as the
-        // answer of memory_manage -- an observation, which the cloud is shown but did not write.
+    @DisplayName("what an earlier task gave the cloud is an excuse once this task hands it on; an observation by itself is not")
+    void whatEarlierTasksGaveIsAnExcuse() {
         var ctx = task("send it");
         String episode = "Task: audit the routers. Response: " + prose(200, 8);
-        ctx.trajectory().record(new AgentAction(AgentAction.MEMORY_MANAGE,
-                        Map.of("action", "recall", "query", "routers"), "look it up"),
-                AgentObservation.success(AgentAction.MEMORY_MANAGE, "1 past task matches 'routers':\n\n" + episode,
-                        Map.of(), 1));
-        var priv = add(ctx, "imap_fetch", "Found: " + episode, PRIVATE);
+        String listing = "Stored skill: " + prose(200, 9);
+        // A special action's answer is what this machine holds, shown to the cloud; the cloud
+        // did not write it, and the task has not been told that the cloud was given it.
+        ctx.trajectory().record(new AgentAction(AgentAction.SKILL_MANAGE,
+                        Map.of("action", "read", "name", "router_audit"), "look at it"),
+                AgentObservation.success(AgentAction.SKILL_MANAGE, listing, Map.of(), 1));
+        // A past task recalled is: its message and its answer were the cloud's to read in it.
+        ctx.givenEarlier("1 past task matches 'routers':\n\n" + episode);
+        var priv = add(ctx, "imap_fetch", "Found: " + episode + " " + listing, PRIVATE);
 
-        assertFalse(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));
+        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));
+        assertFalse(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(listing).substring(40, 80)));
     }
 
     @Test

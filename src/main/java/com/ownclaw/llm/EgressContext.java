@@ -19,8 +19,9 @@ import java.util.function.IntFunction;
  * @param index        the task's canary index: every PRIVATE artifact's windows
  * @param secretValues decrypted vault values that must be scrubbed from the body, by key
  * @param allowed      whether a stretch of hits (handle, normalised text: one window, or several
- *                     running on) is material the cloud was already given — the task text, or a
- *                     PUBLIC artifact recorded before the private one — and may go
+ *                     running on) is material the cloud was already given -- the task's text, a
+ *                     PUBLIC artifact recorded before the private one, the rest that
+ *                     {@code AgentContext.isAllowedLeak} lists -- and may go
  * @param toolOf       the tool that produced a result, by handle -- null for a handle it does
  *                     not know -- so a refusal names the result it found
  */

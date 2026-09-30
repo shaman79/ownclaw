@@ -88,8 +88,14 @@ public class CommandHandler {
         }
         Matcher secret = SECRET_COMMAND.matcher(message);
         if (secret.matches()) {
-            return Optional.of(secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred")
-                    ? storeCredential(userId, secret.group(2), secret.group(3))
+            boolean cred = secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred");
+            if (secret.group(2) == null) {
+                // No name and secret to read: the command's own handler answers with its usage,
+                // however the command was spaced.
+                return Optional.of(cred ? handleCred(userId, "set " + secret.group(4))
+                        : handleUser(userId, "add " + secret.group(4)));
+            }
+            return Optional.of(cred ? storeCredential(userId, secret.group(2), secret.group(3))
                     : addUser(userId, secret.group(2), secret.group(3)));
         }
 
@@ -163,24 +169,40 @@ public class CommandHandler {
      * A second reading of the same text differs at some space or letter case, and the secret
      * sits in the gap: the parse this replaces split on ' ' and routed on the lowercased text, so
      * "/cred&lt;NBSP&gt;set KEY VALUE" was no command at all and came back into the chat whole.
+     * <p>
+     * One of the two commands followed by anything else is read as well, as group 4: "/cred set
+     * SMTP_PASS=hunter2", "/user add bob:pw", a value typed where the key goes. Nothing is stored
+     * from it and it is answered with the usage, but it carries a secret as surely as the form
+     * that works, so it is hidden and deleted the same way; shown as typed, the password stayed on
+     * the screen and in the Telegram chat.
+     * <p>
      * Neighbouring parts never match the same character, so a text splits one way only and a
-     * long run of spaces cannot make the matcher try every split: the time is linear in the text.
+     * long run of spaces cannot make the matcher try every split; the second reading is tried
+     * only once the first has failed. The time is linear in the text.
      */
     private static final Pattern SECRET_COMMAND = Pattern.compile(
-            "(/cred\\s+set|/user\\s+add)\\s+(\\S+)\\s+(\\S.*)",
+            "(/cred\\s+set|/user\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
 
     /** What a chat shows for an unknown command. The text itself is not repeated: it may hold a secret. */
     public static final String UNKNOWN_COMMAND = "Unknown command. Try /help";
 
-    /** The text as a chat may show, log or keep it: a command's secret masked, anything else as sent. */
+    /**
+     * The text as a chat may show, log or keep it: a secret command's secret masked -- all that
+     * follows the command when the grammar cannot read a name and a secret in it -- and anything
+     * else as sent.
+     */
     public static String displayed(String message) {
         Matcher m = message == null ? null : SECRET_COMMAND.matcher(message);
-        return m != null && m.matches()
-                ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022" : message;
+        if (m == null || !m.matches()) return message;
+        return m.group(2) != null ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022"
+                : m.group(1) + " \u2026";
     }
 
-    /** Whether this text carries a secret that {@link #handle} stores. */
+    /**
+     * Whether this text carries a secret: one {@link #handle} stores, or one typed into a secret
+     * command it cannot read.
+     */
     public static boolean carriesSecret(String message) {
         return message != null && SECRET_COMMAND.matcher(message).matches();
     }

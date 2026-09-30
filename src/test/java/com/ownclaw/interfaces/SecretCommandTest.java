@@ -14,9 +14,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * One grammar: whatever {@link CommandHandler#handle} stores as a secret, {@link CommandHandler#displayed}
- * hides, and whatever it does not read as a secret command is shown exactly as sent. Checked as a
- * property over spellings, spacing and case, because the gaps between two readings of the same text
- * are always in the spellings nobody listed.
+ * hides; a text that begins with a secret command shows none of the secret it was typed with, whether
+ * or not it can be stored; and whatever the grammar does not read as a secret command is shown
+ * exactly as sent. Checked as a property over spellings, spacing and case, because the gaps between
+ * two readings of the same text are always in the spellings nobody listed.
  */
 class SecretCommandTest {
 
@@ -45,20 +46,22 @@ class SecretCommandTest {
     static String pick(Random r, String[] from) { return from[r.nextInt(from.length)]; }
 
     @Test
-    @DisplayName("what handle() keeps as a secret, displayed() never shows; anything else is shown as sent")
+    @DisplayName("what handle() keeps as a secret, displayed() never shows, nor a secret typed into a secret command; anything else is shown as sent")
     void oneGrammar() {
         Random r = new Random(20260930);
         int secretForms = 0;
         for (int i = 0; i < 20_000; i++) {
+            String typed = pick(r, SECRETS);
             String text = pick(r, HEADS) + pick(r, GAPS) + pick(r, VERBS) + pick(r, GAPS)
-                    + pick(r, NAMES) + pick(r, GAPS) + pick(r, SECRETS) + (r.nextBoolean() ? pick(r, GAPS) : "");
+                    + pick(r, NAMES) + pick(r, GAPS) + typed + (r.nextBoolean() ? pick(r, GAPS) : "");
             kept.clear();
             var answer = commands.handle("owner", text);
             String shown = CommandHandler.displayed(text);
             if (CommandHandler.carriesSecret(text)) {
                 secretForms++;
                 assertTrue(answer.isPresent(), "a secret form is always a command: " + text);
-                assertTrue(shown.endsWith(" ••••••"), "shown: " + shown);
+                assertTrue(shown.endsWith(" ••••••") || shown.endsWith(" …"), "shown: " + shown);
+                assertFalse(!typed.isEmpty() && shown.contains(typed), "typed " + typed + " and showed " + shown);
             } else {
                 assertEquals(text, shown, "only a secret form is changed");
                 assertTrue(kept.isEmpty(), "kept a secret the display would not hide: " + text);
@@ -76,10 +79,26 @@ class SecretCommandTest {
     void linearTime() {
         String spaces = " ".repeat(1_000_000);
         assertTimeoutPreemptively(java.time.Duration.ofSeconds(5), () -> {
-            assertFalse(CommandHandler.carriesSecret("/cred set K" + spaces));
+            assertTrue(CommandHandler.carriesSecret("/cred set K" + spaces), "a key alone: nothing to store, and hidden");
             assertTrue(CommandHandler.carriesSecret("/cred set K " + "x".repeat(1_000_000) + spaces));
             assertFalse(CommandHandler.carriesSecret("/cred" + spaces + "set"));
         });
+    }
+
+    @Test
+    @DisplayName("a secret command the grammar cannot read stores nothing, is answered with the usage, and shows only the command")
+    void anUnreadableSecretCommandIsHidden() {
+        for (String text : List.of("/cred set SMTP_PASS=Zq7-secret", "/cred set SMTP_PASS:Zq7-secret",
+                "/cred set Zq7-secret", "/user add bob:Zq7-secret", "/USER  ADD\tbob:Zq7-secret")) {
+            kept.clear();
+            var answer = commands.handle("owner", text);
+            assertTrue(answer.orElse("").startsWith("Usage"), text + " -> " + answer);
+            assertTrue(kept.isEmpty(), "stored from " + text);
+            assertTrue(CommandHandler.carriesSecret(text), "Telegram deletes it, as it deletes the form that works: " + text);
+            String shown = CommandHandler.displayed(text);
+            assertTrue(shown.endsWith(" …") && !shown.contains("Zq7"), text + " -> " + shown);
+        }
+        assertEquals("/cred set …", CommandHandler.displayed("/cred set SMTP_PASS=Zq7-secret"));
     }
 
     @Test

@@ -145,6 +145,19 @@ class ChatSecretTest {
     }
 
     @Test
+    @DisplayName("a secret command the grammar cannot read stores nothing and shows no more than the command")
+    void aMalformedSecretCommandIsMasked() throws Exception {
+        for (String form : List.of("/cred set OPENWRT_PASS=%s", "/cred set OPENWRT_PASS:%s", "/cred set %s")) {
+            type(form.formatted(SECRET));
+        }
+        assertTrue(stored.isEmpty(), "stored: " + stored);
+        assertNowhere(SECRET);
+        assertEquals(3, sent.stream().filter(s -> s.contains("\"type\":\"user\"") && s.contains("/cred set …")).count(),
+                "the bubble: " + sent);
+        assertTrue(sent.stream().anyMatch(s -> s.contains("Usage: /cred set <KEY> <VALUE>")), "and it is told how: " + sent);
+    }
+
+    @Test
     @DisplayName("a mistyped command spaced with no-break spaces is not repeated either")
     void unknownCommandsWithOtherSpacesAreNotRepeated() throws Exception {
         type("/creds\u00a0set\u00a0OPENWRT_PASS\u00a0" + SECRET);

@@ -227,11 +227,11 @@ class ArtifactTest {
     @Test
     @DisplayName("fieldRefs: a reference to every key of a JSON object, none for anything else")
     void fieldRefs() {
-        assertEquals(List.of(new ArtifactRef(3, "ok"), new ArtifactRef(3, "body_text")),
-                Artifact.fieldRefs(3, "{\"ok\": true, \"body_text\": \"text\"}"));
-        assertTrue(Artifact.fieldRefs(3, "not json").isEmpty());
-        assertTrue(Artifact.fieldRefs(3, "[1,2]").isEmpty());
-        assertTrue(Artifact.fieldRefs(3, null).isEmpty());
+        assertEquals(List.of(new ArtifactRef(2, "ok"), new ArtifactRef(2, "body_text")),
+                privateResult("t", "{\"ok\": true, \"body_text\": \"text\"}", true).fieldRefs());
+        assertTrue(privateResult("t", "not json", true).fieldRefs().isEmpty());
+        assertTrue(privateResult("t", "[1,2]", true).fieldRefs().isEmpty());
+        assertTrue(privateResult("t", null, true).fieldRefs().isEmpty());
     }
 
     @Test
@@ -330,6 +330,95 @@ class ArtifactTest {
         assertEquals("ﬁ".repeat(15), ArtifactRef.toField(1, "ﬁ".repeat(15), 1).field());
     }
 
+    /** A credentialed result, recorded as the loop records one. */
+    private static Artifact mailSummary(AgentContext ctx, String output) {
+        return ctx.addArtifact("mail_summary", Map.of(), Map.of(), output, true,
+                ctx.decide(List.of("IMAP_PASS"), List.of(), false, output));
+    }
+
+    @Test
+    @DisplayName("a shorter name the result also mentions is a position when the separators around it complete a window")
+    void aNameTheResultMentionsIsAPosition() {
+        // Each key is data the result also names in its text, the way a summary keyed by sender
+        // says who wrote. Around the name the descriptor prints a separator -- a space, ", ",
+        // ": ", " (" -- and the result has the same one there: name and separators are a whole
+        // window of the result, and the gateway refused every request carrying the descriptor.
+        String[][] cases = {
+                // the key, and what the result says in its text; beside each, why they make a window
+                {"alice.novak@example-company.org", "5 new messages from alice.novak@example-company.org today"},  // 31 + a space
+                {"nas-backup-01.home.example.org", "Host nas-backup-01.home.example.org is down"},                 // 30 + a space each side
+                {"bob.brook@mail.example-co.org", "Anna, bob.brook@mail.example-co.org (Bob)"},                    // 29 + ", " and " ("
+                {"carol.jones@examplemail.info", "Petr, carol.jones@examplemail.info (Carol)"},                    // 28 + ", " and " ("
+        };
+        for (String[] c : cases) {
+            String key = c[0];
+            var ctx = new AgentContext("u1", "t1", "summarise my new mail");
+            Artifact a = mailSummary(ctx, "{\"ok\": true, \"" + key + "\": 5, \"summary\": \"" + c[1] + "\"}");
+
+            String d = a.describe();
+            assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), key + ": the door refuses " + d);
+            assertFalse(d.contains(key), d);
+            // Around bob.brook@... the run holds "ok" too, inside "brook": only the longest name
+            // in a run is withheld.
+            assertTrue(d.contains(" · ok=true · fields: ok, #2 (number), summary (string, "), d);
+            assertTrue(d.contains("use: {{1}}, {{1.ok}}, {{1.#2}}, {{1.summary}} — "), "the others keep their names: " + d);
+            assertEquals("5", References.resolve(Map.of("v", "{{1.#2}}"), List.of(a)).params().get("v"));
+            assertTrue(References.available(List.of(a)).contains("fields: ok, #2, summary"),
+                    "the local model is offered the same references: " + References.available(List.of(a)));
+        }
+
+        // The first field, after "fields: ", in an e-mail header; and a failed result's last
+        // field, a boolean, which ends the descriptor.
+        var ctx = new AgentContext("u1", "t1", "who wrote to me?");
+        String d = mailSummary(ctx, "{\"nas-backup-01.home.example.org\": 2, \"last\": \"From: nas-backup-01.home.example.org\"}").describe();
+        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+        assertTrue(d.contains("fields: #1 (number), last (string, "), d);
+        ctx = new AgentContext("u1", "t1", "block the sender");
+        d = mailSummary(ctx, "{\"ok\": false, \"error\": \"blocked alice.novak@example-company.org today\", "
+                + "\"alice.novak@example-company.org\": true}").describe();
+        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+        assertTrue(d.contains(" · ok=false · #3=true · fields: ok, error (string, ") && d.endsWith(" chars), #3"), d);
+
+        // A run that holds no whole name: "s: " and the first 29 characters of a host the text
+        // names another of. Nothing says which name made it, so none is shown.
+        var hosts = new AgentContext("u1", "t1", "which hosts are down?");
+        String listed = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10), () -> mailSummary(hosts,
+                "{\"server-01.rack-12.dc-east.lan1\": \"up\", \"note\": \"Hosts: server-01.rack-12.dc-east.lan2 is down\"}")
+                .describe());
+        assertNull(hosts.privateIndex().firstLeakInResult(listed, hosts::isAllowedLeak), listed);
+        assertTrue(listed.contains("fields: #1 (string, 2 chars), #2 (string, "), listed);
+    }
+
+    @Test
+    @DisplayName("a name the result does not repeat around separators is shown, however long below a window")
+    void aNameOnlyItsKeyHoldsIsShown() {
+        var ctx = new AgentContext("u1", "t1", "summarise my new mail");
+        String d = mailSummary(ctx, "{\"alice.novak@example-company.org\": 5, "
+                + "\"summary\": \"5 new messages, the newest <alice.novak@example-company.org>\"}").describe();
+        assertTrue(d.contains("use: {{1}}, {{1.alice.novak@example-company.org}}, {{1.summary}} — "), d);
+        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+    }
+
+    @Test
+    @DisplayName("through the real loop: a mail summary keyed by sender does not stop the task, run after run")
+    void aSummaryKeyedBySenderIsNotADeadEnd(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        String key = "alice.novak@example-company.org";
+        String output = "{\"" + key + "\": 5, \"summary\": \"5 new messages from " + key + " today\"}";
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("mail_summary", List.of("IMAP_PASS"), p -> output)));
+        String session = rig.chat.createSession("u1", "Mail");
+        for (String message : List.of("summarise my new mail", "and again")) {
+            rig.cloud.think.add(LoopRig.call("mail_summary", Map.of()));
+            rig.cloud.think.add(LoopRig.respond("You have 5 new messages."));
+
+            AgentResult r = rig.turn(session, message);
+
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        }
+        assertEquals(List.of(), rig.jdbc.queryForList("SELECT details FROM events WHERE event_type = 'egress' "
+                + "AND json_extract(details, '$.decision') <> 'SENT'"), "every request was sent");
+        assertEquals(4, rig.cloud.calls("think").size());
+    }
+
     @Test
     @DisplayName("one reading of a JSON output: two objects in a row are text to every reader")
     void oneReadingOfAJsonOutput() {
@@ -363,10 +452,9 @@ class ArtifactTest {
     void unreadableNamesAreOfferedByPosition() {
         // Each of these, written after "{{2.", would resolve to some other field or to none.
         String json = "{\" padded \": 1, \"#1\": 2, \"a{{b\": 3, \"\": 4, \"plain\": 5}";
-        var refs = Artifact.fieldRefs(2, json);
-        assertEquals(List.of("#1", "#2", "#3", "#4", "plain"),
-                refs.stream().map(ArtifactRef::field).toList());
         var a = new Artifact(2, "t", Map.of(), Map.of(), json, true, Label.PUBLIC, List.of());
+        assertEquals(List.of("#1", "#2", "#3", "#4", "plain"),
+                a.fieldRefs().stream().map(ArtifactRef::field).toList());
         for (int k = 1; k <= 4; k++) {
             assertEquals(String.valueOf(k), References.resolve(Map.of("v", "{{1.#" + k + "}}"),
                     List.of(a)).params().get("v"), "position " + k);

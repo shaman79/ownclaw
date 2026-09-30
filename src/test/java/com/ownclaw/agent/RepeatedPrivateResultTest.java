@@ -240,6 +240,70 @@ class RepeatedPrivateResultTest {
         }
     }
 
+    @Test
+    @DisplayName("through the real loop, on both renderers: a delegation that sent the digest and stopped short hands its work back")
+    void anUnfinishedDelegationThatSentTheDigestIsNotADeadEnd(@TempDir Path tmp) throws Exception {
+        String digest = "Daily digest, 30 September: markets calm, rain in Brno at 14 degrees, "
+                + "and the council approved the tram line to the campus.";
+        for (String provider : List.of("anthropic", "openai")) {
+            for (String stop : List.of("out of steps", "the local model's next call fails")) {
+                var news = new DelegationBehaviourTest.FakeTool("daily_news_digest", false, List.of(),
+                        p -> ToolResult.success(digest));
+                var smtp = new DelegationBehaviourTest.FakeTool("smtp_send_email", true, List.of("SMTP_PASS"),
+                        p -> ToolResult.success("Sent to owner@example.org:\n" + p.get("body")));
+                var registry = new ToolRegistry(List.of(news, smtp));
+                // The local model fetches the digest and sends it; then the delegation ends
+                // unfinished -- the hand-back to the cloud that a failing local tier relies on.
+                var turns = new java.util.ArrayDeque<>(List.of(
+                        DelegationBehaviourTest.call("daily_news_digest", Map.of()),
+                        DelegationBehaviourTest.call("smtp_send_email", Map.of("to", "owner@example.org", "body", "{{1}}"))));
+                LlmProvider local = new LlmProvider() {
+                    public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                        if (turns.isEmpty()) throw new com.ownclaw.llm.LlmException("ollama", "Read timed out");
+                        return Replies.of(turns.poll(), 1, 1);
+                    }
+                    public boolean isAvailable() { return true; }
+                    public String name() { return "ollama"; }
+                };
+                var cloud = new Named(provider,
+                        AssistantPartsTest.call("delegate", Map.of("goal", "Fetch the morning digest and email it to the owner.",
+                                "tools", "daily_news_digest,smtp_send_email",
+                                "max_steps", "out of steps".equals(stop) ? 2 : 6)),
+                        AssistantPartsTest.call("respond", Map.of("message", "The digest was sent.")));
+                var rows = new ArrayList<EgressLedger.Row>();
+                var config = new OwnClawConfig();
+                config.getMentor().setProvider(provider);
+                var gateway = new CloudGateway(cloud, cloud, config, rows::add, null);
+                var jdbc = MigratedDatabase.at(tmp.resolve(provider + "-" + stop.length() + ".db"));
+                var emitter = new com.ownclaw.observability.ChatStatusEmitter();
+                var events = new com.ownclaw.observability.EventLogService(jdbc);
+                var router = new LlmRouter(local, gateway, config, null);
+                var loop = new AgentLoop(new ThinkingEngine(registry, config, router), new CriticAgent(registry),
+                        registry, emitter, config, router, null, new SkillCuratorService(jdbc, null, null, null),
+                        new AssistantPartsTest.NoSkills(), new com.ownclaw.observability.DebugSessionService(),
+                        new com.ownclaw.core.TaskCancellationService(), null, null,
+                        new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,
+                        new com.ownclaw.core.TokenBudgetTracker(jdbc, config, emitter), events, null,
+                        new LocalExecutor(new LlmRouter(local, null, null, null), registry, emitter,
+                                new DelegationBehaviourTest.Usage()), null);
+                var ctx = new AgentContext("u1", "t-partial", "Email me the morning digest.");
+                ctx.setLocalTierReady(false);
+
+                AgentResult r = loop.run(ctx);
+
+                String what = provider + ", " + stop + ": ";
+                assertEquals(1, smtp.calls.size(), what + "the email went out once");
+                assertEquals(Label.PRIVATE, ctx.artifacts().get(1).label(), what);
+                assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), what + r.response());
+                assertTrue(rows.stream().allMatch(x -> x.decision() == EgressLedger.Decision.SENT), what + rows);
+                assertEquals(2, cloud.requests.size(), what + "the report was sent, and the cloud finished");
+                String report = ctx.trajectory().turns().get(0).observation().output();
+                assertTrue(report.startsWith("Delegation incomplete: "), what + report);
+                assertTrue(report.contains("### {{1}}: daily_news_digest ✓\n" + digest), what + report);
+            }
+        }
+    }
+
     // ── what a label costs ──
 
     @Test

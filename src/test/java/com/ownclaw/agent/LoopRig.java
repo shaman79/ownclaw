@@ -118,15 +118,17 @@ final class LoopRig {
         };
     }
 
-    /** A skill manager with no skills on disk, whose syntax check and write are the test's. */
+    /** A skill manager with no skills on disk, whose syntax check, files and write are the test's. */
     static final class Skills extends SkillManager {
         volatile Function<String, String> source = name -> null;
+        volatile Function<String, String> files = name -> "ERROR: '" + name + "' is not a skill or does not exist.";
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
 
         Skills(SkillCuratorService curator) { super(null, null, null, null, null, curator); }
 
         @Override public String readSkillCode(String name) { return source.apply(name); }
+        @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
         @Override public String createSkill(Map<String, Object> params) { return create.apply(params); }
     }

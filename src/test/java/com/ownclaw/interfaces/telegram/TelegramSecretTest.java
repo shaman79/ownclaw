@@ -92,6 +92,17 @@ class TelegramSecretTest {
     }
 
     @Test
+    @DisplayName("a /cred set the grammar cannot read stores nothing, and the message holding the value is deleted all the same")
+    void aMalformedCredSetIsDeleted() throws Exception {
+        receive(81, "/cred set OPENWRT_PASS=" + SECRET);
+        assertTrue(stored.isEmpty(), "stored: " + stored);
+        assertEquals(81, new ObjectMapper().readTree(telegram.bodies("deleteMessage").getFirst()).path("message_id").asLong(),
+                "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Usage: /cred set")), "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
+    }
+
+    @Test
     @DisplayName("when Telegram refuses the delete, the owner is told to delete it himself")
     void refusedDeleteIsSaid() throws Exception {
         telegram.answer("deleteMessage", FakeTelegram.Answer.refused(400));

@@ -192,13 +192,12 @@ class TaskEndToEndTest {
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");   // the vault's salt lives on it
         rig.vault.storeCredential("u1", "OPENWRT_PASS", PASSWORD);
         // What still reaches the door: a special action's answer, which is no result the task
-        // labels -- here a past task whose answer quoted the same configuration lines.
-        new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "0ld7a5k1",
-                "Task: show the access point's settings\nResponse: " + AUDIT.substring(AUDIT.indexOf("## 192.0.2.2")),
-                true, List.of());
+        // labels -- here another skill's files, whose baseline holds the same configuration lines.
+        rig.skills.files = name -> "## Skill: " + name + "\n\n### skill.py\n```python\nBASELINE = '''"
+                + AUDIT.substring(AUDIT.indexOf("## 192.0.2.2")) + "'''\n```\n";
         rig.cloud.think.add(call("openwrt_audit", Map.of()));
         rig.cloud.think.add(call("cat_report", Map.of("path", "/srv/audit.md")));
-        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "access point")));
+        rig.cloud.think.add(call(AgentAction.SKILL_MANAGE, Map.of("action", "read", "name", "ap_baseline")));
         String session = session(rig);
 
         AgentResult r = rig.turn(session, "audit the routers");
@@ -233,6 +232,31 @@ class TaskEndToEndTest {
         for (int i = 0; i + PrivateIndex.WINDOW <= audit.length(); i++) {
             assertFalse(nextNormal.contains(audit.substring(i, i + PrivateIndex.WINDOW)), "the next turn read the audit");
         }
+    }
+
+    @Test
+    @DisplayName("a failed call's recorded error is whole but for vault values: ops serves it, and ops is read from the cloud")
+    void aRecordedErrorHoldsNoVaultValue(@TempDir Path tmp) throws Exception {
+        String failure = "Skill error: Command 'sshpass -p " + PASSWORD + " ssh root@192.0.2.1 uci show' "
+                + "returned non-zero exit status 5.";
+        var rig = new LoopRig(tmp, List.of(new Tool() {
+            public String name() { return "openwrt_audit"; }
+            public String description() { return "test skill openwrt_audit"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public List<String> requiredCredentials() { return List.of("OPENWRT_USER", "OPENWRT_PASS"); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p, com.ownclaw.agent.tools.ToolExecutionContext c) {
+                return com.ownclaw.agent.tools.ToolResult.failure(failure);
+            }
+        }));
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");   // the vault's salt lives on it
+        rig.vault.storeCredential("u1", "OPENWRT_PASS", PASSWORD);
+        rig.cloud.think.add(call("openwrt_audit", Map.of()));
+        rig.cloud.think.add(respond("The audit failed."));
+
+        rig.turn(session(rig), "audit the routers");
+
+        assertEquals(failure.replace(PASSWORD, "«vault:OPENWRT_PASS»"), rig.jdbc.queryForObject(
+                "SELECT error FROM skill_usage WHERE tool_name = 'openwrt_audit'", String.class));
     }
 
     @Test
@@ -546,6 +570,47 @@ class TaskEndToEndTest {
                 + "every task has), most relevant first:"), observed);
         assertTrue(observed.contains("Task: reboot the AP in the hall"), observed);
         assertTrue(observed.contains("ERROR: 'the and' has no word to look for (not looked for: the, and"), observed);
+    }
+
+    @Test
+    @DisplayName("a past task recalled beside a private traceback is sent: the cloud had it before, and every traceback opens alike")
+    void aRecalledTracebackIsNotALeak(@TempDir Path tmp) throws Exception {
+        // A credentialed skill fails; its traceback is private and indexed, and its first line is
+        // a 32-character window of every Python traceback -- as is last week's public one, in the
+        // record of a task that stopped on it, which the cloud recalls before or after the failure.
+        Tool imap = new Tool() {
+            public String name() { return "imap_fetch"; }
+            public String description() { return "test skill imap_fetch"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public List<String> requiredCredentials() { return List.of("IMAP_PASS"); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p, com.ownclaw.agent.tools.ToolExecutionContext c) {
+                return com.ownclaw.agent.tools.ToolResult.failure("Skill error: login refused\n"
+                        + "Traceback (most recent call last):\n  File \"/skills/imap_fetch/skill.py\", line 22, in run\n"
+                        + "imaplib.IMAP4.error: [AUTHENTICATIONFAILED] Invalid credentials for petr@example.org");
+            }
+        };
+        String lastWeek = "Task: fetch the lunch menu\nSteps: 1\nOutcome: MAX_STEPS\nResponse: **Stopped:** the "
+                + "task used all 1 steps.\n\n**What it did** — 1 step\n1. ✗ web_fetch · 7ms — Skill error: timed out\n"
+                + "Traceback (most recent call last):\n  File \"/skills/web_fetch/skill.py\", line 14, in run\n"
+                + "TimeoutError: timed out";
+        for (boolean recallFirst : List.of(false, true)) {
+            var rig = new LoopRig(tmp.resolve(recallFirst ? "recall-first" : "fail-first"), List.of(imap));
+            new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "0ld7a5k1", lastWeek,
+                    false, List.of("web_fetch"));
+            Reply recall = call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "fetch"));
+            Reply fetch = call("imap_fetch", Map.of());
+            rig.cloud.think.add(recallFirst ? recall : fetch);
+            rig.cloud.think.add(recallFirst ? fetch : recall);
+            rig.cloud.think.add(respond("The mail fetch failed: the server refused the login."));
+
+            AgentResult r = rig.turn(session(rig), "fetch my new mail");
+
+            String order = recallFirst ? "recalled first: " : "failed first: ";
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), order + r.response());
+            assertEquals(3, rig.cloud.calls("think").size(), order + "every request was sent");
+            assertTrue(sentTo(rig, 2).contains("TimeoutError: timed out"), order + "the past task, whole");
+            assertFalse(sentTo(rig, 2).contains("AUTHENTICATIONFAILED"), order + "the private traceback stays here");
+        }
     }
 
     @Test

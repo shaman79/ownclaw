@@ -84,6 +84,7 @@ class DelegationBehaviourTest {
     /** What each failed step recorded for the repair loop, and under which label. */
     static final class Usage extends SkillCuratorService {
         final List<Map<String, Object>> failedArgs = new ArrayList<>();
+        final List<String> failedErrors = new ArrayList<>();
         final List<Label> failedLabels = new ArrayList<>();
         Usage() { super(null, null, null, null); }
         @Override
@@ -91,6 +92,7 @@ class DelegationBehaviourTest {
                                 Map<String, Object> params, String error, Label label) {
             if (ok) return;
             failedArgs.add(params == null ? null : new LinkedHashMap<>(params));
+            failedErrors.add(error);
             failedLabels.add(label);
         }
     }
@@ -262,6 +264,23 @@ class DelegationBehaviourTest {
 
         assertTrue(outcome.text().contains("prague weather"), outcome.text());
         assertEquals(Map.of("q", "prague weather"), usage.failedArgs.get(0));
+    }
+
+    @Test
+    @DisplayName("a failed step's recorded error is kept whole but for vault values: ops serves it")
+    void aRecordedErrorHoldsNoVaultValue() {
+        var audit = new FakeTool("openwrt_audit", false, List.of("OPENWRT_PASS"), p -> ToolResult.failure(
+                "Skill error: Command 'sshpass -p Xq9-router-root-pw ssh root@192.0.2.1 uci show' "
+                        + "returned non-zero exit status 5."));
+        var ctx = task();
+        ctx.setSecretValues(Map.of("OPENWRT_PASS", "Xq9-router-root-pw"));
+        var usage = new Usage();
+
+        executor(new Scripted(call("openwrt_audit", Map.of()), done("the audit failed")), usage, audit)
+                .execute(plan("audit the router"), ctx);
+
+        assertEquals(List.of("ERROR: Skill error: Command 'sshpass -p «vault:OPENWRT_PASS» ssh root@192.0.2.1 uci show' "
+                + "returned non-zero exit status 5."), usage.failedErrors);
     }
 
     @Test
@@ -536,7 +555,7 @@ class DelegationBehaviourTest {
         assertTrue(smtp.calls.isEmpty(), "the send ran after Stop: " + outcome.text());
         assertTrue(outcome.text().startsWith("Delegation incomplete: Task cancelled during delegation."),
                 outcome.text());
-        assertTrue(outcome.text().contains("{{1}} [net_scan] OK: 3 hosts up"), "what ran is kept");
+        assertTrue(outcome.text().contains("### {{1}}: net_scan ✓\n3 hosts up"), "what ran is kept: " + outcome.text());
     }
 
     @Test

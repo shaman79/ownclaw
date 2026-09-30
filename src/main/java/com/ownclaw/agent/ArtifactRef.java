@@ -134,15 +134,21 @@ public record ArtifactRef(int handle, String field) {
      * the canary refuses to send, so a descriptor carrying one would leak it and then be refused.
      * Its length is measured as the canary measures it, after {@link PrivateIndex#normalise},
      * which can lengthen a name: a dotted capital I lowercases to two characters, a ligature
-     * unfolds into two letters. A name the grammar would read differently (padded with spaces,
-     * holding braces, or spelled like a position) could never resolve. The position always does,
-     * and says nothing.
+     * unfolds into two letters. A shorter name can still complete a window with what the
+     * descriptor prints around it; the descriptor finds those itself ({@code Artifact#withheld}).
+     * A name the grammar would read differently (padded with spaces, holding braces, or spelled
+     * like a position) could never resolve. The position always does, and says nothing.
      */
     public static ArtifactRef toField(int handle, String name, int position) {
         var byName = new ArtifactRef(handle, name);
         return PrivateIndex.normalise(name).length() < PrivateIndex.WINDOW
                 && byName.equals(parse(byName.toString())) && byName.position() == null
-                ? byName : new ArtifactRef(handle, "#" + position);
+                ? byName : atPosition(handle, position);
+    }
+
+    /** The reference to the {@code position}-th field of result {@code handle}, in key order. */
+    public static ArtifactRef atPosition(int handle, int position) {
+        return new ArtifactRef(handle, "#" + position);
     }
 
     /** The reference exactly as the model has to write it. */

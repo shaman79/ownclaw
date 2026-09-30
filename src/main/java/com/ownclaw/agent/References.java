@@ -133,8 +133,7 @@ final class References {
             sb.append(ArtifactRef.handle(i + 1)).append(" = ").append(a.tool())
               .append(a.succeeded() ? " (ok" : " (FAILED — not referenceable");
             if (a.succeeded()) {
-                List<String> fields = Artifact.fieldRefs(i + 1, a.output()).stream()
-                        .map(ArtifactRef::field).toList();
+                List<String> fields = a.fieldRefs().stream().map(ArtifactRef::field).toList();
                 if (!fields.isEmpty()) sb.append("; fields: ").append(String.join(", ", fields));
             }
             sb.append(')');

@@ -288,4 +288,33 @@ class SkillCodegenTest {
             assertTrue(sent.contains(longParam + i), "the parameters of failure " + i + " were cut");
         }
     }
+
+    @Test
+    @DisplayName("a skill's recorded public failures go into its repair after a credentialed skill failed the same way")
+    void recordedFailuresAreSentBesideAPrivateTraceback(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.skills.source = name -> "web_fetch".equals(name) ? "def run(params):\n    return fetch(params['url'])\n" : null;
+        // Last week, in another chat: the public skill failed, and its traceback was recorded.
+        String recorded = "Skill error: timed out\nTraceback (most recent call last):\n"
+                + "  File \"/skills/web_fetch/skill.py\", line 2, in run\nTimeoutError: timed out";
+        new SkillCuratorService(rig.jdbc, null, null, null).recordUsage("web_fetch", "u1", "t0", false, 5,
+                Map.of("url", "https://example.org/status"), recorded, Label.PUBLIC);
+        // This task: a credentialed skill failed with a traceback of its own, which is private and
+        // indexed -- and every Python traceback opens with the same 32 characters.
+        var ctx = new AgentContext("u1", "a1b2c3d4", "read my mail and fix the page fetcher");
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Skill error: [AUTHENTICATIONFAILED]\n"
+                        + "Traceback (most recent call last):\n  File \"/skills/imap_fetch/skill.py\", line 12, "
+                        + "in run\nimaplib.IMAP4.error: login refused for petr@example.org", false,
+                Artifact.labelFor(List.of("IMAP_PASS"), List.of()));
+        rig.cloud.codegen.add(finished(module("")));
+        var spec = spec();
+        spec.put("name", "web_fetch");
+
+        AgentLoop.Codegen made = rig.loop.generateSkillCodeWithCloud(spec, ctx);
+
+        assertNull(made.error(), "the repair was not sent: " + made.error());
+        assertEquals(1, rig.cloud.calls("codegen").size());
+        assertTrue(rig.cloud.calls("codegen").get(0).messages().get(1).content().contains(recorded),
+                "the recorded failure is the evidence the repair is for");
+    }
 }

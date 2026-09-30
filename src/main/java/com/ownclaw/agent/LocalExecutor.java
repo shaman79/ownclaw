@@ -556,11 +556,13 @@ public class LocalExecutor {
         // after the model read private data.
         // Arguments typed after the model read private data are not stored at all -- the
         // label alone kept them out of the repair prompt, and "that label has been wrong
-        // before" is why this was a second defence to begin with.
+        // before" is why this was a second defence to begin with. The error is kept whole but
+        // for vault values, as on the cloud's path (AgentLoop.executeTool).
         curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
                 worked, toolMs,
                 worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
-                worked ? null : toolResult, artifact.label());
+                worked ? null : CloudGateway.scrub(toolResult, parentContext.secretValues()).text(),
+                artifact.label());
 
         log.info("Delegation step {} — {} {} (result: {} chars, {})",
                 mine.size(), artifact.handle() + " " + action.tool, worked ? "OK" : "FAIL",
@@ -1114,28 +1116,33 @@ public class LocalExecutor {
                 results.size(), false, List.copyOf(results));
     }
 
-    private String buildPartialResult(String reason, List<Artifact> results) {
-        var sb = new StringBuilder();
-        sb.append("Delegation incomplete: ").append(reason).append("\n\n");
-        if (!results.isEmpty()) {
-            sb.append("Partial results collected:\n");
-            for (int i = 0; i < results.size(); i++) {
-                var r = results.get(i);
-                sb.append(r.handle()).append(" [").append(r.tool()).append("] ")
-                        .append(r.succeeded() ? "OK" : "FAIL").append(": ")
-                        .append(r.isPrivate() ? r.describe() : r.output()).append("\n");
-            }
-        }
-        return sb.toString();
+    private static String buildPartialResult(String reason, List<Artifact> results) {
+        return "Delegation incomplete: " + reason + "\n\n"
+                + (results.isEmpty() ? "" : "Partial results collected:\n\n" + resultsForCloud(results));
     }
 
     static String buildConsolidatedResult(String goal, List<Artifact> results) {
+        return "Delegation completed for: " + goal + "\n\n" + resultsForCloud(results);
+    }
+
+    /**
+     * A delegation's results as its report shows them to the cloud, finished or not: a PRIVATE
+     * one as its descriptor, a PUBLIC one whole, on the lines under its handle.
+     * <p>
+     * On lines of their own, as a think prompt shows a result
+     * ({@code AgentTrajectory.Turn#observationText}), because that is the frame a result's label
+     * is decided in: normalised, the line break before an output is a space, and the canary
+     * strips the whitespace at the ends of what it asks about. The unfinished report put an
+     * output after {@code "{{1}} [tool] OK: "}, and a private confirmation that quotes the output
+     * after a colon -- "Sent to owner@example.org:" and the digest it sent -- holds the window
+     * that starts at that colon: the request carrying the report was refused, and a delegation
+     * that had sent the email ended the task there. A descriptor opens with the handle, the tool
+     * and the tick itself; prefixing them printed each twice.
+     */
+    private static String resultsForCloud(List<Artifact> results) {
         var sb = new StringBuilder();
-        sb.append("Delegation completed for: ").append(goal).append("\n\n");
         for (Artifact r : results) {
             if (r.isPrivate()) {
-                // describe() already opens with the handle, the tool and the tick; prefixing
-                // them again printed each twice on every private step of every delegation.
                 sb.append("### ").append(r.describe()).append("\n\n");
             } else {
                 sb.append("### ").append(r.handle()).append(": ").append(r.tool())

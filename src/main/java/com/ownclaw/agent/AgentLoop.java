@@ -894,7 +894,7 @@ public class AgentLoop {
             // === MEMORY MANAGEMENT (special action) ===
             if (action.isMemoryManage()) {
                 long startMs = System.currentTimeMillis();
-                String result = executeMemoryManage(action.params(), context.userId());
+                String result = executeMemoryManage(action.params(), context);
                 long durationMs = System.currentTimeMillis() - startMs;
                 boolean ok = !result.startsWith("ERROR");
                 AgentObservation obs = ok
@@ -1214,12 +1214,15 @@ public class AgentLoop {
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
 
-        // Usage, with the raw error: the curator's row is the owner's diagnostic and is read
-        // through ops; the label on it is what keeps it out of the cloud's repair prompt.
+        // Usage, with the error whole: the curator's row is the owner's diagnostic and is read
+        // through ops; the label on it is what keeps it out of the cloud's repair prompt. Whole
+        // but for vault values, as everything stored for display is: a failed call can quote
+        // the password it ran with, and ops is read by sessions whose model runs in the cloud.
         curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
                 result.success(), durationMs,
                 result.success() ? null : action.params(),
-                result.success() ? null : result.output(), artifact.label());
+                result.success() ? null : com.ownclaw.llm.CloudGateway.scrub(result.output(),
+                        context.secretValues()).text(), artifact.label());
 
         // If this tool was tracked as long-running, finalize it -- with the shaped text.
         if (longRunningTaskManager.isActive(context.taskId())) {
@@ -1316,13 +1319,14 @@ public class AgentLoop {
      * Dispatch a memory_manage action to the AgentMemory.
      * Supports: store, list, delete, recall.
      */
-    private String executeMemoryManage(Map<String, Object> params, String userId) {
+    private String executeMemoryManage(Map<String, Object> params, AgentContext context) {
+        String userId = context.userId();
         String action = params.get("action") != null ? params.get("action").toString() : "";
         String key = params.get("key") != null ? params.get("key").toString().strip() : null;
         String content = params.get("content") != null ? params.get("content").toString().strip() : null;
 
         return switch (action) {
-            case "recall" -> recall(userId, params.get("query") == null ? null : params.get("query").toString());
+            case "recall" -> recall(context, params.get("query") == null ? null : params.get("query").toString());
             case "list" -> {
                 List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
                 if (facts.isEmpty()) {
@@ -1372,16 +1376,17 @@ public class AgentLoop {
      * keyword matches into every task's prompt unasked -- unrelated tasks from other chats, and
      * failures filed as [SUCCESS]. The words that were not looked for are named, so "no match" is
      * never said of a word nobody looked for. Handles in the tasks named another task's results,
-     * so they are written as words.
+     * so they are written as words. What it returns, earlier tasks gave the cloud, and the task
+     * records it as such ({@link AgentContext#givenEarlier}).
      */
-    private String recall(String userId, String query) {
+    private String recall(AgentContext context, String query) {
         if (query == null || query.isBlank()) {
             return "ERROR: 'query' parameter is required for action='recall': words that appear "
                     + "in the task to find.";
         }
         AgentMemory.Recall recalled;
         try {
-            recalled = memory.recallEpisodes(userId, query);
+            recalled = memory.recallEpisodes(context.userId(), query);
         } catch (Exception e) {
             return "ERROR: could not read past tasks: " + e.getMessage();
         }
@@ -1402,7 +1407,9 @@ public class AgentLoop {
               .append(java.time.Instant.ofEpochMilli(e.timestamp())).append(" ---\n")
               .append(e.content());
         }
-        return TaskRecord.inWords(sb.toString());
+        String past = TaskRecord.inWords(sb.toString());
+        context.givenEarlier(past);
+        return past;
     }
 
     /**
@@ -1772,7 +1779,9 @@ public class AgentLoop {
      * <p>
      * Returns null when there is nothing recorded. Parameters whose names say they are secrets
      * were redacted when they were stored, and only PUBLIC rows are read, so this is safe to put
-     * in a prompt.
+     * in a prompt. Each row is a PUBLIC result the cloud was given in its own task
+     * ({@link AgentContext#givenEarlier}), so a private result of this task that shares a run
+     * with it -- a traceback's first line -- does not keep the request from being sent.
      * <p>
      * Deliberately evidence and not a test harness. Re-running these calls to check whether a
      * repair worked would be the obvious next step and it is not safe: replaying a recorded
@@ -1889,6 +1898,7 @@ public class AgentLoop {
             // exact calls that broke, so the fix can be aimed at them.
             String history = pastFailureEvidence(name);
             if (history != null) {
+                context.givenEarlier(history);
                 lastError = lastError == null ? history : lastError + "\n\n" + history;
             }
             log.info("Skill '{}' exists — will attempt targeted fix{}{}",

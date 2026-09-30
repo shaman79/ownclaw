@@ -294,9 +294,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
-            // The page does not draw a slash text itself; this is its bubble. A command's secret
-            // is masked by the grammar that stored it; a command nobody knows shows its first
-            // word only, as nothing can say which part of "/creds set KEY VALUE" is the secret.
+            // The page does not draw a slash text itself; this is its bubble. A secret command's
+            // secret is masked by the grammar that reads it, a well-formed one or not; a command
+            // nobody knows shows its first word only, as nothing can say which part of
+            // "/creds set KEY VALUE" is the secret.
             String typed = userMessage.trim();
             sendToSession(session, "user", handledAsCommand.isPresent() || waiting
                     ? CommandHandler.displayed(typed)

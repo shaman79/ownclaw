@@ -437,13 +437,32 @@ public class AgentContext {
         return privateIndex.firstLeakInResult(output, new Excuses());
     }
 
+    /** See {@link #givenEarlier}. */
+    private final List<String> fromEarlierTasks = new java.util.ArrayList<>();
+
+    /**
+     * Text an earlier task gave the cloud, which this task is handing it again: the past tasks
+     * memory_manage recall returns -- a task's message and its response, the cloud's copy and
+     * never the owner's private one -- and a skill's recorded PUBLIC failures, in the request for
+     * its repair. A source of {@link #isAllowedLeak} like the message: a past answer or a past
+     * public traceback that shares a run with a private result of this task was the cloud's to
+     * read before this task began. "Traceback (most recent call last" is a window of every Python
+     * traceback, so once a credentialed skill had failed with one, recalling a task that had
+     * failed so too ended the task at the next request, and the repair of a skill whose recorded
+     * failures held one was refused.
+     */
+    public synchronized void givenEarlier(String text) {
+        if (text != null && !text.isEmpty()) fromEarlierTasks.add(text);
+    }
+
     /**
      * Whether a stretch of normalised text the canary matched is material the cloud was already
      * given, and may go: true when one source below holds the whole of it.
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
-     * the preferences. The output of every PUBLIC artifact recorded BEFORE the private one that
-     * hit; the order matters there. What the CLOUD itself wrote —
+     * the preferences — and what earlier tasks gave the cloud that this one hands it again
+     * ({@link #givenEarlier}). The output of every PUBLIC artifact recorded BEFORE the private
+     * one that hit; the order matters there. What the CLOUD itself wrote —
      * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
      * scans: a result that echoes an argument it was given (which would otherwise make the next
      * prompt unsendable), the code generator's request, the correction after a reply that could
@@ -490,6 +509,9 @@ public class AgentContext {
             synchronized (AgentContext.this) {
                 for (Object given : new Object[] {originalMessage, conversationSummary,
                         userPreferences}) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (String given : fromEarlierTasks) {
                     if (holds(given, stretch)) return true;
                 }
                 for (Artifact a : artifacts) {
