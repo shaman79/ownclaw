@@ -3454,9 +3454,10 @@
                 var loadMore = document.createElement('button');
                 loadMore.className = 'task-load-more';
                 loadMore.textContent = 'Load more...';
-                loadMore.addEventListener('click', function() {
-                    loadMoreRuns(runs.length, container, loadMore);
-                });
+                // One handler, which loadMoreRuns replaces as it pages on. Added beside it with
+                // addEventListener, it ran again on every later click and fetched the second page
+                // once more each time.
+                loadMore.onclick = function() { loadMoreRuns(runs.length, container, loadMore); };
                 container.appendChild(loadMore);
             }
         }

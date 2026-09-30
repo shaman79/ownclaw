@@ -75,8 +75,8 @@ class ResultDeliveryTest {
 
         // With a task id and without one: the two are emitted by different calls.
         var delivery = new ResultDelivery(conversations, emitter);
-        delivery.deliver("u1", session, "Background task", answer.withTaskId("a1b2c3d4"));
-        delivery.deliver("u1", session, "Background task", answer);
+        delivery.deliver("u1", () -> session, "Background task", answer.withTaskId("a1b2c3d4"));
+        delivery.deliver("u1", () -> session, "Background task", answer);
 
         var rows = jdbc.queryForList("SELECT content, private_content FROM conversations");
         assertEquals(2, rows.size());
@@ -109,7 +109,7 @@ class ResultDeliveryTest {
         var messages = new ArrayList<StatusMessage>();
         emitter.subscribe("u1", "web", messages::add);
 
-        new ResultDelivery(conversations, emitter).deliver("u1", asked, "Background task",
+        new ResultDelivery(conversations, emitter).deliver("u1", () -> asked, "Background task",
                 AgentResult.completed("the weather is fine", new AgentTrajectory(), 1));
 
         assertEquals(List.of(asked), jdbc.queryForList(

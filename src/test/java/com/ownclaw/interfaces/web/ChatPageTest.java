@@ -34,6 +34,21 @@ class ChatPageTest {
                 "the pinned chat and an unread one are marked in the list");
         assertTrue(page.contains("displayedSessionId = sessionId; delete unreadSessions[sessionId];"),
                 "opening a chat reads it");
+        assertTrue(page.contains("if (listed) listed.classList.remove('unread');"),
+                "and takes the mark off it in the list at once");
+        String markUnread = page.substring(page.indexOf("function markUnread("));
+        markUnread = markUnread.substring(0, markUnread.indexOf('}') + 1);
+        assertTrue(markUnread.contains("unreadSessions[sessionId] = true;") && markUnread.contains("refreshSessionList();"),
+                "marking a chat unread fetches the list again, as the pinned chat may be new: " + markUnread);
+    }
+
+    @Test
+    @DisplayName("the run history pages on with one handler, so no page is fetched twice")
+    void loadMoreHasOneHandler() {
+        assertTrue(page.contains("loadMore.onclick = function() { loadMoreRuns(runs.length, container, loadMore); };"),
+                "the first page's handler is the one loadMoreRuns replaces");
+        assertTrue(page.contains("btn.onclick = function() { loadMoreRuns(offset + runs.length, container, btn); };"));
+        assertFalse(page.contains("loadMore.addEventListener("), "a second handler beside it fetches a page again");
     }
 
     @Test

@@ -75,4 +75,25 @@ class ListingCommandsTest {
         }
         assertTrue(commands.handle("u1", "/logout").isEmpty(), "another word is not /log");
     }
+
+    @Test
+    @DisplayName("/log errors pages like /log; a page that ends the list offers no older one; page 0 is no page")
+    void errorsArePagedToo(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        for (int i = 1; i <= 12; i++) events.error("u1", null, "test.error", String.format("error e%02d.", i));
+        for (int i = 1; i <= 8; i++) events.info("u1", null, "test.event", "an event.");
+
+        String second = run("/log errors 10 page 2");
+        assertTrue(second.startsWith("Errors 11–12, newest first:"), second);
+        assertTrue(second.contains("error e02.") && second.contains("error e01.") && !second.contains("error e03."), second);
+        assertFalse(second.contains("Older:"), second);
+
+        String exact = run("/log 10 page 2");                   // twenty events: this page ends them
+        assertTrue(exact.startsWith("Events 11–20"), exact);
+        assertFalse(exact.contains("Older:"), "no page after the last: " + exact);
+        assertTrue(run("/log 10").endsWith("Older: `/log 10 page 2`"));
+
+        assertTrue(run("/log page 0").startsWith("Usage: `/log"), run("/log page 0"));
+        assertTrue(run("/log errors 5 page 0").startsWith("Usage: `/log"));
+    }
 }

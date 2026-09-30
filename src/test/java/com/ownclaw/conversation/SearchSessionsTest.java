@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class SearchSessionsTest {
 
     @Test
-    @DisplayName("a chat with many matches does not hide the others: every matching chat, once")
+    @DisplayName("a chat with many matches does not hide the others: every matching chat, once, and no archived one")
     void everyMatchingChatOnce(@TempDir Path tmp) throws Exception {
         var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
         String busy = conversations.createSession("u1", "Busy");
@@ -30,11 +30,14 @@ class SearchSessionsTest {
         conversations.saveMessage("u1", quiet, "user", "the router came up once, in a long message about "
                 + "many other things that are not routers at all, " + "filler ".repeat(40));
         conversations.saveMessage("u2", elsewhere, "user", "router router router");
+        String archived = conversations.createSession("u1", "Archived");
+        conversations.saveMessage("u1", archived, "user", "router router router router");
+        conversations.archiveSession("u1", archived);
 
         var results = conversations.searchMessages("u1", "router");
 
         assertEquals(List.of(busy, quiet), results.stream().map(r -> r.get("session_id")).toList(),
-                "each chat once, best match first, and no one else's");
+                "each chat once, best match first, none archived, and no one else's");
         assertTrue(String.valueOf(results.get(0).get("snippet")).contains("firmware"),
                 "the snippet is from the chat's best-matching message: " + results.get(0));
     }

@@ -92,6 +92,8 @@ class SecretCommandTest {
             assertEquals(1, kept.size(), text);
             assertTrue(kept.get(0).matches("Zq7-[a-e]"), "stored as typed, trimmed: <" + kept.get(0) + ">");
         }
+        assertEquals("✅ Credential 'OPENWRT_PASS' stored (encrypted).",
+                commands.handle("owner", "/cred set openwrt_pass Zq7-f").orElse(""), "the reply names the key as stored");
     }
 
     @Test
@@ -99,6 +101,11 @@ class SecretCommandTest {
     void userAddIsReadOnce() {
         kept.clear();
         assertTrue(commands.handle("owner", "/USER ADD bob Pw12-long").orElse("").contains("created"));
+        assertEquals(List.of("Pw12-long"), kept);
+
+        kept.clear();
+        assertTrue(commands.handle("owner", "/user add bob Pw12-long \t").orElse("").contains("created"),
+                "the spaces after a password are not part of it");
         assertEquals(List.of("Pw12-long"), kept);
 
         kept.clear();

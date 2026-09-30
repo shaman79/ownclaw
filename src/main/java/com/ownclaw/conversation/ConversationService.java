@@ -295,8 +295,8 @@ public class ConversationService {
      * MESSAGES and the page kept one per session, so a chat with 30 matches hid every other chat
      * that matched at all. SQLite runs snippet() only in a plain full-text scan -- not beside a
      * window function or an aggregate -- so the best message of each session is picked first,
-     * and its snippet made in a second scan of just those rows. 64 tokens is the most snippet()
-     * accepts.
+     * and a second full-text scan, joined to those rows, makes a snippet for them alone. 64
+     * tokens is the most snippet() accepts.
      */
     public List<Map<String, Object>> searchMessages(String userId, String query) {
         String match = ftsQuery(query);

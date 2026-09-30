@@ -44,16 +44,7 @@ class ChatSecretTest {
     @BeforeEach
     void setUp() throws Exception {
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
-        CredentialVault vault = new CredentialVault(jdbc) {
-            @Override public void storeCredential(String userId, String key, String value) {
-                stored.add(key + "=" + value);
-            }
-        };
-        CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
-                null, null, null, null, null, null);
-        ConversationService conv = new ConversationService(jdbc, null);
-        ws = new ChatWebSocketHandler(null, null, conv, null, commands, null, null,
-                new SkillInteractionHandler(null), null, null, new ObjectMapper());
+        ws = chatWith(new SkillInteractionHandler(null));
         Map<String, Object> attrs = new HashMap<>(Map.of("userId", "owner"));
         session = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (p, m, args) -> switch (m.getName()) {
@@ -68,6 +59,19 @@ class ChatSecretTest {
         wsLog.addAppender(logged);
         before = wsLog.getLevel();
         wsLog.setLevel(Level.DEBUG);   // production runs INFO; DEBUG is where the text used to go
+    }
+
+    /** The web chat with the real command handler, a vault that records, and this interaction handler. */
+    private ChatWebSocketHandler chatWith(SkillInteractionHandler interactions) {
+        CredentialVault vault = new CredentialVault(jdbc) {
+            @Override public void storeCredential(String userId, String key, String value) {
+                stored.add(key + "=" + value);
+            }
+        };
+        CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
+                null, null, null, null, null, null);
+        return new ChatWebSocketHandler(null, null, new ConversationService(jdbc, null), null, commands, null,
+                null, interactions, null, null, new ObjectMapper());
     }
 
     @AfterEach
@@ -138,5 +142,36 @@ class ChatSecretTest {
         assertTrue(sent.stream().anyMatch(s -> s.contains("\"type\":\"user\"") && s.contains("/creds …")),
                 "the page's bubble names the command it did not know: " + sent);
         assertTrue(sent.stream().anyMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
+    }
+
+    @Test
+    @DisplayName("a mistyped command spaced with no-break spaces is not repeated either")
+    void unknownCommandsWithOtherSpacesAreNotRepeated() throws Exception {
+        type("/creds\u00a0set\u00a0OPENWRT_PASS\u00a0" + SECRET);
+        type("/creds\u2003set OPENWRT_PASS " + SECRET);
+        assertTrue(stored.isEmpty());
+        assertNowhere(SECRET);
+        assertEquals(2, sent.stream().filter(s -> s.contains("\"type\":\"user\"") && s.contains("/creds \u2026")).count(),
+                "the bubble is the first word, however the words are spaced: " + sent);
+    }
+
+    @Test
+    @DisplayName("a slash text that answers a waiting question is shown as typed and handed to the question")
+    void anAnswerThatStartsWithASlash() throws Exception {
+        List<String> answers = new ArrayList<>();
+        ws = chatWith(new SkillInteractionHandler(null) {
+            @Override public boolean hasPending(String userId) { return true; }
+            @Override public boolean provideInput(String userId, String taskId, String input) {
+                answers.add(input);
+                return true;
+            }
+        });
+
+        type("/home/me/My Photos");
+
+        assertEquals(List.of("/home/me/My Photos"), answers);
+        assertTrue(sent.stream().anyMatch(s -> s.contains("\"type\":\"user\"") && s.contains("/home/me/My Photos")),
+                "the bubble is the answer as typed: " + sent);
+        assertTrue(sent.stream().noneMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
     }
 }

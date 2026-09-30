@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.function.Supplier;
+
 /**
  * Delivers the result of work nobody was sitting and waiting for.
  * <p>
@@ -44,11 +46,12 @@ public class ResultDelivery {
     /**
      * Deliver a finished task's outcome, phrased according to how it ended.
      *
-     * @param sessionId the chat it is saved into
+     * @param chat  the chat it is saved into, as {@link #deliver(String, Supplier, String, String,
+     *              String, String)} takes it
      * @param label what the task was, for a header — the result arrives long after the request,
      *              so it has to say what it is answering
      */
-    public void deliver(String userId, String sessionId, String label, AgentResult result) {
+    public void deliver(String userId, Supplier<String> chat, String label, AgentResult result) {
         String header;
         if (result.success()) {
             header = label;
@@ -58,7 +61,7 @@ public class ResultDelivery {
             header = label + " — did not finish (" + result.terminationReason() + ")";
         }
         String withheld = withheldLine(result);
-        deliver(userId, sessionId, header, result.response() + withheld, result.taskId(),
+        deliver(userId, chat, header, result.response() + withheld, result.taskId(),
                 result.ownerText() == null ? null : result.ownerText() + withheld);
     }
 
@@ -105,7 +108,10 @@ public class ResultDelivery {
     /**
      * Deliver text as a real assistant message in the chat the caller names.
      *
-     * @param sessionId the chat it is saved into. Sent with the message too, so a page showing
+     * @param chat      the chat it is saved into, looked up here as part of saving it: finding the
+     *                  pinned chat of scheduled results can create it, and fail like any write.
+     *                  Looked up by the caller, a failure escaped before this was called, and the
+     *                  result was neither saved nor sent. Sent with the message, so a page showing
      *                  another chat does not append it there.
      * @param taskId    the agent task this is the outcome of, or null. Saved with the message and
      *                  sent with it, so the chat can offer "what this task did" -- now and after a
@@ -115,7 +121,7 @@ public class ResultDelivery {
      *                  message's data; the message's text stays the safe one, and that is what
      *                  history, search and later prompts read.
      */
-    public void deliver(String userId, String sessionId, String header, String text, String taskId,
+    public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
                         String ownerText) {
         if (text == null || text.isBlank()) {
             // Nothing useful to show. Saying so beats an empty bubble, which reads like a bug.
@@ -124,7 +130,9 @@ public class ResultDelivery {
         String message = withHeader(header, text);
         String owner = ownerText == null ? null : withHeader(header, ownerText);
 
+        String sessionId = null;
         try {
+            sessionId = chat.get();
             conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(),
                     taskId, owner);
         } catch (Exception e) {
@@ -132,7 +140,7 @@ public class ResultDelivery {
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
         }
         var data = new java.util.HashMap<String, Object>();
-        data.put("sessionId", sessionId);
+        if (sessionId != null) data.put("sessionId", sessionId);
         if (owner != null) data.put("ownerText", owner);
         if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message, data);
         else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message, data);

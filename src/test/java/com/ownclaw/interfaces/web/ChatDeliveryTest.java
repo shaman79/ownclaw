@@ -30,6 +30,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -72,12 +79,20 @@ class ChatDeliveryTest {
     private final Queue queue = new Queue();
     private ChatWebSocketHandler chat;
     private WebSocketSession socket;
-    private final List<JsonNode> sent = new ArrayList<>();
+    private final ChatStatusEmitter emitter = new ChatStatusEmitter();
+    private final List<JsonNode> sent = new CopyOnWriteArrayList<>();
+    /** The conversation store the chat is given; a test may hand it one that fails. */
+    private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db, null);
+    /** Frames the socket refuses, as Tomcat's does: with an IllegalStateException. */
+    private Predicate<JsonNode> refused = frame -> false;
+    /** Called with each frame as the socket is sending it, before it is taken. */
+    private Consumer<JsonNode> whileSending = frame -> {};
+    /** Set while the socket is sending a frame: a second send then is refused, as Tomcat refuses it. */
+    private final AtomicBoolean writing = new AtomicBoolean();
 
     private void connect(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
-        var emitter = new ChatStatusEmitter();
+        conversations = store.apply(jdbc);
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override public Optional<String> validateToken(String token) { return Optional.of(USER); }
         };
@@ -95,7 +110,21 @@ class ChatDeliveryTest {
                     case "getUri" -> URI.create("ws://localhost/ws/chat?token=t");
                     case "isOpen" -> true;
                     case "sendMessage" -> {
-                        sent.add(mapper.readTree(String.valueOf(((TextMessage) args[0]).getPayload())));
+                        JsonNode frame = mapper.readTree(String.valueOf(((TextMessage) args[0]).getPayload()));
+                        if (!writing.compareAndSet(false, true)) {
+                            throw new IllegalStateException("The remote endpoint was in state "
+                                    + "[TEXT_PARTIAL_WRITING] which is an invalid state for called method");
+                        }
+                        try {
+                            if (refused.test(frame)) {
+                                throw new IllegalStateException("The remote endpoint was in state "
+                                        + "[TEXT_FULL_WRITING] which is an invalid state for called method");
+                            }
+                            whileSending.accept(frame);
+                            sent.add(frame);
+                        } finally {
+                            writing.set(false);
+                        }
                         yield null;
                     }
                     case "hashCode" -> System.identityHashCode(proxy);
@@ -170,5 +199,88 @@ class ChatDeliveryTest {
                 "the page appends it only when that chat is on screen, and marks it otherwise");
         assertTrue(result.path("content").asText().contains("Background task: check the weather"), result.toString());
         assertEquals(openNow, conversations.getCurrentSession(USER), "the open chat is left alone");
+    }
+
+    @Test
+    @DisplayName("an answer the page cannot be sent is kept once, and nothing says the task failed")
+    void anUnsentAnswerIsKeptOnce(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        type("check the router");
+        String asked = conversations.getCurrentSession(USER);
+        refused = frame -> "response".equals(frame.path("type").asText());
+        int refreshed = frames("session_updated").size();
+
+        queue.futures.getFirst().complete(AgentResult.completed("the real answer", new AgentTrajectory(), 1));
+
+        assertEquals(List.of("user: check the router", "assistant: the real answer"), jdbc.queryForList(
+                "SELECT role || ': ' || content FROM conversations WHERE session_id = ? ORDER BY rowid",
+                String.class, asked), "the answer, once, and no failure beside it");
+        assertTrue(frames("response").isEmpty(), "the page was not sent one: " + sent);
+        assertEquals(refreshed + 1, frames("session_updated").size(), "the sends after it still go out");
+        assertEquals(asked, frames("session_updated").getLast().path("content").asText());
+    }
+
+    @Test
+    @DisplayName("an answer that cannot be saved is still sent, and nothing says the task failed")
+    void anUnsavedAnswerIsStillSent(@TempDir Path tmp) throws Exception {
+        store = db -> new ConversationService(db, null) {
+            @Override
+            public String saveMessage(String userId, String sessionId, String role, String content,
+                                      List<String> attachmentIds, String taskId, String privateContent) {
+                if (role.equals("assistant")) throw new IllegalStateException("database is locked");
+                return super.saveMessage(userId, sessionId, role, content, attachmentIds, taskId, privateContent);
+            }
+        };
+        connect(tmp);
+        type("check the router");
+
+        queue.futures.getFirst().complete(AgentResult.completed("the real answer", new AgentTrajectory(), 1));
+
+        assertEquals(List.of("the real answer"), frames("response").stream().map(f -> f.path("content").asText()).toList());
+    }
+
+    @Test
+    @DisplayName("sends to one socket take turns: a pong waits for a status being written, and both arrive")
+    void sendsTakeTurns(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        var statusInside = new CountDownLatch(1);
+        var secondSend = new CountDownLatch(1);
+        whileSending = frame -> {
+            if (!"status".equals(frame.path("type").asText())) {
+                secondSend.countDown();
+                return;
+            }
+            statusInside.countDown();
+            try {
+                // Long enough for the pong to be sent in the middle, if nothing makes it wait.
+                secondSend.await(500, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        var task = new Thread(() -> emitter.emit(USER,
+                new ChatStatusEmitter.StatusMessage(ChatStatusEmitter.StatusMessage.Type.STEP, "Think", null, "abcd1234")));
+        task.start();
+        assertTrue(statusInside.await(5, TimeUnit.SECONDS));
+
+        chat.handleMessage(socket, new TextMessage("{\"type\":\"ping\"}"));
+        task.join();
+
+        assertEquals(1, frames("status").size(), String.valueOf(sent));
+        assertEquals(1, frames("pong").size(), "the pong was refused for coming while the status was written: " + sent);
+    }
+
+    @Test
+    @DisplayName("a command's reply is shown, not kept: it is no message of the chat's later prompts")
+    void commandRepliesAreNotKept(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        for (int i = 0; i < 3; i++) conversations.createSession(USER, "Chat " + i);
+
+        type("/history");
+
+        assertTrue(frames("system").stream().anyMatch(f -> f.path("content").asText().contains("Chat 2")),
+                String.valueOf(sent));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM conversations", Integer.class),
+                "neither the command nor its reply is saved");
     }
 }

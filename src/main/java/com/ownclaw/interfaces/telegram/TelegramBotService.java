@@ -23,6 +23,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -52,6 +54,19 @@ public class TelegramBotService {
 
     /** Maps Telegram chatId → userId for users that have interacted. */
     private final Map<String, Long> userChatIds = new ConcurrentHashMap<>();
+
+    /**
+     * Every message to Telegram is sent from this one thread, in the order it was handed over. A
+     * wait Telegram asks for, or a retry after a failure, holds up the messages behind it and
+     * nothing else. The sends used to run on the thread that asked for them: a status on the
+     * thread of the task that emitted it, a result on the task queue's worker -- which slept out
+     * every retry_after while all agent work, the web chat's included, waited on Telegram.
+     */
+    private final ExecutorService outbox = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "telegram-outbox");
+        t.setDaemon(true);
+        return t;
+    });
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -254,13 +269,8 @@ public class TelegramBotService {
         // Handle slash commands consistently with the Web UI
         if (text.startsWith("/")) {
             // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
-            // on, unless it is removed -- first, whatever storing it then does. A bot may delete a
-            // message it was sent in a private chat; in a group only as an admin, so say so.
-            if (CommandHandler.carriesSecret(text)
-                    && !deleteMessage(chatId, message.path("message_id").asLong())) {
-                sendMessage(chatId, "\u26a0\ufe0f I could not delete your message, and it holds "
-                        + "the secret: delete it yourself.");
-            }
+            // on, unless it is removed -- asked for first, whatever storing it then does.
+            if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
             var cmdResult = commandHandler.handle(userId, text);
             if (cmdResult.isPresent()) {
                 sendMessage(chatId, cmdResult.get());
@@ -352,7 +362,7 @@ public class TelegramBotService {
      * of a running task, nor debug output. Those went out one message each, the twenty-second
      * heartbeats of a long code generation and every full prompt of debug mode included; a
      * part Telegram refuses for coming too fast is now waited for, not dropped, and a flood of
-     * them would hold up the task that emits them.
+     * them would hold up the answer queued behind them.
      */
     static boolean forTelegram(ChatStatusEmitter.StatusMessage msg) {
         return switch (msg.type()) {
@@ -456,8 +466,44 @@ public class TelegramBotService {
         return parts;
     }
 
+    /** Hand a text to the outbox, which sends it in turn, in the parts Telegram accepts. */
+    private void sendMessage(long chatId, String text) {
+        outbox.execute(() -> deliver(chatId, text));
+    }
+
     /**
-     * Send to Telegram, falling back to plain text if Markdown will not parse.
+     * Send a text in the parts Telegram accepts, in order, each until Telegram takes it.
+     * <p>
+     * A part Telegram does not take in the end -- it refused it, kept failing or could not be
+     * reached -- ends the text there, and the owner is told what is missing. The parts after it
+     * used to go out as if nothing were missing: an answer with a hole in the middle, and no word
+     * of it.
+     */
+    private void deliver(long chatId, String text) {
+        List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
+        for (int i = 0; i < parts.size(); i++) {
+            int status = sendPart(chatId, parts.get(i));
+            if (status / 100 == 2) continue;
+            log.warn("Telegram did not take part {} of {} for chat {}: HTTP {}", i + 1, parts.size(), chatId, status);
+            if (send(chatId, notTaken(i + 1, parts.size(), status), null) / 100 != 2) {
+                log.warn("Telegram did not take the notice of it either");
+            }
+            return;
+        }
+    }
+
+    /** What the owner is told when Telegram did not take part {@code part} (from 1) of {@code of}. */
+    static String notTaken(int part, int of, int status) {
+        String why = status == 0 ? "it could not be reached" : "HTTP " + status;
+        return "\u26a0\ufe0f Telegram did not take "
+                + (of == 1 ? "a message for you (" + why + ")."
+                           : "part " + part + " of " + of + " of a message for you (" + why
+                                   + "), so the parts from there on were not sent.")
+                + " Answers and results are kept in the web chat.";
+    }
+
+    /**
+     * One part, in Markdown, or as plain text if Telegram will not parse it; Telegram's status.
      * <p>
      * Telegram rejects the whole request with HTTP 400 when the Markdown is malformed, and this
      * text is agent output: skill names like {@code web_search_bikes} and
@@ -470,17 +516,13 @@ public class TelegramBotService {
      * Formatting is a nicety; delivery is not. On a parse failure the same text goes out
      * unformatted.
      */
-    private void sendMessage(long chatId, String text) {
-        // One part at a time: a long answer used to be refused whole, and after the plain-text
-        // retry was refused too it was dropped without a word.
-        for (String part : telegramParts(text, TELEGRAM_MAX_CHARS)) {
-            int status = send(chatId, part, "Markdown");
-            if (status == 400) {
-                log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
-                status = send(chatId, part, null);
-            }
-            if (status >= 300) log.warn("Telegram refused a message for chat {}: HTTP {}", chatId, status);
+    private int sendPart(long chatId, String part) {
+        int status = send(chatId, part, "Markdown");
+        if (status == 400) {
+            log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
+            status = send(chatId, part, null);
         }
+        return status;
     }
 
     /** One sendMessage call; Telegram's HTTP status, as {@link #call} gives it. */
@@ -492,12 +534,23 @@ public class TelegramBotService {
         return call("sendMessage", payload);
     }
 
-    /** Delete a message from a chat; true if Telegram did. */
-    private boolean deleteMessage(long chatId, long messageId) {
-        int status = call("deleteMessage", Map.of("chat_id", chatId, "message_id", messageId));
-        if (status / 100 != 2) log.warn("Telegram deleteMessage failed: HTTP {}", status);
-        return status / 100 == 2;
+    /**
+     * Delete the message that holds a secret, in turn with what is sent to the chat -- so before
+     * the command's reply -- and tell the owner if Telegram will not: a bot may delete a message
+     * in a private chat, and in a group only as an admin.
+     */
+    private void deleteSecret(long chatId, long messageId) {
+        outbox.execute(() -> {
+            int status = call("deleteMessage", Map.of("chat_id", chatId, "message_id", messageId));
+            if (status / 100 == 2) return;
+            log.warn("Telegram deleteMessage failed: HTTP {}", status);
+            deliver(chatId, "\u26a0\ufe0f I could not delete your message, and it holds the secret: "
+                    + "delete it yourself.");
+        });
     }
+
+    /** How often a call is tried that fails on Telegram's side (5xx) or on the way to it. */
+    private static final int TRIES = 3;
 
     /**
      * One Bot API call: Telegram's HTTP status, or 0 if Telegram could not be reached.
@@ -505,7 +558,8 @@ public class TelegramBotService {
      * A 429 is waited out, for as long as Telegram's {@code retry_after} says, and the call made
      * again until it is taken. The parts of a long answer go out back to back, and a part
      * refused for going too fast used to be logged and counted as sent: the answer arrived with
-     * a piece missing.
+     * a piece missing. A failure on Telegram's side (5xx) or on the way to it is tried again
+     * after a second, then after two more; a third failure is the answer.
      */
     private int call(String method, Map<String, Object> payload) {
         try {
@@ -514,18 +568,27 @@ public class TelegramBotService {
                     .post(RequestBody.create(mapper.writeValueAsString(payload),
                             MediaType.get("application/json")))
                     .build();
+            int failures = 0;
             while (true) {
                 long waitSeconds;
                 try (Response response = httpClient.newCall(request).execute()) {
-                    if (response.code() != 429) return response.code();
-                    waitSeconds = retryAfterSeconds(response);
+                    int status = response.code();
+                    if (status == 429) waitSeconds = retryAfterSeconds(response);
+                    else if (status >= 500 && ++failures < TRIES) waitSeconds = failures;
+                    else return status;
+                } catch (IOException e) {
+                    if (++failures >= TRIES) {
+                        log.warn("Telegram {} failed: {}", method, e.getMessage());
+                        return 0;
+                    }
+                    waitSeconds = failures;
                 }
-                log.info("Telegram {} was rate-limited; sending it again in {}s", method, waitSeconds);
+                log.info("Telegram {} did not go through; sending it again in {}s", method, waitSeconds);
                 Thread.sleep(waitSeconds * 1000);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.warn("Telegram {} not sent: interrupted while waiting out a rate limit", method);
+            log.warn("Telegram {} not sent: interrupted while waiting to send it again", method);
             return 0;
         } catch (Exception e) {
             log.warn("Telegram {} failed: {}", method, e.getMessage());

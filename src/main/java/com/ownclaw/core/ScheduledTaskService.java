@@ -671,7 +671,7 @@ public class ScheduledTaskService {
         } catch (Exception e) {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
-            resultDelivery.deliver(userId, conversationService.scheduledSession(userId),
+            resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
                     "Scheduled task: " + description, response + withheld, agentTaskId, owner);
             return;
         }
@@ -679,7 +679,7 @@ public class ScheduledTaskService {
         // Deliver the output, not just a note that output happened. Until this line the result
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
-        resultDelivery.deliver(userId, conversationService.scheduledSession(userId),
+        resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
                 "Scheduled task: " + description, response + withheld, agentTaskId, owner);
 
         // Record full execution history
@@ -736,6 +736,9 @@ public class ScheduledTaskService {
                 "Task #" + taskId + " completed (run #" + newRunCount + ")");
     }
 
+    /** Where a failed run's status line sends the owner: to its report, delivered whole. */
+    static final String WHERE_ITS_REPORT_IS = "Its report is in the chat of scheduled results.";
+
     /**
      * Called when a scheduled task fails.
      *
@@ -753,8 +756,10 @@ public class ScheduledTaskService {
 
         // A failed scheduled run is worth as much of the user's attention as a successful one —
         // arguably more, since a silent failure is how a job stops working without anyone
-        // noticing. The status emissions below say a run failed; this says what it said.
-        resultDelivery.deliver(userId, conversationService.scheduledSession(userId),
+        // noticing. The status emissions below say a run failed and where its report is; this
+        // is the report. They used to repeat it, so Telegram, which is sent both, got every
+        // ending twice, part by part.
+        resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
                 "Scheduled task did not finish: " + description, error, agentTaskId, ownerError);
 
         // Record full execution history
@@ -775,8 +780,8 @@ public class ScheduledTaskService {
                     WHERE id = ?
                     """, nextRun.toString(), error, taskId);
                 statusEmitter.emit(userId, StatusMessage.Type.WARNING,
-                        "Recurring task #" + taskId + " failed but will retry at "
-                                + formatTime(nextRun) + ": " + error);
+                        "Recurring task #" + taskId + " failed and runs again at "
+                                + formatTime(nextRun) + ". " + WHERE_ITS_REPORT_IS);
             }
         } else {
             // Deferred — mark failed
@@ -787,7 +792,7 @@ public class ScheduledTaskService {
                 WHERE id = ?
                 """, error, taskId);
             statusEmitter.emit(userId, StatusMessage.Type.FAILED,
-                    "Deferred task #" + taskId + " failed: " + error);
+                    "Deferred task #" + taskId + " failed. " + WHERE_ITS_REPORT_IS);
         }
 
         eventLog.warn(userId, null, "scheduled.failed",

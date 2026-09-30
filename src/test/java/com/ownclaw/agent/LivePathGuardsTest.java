@@ -173,9 +173,10 @@ class LivePathGuardsTest {
     @Test
     @DisplayName("Telegram saves the two texts apart and is sent the owner's")
     void saveSitesKeepTheTwoTexts() throws IOException {
-        // Only Telegram: no test runs TelegramBotService, while the web chat and the scheduler are
-        // driven by PrivateAnswerInTheWebChatTest and ScheduledPrivateAnswerTest. The row's content
-        // feeds every later prompt, the compressor and search, so it must be the safe text.
+        // Only Telegram: the web chat and the scheduler are driven by PrivateAnswerInTheWebChatTest
+        // and ScheduledPrivateAnswerTest, and TelegramDeliveryTest drives the bot but does not look
+        // at what it saves. The row's content feeds every later prompt, the compressor and search,
+        // so it must be the safe text.
         String telegram = read("com.ownclaw.interfaces.telegram.TelegramBotService");
         assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
                         + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
@@ -189,7 +190,7 @@ class LivePathGuardsTest {
                 "a delivered result is sent through telegramText, which reads the owner's text");
         assertTrue(telegram.contains("if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id)))"),
                 "results go only to the owner's own, still-linked chat");
-        assertTrue(telegram.contains("for (String part : telegramParts(text, TELEGRAM_MAX_CHARS))"),
+        assertTrue(telegram.contains("List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);"),
                 "a long answer is sent in parts instead of being refused whole");
     }
 

@@ -323,7 +323,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // what the user meant.
         boolean waiting = interactionHandler.hasPending(userId);
         if (userMessage.startsWith("/")) {
-            String sessionId = conversationService.getCurrentSession(userId);
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
@@ -335,7 +334,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     ? CommandHandler.displayed(typed)
                     : typed.split("(?U)\\s", 2)[0] + (typed.matches("(?U)\\S+") ? "" : " \u2026"));
             if (handledAsCommand.isPresent() || !waiting) {
-                handleCommand(userId, sessionId, userMessage, handledAsCommand, session);
+                handleCommand(userId, userMessage, handledAsCommand, session);
                 return;
             }
             // Not a command, and something is waiting for an answer: it is the answer.
@@ -376,9 +375,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 .thenAccept(result -> {
                     // Two texts. The history every later prompt is built from gets the safe one;
                     // a private answer is kept beside it, for this chat and its reload only.
-                    conversationService.saveMessage(userId, currentSessionId, "assistant",
-                            result.response(), java.util.List.of(), result.taskId(),
-                            result.ownerText());
+                    // Saving is one half of delivering it, and failing it must not also lose the
+                    // other: the answer is still sent.
+                    try {
+                        conversationService.saveMessage(userId, currentSessionId, "assistant",
+                                result.response(), java.util.List.of(), result.taskId(),
+                                result.ownerText());
+                    } catch (Exception e) {
+                        log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
+                    }
                     // A question is routed as a question, so the client can offer a reply box
                     // instead of presenting it as the finished answer.
                     sendToUser(userId, result.awaitingUser() ? "input_request" : "response",
@@ -386,6 +391,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     // Notify frontend to refresh session list (title/preview may have changed)
                     sendToUser(userId, "session_updated", currentSessionId);
                 })
+                // Only the task's own failure arrives here. Saving and sending its answer cannot
+                // throw (send() catches what a socket throws), so an answer that is already saved
+                // is never followed by a second one saying the task went wrong.
                 .exceptionally(ex -> {
                     log.error("Task failed for {}: {}", userId, ex.getMessage());
                     String reply = "Something went wrong: " + ex.getMessage();
@@ -435,8 +443,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      *               queued its task twice, /new created two chats, and /files rm deleted the file
      *               and then reported that there was no such file.
      */
-    private void handleCommand(String userId, String sessionId, String command,
-                               Optional<String> shared, WebSocketSession session) {
+    private void handleCommand(String userId, String command, Optional<String> shared,
+                               WebSocketSession session) {
         String cmd = command.trim();
         String cmdLower = cmd.toLowerCase();
 
@@ -465,8 +473,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             response = shared.orElse(CommandHandler.UNKNOWN_COMMAND);
         }
 
+        // Shown, not kept: a command and its reply are no part of the conversation -- the command
+        // itself was never saved, and Telegram never kept either. Kept, the reply was read into
+        // the later prompts of the chat as one of its messages: after /log all, every event
+        // there is.
         if (response != null && !response.isBlank()) {
-            conversationService.saveMessage(userId, sessionId, "system", response);
             sendToSession(session, "system", response);
         }
 
@@ -543,20 +554,38 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "status");
+        payload.put("content", msg.formatted());
+        payload.put("status", msg.type().name().toLowerCase());
+        // Carried so the client can attribute a step to a task once more than one can run.
+        if (msg.taskId() != null) payload.put("taskId", msg.taskId());
+        if (msg.data() != null && !msg.data().isEmpty()) {
+            payload.put("data", msg.data());
+        }
+        send(session, payload);
+    }
+
+    /**
+     * Send one frame to one socket -- the only place a frame is sent.
+     * <p>
+     * A socket takes one frame at a time: Tomcat throws IllegalStateException for a send made
+     * while another is still being written, and this socket is written from several threads --
+     * a task's statuses and its answer from the task queue, a pong or a command's reply from the
+     * socket's own. So the sends to a socket take turns here. Whatever a send still throws -- a
+     * socket closed since {@code isOpen()} was asked, a broken connection -- costs this frame and
+     * nothing else: it used to escape into the caller, and the one that had just saved a task's
+     * answer then recorded that the task had failed.
+     */
+    private void send(WebSocketSession session, Map<String, Object> payload) {
+        if (!session.isOpen()) return;
         try {
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("type", "status");
-            payload.put("content", msg.formatted());
-            payload.put("status", msg.type().name().toLowerCase());
-            // Carried so the client can attribute a step to a task once more than one can run.
-            if (msg.taskId() != null) payload.put("taskId", msg.taskId());
-            if (msg.data() != null && !msg.data().isEmpty()) {
-                payload.put("data", msg.data());
+            TextMessage frame = new TextMessage(mapper.writeValueAsString(payload));
+            synchronized (session) {
+                session.sendMessage(frame);
             }
-            String json = mapper.writeValueAsString(payload);
-            session.sendMessage(new TextMessage(json));
         } catch (Exception e) {
-            log.warn("Failed to send status to WebSocket: {}", e.getMessage());
+            log.warn("Failed to send WS message: {}", e.getMessage());
         }
     }
 
@@ -617,17 +646,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     /** @param taskId the agent task a message is the outcome of, so the chat can link to it */
     private void sendToSession(WebSocketSession session, String type, String content,
                                String sessionId, String taskId) {
-        if (!session.isOpen()) return;
-        try {
-            var payload = new LinkedHashMap<String, Object>();
-            payload.put("type", type);
-            payload.put("content", content);
-            if (sessionId != null) payload.put("sessionId", sessionId);
-            if (taskId != null) payload.put("taskId", taskId);
-            session.sendMessage(new TextMessage(mapper.writeValueAsString(payload)));
-        } catch (IOException e) {
-            log.warn("Failed to send WS message: {}", e.getMessage());
-        }
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("type", type);
+        payload.put("content", content);
+        if (sessionId != null) payload.put("sessionId", sessionId);
+        if (taskId != null) payload.put("taskId", taskId);
+        send(session, payload);
     }
 
     /**
@@ -641,13 +665,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Status messages are live-only and never replayed, so reloading during a long task
             // produced a completely idle chat with an enabled Send button -- which reads as "the
             // request was lost", and the obvious response is to send it again.
-            String json = mapper.writeValueAsString(Map.of(
+            send(session, Map.of(
                     "type", "session_info",
                     "activeSessionId", sessionId,
                     "sessions", sessions,
                     "taskRunning", taskQueue.isBusyFor(userId)
             ));
-            session.sendMessage(new TextMessage(json));
         } catch (Exception e) {
             log.warn("Failed to send session info: {}", e.getMessage());
         }

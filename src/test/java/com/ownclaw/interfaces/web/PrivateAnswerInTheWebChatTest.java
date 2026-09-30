@@ -138,7 +138,7 @@ class PrivateAnswerInTheWebChatTest {
                 com.ownclaw.interfaces.telegram.TelegramBotService.telegramText(m)));
 
         String session = conversations.getCurrentSession(USER);
-        new ResultDelivery(conversations, emitter).deliver(USER, session, "Background task", privateAnswer());
+        new ResultDelivery(conversations, emitter).deliver(USER, () -> session, "Background task", privateAnswer());
 
         List<String> shown = frames("result");
         assertEquals(1, shown.size(), String.valueOf(sent));

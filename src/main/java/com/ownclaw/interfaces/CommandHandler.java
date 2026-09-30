@@ -211,7 +211,7 @@ public class CommandHandler {
         // answer was produced, and nothing delivered it. Only the status lines appeared.
         taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY)
                 .thenAccept(result -> resultDelivery.deliver(
-                        userId, sessionId, "Background task: " + task, result));
+                        userId, () -> sessionId, "Background task: " + task, result));
         return "Running in the background:\n> " + task
                 + "\n\nYou will get the result here when it finishes — no need to wait.";
     }

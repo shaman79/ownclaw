@@ -27,8 +27,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What reaches the owner's Telegram chat, through the real bot and a recorded Bot API: every part
- * of a long answer, however often Telegram says to slow down; results from the first moment
- * after a restart; and not the steps of a running task.
+ * of a long answer, however often Telegram says to slow down, sent from the bot's own thread;
+ * what could not be sent, said; results from the first moment after a restart, or after a first
+ * message; and not the steps of a running task.
  */
 class TelegramDeliveryTest {
 
@@ -98,22 +99,102 @@ class TelegramDeliveryTest {
         String line = "line of the answer " + "x".repeat(80) + "\n";
         String answer = line.repeat(120);                       // about 12,000 characters
         start(tmp, answer);
-        // The first part is taken; the second is refused twice for going too fast.
-        telegram.answer("sendMessage", FakeTelegram.Answer.ok("true"),
-                FakeTelegram.Answer.tooMany(1), FakeTelegram.Answer.tooMany(0));
+        // The first part is taken; the second is refused for going too fast, with two seconds to wait.
+        telegram.answer("sendMessage", FakeTelegram.Answer.ok("true"), FakeTelegram.Answer.tooMany(2));
 
         long started = System.nanoTime();
         receive("what is in the log?");
+        FakeTelegram.drain(bot);
         long waitedMs = (System.nanoTime() - started) / 1_000_000;
 
         var bodies = telegram.bodies("sendMessage");
         assertEquals(bodies.get(1), bodies.get(2), "the refused part is sent again, unchanged");
-        assertEquals(bodies.get(1), bodies.get(3));
         var texts = new java.util.ArrayList<>(sentTexts());
-        texts.subList(1, 3).clear();                              // the two calls refused with 429
+        texts.remove(1);                                          // the call refused with 429
         assertTrue(texts.size() >= 3, "in parts: " + texts.size());
         assertEquals(answer, String.join("", texts), "every part, in order, nothing lost or trimmed");
-        assertTrue(waitedMs >= 1000, "it waited as long as Telegram said: " + waitedMs + " ms");
+        assertTrue(waitedMs >= 2000, "it waited as long as Telegram said: " + waitedMs + " ms");
+        assertEquals(List.of("telegram-outbox"), telegram.threadsOf("sendMessage").stream().distinct().toList(),
+                "the waiting is the bot's own: the thread that handed it the answer went on at once");
+    }
+
+    @Test
+    @DisplayName("a status is sent from the bot's own thread, so a wait for Telegram never holds up the task")
+    void theTaskNeverWaits(@TempDir Path tmp) throws Exception {
+        start(tmp, "unused");
+        jdbc.update("INSERT INTO system_settings (key, value) VALUES (?, ?)", "telegram.chat." + owner, String.valueOf(ME));
+        telegram.answer("getMe", FakeTelegram.Answer.ok("{\"username\":\"testbot\"}"));
+        telegram.otherwise.put("getUpdates", FakeTelegram.Answer.refused(502));
+        bot.start();
+        telegram.answer("sendMessage", FakeTelegram.Answer.tooMany(1));
+
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.WARNING, "a tool failed", null, "abcd1234"));
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of("\u26a0\ufe0f a tool failed", "\u26a0\ufe0f a tool failed"), sentTexts());
+        assertEquals(List.of("telegram-outbox", "telegram-outbox"), telegram.threadsOf("sendMessage"),
+                "not the task's thread, which emitted it");
+    }
+
+    @Test
+    @DisplayName("a failure on Telegram's side is tried again, and the part arrives")
+    void aFailureIsTriedAgain(@TempDir Path tmp) throws Exception {
+        start(tmp, "the answer");
+        telegram.answer("sendMessage", FakeTelegram.Answer.refused(502));
+
+        receive("what is in the log?");
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of("the answer", "the answer"), sentTexts(), "refused once, then taken");
+    }
+
+    @Test
+    @DisplayName("a part Telegram will not take ends the answer there, and the owner is told which")
+    void whatIsNotTakenIsSaid(@TempDir Path tmp) throws Exception {
+        String line = "line of the answer " + "x".repeat(80) + "\n";
+        String answer = line.repeat(120);                       // three parts
+        start(tmp, answer);
+        var parts = TelegramBotService.telegramParts(answer, TelegramBotService.TELEGRAM_MAX_CHARS);
+        assertEquals(3, parts.size());
+        telegram.answer("sendMessage", FakeTelegram.Answer.ok("true"), FakeTelegram.Answer.refused(403));
+
+        receive("what is in the log?");
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of(parts.get(0), parts.get(1), TelegramBotService.notTaken(2, 3, 403)), sentTexts(),
+                "the third part does not follow as if nothing were missing");
+        assertTrue(TelegramBotService.notTaken(2, 3, 403).contains("part 2 of 3"));
+        assertTrue(TelegramBotService.notTaken(1, 1, 0).contains("a message for you (it could not be reached)"));
+    }
+
+    @Test
+    @DisplayName("a failure that goes on is tried three times, and then said")
+    void aLastingFailureIsSaid(@TempDir Path tmp) throws Exception {
+        start(tmp, "the answer");
+        telegram.answer("sendMessage", FakeTelegram.Answer.refused(502), FakeTelegram.Answer.refused(502),
+                FakeTelegram.Answer.refused(502));
+
+        receive("what is in the log?");
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of("the answer", "the answer", "the answer", TelegramBotService.notTaken(1, 1, 502)),
+                sentTexts());
+    }
+
+    @Test
+    @DisplayName("a chat first heard from after start-up gets results from then on")
+    void aNewChatGetsResults(@TempDir Path tmp) throws Exception {
+        start(tmp, "hello to you");
+        telegram.answer("getMe", FakeTelegram.Answer.ok("{\"username\":\"testbot\"}"));
+        telegram.otherwise.put("getUpdates", FakeTelegram.Answer.refused(502));
+        bot.start();                                            // no chat remembered yet
+
+        receive("hello");
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.RESULT, "**Scheduled task: digest**\n\nall quiet",
+                java.util.Map.of("sessionId", "s1"), "abcd1234"));
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of("hello to you", "**Scheduled task: digest**\n\nall quiet"), sentTexts());
     }
 
     @Test
@@ -127,6 +208,7 @@ class TelegramDeliveryTest {
         bot.start();
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.RESULT, "**Scheduled task: digest**\n\nall quiet",
                 java.util.Map.of("sessionId", "s1"), "abcd1234"));
+        FakeTelegram.drain(bot);
 
         assertEquals(List.of("**Scheduled task: digest**\n\nall quiet"), sentTexts());
         assertEquals(ME, JSON.readTree(telegram.bodies("sendMessage").getFirst()).path("chat_id").asLong());
@@ -143,6 +225,7 @@ class TelegramDeliveryTest {
 
         bot.stop();
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.RESULT, "a result", null));
+        FakeTelegram.drain(bot);
 
         assertEquals(List.of(), sentTexts());
     }
@@ -163,6 +246,7 @@ class TelegramDeliveryTest {
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.COMPLETED, "Done in 3 steps", null, "abcd1234"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.WARNING, "No progress for 600s", null, "abcd1234"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.FAILED, "STALLED", null, "abcd1234"));
+        FakeTelegram.drain(bot);
 
         assertEquals(List.of("\u26a0\ufe0f No progress for 600s", "\u274c STALLED"), sentTexts());
     }

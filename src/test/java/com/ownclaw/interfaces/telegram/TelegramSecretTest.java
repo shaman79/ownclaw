@@ -22,7 +22,10 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** A secret sent to the bot as a command is stored and then removed from the Telegram chat; a mistyped one goes nowhere. */
+/**
+ * A secret sent to the bot as a command is stored and then removed from the Telegram chat; a
+ * mistyped one goes nowhere; a slash text that answers a waiting question is that answer.
+ */
 class TelegramSecretTest {
 
     static final String SECRET = "hunter2-Xq9";
@@ -38,6 +41,11 @@ class TelegramSecretTest {
     void setUp() throws Exception {
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
         new UserRepository(jdbc).createUser("petr", ME);
+        bot = botWith(new SkillInteractionHandler(null));
+    }
+
+    /** The bot with the real command handler, a vault that records, and this interaction handler. */
+    private TelegramBotService botWith(SkillInteractionHandler interactions) {
         CredentialVault vault = new CredentialVault(jdbc) {
             @Override public void storeCredential(String userId, String key, String value) {
                 stored.add(key + "=" + value);
@@ -49,9 +57,8 @@ class TelegramSecretTest {
         config.getTelegram().setBotToken("123:test");
         ConversationService conv = new ConversationService(jdbc, null);
         // No task queue: a message handed to the agent fails the test at taskQueue.submit.
-        bot = new TelegramBotService(config, null, new UserRepository(jdbc), new ChatStatusEmitter(),
-                new ObjectMapper(), conv, new SkillInteractionHandler(null), null, commands, null, null, jdbc,
-                telegram.client);
+        return new TelegramBotService(config, null, new UserRepository(jdbc), new ChatStatusEmitter(),
+                new ObjectMapper(), conv, interactions, null, commands, null, null, jdbc, telegram.client);
     }
 
     private void receive(long messageId, String text) throws Exception {
@@ -68,6 +75,7 @@ class TelegramSecretTest {
         } catch (InvocationTargetException e) {
             fail("the message was handed to the agent: " + e.getCause());
         }
+        FakeTelegram.drain(bot);
     }
 
     @Test
@@ -104,5 +112,24 @@ class TelegramSecretTest {
         assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains(CommandHandler.UNKNOWN_COMMAND)),
                 "calls: " + telegram.calls);
         assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
+    }
+
+    @Test
+    @DisplayName("a slash text that answers a waiting question is handed to it, not refused as a command")
+    void anAnswerThatStartsWithASlash() throws Exception {
+        List<String> answers = new ArrayList<>();
+        bot = botWith(new SkillInteractionHandler(null) {
+            @Override public boolean hasPending(String userId) { return true; }
+            @Override public boolean provideInput(String userId, String taskId, String input) {
+                answers.add(input);
+                return true;
+            }
+        });
+
+        receive(80, "/home/me/My Photos");
+
+        assertEquals(List.of("/home/me/My Photos"), answers);
+        assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(CommandHandler.UNKNOWN_COMMAND)),
+                "calls: " + telegram.calls);
     }
 }

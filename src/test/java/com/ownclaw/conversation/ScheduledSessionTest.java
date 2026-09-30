@@ -4,10 +4,15 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -104,5 +109,45 @@ class ScheduledSessionTest {
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM conversations", Integer.class));
         assertEquals(List.of(next), jdbc.queryForList(
                 "SELECT id FROM chat_sessions WHERE kind = 'scheduled'", String.class));
+    }
+
+    @Test
+    @DisplayName("two runs finishing at once get one pinned chat, not one each")
+    void oneChatForTwoAtOnce(@TempDir Path tmp) throws Exception {
+        MigratedDatabase.at(tmp.resolve("t.db"));
+        var looked = new AtomicInteger();
+        var secondLooked = new CountDownLatch(1);
+        // The first to look finds no chat and, before making one, waits for the second to look --
+        // or half a second, if the second cannot get in to look.
+        var db = new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + tmp.resolve("t.db"))) {
+            @Override
+            public <T> List<T> queryForList(String sql, Class<T> type, Object... args) {
+                List<T> found = super.queryForList(sql, type, args);
+                if (sql.contains("kind = 'scheduled'") && looked.incrementAndGet() == 2) secondLooked.countDown();
+                return found;
+            }
+
+            @Override
+            public int update(String sql, Object... args) {
+                if (sql.contains("INSERT INTO chat_sessions") && looked.get() == 1) {
+                    try {
+                        secondLooked.await(500, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return super.update(sql, args);
+            }
+        };
+        var conversations = new ConversationService(db, null);
+        var runs = Executors.newFixedThreadPool(2);
+        try {
+            var first = runs.submit(() -> conversations.scheduledSession("u1"));
+            var second = runs.submit(() -> conversations.scheduledSession("u1"));
+            assertEquals(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+        } finally {
+            runs.shutdown();
+        }
+        assertEquals(1, db.queryForObject("SELECT COUNT(*) FROM chat_sessions WHERE kind = 'scheduled'", Integer.class));
     }
 }
