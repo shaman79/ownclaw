@@ -1,7 +1,6 @@
 package com.ownclaw.agent;
 
 import com.ownclaw.config.OwnClawConfig;
-import com.ownclaw.conversation.ConversationCompressor;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.conversation.MigratedDatabase;
@@ -78,7 +77,7 @@ class StopWithoutLocalModelTest {
         config.getDatabase().setPath(tmp.resolve("t.db").toString());
         Files.createDirectories(tmp.resolve("uploads"));
         var files = new FileStorageService(jdbc, config);
-        var conversations = new ConversationService(jdbc, new ConversationCompressor(jdbc, null, null));
+        var conversations = new ConversationService(jdbc);
         String pdf = files.store("u1", "statement.pdf", "application/pdf",
                 new ByteArrayInputStream("%PDF-1.7 binary".getBytes(StandardCharsets.UTF_8)));
 
@@ -91,7 +90,10 @@ class StopWithoutLocalModelTest {
                     () -> loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf)),
                     which + ": the task went on past the stop");
             assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), which);
-            assertEquals(AgentLoop.LOCAL_DOWN_FOR_FILES, r.response(), which);
+            assertTrue(r.response().startsWith("**Stopped:** " + AgentLoop.LOCAL_DOWN_FOR_FILES + "."),
+                    which + ": the ending says why first: " + r.response());
+            assertTrue(r.response().contains("result 1 (attachment)"), "the file is described: " + r.response());
+            assertFalse(r.response().contains("statement.pdf"), "and never named: " + r.response());
             assertNotNull(r.taskId(), which + ": stamped, so the chat can link to what happened");
         }
     }

@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>
  * {@link Artifact#asObservation} is the one place a result's bytes are either admitted to the
  * trajectory or replaced by a descriptor. Everything downstream — both prompt renderers, the
- * progress summary, the episode, the events rows — reads that observation, so if this is right,
+ * episode, the events rows — reads that observation, so if this is right,
  * nothing else has to know about privacy. If it is wrong, nothing else can save it.
  */
 class ArtifactTest {

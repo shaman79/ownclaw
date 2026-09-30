@@ -202,17 +202,18 @@ public class TaskQueue {
                     // Priority is the origin signal: the scheduler and /bg submit at 2,
                     // a chat message at 1. Nobody is waiting on the former.
                     boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
-                    // executeFull, not execute: execute() returns the response string and throws
-                    // the outcome away. That is where the scheduler lost the ability to tell a
-                    // finished job from one that gave up, and so recorded every run as completed.
+                    // The whole result, not only its text: the scheduler once kept only the
+                    // response string, and so could not tell a finished job from one that gave
+                    // up and recorded every run as completed.
                     task.future().complete(
                             agentLoop.executeFull(task.userId(), task.message(), unattended,
                                     task.currentMessageId(), task.attachmentIds()));
                 } catch (Exception e) {
                     log.error("Task processing failed on the {} lane for user {}: {}",
                             laneName, task.userId(), e.getMessage(), e);
-                    // execute() used to emit this before swallowing the exception; executeFull
-                    // lets it out, so the notice has to happen here or a crash goes unannounced.
+                    // executeFull turns what fails inside the loop into the task's ending; what
+                    // fails before the loop starts reaches here, and without this notice a crash
+                    // would go unannounced.
                     statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED,
                             "An unexpected error occurred.");
                     task.future().complete(AgentResult.error(

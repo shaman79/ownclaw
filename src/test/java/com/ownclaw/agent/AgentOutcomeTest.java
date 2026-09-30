@@ -88,8 +88,6 @@ class AgentOutcomeTest {
 
         Set<AgentResult.TerminationReason> missing = EnumSet.allOf(AgentResult.TerminationReason.class);
         missing.removeAll(reachable);
-        // TIMEOUT is retained for stored results from older builds; nothing produces it now.
-        missing.remove(AgentResult.TerminationReason.TIMEOUT);
         assertTrue(missing.isEmpty(),
                 "No factory produces " + missing + ". A reason nothing can construct is either "
                         + "dead or a missing factory, and both mislead whoever reads the enum.");

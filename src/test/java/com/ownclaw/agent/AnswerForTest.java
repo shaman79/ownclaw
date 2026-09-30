@@ -117,21 +117,20 @@ class AnswerForTest {
     }
 
     @Test
-    @DisplayName("a task that ends without respond -- step limit, cloud errors -- still gives the owner the local answer")
+    @DisplayName("a task that ends without respond -- step limit, cloud errors -- still gives the owner every private result")
     void everyExitCarriesTheLocalAnswer() {
-        var ctx = fileTask();
-        var stopped = AgentResult.maxSteps("Reached the step limit. Last result: {{2}}", new AgentTrajectory(), 5);
-        var r = AgentLoop.withLocalAnswers(stopped, ctx);
-        assertEquals(AgentLoop.ENDED_WITH_AN_ANSWER + "\n\n" + PRIVATE_HEADER + ANSWER, r.ownerText());
-        assertEquals(AgentLoop.ENDED_WITH_AN_ANSWER + "\n\n" + PRIVATE_NOTE, r.response(),
-                "not the progress note addressed to the cloud, with its stale {{2}}");
+        var stopped = AgentResult.maxSteps("it used all 20 steps a task may take", new AgentTrajectory(), 5);
+        var r = TaskEnding.apply(stopped, fileTask(), Map.of());
+        assertTrue(r.ownerText().contains(PRIVATE_HEADER + "**result 3 (local_answer):**\n\n" + ANSWER), r.ownerText());
+        assertTrue(r.ownerText().contains("statement text"), "what a skill read from the file is the owner's too");
+        assertFalse(r.response().contains(ANSWER), "the text every later prompt reads never holds it");
+        assertFalse(r.response().contains("statement text"));
         assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason());
 
-        var answered = AgentLoop.withLocalAnswers(stopped.withOwnerText("already given"), ctx);
-        assertEquals("already given", answered.ownerText(), "answerFor already handled it");
+        // Without a file as well: a private result is the owner's whatever made it private.
         var noFile = new AgentContext("u1", "t2", "x");
         noFile.addArtifact("local_answer", Map.of(), Map.of(), ANSWER, true, label(Label.PRIVATE));
-        assertNull(AgentLoop.withLocalAnswers(stopped, noFile).ownerText());
+        assertTrue(TaskEnding.apply(stopped, noFile, Map.of()).ownerText().contains(ANSWER));
     }
 
     @Test

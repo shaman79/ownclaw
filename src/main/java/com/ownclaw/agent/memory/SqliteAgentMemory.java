@@ -5,17 +5,18 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
  * SQLite-backed implementation of AgentMemory.
  *
- * Episodic memory uses tag-based keyword matching for recall (lightweight, no embeddings).
- * This is effective for the single-user or small-scale scenario and avoids
- * external dependencies for vector search.
+ * Episodic memory is recalled by keyword: every episode that shares a word with the query
+ * (lightweight, no embeddings). This is effective for the single-user or small-scale scenario
+ * and avoids external dependencies for vector search.
  *
  * Upgrade path: swap this for an embedding-based implementation when needed.
  */
@@ -46,68 +47,34 @@ public class SqliteAgentMemory implements AgentMemory {
     }
 
     @Override
-    public List<MemoryEntry> recallEpisodes(String userId, String query, int maxResults) {
-        try {
-            // Extract keywords from the query for tag matching
-            List<String> keywords = extractKeywords(query);
-
-            if (keywords.isEmpty()) {
-                // No keywords — return most recent episodes
-                return jdbc.query(
-                        "SELECT id, content, outcome, tags, created_at FROM agent_memory " +
-                                "WHERE user_id = ? AND memory_type = 'episode' " +
-                                "ORDER BY created_at DESC LIMIT ?",
-                        (rs, rowNum) -> new MemoryEntry(
-                                rs.getString("id"),
-                                rs.getString("content"),
-                                rs.getInt("outcome") == 1,
-                                parseTags(rs.getString("tags")),
-                                rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
-                        ),
-                        userId, maxResults
-                );
-            }
-
-            // Build a scoring query — episodes matching more keywords rank higher.
-            // SQLite doesn't have full-text search without FTS extension, so we use LIKE.
-            // We wrap in a subquery because SQLite rejects HAVING on non-aggregate queries.
-            StringBuilder inner = new StringBuilder();
-            inner.append("SELECT id, content, outcome, tags, created_at, (");
-            List<Object> params = new ArrayList<>();
-
-            for (int i = 0; i < keywords.size(); i++) {
-                if (i > 0) inner.append(" + ");
-                inner.append("(CASE WHEN (tags LIKE ? OR content LIKE ?) THEN 1 ELSE 0 END)");
-                String pattern = "%" + keywords.get(i) + "%";
-                params.add(pattern);
-                params.add(pattern);
-            }
-
-            inner.append(") AS relevance FROM agent_memory ")
-                    .append("WHERE user_id = ? AND memory_type = 'episode'");
-            params.add(userId);
-
-            String sql = "SELECT id, content, outcome, tags, created_at, relevance "
-                    + "FROM (" + inner + ") "
-                    + "WHERE relevance > 0 "
-                    + "ORDER BY relevance DESC, created_at DESC "
-                    + "LIMIT ?";
-            params.add(maxResults);
-
-            return jdbc.query(sql,
-                    (rs, rowNum) -> new MemoryEntry(
-                            rs.getString("id"),
-                            rs.getString("content"),
-                            rs.getInt("outcome") == 1,
-                            parseTags(rs.getString("tags")),
-                            rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
-                    ),
-                    params.toArray()
-            );
-        } catch (Exception e) {
-            log.warn("Failed to recall episodes: {}", e.getMessage());
-            return List.of();
-        }
+    public List<MemoryEntry> recallEpisodes(String userId, String query) {
+        List<String> keywords = extractKeywords(query);
+        if (keywords.isEmpty()) return List.of();
+        // Scored here rather than in SQL: every episode is compared with every word -- LIKE with
+        // two bound parameters per word runs into SQLite's parameter limit on a long query, and
+        // lowercases only ASCII, so "Škoda" never matched "škoda". Newest first, and the sort is
+        // stable, so among equals the newest stays first.
+        List<MemoryEntry> episodes = jdbc.query(
+                "SELECT id, content, outcome, tags, created_at FROM agent_memory "
+                        + "WHERE user_id = ? AND memory_type = 'episode' ORDER BY created_at DESC, id DESC",
+                (rs, rowNum) -> new MemoryEntry(
+                        rs.getString("id"),
+                        rs.getString("content"),
+                        rs.getInt("outcome") == 1,
+                        parseTags(rs.getString("tags")),
+                        createdAt(rs)
+                ),
+                userId);
+        record Scored(MemoryEntry entry, long relevance) {}
+        return episodes.stream()
+                .map(e -> {
+                    String text = (String.join(",", e.tags()) + " " + e.content()).toLowerCase(Locale.ROOT);
+                    return new Scored(e, keywords.stream().filter(text::contains).count());
+                })
+                .filter(s -> s.relevance() > 0)
+                .sorted(Comparator.comparingLong(Scored::relevance).reversed())
+                .map(Scored::entry)
+                .toList();
     }
 
     @Override
@@ -158,7 +125,7 @@ public class SqliteAgentMemory implements AgentMemory {
                             rs.getString("content"),
                             rs.getInt("outcome") == 1,
                             parseTags(rs.getString("tags")),
-                            rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
+                            createdAt(rs)
                     ),
                     userId
             );
@@ -169,8 +136,8 @@ public class SqliteAgentMemory implements AgentMemory {
     }
 
     /**
-     * Extract simple keywords from a query string for tag matching.
-     * Filters out common stop words and short words.
+     * The words of a query worth looking for: every distinct word of three or more characters
+     * that is not a stop word, lowercased.
      */
     private List<String> extractKeywords(String query) {
         if (query == null || query.isBlank()) return List.of();
@@ -190,12 +157,21 @@ public class SqliteAgentMemory implements AgentMemory {
                 "please", "want", "need", "like", "get", "make", "help"
         );
 
-        return Arrays.stream(query.toLowerCase().split("[\\s,.;:!?()\\[\\]{}\"']+"))
+        return Arrays.stream(query.toLowerCase(Locale.ROOT).split("[\\s,.;:!?()\\[\\]{}\"']+"))
                 .filter(w -> w.length() > 2)
                 .filter(w -> !stopWords.contains(w))
                 .distinct()
-                .limit(10)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * When the row was written: {@code datetime('now')} is UTC, stored as text. Read as a
+     * timestamp it was taken for the JVM's local time.
+     */
+    private static long createdAt(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String at = rs.getString("created_at");
+        return at == null ? 0 : java.time.LocalDateTime.parse(at.replace(' ', 'T'))
+                .toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
     }
 
     private List<String> parseTags(String tagStr) {

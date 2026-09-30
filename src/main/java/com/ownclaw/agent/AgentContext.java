@@ -17,18 +17,19 @@ public class AgentContext {
     private final AgentTrajectory trajectory;
     private final Map<String, Object> metadata;
     private final long startTimeMs;
-    /** Timestamp of the last forward progress (step completion, LLM response, etc.). */
+    /** When the task last moved: a step finished, a model replied, or an event of a reply arrived. */
     private volatile long lastProgressMs;
 
     /**
      * True when nobody is waiting for this task — the scheduler submitted it, or the user
      * explicitly sent it to the background. It is a fact about ORIGIN, not a guess: the
      * scheduler genuinely has no one watching. What it buys is permission to spend local
-     * inference time, which is free but slow, on work that would otherwise be truncated.
+     * inference time, which is free but slow, where nobody is waiting for it.
      */
     private boolean unattended;
 
-    private volatile boolean cancelled;
+    /** What the stall watchdog stopped this task on, or null. See {@link #stall}. */
+    private volatile String stalled;
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
     private String conversationSummary;
@@ -76,7 +77,6 @@ public class AgentContext {
         this.metadata = new HashMap<>();
         this.startTimeMs = System.currentTimeMillis();
         this.lastProgressMs = this.startTimeMs;
-        this.cancelled = false;
     }
 
     public String userId() { return userId; }
@@ -96,38 +96,53 @@ public class AgentContext {
     /** Milliseconds since the last forward progress. */
     public long msSinceLastProgress() { return System.currentTimeMillis() - lastProgressMs; }
 
-    /**
-     * Whether this task should stop, consulting both the local flag and the external source
-     * the Stop button writes to.
-     * <p>
-     * This used to read the local flag only, and nothing ever called {@link #cancel()} — zero
-     * callers repo-wide — so it was permanently false for the lifetime of every task. The main
-     * loop polls {@code cancellationService} itself at the top of each step, so Stop appeared to
-     * work; what was dead was everything <em>inside</em> a step. The per-step check in
-     * {@code LocalExecutor} and the {@code context::isCancelled} supplier handed to every tool
-     * could never fire, so a running tool or an in-flight local call — 60 to 133 seconds on this
-     * deployment, and up to ten of them in a delegated plan — carried on to completion after the
-     * user pressed Stop.
-     * <p>
-     * Consulting the external source here revives all of those checks at once, rather than
-     * relying on each caller to remember to poll two places.
-     */
     public boolean isUnattended() { return unattended; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
 
+    /**
+     * Whether this task should stop: the stall watchdog stopped it, or the external source the
+     * Stop button and the ops API write to says so.
+     * <p>
+     * Every check inside a step reads this -- the per-step check in {@code LocalExecutor}, the
+     * {@code context::isCancelled} supplier handed to every tool, the {@link #progress} hook of
+     * every model call -- so a stop reaches a running step, not only the top of the next one.
+     */
     public boolean isCancelled() {
-        if (cancelled) return true;
+        if (stalled != null) return true;
         java.util.function.BooleanSupplier ext = externalCancel;
         return ext != null && ext.getAsBoolean();
     }
 
-    public void cancel() { this.cancelled = true; }
-
     /**
      * Attach the authoritative cancellation source for this task, normally
-     * {@code () -> cancellationService.isCancelled(userId)}. Set once at task start.
+     * {@code () -> cancellationService.isCancelled(userId, taskId, startTimeMs)}. Set once at task
+     * start.
      */
     public void setExternalCancel(java.util.function.BooleanSupplier supplier) { this.externalCancel = supplier; }
+
+    /**
+     * The stall watchdog's stop, with the facts it stopped on: from here {@link #isCancelled()}
+     * is true, and the task ends STALLED saying them. The first facts are kept.
+     */
+    public void stall(String facts) {
+        if (stalled == null) stalled = facts;
+    }
+
+    /** What the stall watchdog stopped this task on, or null when it has not. */
+    public String stalled() { return stalled; }
+
+    /**
+     * The hook for every model call made on this task's behalf ({@code withProgress}): each event
+     * of the streamed reply is progress, so the stall watchdog sees a long call that is still
+     * answering as alive; and once the task has been stopped, the next event ends the call by
+     * throwing {@code TaskCancelledException}, instead of the stop waiting minutes for it.
+     */
+    public com.ownclaw.llm.LlmProgress progress() {
+        return () -> {
+            markProgress();
+            if (isCancelled()) throw new com.ownclaw.core.TaskCancellationService.TaskCancelledException(taskId);
+        };
+    }
 
     public String conversationSummary() { return conversationSummary; }
     public void setConversationSummary(String summary) { this.conversationSummary = summary; }
@@ -398,6 +413,11 @@ public class AgentContext {
     /** What a cloud call made on behalf of this task carries to the door. */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues, this::isAllowedLeak);
+                secretValues, this::isAllowedLeak, this::toolOf);
+    }
+
+    /** The tool that produced result {@code n}, or null when there is no such result. */
+    private synchronized String toolOf(int n) {
+        return n >= 1 && n <= artifacts.size() ? artifacts.get(n - 1).tool() : null;
     }
 }

@@ -550,15 +550,16 @@ public class OpsController {
     public ResponseEntity<?> cancel(@PathVariable String userId,
                                     @RequestParam(required = false) String taskId) {
         if (taskId != null && !taskId.isBlank()) {
-            cancellation.request(userId, taskId);
+            cancellation.request(userId, taskId, "a stop request from the ops API");
         } else {
-            cancellation.requestAll(userId);
+            cancellation.requestAll(userId, "a stop request from the ops API");
         }
         return ResponseEntity.ok(Map.of("cancelRequested", true, "userId", userId,
                 "scope", taskId != null && !taskId.isBlank() ? taskId : "all tasks for this user",
-                "caveat", "Cancellation is now observed inside a step as well as between them — "
-                        + "a running tool or local call polls it — but a request already in "
-                        + "flight to a provider still has to return before it is noticed."));
+                "caveat", "Cancellation is observed inside a step as well as between them: a "
+                        + "running tool or delegation polls it, and the task's think, code-writing "
+                        + "and analysis calls end at the next event of their streamed reply. A call "
+                        + "that has gone silent ends only at its read timeout."));
     }
 
     /**

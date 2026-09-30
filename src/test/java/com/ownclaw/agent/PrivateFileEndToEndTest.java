@@ -7,7 +7,6 @@ import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.config.OwnClawConfig;
-import com.ownclaw.conversation.ConversationCompressor;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.conversation.MigratedDatabase;
@@ -71,7 +70,7 @@ class PrivateFileEndToEndTest {
         config.getDatabase().setPath(tmp.resolve("t.db").toString());
         Files.createDirectories(tmp.resolve("uploads"));
         var files = new FileStorageService(jdbc, config);
-        var conversations = new ConversationService(jdbc, new ConversationCompressor(jdbc, null, null));
+        var conversations = new ConversationService(jdbc);
         String session = conversations.createSession("u1", "Statements");
 
         // The upload and the message it came with, as the chat saves them.
@@ -81,7 +80,7 @@ class PrivateFileEndToEndTest {
                 List.of(fileId));
 
         var ctx = new AgentContext("u1", "a1b2c3d4", "summarise this statement");
-        AgentLoop.loadConversationContext(ctx, "u1", row, conversations, files);
+        AgentLoop.loadConversationContext(ctx, "u1", row, conversations, files, id -> null);
         AgentLoop.registerAttachments(ctx, List.of(fileId), files, new EventLogService(jdbc));
 
         // What the cloud is told of the file, and what the delegation it asks for reports back.
@@ -108,7 +107,7 @@ class PrivateFileEndToEndTest {
         // The next turn, and the episode memory recalls into later prompts.
         String nextRow = conversations.saveMessage("u1", session, "user", "and last month's?");
         var next = new AgentContext("u1", "b2c3d4e5", "and last month's?");
-        AgentLoop.loadConversationContext(next, "u1", nextRow, conversations, files);
+        AgentLoop.loadConversationContext(next, "u1", nextRow, conversations, files, id -> null);
         String episode = AgentLoop.episodeSummary(ctx.originalMessage(), result);
 
         var cloudBound = new LinkedHashMap<String, String>();

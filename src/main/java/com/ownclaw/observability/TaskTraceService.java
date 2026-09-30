@@ -22,7 +22,9 @@ import java.util.Optional;
  * <p>
  * What it does not contain, on purpose: the text of any request (never stored), the per-part list
  * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), and
- * any tool's error output beyond the excerpt a failed step's row already carries.
+ * any tool's output beyond how a failed step failed, which its row carries (none for a private
+ * step). The same parse is the record of the task that its ending and later tasks of its chat
+ * read ({@code TaskRecord}).
  */
 @Service
 public class TaskTraceService {
@@ -146,6 +148,9 @@ public class TaskTraceService {
                     s.put("step", stepNo);
                     s.put("at", at);
                     s.put("tool", tool);
+                    // skill_create and skill_manage: which skill. Absent on rows from before it was
+                    // recorded.
+                    s.put("skill", d.hasNonNull("skill") ? d.path("skill").asText() : null);
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));

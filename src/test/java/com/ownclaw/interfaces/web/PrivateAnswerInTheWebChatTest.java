@@ -76,7 +76,7 @@ class PrivateAnswerInTheWebChatTest {
 
     private void connect(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
         emitter = new ChatStatusEmitter();
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override

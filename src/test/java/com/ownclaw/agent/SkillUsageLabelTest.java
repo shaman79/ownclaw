@@ -61,7 +61,7 @@ class SkillUsageLabelTest {
         curator.recordUsage("imap_fetch", "u1", "t3", false, 10,
                 Map.of("folder", "INBOX"), "old row, no label");   // pre-slice shape
 
-        var evidence = curator.recentFailures("imap_fetch", 5);
+        var evidence = curator.failures("imap_fetch");
         assertEquals(1, evidence.size(), "one PUBLIC row; the private one and the unlabelled one stay out");
         assertEquals("Traceback: KeyError 'uid'", evidence.get(0).get("error"));
 
@@ -71,5 +71,28 @@ class SkillUsageLabelTest {
                 "SELECT error FROM skill_usage WHERE label = 'PRIVATE'", String.class);
         assertTrue(priv.contains("petr@example.com"), "stored in full, read through ops");
         // Mutation: drop the WHERE label clause -> three rows come back.
+    }
+
+    @Test
+    @DisplayName("a failure is kept whole -- its error, its parameters -- with secret-named ones redacted; repeats are one row")
+    void failuresAreKeptWhole(@TempDir Path tmp) throws Exception {
+        var jdbc = db(tmp);
+        var curator = new SkillCuratorService(jdbc, null, null, null);
+        String error = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 9\n".repeat(200) + "KeyError: 'uid'";
+        String folder = "INBOX/" + "Archive/".repeat(600);
+        for (String task : List.of("t1", "t2")) {
+            curator.recordUsage("imap_fetch", "u1", task, false, 10,
+                    Map.of("folder", folder, "api_key", "sk-live-value"), error, Label.PUBLIC);
+        }
+        curator.recordUsage("imap_fetch", "u1", "t3", false, 10, Map.of("folder", "INBOX"), "timed out", Label.PUBLIC);
+
+        var failures = curator.failures("imap_fetch");
+        assertEquals(2, failures.size(), "the same call failing the same way is one row");
+        assertEquals("timed out", failures.get(0).get("error"), "newest first");
+        assertEquals(error, failures.get(1).get("error"), "the error, whole");
+        assertEquals(2, ((Number) failures.get(1).get("times")).intValue());
+        var params = new com.fasterxml.jackson.databind.ObjectMapper().readTree(String.valueOf(failures.get(1).get("params_json")));
+        assertEquals(folder, params.path("folder").asText(), "the parameters, whole and still JSON");
+        assertEquals("[REDACTED]", params.path("api_key").asText());
     }
 }

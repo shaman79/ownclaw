@@ -4,16 +4,19 @@ package com.ownclaw.agent;
  * The final result of an agent execution.
  *
  * @param success        whether the task was completed successfully
- * @param response       the final response message to the user
+ * @param response       the final response message to the user. For every ending but COMPLETED
+ *                       and NEEDS_INPUT the loop sets it to why the task stopped, a clause ("you
+ *                       pressed Stop"), and {@link TaskEnding} writes the ending around it before
+ *                       anything reads it
  * @param trajectory     the full execution trajectory
  * @param totalSteps     number of action-observation cycles
  * @param totalDurationMs wall-clock time of the entire execution
- * @param terminationReason why the agent stopped (COMPLETED, CANCELLED, MAX_STEPS, TIMEOUT, ERROR)
+ * @param terminationReason why the agent stopped
  * @param ownerText      what the owner's own screen shows in place of {@code response}, or null
- *                       when that is the same text. Set only for an answer that holds private
- *                       data: {@code response} is then a note that the answer exists, and it is
- *                       what every other reader gets -- history, memory, search, the
- *                       scheduler's records. The web chat and Telegram show ownerText.
+ *                       when that is the same text. Set only for a text that holds private
+ *                       data: {@code response} is then the text without it, and it is what
+ *                       every other reader gets -- history, memory, search, the scheduler's
+ *                       records. The web chat and Telegram show ownerText.
  */
 public record AgentResult(
         boolean success,
@@ -34,13 +37,11 @@ public record AgentResult(
     public enum TerminationReason {
         /** Agent determined the task is complete and responded. */
         COMPLETED,
-        /** The user cancelled the task. */
+        /** Stopped on request -- the owner's Stop or /cancel, or the ops API; the ending says which. */
         CANCELLED,
         /** Maximum number of steps reached. */
         MAX_STEPS,
-        /** Task-level timeout exceeded (legacy — prefer STALLED). */
-        TIMEOUT,
-        /** Task stalled — no progress for stall-timeout seconds. */
+        /** The stall watchdog stopped it: nothing moved for the stall timeout. */
         STALLED,
         /** Unrecoverable error. */
         ERROR,
@@ -72,10 +73,6 @@ public record AgentResult(
 
     public static AgentResult maxSteps(String response, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.MAX_STEPS);
-    }
-
-    public static AgentResult timeout(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.TIMEOUT);
     }
 
     public static AgentResult stalled(String response, AgentTrajectory trajectory, long durationMs) {

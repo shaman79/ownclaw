@@ -73,6 +73,11 @@ public class SkillManager {
 
     // ────────────────────── Create / Update ──────────────────────
 
+    /** What a skill may be called: the one rule, for creating one and for recording which one ran. */
+    static boolean isSkillName(String name) {
+        return name != null && name.matches("[a-z][a-z0-9_]*");
+    }
+
     /**
      * Create (or update) a Python skill.
      *
@@ -86,7 +91,7 @@ public class SkillManager {
         String code = str(params, "code");
         // --- Validate ---
 
-        if (name == null || !name.matches("[a-z][a-z0-9_]*")) {
+        if (!isSkillName(name)) {
             return "ERROR: Invalid skill name. Must start with a lowercase letter and " +
                     "contain only lowercase letters, digits, and underscores.";
         }
@@ -368,8 +373,8 @@ public class SkillManager {
     /**
      * LLM-powered library analysis.
      */
-    public String analyzeSkills(com.ownclaw.llm.EgressContext egress) {
-        return curatorService.analyzeLibrary(egress);
+    public String analyzeSkills(com.ownclaw.llm.EgressContext egress, com.ownclaw.llm.LlmProgress progress) {
+        return curatorService.analyzeLibrary(egress, progress);
     }
 
     // ────────────────────── Helpers ──────────────────────

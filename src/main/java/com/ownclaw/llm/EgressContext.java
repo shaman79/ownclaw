@@ -4,6 +4,7 @@ import com.ownclaw.privacy.PrivateIndex;
 
 import java.util.Map;
 import java.util.function.BiPredicate;
+import java.util.function.IntFunction;
 
 /**
  * What a cloud call carries with it so the gateway can decide, scrub, check and record.
@@ -20,15 +21,19 @@ import java.util.function.BiPredicate;
  * @param allowed      whether a hit (handle, normalised window) is material the cloud was
  *                     already given — the task text, or a PUBLIC artifact recorded before the
  *                     private one — and may go
+ * @param toolOf       the tool that produced a result, by handle -- null for a handle it does
+ *                     not know -- so a refusal names the result it found
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,
-                            BiPredicate<Integer, String> allowed) {
+                            BiPredicate<Integer, String> allowed,
+                            IntFunction<String> toolOf) {
 
     public EgressContext {
         index = index == null ? new PrivateIndex() : index;
         secretValues = secretValues == null ? Map.of() : Map.copyOf(secretValues);
         allowed = allowed == null ? (h, w) -> false : allowed;
+        toolOf = toolOf == null ? n -> null : toolOf;
         purpose = purpose == null ? "unspecified" : purpose;
     }
 }

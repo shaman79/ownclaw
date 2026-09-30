@@ -61,7 +61,7 @@ class CloudGatewayTest {
 
     private static EgressContext egress(PrivateIndex index, Map<String, String> secrets,
                                         java.util.function.BiPredicate<Integer, String> allowed) {
-        return new EgressContext("u1", "t1", "think", index, secrets, allowed);
+        return new EgressContext("u1", "t1", "think", index, secrets, allowed, null);
     }
 
     private static List<LlmMessage> messages(String... contents) {

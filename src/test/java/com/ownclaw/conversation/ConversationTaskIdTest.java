@@ -23,7 +23,7 @@ class ConversationTaskIdTest {
                 role TEXT NOT NULL, content TEXT NOT NULL, compressed_content TEXT, tokens_used INTEGER DEFAULT 0,
                 timestamp TEXT DEFAULT (datetime('now')), metadata TEXT, private_content TEXT)""");
         jdbc.execute("CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, updated_at TEXT, preview TEXT)");
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
 
         conversations.saveMessage("u1", "s1", "assistant", "the menu", List.of(), "a1b2c3d4");
         conversations.saveMessage("u1", "s1", "assistant", "old answer");

@@ -115,8 +115,9 @@ public class ThinkingEngine {
                 null    // use provider default read timeout
         );
         // On whose behalf. Without this the gateway refuses the call -- which is the point:
-        // a call site that forgets is stopped, not silently unscanned.
-        requestConfig = requestConfig.withEgress(context.egress("think"));
+        // a call site that forgets is stopped, not silently unscanned. The task's progress hook
+        // lets its stall watchdog see a long reply streaming in, and its Stop end the call.
+        requestConfig = requestConfig.withEgress(context.egress("think")).withProgress(context.progress());
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
         } else {

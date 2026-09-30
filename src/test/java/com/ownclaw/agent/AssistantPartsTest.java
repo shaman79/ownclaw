@@ -256,13 +256,19 @@ class AssistantPartsTest {
 
     // ── the whole loop ──
 
+    /** No skill of its own: the loop reads a skill's source only to excuse a canary hit. */
+    static final class NoSkills extends SkillManager {
+        NoSkills() { super(null, null, null, null, null, null); }
+        @Override public String readSkillCode(String name) { return null; }
+    }
+
     static AgentLoop loop(JdbcTemplate jdbc, ToolRegistry registry, CloudGateway gateway, OwnClawConfig config) {
         var emitter = new ChatStatusEmitter();
         var events = new EventLogService(jdbc);
         var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, config, null);
         var engine = new ThinkingEngine(registry, new ToolSelector(registry), config, router);
         return new AgentLoop(engine, new CriticAgent(registry), registry, emitter, config, router,
-                null, new SkillCuratorService(jdbc, null, null, null), null,
+                null, new SkillCuratorService(jdbc, null, null, null), new NoSkills(),
                 new DebugSessionService(), new TaskCancellationService(), null, null,
                 new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null, null, null);
@@ -288,8 +294,8 @@ class AssistantPartsTest {
                 call("respond", Map.of("message", "{{2}}"))));
         var rows = new ArrayList<EgressLedger.Row>();
 
-        var ctx = new AgentContext("u1", "t-loop", "Audit the routers and save the report.");
-        AgentResult r = loop(jdbc, registry, gateway(cloud, rows), config).executeWithContext(ctx);
+        AgentResult r = loop(jdbc, registry, gateway(cloud, rows), config)
+                .executeFull("u1", "Audit the routers and save the report.", false, null, List.of());
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(),
                 "the step after the writer was refused on the cloud's own spec: " + r.response());

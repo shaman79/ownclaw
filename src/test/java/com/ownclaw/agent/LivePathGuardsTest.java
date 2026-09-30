@@ -194,17 +194,6 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("every way a task ends passes through the local-answer fallback")
-    void everyExitGivesTheLocalAnswer() throws IOException {
-        // withLocalAnswers is driven in AnswerForTest; no test runs executeFull to its end, so
-        // this pins the one line that applies it to whatever runLoop returned.
-        assertTrue(read("com.ownclaw.agent.AgentLoop")
-                        .contains("result = withLocalAnswers(runLoop(context), context).withTaskId(taskId);"),
-                "executeFull applies the fallback to every result");
-
-    }
-
-    @Test
     @DisplayName("both ops skill_usage reads carry the error the descriptor points at")
     void theOpsPointerIsTrue() throws IOException {
         // A PRIVATE descriptor says "text withheld; skill_usage row via ops". Twice that row was

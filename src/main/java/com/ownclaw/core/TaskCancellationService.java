@@ -2,11 +2,11 @@ package com.ownclaw.core;
 
 import org.springframework.stereotype.Service;
 
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Tracks cancellation requests, per task and per user.
+ * Tracks requests to stop tasks, per task and per user -- and who made each one.
  *
  * <p>Cancellation used to be keyed on the user alone: one flag, set by Stop, cleared at the
  * start of every task. With a single worker thread that was indistinguishable from correct,
@@ -14,72 +14,67 @@ import java.util.concurrent.ConcurrentHashMap;
  * at once — Stop would cancel both, and the flag cleared at the start of one task would discard
  * a cancellation aimed at the other.
  *
- * <p>So a task is now cancellable by its own id, and there is a separate "cancel everything this
- * user is running" which is what the Stop button still does today. Keeping both is deliberate:
- * the per-task form is what concurrency needs, and the user-wide form is what a person means
- * when they press Stop without choosing a task. Once the UI can attribute a task to a chat, it
- * can pass the id and stop only that one.
+ * <p>So a task is cancellable by its own id, and there is a separate "stop everything this user
+ * is running", which is what the Stop button does. Keeping both is deliberate: the per-task form
+ * is what concurrency needs, and the user-wide form is what a person means when they press Stop
+ * without choosing a task.
  *
- * <p>This ships before any second worker thread exists, on purpose. It changes no behaviour on
- * its own, and adding concurrency first would mean a window in which Stop silently did the wrong
- * thing.
+ * <p>Every request says why, in words the task's ending shows the owner ("you pressed Stop", "a
+ * stop request from the ops API"). Without it a Stop, an ops request and the stall watchdog all
+ * ended on the same "Task was cancelled.", and the next turn could not tell which had happened.
+ * The stall watchdog does not come through here: it marks the task itself
+ * ({@code AgentContext.stall}), so the task ends STALLED with the watchdog's facts.
  */
 @Service
 public class TaskCancellationService {
 
-    /** Tasks individually cancelled, by task id. */
-    private final Set<String> cancelledTasks = ConcurrentHashMap.newKeySet();
+    /** Tasks individually stopped, by task id, with why. The first request's why is kept. */
+    private final Map<String, String> stoppedTasks = new ConcurrentHashMap<>();
 
     /**
-     * When each user last pressed Stop, as epoch millis.
+     * When each user last stopped everything, and why.
      *
-     * A timestamp rather than a flag, because a flag has no way to end. Stop means "cancel what
-     * is running now"; it cannot mean "and everything I start later". With one worker the flag
-     * was cleared by the next task and that distinction never surfaced. With two lanes it does:
-     * clearing on start lets a task that begins a moment after Stop swallow a cancellation aimed
-     * at the task still running beside it, and NOT clearing makes Stop permanent. Comparing
-     * against when the task began answers both — a task started after the Stop is simply not
-     * covered by it.
+     * A time rather than a flag, because a flag has no way to end. Stop means "cancel what is
+     * running now"; it cannot mean "and everything I start later". Clearing on start would let a
+     * task that begins a moment after Stop swallow a cancellation aimed at the task still running
+     * beside it, and NOT clearing would make Stop permanent. Comparing against when the task
+     * began answers both — a task started after the Stop is simply not covered by it.
      */
-    private final java.util.Map<String, Long> stoppedAt = new ConcurrentHashMap<>();
+    private final Map<String, Stop> stoppedAll = new ConcurrentHashMap<>();
 
-    /** Cancel one specific task. */
-    public void request(String userId, String taskId) {
-        if (taskId != null) cancelledTasks.add(taskId);
+    private record Stop(long atMs, String why) {}
+
+    /** Stop one specific task, saying why. */
+    public void request(String userId, String taskId, String why) {
+        if (taskId != null) stoppedTasks.putIfAbsent(taskId, why);
     }
 
     /**
-     * Cancel everything this user is currently running.
+     * Stop everything this user is currently running, saying why.
      * <p>
      * What the Stop button does: a person pressing Stop without naming a task means "whatever is
      * going on, stop it".
      */
-    public void requestAll(String userId) {
-        if (userId != null) stoppedAt.put(userId, System.currentTimeMillis());
+    public void requestAll(String userId, String why) {
+        if (userId != null) stoppedAll.put(userId, new Stop(System.currentTimeMillis(), why));
     }
 
     /**
-     * Whether this specific task should stop.
-     * <p>
-     * Without a start time this cannot tell a Stop aimed at this task from one aimed at a task
-     * that finished earlier, so it errs toward stopping: a user who pressed Stop wants things to
-     * stop. Callers that know when their task began should use the three-argument form.
-     */
-    public boolean isCancelled(String userId, String taskId) {
-        return isCancelled(userId, taskId, Long.MAX_VALUE);
-    }
-
-    /**
-     * Whether this specific task should stop, given when it started.
+     * Why this task should stop, or null when nothing has asked it to.
      *
      * @param taskStartedAtMs when this task began; a user-wide Stop only covers tasks that were
      *                        already running when it was pressed
      */
+    public String why(String userId, String taskId, long taskStartedAtMs) {
+        String own = taskId == null ? null : stoppedTasks.get(taskId);
+        if (own != null) return own;
+        Stop all = userId == null ? null : stoppedAll.get(userId);
+        return all != null && taskStartedAtMs <= all.atMs() ? all.why() : null;
+    }
+
+    /** Whether this task should stop, given when it started. */
     public boolean isCancelled(String userId, String taskId, long taskStartedAtMs) {
-        if (taskId != null && cancelledTasks.contains(taskId)) return true;
-        if (userId == null) return false;
-        Long stop = stoppedAt.get(userId);
-        return stop != null && taskStartedAtMs <= stop;
+        return why(userId, taskId, taskStartedAtMs) != null;
     }
 
     /**
@@ -92,34 +87,31 @@ public class TaskCancellationService {
      * anyway.
      */
     public Long stoppedAt(String userId) {
-        return userId == null ? null : stoppedAt.get(userId);
+        Stop all = userId == null ? null : stoppedAll.get(userId);
+        return all == null ? null : all.atMs();
     }
 
     /**
-     * Clear this task's own cancellation flag at the start of a task, so a stale per-task
-     * cancellation cannot kill the work that follows it.
+     * Clear this task's own request at the start of a task, so a stale per-task request cannot
+     * stop the work that follows it.
      * <p>
-     * It does not touch the user-wide Stop, and must not: that is bounded by its timestamp
-     * instead, so a task starting now already falls outside it. Clearing it here would discard a
-     * Stop that another task, still running, has not yet noticed — which is exactly the bug that
+     * It does not touch the user-wide Stop, and must not: that is bounded by its time instead,
+     * so a task starting now already falls outside it. Clearing it here would discard a Stop
+     * that another task, still running, has not yet noticed — which is exactly the bug that
      * appears the moment more than one task can run at a time.
      */
     public void clear(String userId, String taskId) {
-        // Only this task's own flag. The user-wide Stop is NOT cleared here: it is bounded by
-        // its timestamp instead, so a task starting now is already outside it. Clearing it would
-        // discard a Stop that a task still running beside this one has not yet noticed.
-        if (taskId != null) cancelledTasks.remove(taskId);
+        if (taskId != null) stoppedTasks.remove(taskId);
     }
 
-    /** How many tasks are individually flagged — for diagnostics. */
-    public int pendingCancellations() {
-        return cancelledTasks.size() + stoppedAt.size();
-    }
-
-    /** Exception thrown by the orchestrator when a task is cancelled mid-flight. */
+    /**
+     * Thrown into a model call when its task has been stopped: the call's progress hook throws
+     * it on the next event of the streamed reply, so a Stop or the stall watchdog ends the call
+     * instead of waiting for it to finish. The loop turns it into the task's ending.
+     */
     public static class TaskCancelledException extends RuntimeException {
-        public TaskCancelledException(String userId) {
-            super("Task cancelled by user " + userId);
+        public TaskCancelledException(String taskId) {
+            super("task " + taskId + " was stopped");
         }
     }
 }

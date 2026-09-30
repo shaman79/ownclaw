@@ -60,7 +60,7 @@ class ResultDeliveryTest {
     @DisplayName("a private answer is saved and sent beside the safe text, never as it")
     void privateAnswerIsSavedAndEmittedSafely(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
         var emitter = new ChatStatusEmitter();
         var messages = new ArrayList<StatusMessage>();
         var telegram = new ArrayList<String>();

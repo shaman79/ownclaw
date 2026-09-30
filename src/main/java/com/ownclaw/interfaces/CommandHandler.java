@@ -94,7 +94,7 @@ public class CommandHandler {
                 // interface, so typing it in the web UI did nothing at all — it fell through to
                 // the agent as an ordinary message. The Stop button worked; the documented
                 // command did not.
-                cancellationService.requestAll(userId);
+                cancellationService.requestAll(userId, "you sent /cancel");
                 yield Optional.of("Cancelling. Anything already running will stop at its next "
                         + "checkpoint — a tool or a local model call already in flight has to "
                         + "return first.");
