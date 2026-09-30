@@ -48,9 +48,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * and the Anthropic renderer replays the cloud's actions as JSON too -- so the same escaped run
  * sat in both, and the canary refused the cloud's own words. The gateway no longer scans
  * assistant parts. That is sound only while nothing derived from a tool result or other private
- * input is put into an assistant part -- the model's words as it wrote them, and the few turns
- * the code writes in its place -- which is what these tests pin, through the real renderer, the
- * real gateway, and once through the real loop. Every other part is still scanned.
+ * input is put into an assistant part -- the model's words as it wrote them, and at step 1 the
+ * skill_create the loop builds from CapabilityResolver's constants -- which is what these tests
+ * pin, through the real renderer, the real gateway, and once through the real loop. Every other
+ * part is still scanned.
  */
 class AssistantPartsTest {
 
@@ -154,7 +155,7 @@ class AssistantPartsTest {
 
     static List<LlmMessage> render(AgentContext ctx) {
         var registry = new ToolRegistry(List.of());
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         return engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
     }
 
@@ -309,17 +310,17 @@ class AssistantPartsTest {
     }
 
     @Test
-    @DisplayName("the turns the code writes in the model's place -- a failed think, a reflection, a resolver's skill_create -- carry no private text")
+    @DisplayName("the steps the code takes in the model's place -- a failed think, a reflection, a resolver's skill_create -- put no private text in an assistant part")
     void theTurnsTheCodeWritesCarryNoPrivateText() throws Exception {
         var ctx = theRun();
         String own = ownWords(ctx);          // every turn so far is one the model wrote
         String preview = writerResultOf(ctx);
 
         // A think call that failed with an error quoting a private result. The real engine turns
-        // it into its fallback action, with the error in the reasoning; the loop records that as
-        // a _thinking failure whose feedback quotes the error again.
+        // it into a step that produced nothing to run, with the error in what the model is told;
+        // the loop records that as a _thinking failure carrying the same text.
         var registry = new ToolRegistry(List.of());
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         String quoted = REPORT.substring(REPORT.indexOf("wireless.default_radio0"));
         LlmProvider failing = new LlmProvider() {
             public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
@@ -331,9 +332,10 @@ class AssistantPartsTest {
             public String model() { return "claude-opus-5"; }
         };
         ThinkResult failed = engine.decideNextActionFull(ctx, failing);
+        assertEquals(ThinkingEngine.THINKING, failed.action().tool());
         assertTrue(failed.action().reasoning().contains(quoted), "the premise: the failure quotes the private result");
-        ctx.trajectory().record(failed.action(), AgentObservation.failure("_thinking",
-                "PARSE ERROR. Your output:\n" + failed.rawLlmOutput(), 0));
+        ctx.trajectory().record(failed.action(), AgentObservation.failure(ThinkingEngine.THINKING,
+                failed.action().reasoning(), 0));
 
         // The reflection the loop injects after repeated failures, as AgentLoop records it.
         ctx.trajectory().record(new AgentAction("_reflection", Map.of(), "System-injected reflection"),
@@ -356,12 +358,20 @@ class AssistantPartsTest {
                 AgentObservation.failure(AgentAction.SKILL_CREATE,
                         "ERROR: Cloud LLM unavailable — cannot generate skill code", 0));
 
-        var assistantParts = render(ctx).stream().filter(m -> m.role() == LlmMessage.Role.ASSISTANT)
+        var rendered = render(ctx);
+        var assistantParts = rendered.stream().filter(m -> m.role() == LlmMessage.Role.ASSISTANT)
                 .map(m -> PrivateIndex.normalise(m.content())).toList();
-        assertTrue(assistantParts.stream().anyMatch(p -> p.contains("i encountered an error")),
-                "the premise: the failed think is replayed");
-        assertTrue(assistantParts.stream().anyMatch(p -> p.contains("_reflection")), "and the reflection");
-        assertTrue(assistantParts.stream().anyMatch(p -> p.contains(hint.suggestedName())), "and the skill_create");
+        String userParts = rendered.stream().filter(m -> m.role() == LlmMessage.Role.USER)
+                .map(m -> PrivateIndex.normalise(m.content())).reduce("", (a, b) -> a + "\n" + b);
+        // A step the loop took itself is said in a user part, which the gateway scans; the
+        // resolver's skill_create, written under a tool's name, is the one assistant turn the
+        // code writes, and it is built from the resolver's constants.
+        assertTrue(userParts.contains("the call to the model failed"), "the failed think is told in a user part");
+        assertTrue(userParts.contains("reflect: 2x failed"), "and so is the reflection");
+        assertFalse(assistantParts.stream().anyMatch(p -> p.contains("the call to the model failed")
+                || p.contains("reflect: 2x failed")), "neither is an assistant turn");
+        assertTrue(assistantParts.stream().anyMatch(p -> p.contains(hint.suggestedName())),
+                "the premise: the skill_create is replayed as one");
         for (String part : assistantParts) {
             for (String secret : List.of(REPORT, preview)) {
                 String s = PrivateIndex.normalise(secret);
@@ -382,7 +392,7 @@ class AssistantPartsTest {
         var emitter = new ChatStatusEmitter();
         var events = new EventLogService(jdbc);
         var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, config, null);
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), config, router);
+        var engine = new ThinkingEngine(registry, config, router);
         return new AgentLoop(engine, new CriticAgent(registry), registry, emitter, config, router,
                 null, new SkillCuratorService(jdbc, null, null, null), null,
                 new DebugSessionService(), new TaskCancellationService(), null, null,

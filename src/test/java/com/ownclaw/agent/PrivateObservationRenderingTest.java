@@ -60,7 +60,7 @@ class PrivateObservationRenderingTest {
     }
 
     private static ThinkingEngine engine(ToolRegistry registry) {
-        return new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
     }
 
     /** A task with one result recorded exactly as executeTool records it. */

@@ -312,6 +312,28 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("a private tail shorter than a window, after an allowed run, is refused")
+    void aShortPrivateTailIsRefused() {
+        // The same confirmation with only its address after the digest: 26 characters, less than
+        // a window, carried by the windows that take in the end of the digest.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String digest = prose(130, 23);
+        var index = new PrivateIndex();
+        index.addPrivate(2, digest + " sent to owner@example.org");
+        String allowed = PrivateIndex.normalise(digest);
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(),
+                (h, w) -> allowed.contains(w)));
+
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages(digest + " sent to owner@example.org"), cfg));
+        assertEquals(2, ex.handle());
+        assertTrue(provider.calls.isEmpty());
+        gw.chat(messages(digest), cfg);
+        assertEquals(1, provider.calls.size(), "the digest alone is sent");
+    }
+
+    @Test
     @DisplayName("a hit the task has allowed is sent")
     void allowedHitIsSent() {
         var provider = new Recording(); var rows = new Rows();

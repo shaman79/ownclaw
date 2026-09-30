@@ -6,43 +6,44 @@ import com.ownclaw.llm.LlmMessage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Whether the model is told that its last answer could not be parsed.
+ * What the model is shown of a step that produced nothing to run: every one, in its place, with
+ * nothing invented for it.
  * <p>
- * It was not, on the provider this deployment actually runs. When Claude replies in prose instead
- * of the action JSON, the loop records the raw text and the required format as a {@code _thinking}
- * failure and retries — and {@code buildAnthropicMessages} discarded that turn as "noise without
- * useful info". No other part of the Anthropic prompt reads the trajectory, so the retry was a
- * byte-identical prompt, drew the identical reply, and the run aborted at three with
- * "3 consecutive reasoning failures". Four of those sit in this deployment's chat history, for
- * questions the model had answered correctly each time.
+ * The Anthropic renderer used to keep only the latest such step, reduce the others to a count, and
+ * move the latest to the end of the history -- so a correction the model had already acted on was
+ * the newest thing it read for the rest of the task. It replayed a sentence the parser invented
+ * ("Empty response from reasoning engine.") as the model's own turn, and the OpenAI summary
+ * collapsed older ones into "N thinking failures (JSON parse errors) — skipped".
  */
 class ParseFailureFeedbackTest {
 
-    private static final String FEEDBACK =
-            "PARSE ERROR. Your output:\nThe capital of France is Paris.\n\n"
-                    + "Required format: {\"tool\": \"name\", \"params\": {...}, \"reasoning\": \"...\"}";
+    private static final ThinkingEngine.StepMode TEXT = new ThinkingEngine.StepMode(false, false);
 
     private static ThinkingEngine engine() {
-        ToolRegistry registry = new ToolRegistry(List.of());
-        // llmRouter is only touched by local tool pre-selection, which is off by default.
-        return new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var registry = new ToolRegistry(List.of());
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
     }
 
-    /** A context whose trajectory holds one parse failure, exactly as AgentLoop records it. */
-    private static AgentContext contextWithParseFailure(String rawModelText) {
-        AgentContext ctx = new AgentContext("u1", "t1", "What is the capital of France?");
-        AgentAction fallback = new AgentAction(AgentAction.RESPOND,
-                Map.of("message", rawModelText),
-                "LLM did not produce structured output; delivering raw response");
-        ctx.trajectory().record(fallback, AgentObservation.failure("_thinking", FEEDBACK, 0));
-        return ctx;
+    /** A step that produced nothing to run, as AgentLoop records it. */
+    private static void unusable(AgentContext ctx, String wrote, String told) {
+        ctx.trajectory().record(new AgentAction(ThinkingEngine.THINKING,
+                        wrote == null ? Map.of() : Map.of("message", wrote), told),
+                AgentObservation.failure(ThinkingEngine.THINKING, told, 0));
+    }
+
+    private static void step(AgentContext ctx, String tool, String output) {
+        ctx.trajectory().record(new AgentAction(tool, Map.of("q", tool), "running " + tool),
+                AgentObservation.success(tool, output, Map.of(), 5));
+    }
+
+    private static List<LlmMessage> anthropic(AgentContext ctx) {
+        return engine().buildMessages(ctx, "anthropic", TEXT);
     }
 
     private static String joined(List<LlmMessage> msgs) {
@@ -52,93 +53,106 @@ class ParseFailureFeedbackTest {
     }
 
     @Test
-    @DisplayName("the correction actually reaches the model")
-    void feedbackIsSent() {
-        var messages = new ArrayList<LlmMessage>();
-        engine().buildAnthropicMessages(messages, contextWithParseFailure("The capital of France is Paris."));
+    @DisplayName("every step that produced nothing is shown in its place, and no assistant turn is invented for it")
+    void everyOneInItsPlace() {
+        var ctx = new AgentContext("u1", "t1", "Check the router and tell me what you find.");
+        step(ctx, "router_status", "STATUS-ONE");
+        unusable(ctx, "The router looks fine to me.", "TOLD-ONE: not an action. It was:\n\nThe router looks fine to me.");
+        step(ctx, "router_logs", "STATUS-TWO");
+        unusable(ctx, null, "TOLD-TWO: your previous reply was empty");
+        unusable(ctx, null, "TOLD-THREE: the call to the model failed");
+
+        List<LlmMessage> messages = anthropic(ctx);
         String all = joined(messages);
 
-        assertTrue(all.contains("PARSE ERROR"),
-                "without this the retry is byte-identical to the prompt that just failed:\n" + all);
-        assertTrue(all.contains("Required format"), "the model must be told what shape to produce");
+        // Only the two actions the model took are assistant turns.
+        var assistants = messages.stream().filter(m -> m.role() == LlmMessage.Role.ASSISTANT)
+                .map(LlmMessage::content).toList();
+        assertEquals(2, assistants.size(), all);
+        assertTrue(assistants.get(0).contains("router_status") && assistants.get(1).contains("router_logs"), all);
+        assertTrue(assistants.stream().noneMatch(a -> a.contains("looks fine") || a.contains("TOLD")),
+                "what the model was told, and the reply it is told about, are not its turns:\n" + all);
+
+        // Each correction where it happened, every one of them -- none counted away, none moved.
+        int one = all.indexOf("STATUS-ONE"), toldOne = all.indexOf("TOLD-ONE"),
+                two = all.indexOf("STATUS-TWO"), toldTwo = all.indexOf("TOLD-TWO"),
+                toldThree = all.indexOf("TOLD-THREE");
+        assertTrue(one < toldOne && toldOne < all.indexOf("router_logs") && two < toldTwo && toldTwo < toldThree,
+                "in the order it happened:\n" + all);
+        assertFalse(all.contains("earlier parse failure"), all);
     }
 
     @Test
-    @DisplayName("the model is shown its real prose, not a fabricated valid action")
-    void noFabricatedActionIsReplayed() {
-        var messages = new ArrayList<LlmMessage>();
-        engine().buildAnthropicMessages(messages, contextWithParseFailure("The capital of France is Paris."));
-        String all = joined(messages);
-
-        // The parser invents {"tool":"respond","params":{"message":"<prose>"}} to carry the text.
-        // Replaying that as the model's own output, then calling it unparseable, would teach the
-        // opposite of the lesson: that prose does become a valid respond action.
-        assertFalse(all.contains("\"tool\":\"respond\"") || all.contains("\"tool\": \"respond\""),
-                "the fabricated fallback action must never be replayed as the assistant turn:\n" + all);
-        assertTrue(all.contains("The capital of France is Paris."),
-                "the model should see the actual text it produced");
-    }
-
-    @Test
-    @DisplayName("roles still alternate, as the Messages API requires")
+    @DisplayName("the roles alternate, the last turn is the user's, and it carries the step's context")
     void rolesAlternate() {
-        var messages = new ArrayList<LlmMessage>();
-        engine().buildAnthropicMessages(messages, contextWithParseFailure("prose"));
-        for (int i = 1; i < messages.size(); i++) {
+        var ctx = new AgentContext("u1", "t1", "hello");
+        unusable(ctx, null, "empty");
+        step(ctx, "a", "x");
+        unusable(ctx, "prose", "not an action");
+        unusable(ctx, null, "empty again");
+
+        var messages = anthropic(ctx);
+        assertEquals(LlmMessage.Role.SYSTEM, messages.get(0).role());
+        for (int i = 2; i < messages.size(); i++) {
             assertNotEquals(messages.get(i - 1).role(), messages.get(i).role(),
-                    "two consecutive " + messages.get(i).role() + " messages at index " + i
-                            + " — the Anthropic Messages API rejects that:\n" + joined(messages));
+                    "two " + messages.get(i).role() + " turns in a row at " + i + ":\n" + joined(messages));
         }
-        assertEquals(LlmMessage.Role.USER, messages.get(messages.size() - 1).role(),
-                "the last message must be the user turn carrying the correction");
+        String last = messages.get(messages.size() - 1).content();
+        assertEquals(LlmMessage.Role.USER, messages.get(messages.size() - 1).role());
+        assertTrue(last.contains("empty again") && last.contains("## Environment"), last);
     }
 
     @Test
-    @DisplayName("repeated failures are counted, so the model can see it is looping")
-    void olderFailuresAreCounted() {
-        AgentContext ctx = contextWithParseFailure("prose one");
-        ctx.trajectory().record(
-                new AgentAction(AgentAction.RESPOND, Map.of("message", "prose two"),
-                        "Failed to parse structured output"),
-                AgentObservation.failure("_thinking", FEEDBACK, 0));
+    @DisplayName("before any action, the task, what went wrong and the context are one message, the task cached")
+    void beforeAnyActionTheTaskIsTheFirstBlock() {
+        var ctx = new AgentContext("u1", "t1", "what is the capital of France");
+        unusable(ctx, null, "Your previous reply was empty");
 
-        var messages = new ArrayList<LlmMessage>();
-        engine().buildAnthropicMessages(messages, ctx);
-        String all = joined(messages);
-
-        assertTrue(all.contains("earlier parse failure"),
-                "a model repeating itself should be told it is repeating itself:\n" + all);
-        assertTrue(all.contains("prose two"), "the most recent attempt is the one to correct");
+        var messages = anthropic(ctx);
+        assertEquals(2, messages.size(), "system and one user message: " + joined(messages));
+        String user = messages.get(1).content();
+        int cut = user.indexOf(ThinkingEngine.CACHE_BOUNDARY_MARKER);
+        assertTrue(cut > 0, user);
+        assertTrue(user.substring(0, cut).endsWith("what is the capital of France"),
+                "the cached block is the task, the same bytes as on the first call");
+        assertTrue(user.indexOf("Your previous reply was empty") > cut);
     }
 
     @Test
-    @DisplayName("a clean first step is unchanged")
-    void step0IsUntouched() {
-        var messages = new ArrayList<LlmMessage>();
-        AgentContext ctx = new AgentContext("u1", "t1", "hello");
-        engine().buildAnthropicMessages(messages, ctx);
+    @DisplayName("a reflection the loop injected is what the model was told, not a turn of its own")
+    void aReflectionIsNotTheModelsTurn() {
+        var ctx = new AgentContext("u1", "t1", "fetch it");
+        ctx.trajectory().record(new AgentAction("fetch", Map.of(), "fetching"),
+                AgentObservation.failure("fetch", "timeout", 5));
+        ctx.trajectory().record(new AgentAction("_reflection", Map.of(), "System-injected reflection"),
+                AgentObservation.failure("_reflection", "REFLECT: 2x failed.", 0));
 
-        assertEquals(1, messages.size(), "step 0 is a single user message");
-        assertFalse(joined(messages).contains("PARSE ERROR"));
+        String all = joined(anthropic(ctx));
+        assertFalse(all.contains("System-injected reflection") || all.contains("\"_reflection\""),
+                "the model never chose a _reflection step:\n" + all);
+        assertTrue(all.contains("REFLECT: 2x failed."), all);
+        assertTrue(all.indexOf("timeout") < all.indexOf("REFLECT"), all);
     }
 
     @Test
-    @DisplayName("a successful turn followed by a parse failure keeps both")
-    void mixedTrajectory() {
-        AgentContext ctx = new AgentContext("u1", "t1", "do the thing");
-        ctx.trajectory().record(
-                new AgentAction("shell_exec", Map.of("cmd", "hostname"), "check the host"),
-                AgentObservation.success("shell_exec", "prod-box", Map.of(), 12));
-        ctx.trajectory().record(
-                new AgentAction(AgentAction.RESPOND, Map.of("message", "some prose"),
-                        "Fallback response"),
-                AgentObservation.failure("_thinking", FEEDBACK, 0));
+    @DisplayName("the history summary shows every one of them in its place, not a count")
+    void theSummaryShowsEveryOne() {
+        var t = new AgentTrajectory();
+        for (int i = 1; i <= 4; i++) {
+            String told = "TOLD-" + i;
+            t.record(new AgentAction(ThinkingEngine.THINKING, Map.of(), told),
+                    AgentObservation.failure(ThinkingEngine.THINKING, told, 0));
+        }
+        t.record(new AgentAction("fetch", Map.of(), "now fetching"),
+                AgentObservation.success("fetch", "PAGE", Map.of(), 5));
 
-        var messages = new ArrayList<LlmMessage>();
-        engine().buildAnthropicMessages(messages, ctx);
-        String all = joined(messages);
-
-        assertTrue(all.contains("prod-box"), "the real tool result must survive");
-        assertTrue(all.contains("PARSE ERROR"), "and so must the correction");
+        String summary = t.toPromptSummary();
+        for (int i = 1; i <= 4; i++) {
+            assertTrue(summary.contains("[Step " + i + "] TOLD-" + i), summary);
+        }
+        assertFalse(summary.contains("skipped") || summary.contains("thinking failures"), summary);
+        assertTrue(summary.contains("[Step 5] Tool: fetch"), summary);
+        assertFalse(summary.contains("Tool: " + ThinkingEngine.THINKING),
+                "a step the loop recorded is what the model was told, not a tool it ran: " + summary);
     }
 }

@@ -1,5 +1,8 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.llm.LlmMessage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -9,97 +12,89 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * How much tool output survives into the next prompt.
+ * Every result the cloud reasons over reaches it whole, on every step, on both renderers.
  * <p>
- * The rule used to be "the last two turns in full, everything older crushed to 150 characters of
- * head and 150 of tail". That makes a whole class of task impossible rather than merely lossy:
- * "read these three pages and compare them" cannot work, because by the time the third page
- * arrives the first is a 300-character stub and the model is comparing summaries it was never
- * given. It was wasteful in the other direction too — two turns holding a 200 KB page each were
- * re-sent in full on every step.
+ * It used to be cut three ways. A result over 12,000 characters was sent as its first and last
+ * 6,000 -- the 29 September audit, 175 KB, reached the cloud as 12 KB, and the cloud reasoned
+ * over a result with a hole in it. Past a 60,000-character budget, counted newest first, every
+ * older result became 150 characters of head and 150 of tail, and older reasoning 200. And the
+ * OpenAI summary did the same with its own numbers. The only bound left is the model's context
+ * window, which the provider reports when a prompt exceeds it.
  */
 class ObservationRetentionTest {
 
-    private static AgentTrajectory withOutputs(int... sizes) {
-        var t = new AgentTrajectory();
-        for (int i = 0; i < sizes.length; i++) {
-            t.record(new AgentAction("fetch_page", Map.of("n", i), "read page " + i),
-                    AgentObservation.success("fetch_page", "x".repeat(sizes[i]), Map.of(), 10));
+    private static final ThinkingEngine.StepMode NATIVE = new ThinkingEngine.StepMode(true, false);
+
+    private static ThinkingEngine engine() {
+        var registry = new ToolRegistry(List.of());
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
+    }
+
+    /** A result of about {@code chars} characters that no other result shares a run with. */
+    private static String page(String name, int chars) {
+        var sb = new StringBuilder(name).append("-BEGIN ");
+        for (int i = 0; sb.length() < chars; i++) sb.append(name).append(" line ").append(i).append('\n');
+        return sb.append(name).append("-END").toString();
+    }
+
+    private static AgentContext taskWith(String... outputs) {
+        var ctx = new AgentContext("u1", "t1", "Read these and compare them.");
+        for (int i = 0; i < outputs.length; i++) {
+            ctx.trajectory().record(new AgentAction("fetch_page", Map.of("n", i), "reading page " + i),
+                    AgentObservation.success("fetch_page", outputs[i], Map.of(), 10));
         }
-        return t;
+        return ctx;
     }
 
-    private static int firstKept(AgentTrajectory t, int budget) {
-        return AgentTrajectory.firstTurnKeptInFull(t.turns(), budget);
+    private static String anthropic(AgentContext ctx) {
+        return engine().buildMessages(ctx, "anthropic", NATIVE).stream()
+                .map(LlmMessage::content).reduce("", (a, b) -> a + "\n" + b);
     }
 
-    @Test
-    @DisplayName("three pages that fit the budget are all kept in full")
-    void threePagesFit() {
-        var t = withOutputs(10_000, 10_000, 10_000);
-        assertEquals(0, firstKept(t, 60_000),
-                "all three must survive, or 'compare these three pages' cannot be answered");
-    }
-
-    @Test
-    @DisplayName("the old fixed rule would have stubbed the first page")
-    void theOldRuleWasTheBug() {
-        var t = withOutputs(10_000, 10_000, 10_000);
-        int oldRule = Math.max(0, t.turns().size() - 2);   // what the code used to do
-        assertEquals(1, oldRule, "the old rule kept only the last two");
-        assertTrue(firstKept(t, 60_000) < oldRule, "the budget keeps strictly more");
+    private static String openai(AgentContext ctx) {
+        return engine().buildMessages(ctx, "openai", NATIVE).stream()
+                .map(LlmMessage::content).reduce("", (a, b) -> a + "\n" + b);
     }
 
     @Test
-    @DisplayName("past the budget the OLDEST output is what gets dropped")
-    void oldestIsDroppedFirst() {
-        var t = withOutputs(50_000, 50_000, 50_000);
-        int first = firstKept(t, 60_000);
-        assertTrue(first > 0, "not everything can be kept at this size");
-        assertEquals(2, first, "only the newest fits, and it is the newest that is kept");
-    }
+    @DisplayName("a 175 KB result reaches the cloud whole, on both renderers")
+    void aLargeResultIsWhole() {
+        String audit = page("AUDIT", 175_000);
+        var ctx = taskWith(audit);
 
-    @Test
-    @DisplayName("the newest turn is always kept, however large")
-    void newestAlwaysSurvives() {
-        var t = withOutputs(500_000);
-        assertEquals(0, firstKept(t, 60_000),
-                "a model that cannot see the result of the step it just took cannot take the next");
-        var t2 = withOutputs(10, 500_000);
-        assertEquals(1, firstKept(t2, 60_000), "the huge newest turn is kept; the old one is not");
-    }
-
-    @Test
-    @DisplayName("many small outputs all survive")
-    void manySmallSurvive() {
-        var t = withOutputs(100, 100, 100, 100, 100, 100, 100, 100);
-        assertEquals(0, firstKept(t, 60_000), "nothing here comes close to the budget");
-    }
-
-    @Test
-    @DisplayName("an empty trajectory and null outputs do not blow up")
-    void degenerateInputs() {
-        assertEquals(-1, AgentTrajectory.firstTurnKeptInFull(List.of(), 60_000),
-                "no turns: nothing to keep");
-        var t = new AgentTrajectory();
-        t.record(new AgentAction("noop", Map.of(), "r"),
-                AgentObservation.success("noop", null, Map.of(), 1));
-        assertEquals(0, firstKept(t, 60_000));
-    }
-
-    @Test
-    @DisplayName("the rendered prompt actually contains all three pages")
-    void renderedPromptKeepsThem() {
-        var t = new AgentTrajectory();
-        for (String marker : List.of("ALPHA", "BETA", "GAMMA")) {
-            t.record(new AgentAction("fetch_page", Map.of(), "read " + marker),
-                    AgentObservation.success("fetch_page", marker + "-" + "y".repeat(5_000), Map.of(), 10));
+        for (String prompt : List.of(anthropic(ctx), openai(ctx))) {
+            assertTrue(prompt.contains(audit), "the whole result, not its head and tail");
+            assertFalse(prompt.contains("middle omitted"));
         }
-        String prompt = t.toPromptSummary();
-        for (String marker : List.of("ALPHA", "BETA", "GAMMA")) {
-            assertTrue(prompt.contains(marker), marker + " was dropped from the prompt");
+    }
+
+    @Test
+    @DisplayName("older results stay whole however many steps follow and however large they are")
+    void olderResultsStayWhole() {
+        String first = page("FIRST", 50_000), second = page("SECOND", 50_000),
+                third = page("THIRD", 50_000), last = page("LAST", 500);
+        var ctx = taskWith(first, second, third, last);
+
+        for (String prompt : List.of(anthropic(ctx), openai(ctx))) {
+            for (String p : List.of(first, second, third, last)) {
+                assertTrue(prompt.contains(p), "an older result became a stub");
+            }
         }
-        assertFalse(prompt.contains("middle omitted"),
-                "nothing needed truncating at this size: " + prompt.length() + " chars");
+    }
+
+    @Test
+    @DisplayName("the model's own older reasoning is replayed whole")
+    void olderReasoningIsWhole() {
+        String reasoning = "Comparing the two pages first, because ".repeat(20);   // ~800 chars
+        var ctx = new AgentContext("u1", "t1", "Compare them.");
+        ctx.trajectory().record(new AgentAction("fetch_page", Map.of("n", 1), reasoning),
+                AgentObservation.success("fetch_page", page("A", 70_000), Map.of(), 10));
+        ctx.trajectory().record(new AgentAction("fetch_page", Map.of("n", 2), "second"),
+                AgentObservation.success("fetch_page", page("B", 70_000), Map.of(), 10));
+
+        assertTrue(openai(ctx).contains("Reasoning: " + reasoning.strip()));
+        String replay = engine().buildMessages(ctx, "anthropic", NATIVE).stream()
+                .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).findFirst().orElseThrow().content();
+        assertTrue(replay.contains(reasoning.strip()), "the replayed turn carries it whole: " + replay);
     }
 }

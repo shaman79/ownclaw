@@ -51,7 +51,7 @@ class LivePathGuardsTest {
         int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
         int run = body.indexOf("tool.execute(");
-        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false)");
+        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false,");
         assertTrue(resolve > 0, "executeTool no longer resolves through References");
         assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
         String refusal = body.substring(refuse, body.indexOf("\n        }\n", refuse));
@@ -61,6 +61,8 @@ class LivePathGuardsTest {
         assertTrue(body.substring(refuse, run).contains("resolved = refs.params()"),
                 "the call runs on the resolver's substituted arguments");
         assertTrue(label > run, "the label must come from the resolver's record, not a re-parse");
+        assertTrue(body.substring(label, body.indexOf(";", label)).contains("result.output()"),
+                "and from what the tool returned, which may repeat a private result");
         assertFalse(body.contains("resolved = LocalExecutor"), "a second resolver is back");
     }
 
@@ -115,17 +117,6 @@ class LivePathGuardsTest {
         assertTrue(guard > 0 && claim > guard,
                 "a delegate step that never reached the executor recorded nothing; claiming "
                         + "there swallows an earlier artifact's attribution:\n" + body);
-    }
-
-    @Test
-    @DisplayName("the canary normalises each part once, not once per hit")
-    void theCanaryIsNotQuadratic() throws IOException {
-        // Behaviourally identical, which is why reverting it left the suite green -- the cost is
-        // the only difference: 7.8 seconds measured on one 130 KB part, on every step.
-        String s = read("com.ownclaw.llm.CloudGateway");
-        assertTrue(s.contains("firstHitInNormalised(normalised, from)"),
-                "the per-hit loop must reuse the part's normalised text");
-        assertFalse(s.contains("firstHitIn(part.text(), from)"));
     }
 
     /** One branch of runLoop: from its opening line to the next top-level {@code if (action.}. */

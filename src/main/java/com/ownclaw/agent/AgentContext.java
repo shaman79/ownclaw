@@ -245,9 +245,26 @@ public class AgentContext {
      * same public page one hop on, and indexing them is what made the cloud's own later fetch of
      * that page trip the canary. In a task holding a file every result is PRIVATE and, unless it
      * needed credentials, unindexed -- so the cloud sees each as a handle, a kind and a size.
+     * <p>
+     * Last, the bytes themselves: a result its own facts call PUBLIC whose {@code output} repeats
+     * a PRIVATE one ({@link #firstLeakIn}) is PRIVATE -- "repeats {{N}}" -- and unindexed, like
+     * every result that is PRIVATE only because of what it carries from another: the run it
+     * repeats is {{N}}'s, and {{N}} is indexed. It is the question the gateway asks of each part
+     * it scans, asked here first. Shown to the cloud, the result would have been refused at the
+     * door on the next step and the task would have ended there; labelled, the cloud reads a
+     * description of it and the task goes on.
+     * <p>
+     * A run is 32 characters, and some runs are nobody's in particular: a Python traceback opens
+     * with "Traceback (most recent call last)", which is one window, and web pages share their
+     * standard head. After a credentialed skill has failed with a traceback, or returned a page,
+     * a public result carrying the same boilerplate repeats it, and is withheld whole: the cloud
+     * is told that the public skill failed but not why, and cannot repair it from the error. The
+     * same collision used to end the task at the door.
+     *
+     * @param output the result's text, as it will be recorded
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
-                                    boolean tainted) {
+                                    boolean tainted, String output) {
         Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
         boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
         if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
@@ -261,6 +278,11 @@ public class AgentContext {
             if (!files.isEmpty()) {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
                         List.of(givenTheFiles()), false);
+            }
+            com.ownclaw.privacy.PrivateIndex.Hit repeated = firstLeakIn(output);
+            if (repeated != null) {
+                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of("repeats {{" + repeated.handle() + "}}"), false);
             }
             return own;
         }
@@ -338,11 +360,35 @@ public class AgentContext {
     }
 
     /**
-     * Whether a canary hit is material the cloud was already given, and may go.
+     * The first run of an indexed PRIVATE artifact in a result that {@link #isAllowedLeak} does
+     * not excuse, or null -- what the gateway would refuse to send. One question, over one index
+     * and one set of excuses: {@link #decide} asks it of every result before it is labelled, and
+     * the gateway of each part it scans, with what {@link #egress} hands it.
+     * <p>
+     * The door sees the result in its frame ({@link AgentTrajectory.Turn#observationText}: a line
+     * naming the tool and how it went, then the output, then whatever follows it). The line
+     * breaks around the output are whitespace: the label scans the result with a space at each
+     * end ({@code PrivateIndex.firstLeakInResult}) and the scan strips whitespace from what it
+     * asks about, so the label and the door see the same windows of the result and excuse them
+     * alike. What can still set them apart is a coincidence at the output's two edges: a window
+     * that takes in a visible character of the frame (the ')' ending the line before the output,
+     * the first character of whatever follows it) is refused at the door if a private result has
+     * that character in that place too, though the label passed the result -- a collision, like
+     * any other the door refuses.
+     *
+     * @param output the result's text, as it will be recorded
+     */
+    public com.ownclaw.privacy.PrivateIndex.Hit firstLeakIn(String output) {
+        return privateIndex.firstLeakInResult(output, new Excuses());
+    }
+
+    /**
+     * Whether a stretch of normalised text the canary matched is material the cloud was already
+     * given, and may go: true when one source below holds the whole of it.
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
-     * the preferences, the recalled memories. The output of every PUBLIC artifact recorded
-     * BEFORE the private one that hit; the order matters there. What the CLOUD itself wrote —
+     * the preferences. The output of every PUBLIC artifact recorded BEFORE the private one that
+     * hit; the order matters there. What the CLOUD itself wrote —
      * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
      * scans: a result that echoes an argument it was given (which would otherwise make the next
      * prompt unsendable), the code generator's request, the correction after a reply that could
@@ -355,36 +401,62 @@ public class AgentContext {
      * a summary the local model wrote — and whitelisting it would let the leak through as
      * "already public". The smtp confirmation that quotes the public digest it just sent is the
      * case the order exists to allow; a public result quoting a private one is the case it
-     * exists to refuse. Computed on demand: hits are rare.
+     * exists to refuse.
+     * <p>
+     * A scan asks once per stretch, not once per window ({@code PrivateIndex.firstLeakIn}), and
+     * reads each source normalised once for all the stretches it asks about ({@code Excuses}).
+     * Normalising every source again for every window made labelling a quoted public digest
+     * quadratic in its length.
      */
-    public synchronized boolean isAllowedLeak(int hitHandle, String normalisedWindow) {
-        if (normalisedWindow == null || normalisedWindow.isEmpty()) return false;
-        Function<String, String> n = com.ownclaw.privacy.PrivateIndex::normalise;
-        for (String given : new String[] {originalMessage, conversationSummary, userPreferences,
-                String.valueOf(metadata.get("relevantMemories"))}) {
-            if (given != null && n.apply(given).contains(normalisedWindow)) return true;
+    public boolean isAllowedLeak(int hitHandle, String normalisedStretch) {
+        return new Excuses().test(hitHandle, normalisedStretch);
+    }
+
+    /**
+     * The sources {@link #isAllowedLeak} reads, each normalised the first time it is needed and
+     * kept after that. One is made per label and per request to the cloud, so a source costs one
+     * normalisation per request, not one per window. Kept by identity, since nothing recorded
+     * changes while a request is made; what is recorded later is read when it is first met.
+     */
+    private final class Excuses implements java.util.function.BiPredicate<Integer, String> {
+        private final Map<Object, String> normalised = new java.util.IdentityHashMap<>();
+        private final Map<String, String> skillSources = new HashMap<>();
+
+        private boolean holds(Object source, String stretch) {
+            if (source == null) return false;
+            return normalised.computeIfAbsent(source,
+                    s -> com.ownclaw.privacy.PrivateIndex.normalise(String.valueOf(s)))
+                    .contains(stretch);
         }
-        for (Artifact a : artifacts) {
-            if (a.n() >= hitHandle) break;
-            if (!a.isPrivate() && n.apply(a.output()).contains(normalisedWindow)) return true;
-        }
-        for (var turn : trajectory.turns()) {
-            var action = turn.action();
-            if (action == null) continue;
-            if (action.reasoning() != null && n.apply(action.reasoning()).contains(normalisedWindow)) {
-                return true;
+
+        @Override
+        public boolean test(Integer hitHandle, String stretch) {
+            if (stretch == null || stretch.isEmpty()) return false;
+            synchronized (AgentContext.this) {
+                for (Object given : new Object[] {originalMessage, conversationSummary,
+                        userPreferences}) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (Artifact a : artifacts) {
+                    if (a.n() >= hitHandle) break;
+                    if (!a.isPrivate() && holds(a.output(), stretch)) return true;
+                }
+                for (var turn : trajectory.turns()) {
+                    var action = turn.action();
+                    if (action == null) continue;
+                    if (holds(action.reasoning(), stretch)) return true;
+                    for (Object v : action.params().values()) {
+                        if (holds(v, stretch)) return true;
+                    }
+                }
+                Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
+                        ? artifacts.get(hitHandle - 1) : null;
+                return hit != null && skillSources.computeIfAbsent(hit.tool(), tool -> {
+                    String source = skillSource.apply(tool);
+                    return source == null ? "" : com.ownclaw.privacy.PrivateIndex.normalise(source);
+                }).contains(stretch);
             }
-            for (Object v : action.params().values()) {
-                if (v != null && n.apply(String.valueOf(v)).contains(normalisedWindow)) return true;
-            }
         }
-        Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
-                ? artifacts.get(hitHandle - 1) : null;
-        if (hit != null) {
-            String source = skillSource.apply(hit.tool());
-            if (source != null && n.apply(source).contains(normalisedWindow)) return true;
-        }
-        return false;
     }
 
     /**
@@ -395,9 +467,12 @@ public class AgentContext {
         this.skillSource = reader == null ? n -> null : reader;
     }
 
-    /** What a cloud call made on behalf of this task carries to the door. */
+    /**
+     * What a cloud call made on behalf of this task carries to the door: its excuses are read
+     * once for every part of the call.
+     */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues, this::isAllowedLeak);
+                secretValues, new Excuses());
     }
 }

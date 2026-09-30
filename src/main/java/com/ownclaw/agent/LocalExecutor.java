@@ -533,7 +533,7 @@ public class LocalExecutor {
         boolean wroteAfterPrivate = parentContext.localTierReadPrivate();
         Artifact.Decision decision = parentContext.decide(
                 target == null ? List.of() : target.requiredCredentials(), refs.used(),
-                wroteAfterPrivate);
+                wroteAfterPrivate, toolResult);
         Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);

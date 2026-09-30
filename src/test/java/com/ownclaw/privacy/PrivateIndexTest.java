@@ -7,6 +7,7 @@ import java.lang.reflect.Field;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Random;
+import java.util.function.BiPredicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -162,6 +163,118 @@ class PrivateIndexTest {
         var filler = new PrivateIndex();
         filler.addPrivate(7, "-".repeat(40));
         assertTrue(filler.isEmpty(), "a row of dashes really is filler and must not refuse");
+    }
+
+    @Test
+    @DisplayName("the first leak is the first run nothing excuses: excused runs are passed, later ones still found")
+    void firstLeakSkipsExcusedRuns() {
+        String given = prose(400, 31), secret = prose(400, 32);
+        var idx = new PrivateIndex();
+        idx.addPrivate(2, given + " " + secret);
+        String excusedWindow = PrivateIndex.normalise(given);
+
+        // Only the part the task was given is excused: the scan goes on past it.
+        String text = "sent: " + given + " " + secret;
+        var leak = idx.firstLeakIn(text, (h, w) -> excusedWindow.contains(w));
+        assertNotNull(leak, "one excused run does not clear the text");
+        assertEquals(2, leak.handle());
+        String reported = PrivateIndex.normalise(text).substring(leak.offset(), leak.offset() + leak.length());
+        assertFalse(excusedWindow.contains(reported), "the run reported is one nothing excuses: " + reported);
+
+        assertNull(idx.firstLeakIn("sent: " + given, (h, w) -> excusedWindow.contains(w)),
+                "every run excused: nothing to refuse");
+        assertNull(idx.firstLeakIn("nothing of either here, only other words", (h, w) -> false));
+    }
+
+    @Test
+    @DisplayName("a private tail shorter than a window, straight after an excused run, is found")
+    void aShortPrivateTailIsFound() {
+        // The confirmation quotes the public digest it sent and then says where it went: 26
+        // characters, less than a window. Only the windows that take in the end of the digest
+        // and the start of the address carry them; a scan that stepped a whole window past each
+        // excused run, instead of one character, skipped every one of those.
+        String digest = prose(130, 41);
+        String tail = " sent to owner@example.org";
+        var idx = new PrivateIndex();
+        idx.addPrivate(2, digest + tail);
+        String given = PrivateIndex.normalise(digest);
+
+        String text = digest + tail;
+        var leak = idx.firstLeakIn(text, (h, s) -> given.contains(s));
+        assertNotNull(leak, "the address went out unchecked");
+        assertEquals(2, leak.handle());
+        String window = PrivateIndex.normalise(text).substring(leak.offset(), leak.offset() + leak.length());
+        assertFalse(given.contains(window.strip()), "the window reported reaches into the address: " + window);
+        assertNull(idx.firstLeakIn(digest, (h, s) -> given.contains(s)), "the digest alone may go");
+    }
+
+    @Test
+    @DisplayName("the line break a renderer sets before a result is not counted; a visible character is")
+    void theLineBreakBeforeAResultIsNotCounted() {
+        // The private result quotes what the cloud typed, after a space. Rendered, a result starts
+        // on the line after its header, and normalised that line break is a space as well, so the
+        // window starting there is a run of the private result -- and the cloud's own words are
+        // all of it but the space, which carries nothing.
+        String typed = "Guest SSID must stay isolated from the LAN at all times.";
+        String given = PrivateIndex.normalise(typed);
+        BiPredicate<Integer, String> excused = (h, s) -> given.contains(s);
+        var idx = new PrivateIndex();
+        idx.addPrivate(1, "Stored note: " + typed + " (note 7731)");
+
+        assertNull(idx.firstLeakIn("[print_text] OK (0ms)\n" + typed + "\n\nNext", excused),
+                "only the line breaks around the result are not the cloud's");
+        assertNull(idx.firstLeakIn(typed, excused), "which is what the label is asked about");
+
+        // Any other character counts: here the header's ')' is where the private result has one.
+        var framed = new PrivateIndex();
+        framed.addPrivate(1, "Stored (0ms) " + typed);
+        var leak = framed.firstLeakIn("[print_text] OK (0ms)\n" + typed, excused);
+        assertNotNull(leak, "a collision the door refuses, though the result alone is excused");
+        assertNull(framed.firstLeakIn(typed, excused));
+    }
+
+    @Test
+    @DisplayName("a stretch is one artifact's: where another's runs take over, they are asked about as its")
+    void aStretchIsOneArtifacts() {
+        // What may go depends on whose run it is -- the order of the excuses and the skill source
+        // are per artifact -- so a stretch never runs on from one artifact's runs into another's.
+        String a = prose(300, 51), b = prose(300, 52);
+        var idx = new PrivateIndex();
+        idx.addPrivate(1, a + " " + b.substring(0, 60));
+        idx.addPrivate(2, b);
+
+        var leak = idx.firstLeakIn(a + " " + b, (h, s) -> h == 1);
+        assertNotNull(leak, "the runs past the first artifact's are the second's, and nothing excuses those");
+        assertEquals(2, leak.handle());
+    }
+
+    @Test
+    @DisplayName("text the cloud was given in one piece is one question, however long it is")
+    void anExcusedStretchIsOneQuestion() {
+        // A public digest that a private confirmation quoted: every window of it is a run of the
+        // confirmation, and the digest itself excuses every one. Asked window by window, with the
+        // scan started again after each, 24,000 characters took eleven seconds to label.
+        for (int size : new int[] {2_000, 200_000}) {
+            String digest = prose(size, 43);
+            var idx = new PrivateIndex();
+            idx.addPrivate(2, "Sent: \"" + digest + "\"");
+            String given = PrivateIndex.normalise(digest);
+            int[] asked = {0};
+            BiPredicate<Integer, String> excused = (h, s) -> {
+                asked[0]++;
+                return given.contains(s);
+            };
+
+            assertNull(idx.firstLeakIn("Again: " + digest, excused));
+            assertEquals(1, asked[0], "one question for " + size + " characters");
+
+            // A leak at its very end costs the halving down to it, not a question per window.
+            asked[0] = 0;
+            var leak = idx.firstLeakIn("Again: " + digest + "\" and on", excused);
+            assertNotNull(leak);
+            int bound = 2 * (32 - Integer.numberOfLeadingZeros(size)) + 2;
+            assertTrue(asked[0] <= bound, asked[0] + " questions for " + size + " characters");
+        }
     }
 
     @Test

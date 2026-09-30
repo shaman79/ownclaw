@@ -34,7 +34,7 @@ class ThinkingEngineFilesSectionTest {
 
         // And it is what the model is actually sent, on both renderers.
         var registry = new ToolRegistry(List.of());
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         for (String provider : List.of("anthropic", "openai")) {
             String all = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false))
                     .stream().map(LlmMessage::content).reduce("", String::concat);

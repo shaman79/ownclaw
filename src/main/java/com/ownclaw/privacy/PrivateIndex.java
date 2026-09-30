@@ -3,6 +3,7 @@ package com.ownclaw.privacy;
 import java.text.Normalizer;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.function.BiPredicate;
 
 /**
  * The canary: can this text contain a run of any PRIVATE artifact's bytes?
@@ -12,7 +13,9 @@ import java.util.Locale;
  * the replayed assistant turns, which hold nothing derived from a private input (see
  * CloudGateway). That is what makes privacy a property of the code path rather than of a prompt
  * builder's carefulness: the builders can be wrong about what they rendered and this still
- * refuses the call.
+ * refuses the call. The task asks the same question of every result before labelling it
+ * ({@link #firstLeakInResult}, through AgentContext), so a result that repeats a private one is
+ * labelled PRIVATE instead of being refused at the door one step later.
  * <p>
  * It holds hashes and integers only — no field of type String, CharSequence, char[] or any
  * collection of them, and a test pins that by reflection. The roadmap's warning was that an
@@ -23,8 +26,8 @@ import java.util.Locale;
  * <p>
  * What it does not catch, stated plainly: a paraphrase; a fact shorter than eight characters;
  * a short value quoted from inside a long artifact (only the artifact's 32-character runs are
- * indexed, plus whole strings of 8 to 31 characters registered as such). It is a check on the
- * renderers, not a semantic leak detector.
+ * indexed, plus whole strings registered as such: one of 8 to 31 characters, or a longer one
+ * whose every window is filler). It is a check on the renderers, not a semantic leak detector.
  */
 public final class PrivateIndex {
 
@@ -123,76 +126,149 @@ public final class PrivateIndex {
 
     /** The earliest run in {@code part} that belongs to a registered artifact, or null. */
     public Hit firstHitIn(String part) {
-        return firstHitIn(part, 0);
+        return firstLeak(normalise(part), (handle, stretch) -> false);
     }
 
     /**
-     * The earliest run at or after {@code from} (an offset into the NORMALISED text).
+     * The earliest run in {@code text} that belongs to a registered artifact and that
+     * {@code excused} does not excuse, or null -- what the canary refuses to send.
      * <p>
-     * The caller needs this because one allowed hit does not clear a part: a private
+     * Every run is tried, not only the first: one excused run does not clear the text. A private
      * confirmation may open with a run of the public thing it was given and continue with an
-     * address and a message id that are nobody else's.
+     * address and a message id that are nobody else's -- shorter than a window, and caught by the
+     * windows that take in the end of the one and the start of the other.
+     * <p>
+     * The text is normalised once and read once, with a rolling hash for every registered length
+     * moving forward together, and at each offset the one run that counts there is taken: the
+     * longest registration that starts there, and of the windows, the first registered
+     * artifact's. Runs of one artifact at consecutive offsets form a stretch, and
+     * {@code excused} is asked about the whole stretch first, so text the cloud was given in one
+     * piece is one question however long it is. Only a stretch it was not given is halved, down
+     * to the window that is the leak. Asked window by window, with the scan started again after
+     * each, a 24,000-character public digest that a private confirmation quoted took eleven
+     * seconds to label, and the door paid as much again on every think call that sent it.
+     * <p>
+     * What {@code excused} is asked about is stripped of the whitespace at its two ends. A
+     * result is sent on lines of its own ({@code AgentTrajectory.Turn.observationText}), and
+     * normalised, a line break is a space: a window that starts at the one before a result and
+     * runs on into text the cloud was given adds nothing to that text but the space, yet the
+     * source the cloud was given it in starts with the text. Every other character counts: a
+     * window that joins an excused run to a private one is the leak described above.
+     *
+     * @param excused whether the cloud was already given the whole of a stretch of normalised
+     *                text (handle, stretch) -- yes only if it would say yes to every window in it
      */
-    public Hit firstHitIn(String part, int from) {
-        return firstHitInNormalised(normalise(part), from);
+    public Hit firstLeakIn(String text, BiPredicate<Integer, String> excused) {
+        return firstLeak(normalise(text), excused);
     }
 
     /**
-     * The same scan over text that is ALREADY normalised.
-     * <p>
-     * The caller that walks every hit in a part holds the normalised string anyway; handing the
-     * raw text back in made each hit re-normalise the whole part, which is quadratic in the
-     * number of hits.
+     * {@link #firstLeakIn}, asked of a result as the think prompts send it: on lines of its own
+     * ({@code AgentTrajectory.Turn.observationText}). Normalised, the line breaks around it are
+     * spaces, and a space can complete a window -- a result that opens with 31 characters which a
+     * private result has after a space is, once rendered, a whole window of it. Scanned with a
+     * space at each end, a result shows the label ({@code AgentContext.decide}) every window of
+     * it the door will see. Offsets count the leading space.
      */
-    public Hit firstHitInNormalised(String normalised, int from) {
-        String n = normalised;
-        if (n.length() < MIN_SHORT) return null;
-        Hit best = null;
+    public Hit firstLeakInResult(String output, BiPredicate<Integer, String> excused) {
+        return firstLeak(" " + normalise(output) + " ", excused);
+    }
 
-        if (n.length() >= WINDOW && handles.length > 0) {
-            long h = 0;
-            for (int i = 0; i < n.length(); i++) {
-                h = h * BASE + n.charAt(i);
-                if (i >= WINDOW) h -= n.charAt(i - WINDOW) * BASE_POW_WINDOW;
-                int start = i - WINDOW + 1;
-                if (start < from) continue;
+    /** The one scan, over text already normalised. */
+    private Hit firstLeak(String n, BiPredicate<Integer, String> excused) {
+        // Every registered length that fits in the text, each with the hash of the text's run of
+        // that length that starts at the current offset: WINDOW for the windows, and each whole
+        // string's own length -- under WINDOW, or over it when every window of it was filler.
+        int[] lengths = new int[shortLengths.length + 1];
+        int slots = 0;
+        int windowSlot = -1;
+        if (handles.length > 0 && WINDOW <= n.length()) {
+            windowSlot = slots;
+            lengths[slots++] = WINDOW;
+        }
+        int[] slotOf = new int[shortLengths.length];   // each whole string's slot, or -1
+        for (int k = 0; k < shortLengths.length; k++) {
+            int slot = -1;
+            if (shortLengths[k] <= n.length()) {
+                for (int s = 0; s < slots && slot < 0; s++) {
+                    if (lengths[s] == shortLengths[k]) slot = s;
+                }
+                if (slot < 0) {
+                    slot = slots;
+                    lengths[slots++] = shortLengths[k];
+                }
+            }
+            slotOf[k] = slot;
+        }
+        if (slots == 0) return null;
+        long[] hash = new long[slots];
+        long[] lead = new long[slots];   // BASE^(length-1): the weight of the character leaving
+        int shortest = Integer.MAX_VALUE;
+        for (int s = 0; s < slots; s++) {
+            for (int i = 0; i < lengths[s]; i++) hash[s] = hash[s] * BASE + n.charAt(i);
+            lead[s] = pow(BASE, lengths[s] - 1);
+            shortest = Math.min(shortest, lengths[s]);
+        }
+
+        int from = -1, to = -1, handle = 0, length = 0;   // the stretch being gathered
+        for (int at = 0; at + shortest <= n.length(); at++) {
+            int hitHandle = 0, hitLength = 0;
+            if (windowSlot >= 0 && at + WINDOW <= n.length()) {
                 for (int k = 0; k < handles.length; k++) {
-                    if (Arrays.binarySearch(windowHashes[k], h) >= 0) {
-                        best = new Hit(handles[k], start, WINDOW);
+                    if (Arrays.binarySearch(windowHashes[k], hash[windowSlot]) >= 0) {
+                        hitHandle = handles[k];
+                        hitLength = WINDOW;
                         break;
                     }
                 }
-                if (best != null) break;
             }
-        }
+            // At the same offset the LONGER registration wins. "ORDER-4471" and
+            // "ORDER-4471 petr@example.com" both start at the same place; allowing the short one
+            // must not hide the long one, which is the specific thing.
+            for (int k = 0; k < shortHashes.length; k++) {
+                int len = shortLengths[k];
+                if (slotOf[k] >= 0 && len > hitLength && at + len <= n.length()
+                        && hash[slotOf[k]] == shortHashes[k]) {
+                    hitHandle = shortHandles[k];
+                    hitLength = len;
+                }
+            }
 
-        for (int k = 0; k < shortHashes.length; k++) {
-            int len = shortLengths[k];
-            if (len > n.length()) continue;
-            // This registration cannot improve on what we have -- the best is already at the
-            // earliest possible offset and is at least as long. Skip THIS one, not the rest:
-            // registrations are in insertion order, not sorted by length, so a later one may
-            // still be longer at that same offset.
-            if (best != null && best.offset() == from && best.length() >= len) continue;
-            long pow = pow(BASE, len);
-            long h = 0;
-            for (int i = 0; i < n.length(); i++) {
-                h = h * BASE + n.charAt(i);
-                if (i >= len) h -= n.charAt(i - len) * pow;
-                int start = i - len + 1;
-                if (start < from) continue;
-                // At the same offset the LONGER registration wins. "ORDER-4471" and
-                // "ORDER-4471 petr@example.com" both start at the same place; allowing the
-                // short one must not hide the long one, which is the specific thing.
-                if (best != null && (start > best.offset()
-                        || (start == best.offset() && len <= best.length()))) break;
-                if (h == shortHashes[k]) {
-                    best = new Hit(shortHandles[k], start, len);
-                    break;
+            boolean continues = from >= 0 && at == to + 1
+                    && hitHandle == handle && hitLength == length;
+            if (hitLength > 0 && continues) {
+                to = at;
+            } else {
+                if (from >= 0) {
+                    Hit leak = firstUnexcused(n, from, to, handle, length, excused);
+                    if (leak != null) return leak;
+                }
+                from = hitLength > 0 ? at : -1;
+                to = at;
+                handle = hitHandle;
+                length = hitLength;
+            }
+
+            for (int s = 0; s < slots; s++) {
+                if (at + lengths[s] < n.length()) {
+                    hash[s] = (hash[s] - n.charAt(at) * lead[s]) * BASE + n.charAt(at + lengths[s]);
                 }
             }
         }
-        return best;
+        return from >= 0 ? firstUnexcused(n, from, to, handle, length, excused) : null;
+    }
+
+    /**
+     * The first window of the stretch of runs at offsets {@code from..to} that {@code excused}
+     * does not excuse, or null: the whole stretch asked first, then each half.
+     */
+    private static Hit firstUnexcused(String n, int from, int to, int handle, int length,
+                                      BiPredicate<Integer, String> excused) {
+        if (excused.test(handle, n.substring(from, to + length).strip())) return null;
+        if (from == to) return new Hit(handle, from, length);
+        int mid = (from + to) >>> 1;
+        Hit leak = firstUnexcused(n, from, mid, handle, length, excused);
+        return leak != null ? leak : firstUnexcused(n, mid + 1, to, handle, length, excused);
     }
 
     /** Whether anything at all is registered. */

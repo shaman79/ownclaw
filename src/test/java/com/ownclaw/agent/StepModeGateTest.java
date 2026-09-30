@@ -42,7 +42,7 @@ class StepModeGateTest {
         ToolRegistry registry = new ToolRegistry(List.of());
         // llmRouter is null: every test pre-answers the local health question on the context,
         // which is the whole point of deciding it once per task rather than per step.
-        return new ThinkingEngine(registry, new ToolSelector(registry), config, null);
+        return new ThinkingEngine(registry, config, null);
     }
 
     private static OwnClawConfig config(boolean nativeTools, boolean localFirst) {
@@ -171,7 +171,7 @@ class StepModeGateTest {
     }
 
     @Test
-    @DisplayName("a native respond call before any work is a reasoning failure, not an answer")
+    @DisplayName("a native respond call before any work produces nothing to run, not an answer")
     void nativeRespondBeforeAnyWorkIsRefused() {
         // The channel the prompt actually teaches: under native tools it says "For respond, put
         // the whole answer in the message argument". So a model that cannot run
@@ -183,9 +183,37 @@ class StepModeGateTest {
         var result = engine.decideNextActionFull(ctx,
                 answering(true, respondCall("I'll fetch today's news digest first.")));
 
-        assertEquals(AgentAction.RESPOND, result.action().tool());
-        assertEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
-                "AgentLoop keys its retry off this string; without it the task ends green");
+        assertEquals(ThinkingEngine.THINKING, result.action().tool(),
+                "AgentLoop keys its retry off this step; as a respond the task ends green");
+        assertTrue(result.action().reasoning().contains("I'll fetch today's news digest first."),
+                "the model is shown what it answered: " + result.action().reasoning());
+        assertTrue(result.action().reasoning().contains("Call 'delegate'"), result.action().reasoning());
+    }
+
+    @Test
+    @DisplayName("prose before any work produces nothing to run either")
+    void proseBeforeAnyWorkIsRefused() {
+        var result = engine(config(true, true)).decideNextActionFull(context(true, true),
+                answering(true, Replies.of("I'll fetch today's news digest first.", 10, 5)));
+
+        assertEquals(ThinkingEngine.THINKING, result.action().tool());
+        assertEquals("I'll fetch today's news digest first.", result.action().params().get("message"));
+    }
+
+    @Test
+    @DisplayName("a respond envelope written as text before any work produces nothing to run either")
+    void aTextEnvelopeBeforeAnyWorkIsRefused() {
+        // The third channel: a local model orchestrating in the cloud's place ignores the tools
+        // array and writes the old JSON envelope as text. It was parsed and returned as the answer
+        // before the guard was asked, so the run ended COMPLETED with nothing run.
+        var result = engine(config(true, true)).decideNextActionFull(context(true, true),
+                answering(true, Replies.of("{\"tool\": \"respond\", \"params\": {\"message\": "
+                        + "\"I'll fetch today's news digest first.\"}}", 10, 5)));
+
+        assertEquals(ThinkingEngine.THINKING, result.action().tool(),
+                "as a respond the task ends green having done nothing");
+        assertEquals("I'll fetch today's news digest first.", result.action().params().get("message"));
+        assertTrue(result.action().reasoning().contains("Call 'delegate'"), result.action().reasoning());
     }
 
     @Test
@@ -199,7 +227,7 @@ class StepModeGateTest {
 
         var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Sent.")));
 
-        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+        assertEquals(AgentAction.RESPOND, result.action().tool(),
                 "it did the work and is reporting it; refusing that would loop forever");
     }
 
@@ -211,7 +239,7 @@ class StepModeGateTest {
 
         var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Paris.")));
 
-        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+        assertEquals(AgentAction.RESPOND, result.action().tool(),
                 "the user asked a question; answering it is the whole job");
     }
 
@@ -260,6 +288,27 @@ class StepModeGateTest {
         assertEquals("t1", e.taskId());
         assertEquals("u1", e.userId());
         assertSame(ctx.privateIndex(), e.index(), "the task's own index, not an empty one");
+    }
+
+    @Test
+    @DisplayName("a step is priced as the model that wrote the reply, which a declined request can change")
+    void theServedModelIsPriced() {
+        // Anthropic's server-side fallback answers a declined request with another model, in the
+        // same call; the provider reports which one wrote the reply.
+        LlmProvider fallback = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                return new LlmResponse("",
+                        List.of(new ToolCall("t1", AgentAction.RESPOND, Map.of("message", "Paris."))),
+                        null, "tool_use", null, "claude-opus-4-8", 128_000, 1_000_000,
+                        List.of(new LlmResponse.Usage("claude-opus-4-8", 10, 5, 0, 0)));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+            public String model() { return "claude-opus-5"; }
+        };
+        var result = engine(config(true, false)).decideNextActionFull(context(false, true), fallback);
+        assertEquals("claude-opus-4-8", result.model());
     }
 
     // ── the health answer is settled once ──

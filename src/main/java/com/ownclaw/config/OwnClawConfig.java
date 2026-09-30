@@ -55,20 +55,6 @@ public class OwnClawConfig {
         private int maxTokensPerTask = 10000;
         private double temperature = 0.4;
 
-        /**
-         * If true, use the local LLM (Ollama) to pre-select the most relevant tools
-         * to include in the cloud prompt. This reduces the large step-0 tool manifest.
-         * Falls back to heuristic selection if local is unavailable or output is invalid.
-         */
-        private boolean localToolSelection = false;
-
-        /** Max number of tools to include with full descriptions in the prompt when local selection is enabled. */
-        private int localToolSelectionMaxTools = 12;
-
-        /** Max number of tool candidates to show the local selector model (compact list) when local selection is enabled. */
-        private int localToolSelectionCandidateLimit = 120;
-
-        /** Cap the number of omitted tool names listed after the manifest ("Also:"). Prevents huge name lists. */
         private boolean nativeTools = true;
 
         /**
@@ -92,8 +78,6 @@ public class OwnClawConfig {
         public boolean isNativeTools() { return nativeTools; }
         public void setNativeTools(boolean v) { this.nativeTools = v; }
 
-        private int toolNamePreviewLimit = 50;
-
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
         public String getModel() { return model; }
@@ -108,15 +92,6 @@ public class OwnClawConfig {
         public void setMaxTokensPerTask(int maxTokensPerTask) { this.maxTokensPerTask = maxTokensPerTask; }
         public double getTemperature() { return temperature; }
         public void setTemperature(double temperature) { this.temperature = temperature; }
-
-        public boolean isLocalToolSelection() { return localToolSelection; }
-        public void setLocalToolSelection(boolean localToolSelection) { this.localToolSelection = localToolSelection; }
-        public int getLocalToolSelectionMaxTools() { return localToolSelectionMaxTools; }
-        public void setLocalToolSelectionMaxTools(int v) { this.localToolSelectionMaxTools = v; }
-        public int getLocalToolSelectionCandidateLimit() { return localToolSelectionCandidateLimit; }
-        public void setLocalToolSelectionCandidateLimit(int v) { this.localToolSelectionCandidateLimit = v; }
-        public int getToolNamePreviewLimit() { return toolNamePreviewLimit; }
-        public void setToolNamePreviewLimit(int v) { this.toolNamePreviewLimit = v; }
     }
 
     public static class Queue {

@@ -437,16 +437,6 @@ public class AgentLoop {
     /**
      * The core loop implementation.
      */
-    /**
-     * A prose reply on restricted unattended work, before anything has actually run.
-     * <p>
-     * "I'll fetch today's news digest first." is a plan, not an answer, and delivering it as
-     * COMPLETED is the specific way withholding the registry breaks the owner's morning email:
-     * the model cannot call the skill, says what it would do, and the task ends successfully
-     * having done nothing.
-     */
-    static final String ANSWERED_WITHOUT_WORKING = "Answered without doing the work";
-
     /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
     static final String PRIVATE_HEADER = "**Private — written by your local model, not seen by the cloud:**\n\n";
 
@@ -774,104 +764,57 @@ public class AgentLoop {
                     context.taskId(), step + 1, action.tool(),
                     truncate(action.reasoning(), 100));
 
+            // === A STEP THAT PRODUCED NOTHING TO RUN ===
+            // The engine returns THINKING for a reply that was empty, that is not an action, that
+            // never came because the call failed, or -- unattended, before anything ran -- that
+            // answered instead of doing the work. Nothing runs. What the model is told about it
+            // is recorded in its place, and the model is asked again, within the limits below.
+            if (ThinkingEngine.THINKING.equals(action.tool())) {
+                consecutiveFallbacks++;
+                totalThinkingFailures++;
+                boolean stop = consecutiveFallbacks >= 3 || totalThinkingFailures >= 5
+                        || step >= maxSteps - 1;
+                String told = action.reasoning();
+                if (!stop && (consecutiveFallbacks == 2 || totalThinkingFailures == 4)) {
+                    told += "\n\nWARNING: one more step like this and the task is stopped.";
+                }
+                // Recorded before any stop, so the task's steps hold every one of them -- the one
+                // that ends the task too -- under their own name, not as a respond that failed.
+                recordAndEmitObservation(context, action,
+                        AgentObservation.failure(ThinkingEngine.THINKING, told, 0), step + 1);
+
+                // failureLimit, not completed: an abort. Recording it as COMPLETED marked the
+                // event log "info" and stored the episode with a [SUCCESS] prefix, so the memory
+                // layer later recalled a failed task as a worked example.
+                if (consecutiveFallbacks >= 3) {
+                    log.error("Task {} step {}: {} steps in a row produced nothing to run — aborting task",
+                            context.taskId(), step + 1, consecutiveFallbacks);
+                    return AgentResult.failureLimit("The model produced nothing that could be run "
+                                    + consecutiveFallbacks + " times in a row.",
+                            context.trajectory(), context.elapsedMs());
+                }
+                if (totalThinkingFailures >= 5) {
+                    log.error("Task {} step {}: {} steps in this task produced nothing to run — aborting task",
+                            context.taskId(), step + 1, totalThinkingFailures);
+                    return AgentResult.failureLimit("The model produced nothing that could be run "
+                                    + totalThinkingFailures + " times in this task.",
+                            context.trajectory(), context.elapsedMs());
+                }
+                // Out of steps on the very same kind of failure: not an answer either.
+                if (step >= maxSteps - 1) {
+                    log.error("Task {} step {}: the last step produced nothing to run", context.taskId(), step + 1);
+                    return AgentResult.maxSteps("The task used all " + maxSteps + " steps it may "
+                                    + "take; the last produced nothing that could be run.",
+                            context.trajectory(), context.elapsedMs());
+                }
+                log.warn("Task {} step {}: nothing to run, asking the model again (in a row {}/3, in this task {}/5)",
+                        context.taskId(), step + 1, consecutiveFallbacks, totalThinkingFailures);
+                continue;
+            }
+
             // === RESPOND / ASK ===
             if (action.isResponse()) {
-                // Detect LLM parse failures masquerading as responses — retry instead of terminating
-                String reasoning = action.reasoning() != null ? action.reasoning() : "";
-                boolean isFallback = reasoning.equals("Fallback response")
-                        || reasoning.startsWith("LLM did not produce structured output")
-                        || reasoning.startsWith("Failed to parse structured output")
-                        || reasoning.startsWith("LLM call failed")
-                        || reasoning.startsWith(ANSWERED_WITHOUT_WORKING);
-
-                if (isFallback) {
-                    consecutiveFallbacks++;
-                    totalThinkingFailures++;
-
-                    // After 3 consecutive failures, stop burning tokens and give up
-                    if (consecutiveFallbacks >= 3) {
-                        log.error("Task {} step {}: {} consecutive LLM failures — aborting task",
-                                context.taskId(), step + 1, consecutiveFallbacks);
-                        String progress = summarizeProgress(context);
-                        // failureLimit, not completed: three consecutive reasoning failures is
-                        // an abort. Recording it as COMPLETED marked the event log "info" and
-                        // stored the episode with a [SUCCESS] prefix, so the memory layer later
-                        // recalled a failed task as a worked example.
-                        return AgentResult.failureLimit(
-                                "I had trouble completing this request (" + consecutiveFallbacks +
-                                " consecutive reasoning failures). Here's what happened:\n\n" + progress,
-                                context.trajectory(),
-                                context.elapsedMs()
-                        );
-                    }
-
-                    // After 5 total thinking failures in a task (even non-consecutive), abort
-                    if (totalThinkingFailures >= 5) {
-                        log.error("Task {} step {}: {} total thinking failures — aborting task",
-                                context.taskId(), step + 1, totalThinkingFailures);
-                        String progress = summarizeProgress(context);
-                        return AgentResult.failureLimit(
-                                "I've had " + totalThinkingFailures + " reasoning failures during this task. " +
-                                "Here's what happened:\n\n" + progress,
-                                context.trajectory(),
-                                context.elapsedMs()
-                        );
-                    }
-
-                    if (step < maxSteps - 1) {
-                        log.warn("Task {} step {}: LLM produced fallback response ('{}'), retrying... (consec={}/3, total={}/5)",
-                                context.taskId(), step + 1, truncate(action.responseText(), 80),
-                                consecutiveFallbacks, totalThinkingFailures);
-
-                        // Build feedback that shows the LLM WHAT it did wrong
-                        String rawOutput = thinkResult.rawLlmOutput();
-                        StringBuilder feedback = new StringBuilder();
-                        if (reasoning.startsWith(ANSWERED_WITHOUT_WORKING)) {
-                            // Not a parse failure, and saying so would teach the text envelope
-                            // to a model that is holding a tools array.
-                            feedback.append("You described what you were going to do instead of "
-                                    + "doing it, and nothing has run yet:\n");
-                            feedback.append(truncate(rawOutput, 500));
-                            feedback.append("\n\nNobody is waiting for this, so the work runs on "
-                                    + "the local model. Call 'delegate' with the goal stated in "
-                                    + "full. Answer only once there is a result to report.");
-                        } else {
-                        feedback.append("PARSE ERROR. Your output:\n");
-                        feedback.append(truncate(rawOutput, 500));
-                        feedback.append("\n\nRequired format: {\"tool\": \"name\", \"params\": {...}, \"reasoning\": \"...\"}\n");
-                        feedback.append("To respond: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}, \"reasoning\": \"...\"}");
-                        }
-
-                        if (consecutiveFallbacks >= 2) {
-                            feedback.append("\n\nWARNING: This is your ").append(consecutiveFallbacks)
-                                    .append("th consecutive failure. ONE more and the task will be aborted.");
-                        }
-
-                        AgentObservation failedThink = AgentObservation.failure(
-                                "_thinking", feedback.toString(), 0);
-                        recordAndEmitObservation(context, action, failedThink, step + 1);
-                        context.markProgress(); // LLM produced output (even if malformed)
-                        continue;
-                    }
-
-                    // Out of steps AND the output is still unparseable. This used to fall through
-                    // to the COMPLETED return below, which handed the user the fallback string
-                    // ("I'm not sure how to help with that") as if it were a considered answer,
-                    // logged the task as info, and stored it in memory as a worked example. The
-                    // two abort branches above already refuse to do that after 3 or 5 failures;
-                    // running out of steps on the very same kind of failure is no different.
-                    log.error("Task {} step {}: unparseable output on the final step — no retry left",
-                            context.taskId(), step + 1);
-                    return AgentResult.maxSteps(
-                            "I ran out of steps while still failing to produce a usable answer. "
-                                    + "Here's what happened:\n\n" + summarizeProgress(context),
-                            context.trajectory(),
-                            context.elapsedMs()
-                    );
-                } else {
-                    consecutiveFallbacks = 0; // Reset on any successful action
-                }
-
+                consecutiveFallbacks = 0; // an answer, not a step that produced nothing
                 Answer answer = answerFor(action.responseText(), context);
                 if (answer.refusal() != null) {
                     recordAndEmitObservation(context, action, AgentObservation.failure(
@@ -1381,8 +1324,10 @@ public class AgentLoop {
         // rows, the repair evidence -- ever sees the other.
         // The label from what the resolver actually pulled in, so it describes what moved.
         // The same decision the delegation uses. Never tainted here -- the cloud has not read
-        // private bytes -- but a call that pulled in an unindexed result stays unindexed.
-        Artifact.Decision decision = context.decide(tool.requiredCredentials(), refs.used(), false);
+        // private bytes -- but a call that pulled in an unindexed result stays unindexed, and
+        // one whose output repeats a private result is private.
+        Artifact.Decision decision = context.decide(tool.requiredCredentials(), refs.used(), false,
+                result.output());
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
 
