@@ -37,7 +37,7 @@ class LocalLogPrivacyTest {
 
     static final String SECRET = "account 123456789/0100 closing balance 48,213.07 CZK";
     static final List<String> PDF = List.of("uploaded file",
-            "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
+            "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)");
 
     private static ListAppender<ILoggingEvent> capture() {
         var appender = new ListAppender<ILoggingEvent>();

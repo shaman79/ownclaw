@@ -225,9 +225,10 @@ public class LongRunningTaskManager {
     }
 
     /**
-     * Mark a task as cancelled.
+     * Mark a task as cancelled, saying why: its task was stopped, by the owner, the ops API or
+     * the stall watchdog.
      */
-    public void cancel(String taskId) {
+    public void cancel(String taskId, String why) {
         jdbc.update("""
             UPDATE long_running_tasks
             SET status = 'cancelled', completed_at = datetime('now')
@@ -238,7 +239,7 @@ public class LongRunningTaskManager {
         if (hb != null) {
             statusEmitter.emit(hb.userId, StatusMessage.Type.WARNING,
                     "Long-running task cancelled.");
-            eventLog.info(hb.userId, taskId, "task.long_running.cancelled", "Task cancelled by user");
+            eventLog.info(hb.userId, taskId, "task.long_running.cancelled", "Stopped: " + why);
         }
         log.info("Long-running task cancelled: taskId={}", taskId);
     }

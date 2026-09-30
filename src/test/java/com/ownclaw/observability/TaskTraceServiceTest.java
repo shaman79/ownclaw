@@ -167,7 +167,7 @@ class TaskTraceServiceTest {
     void anAttachmentKeepsItsName() {
         row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
                 + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,"
-                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)\"]}");
+                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, or not UTF-8)\"]}");
         row("egress", egress("SENT", 1, 1, 0, null));
         row("step", "{\"step\":1,\"tool\":\"delegate\",\"success\":true,\"localTokens\":900,\"cloudTokens\":2,"
                 + "\"artifacts\":[{\"n\":2,\"tool\":\"pdf_text\",\"label\":\"PRIVATE\",\"chars\":12400,"
@@ -183,7 +183,7 @@ class TaskTraceServiceTest {
         assertEquals("statement.pdf", file.get("name"));
         assertEquals("PRIVATE", file.get("label"));
         assertEquals(0L, file.get("chars"));
-        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)"), file.get("why"));
+        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)"), file.get("why"));
         assertNull(file.get("canary"), "a file with no text cannot be looked for");
         assertEquals(1, file.get("requestsAfter"));
 

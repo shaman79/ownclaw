@@ -850,7 +850,7 @@ public class ScheduledTaskService {
      * <p>
      * This used to be an INSERT followed by a separate {@code SELECT last_insert_rowid()}. That
      * is two calls through a pooled DataSource, and last_insert_rowid() is per-connection state:
-     * with four connections shared by the scheduler poll, the compressor and the agent loop,
+     * with four connections shared by the scheduler poll, the agent loop and every request,
      * the second call can land on a different connection and return another statement's id, or
      * zero on a connection that has inserted nothing. The scheduler would then confirm
      * "Task #N scheduled" for an N belonging to someone else's row, and cancel or pause that id

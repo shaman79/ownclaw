@@ -82,4 +82,16 @@ class LongRunningTaskManagerTest {
             watched.forEach(l -> l.detachAppender(logs));
         }
     }
+
+    @Test
+    @DisplayName("a cancelled long-running task's event says who stopped its task, not always the user")
+    void aCancelSaysWhy() throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var manager = new LongRunningTaskManager(jdbc, new ChatStatusEmitter(), new EventLogService(jdbc),
+                new OwnClawConfig());
+        manager.register("t3", "u1", DESCRIPTION, "net_scan");
+        manager.cancel("t3", "the stall watchdog stopped it: no progress for 20m");
+        assertEquals("Stopped: the stall watchdog stopped it: no progress for 20m", jdbc.queryForObject(
+                "SELECT summary FROM events WHERE event_type = 'task.long_running.cancelled'", String.class));
+    }
 }

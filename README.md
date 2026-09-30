@@ -51,10 +51,10 @@ Skills persist across sessions. Over time, the agent accumulates a growing libra
 ### Other components
 
 - **Task queue** with priority scheduling, multi-user fairness, and stall detection
-- **Episodic memory** — the agent remembers past task outcomes and learns from them
+- **Episodic memory** — every finished task is kept whole, and the agent recalls the ones that match when it asks for them
 - **Credential vault** — AES-256-GCM encrypted storage for API keys and passwords
 - **Scheduled tasks** — one-shot and recurring (cron-style) task execution
-- **Conversation compression** — long chat histories are compressed to fit context windows
+- **Whole chat memory** — a task reads the whole chat it came from, every message whole, with a record of what each earlier task did; nothing is summarised or cut to fit
 - **Real-time status** — WebSocket-based live updates with token counters during execution
 
 ## Key differences from OpenClaw
@@ -67,7 +67,7 @@ OwnClaw started as a fork of the [OpenClaw](https://github.com/BionicClick/OpenC
 | **LLM routing** | Cloud-only, single LLM | Dual-LLM: cloud orchestrates, local executes delegated plans |
 | **Skill creation** | Manual or pre-built skill library | On-the-fly: cloud LLM generates Python code, auto-installs dependencies |
 | **Error recovery** | Skill repair loop (diagnose → patch code → retry) | Trajectory-aware: critic agent, reflection injection, retry guards |
-| **Memory** | Plan cache (exact-match only) | Episodic memory, agent facts, conversation history with compression |
+| **Memory** | Plan cache (exact-match only) | Episodic memory, agent facts, the whole conversation history |
 | **Multi-user** | Single-user | Multi-user with isolated profiles, credentials, and skill libraries |
 | **Credential handling** | Config files or hardcoded | Encrypted vault with per-user isolation, injected as env vars at runtime |
 | **Sandbox** | Basic process execution | Podman containers with network policies, stall detection, per-skill venvs |

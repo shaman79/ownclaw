@@ -209,7 +209,7 @@ class AgentContextArtifactsTest {
 
     private static final List<String> CSV_WHY = List.of("uploaded file", "text/csv, 412 bytes");
     private static final List<String> PDF_WHY =
-            List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
+            List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)");
 
     @Test
     @DisplayName("on a file task every result is PRIVATE and unindexed, so its descriptor shows no keys")

@@ -410,13 +410,14 @@ public class OpsController {
     }
 
     /**
-     * Run one agent task synchronously and return the outcome.
+     * Run one agent task and return the outcome -- in the response, or, with {@code async}, as a
+     * handle to collect it by.
      * <p>
      * This is the loop that makes autonomous development possible: send a prompt, read the
-     * result, then read {@code /logs?grep=Task+<id>} for the step trail. It runs on the
-     * calling thread rather than the task queue, so it does not wait behind other work — and
-     * for the same reason it bypasses the queue's serialisation, so avoid running several at
-     * once against one Ollama instance.
+     * result, then read {@code /logs?grep=Task+<id>} for the step trail. It runs outside the task
+     * queue -- on the calling thread, or on a thread of its own when async -- so it does not wait
+     * behind other work, and for the same reason it bypasses the queue's lanes: avoid running
+     * several at once against one Ollama instance.
      * <p>
      * Defaults to the owner's account so context, memory and credentials match normal use.
      * <p>

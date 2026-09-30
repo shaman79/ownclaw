@@ -284,7 +284,7 @@ curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops | jq      # lists eve
 | `GET /api/ops/tasks?offset=0&limit=50`, `GET /api/ops/tasks/{taskId}` | recent tasks, paged like forensics; one task correlated across events, tool calls and memory |
 | `POST /api/ops/selftest` | pass/fail across database, tools, cloud key, local model, skills dir, log file |
 | `POST /api/ops/agent/run` | run one agent task and get the outcome plus the full step trajectory; with `"sessionId"` (`"new"` or a chat's id) the run is a chat turn, saved to that chat as the web chat saves one |
-| `POST /api/ops/agent/cancel/{userId}` | request cancellation (observed between steps) |
+| `POST /api/ops/agent/cancel/{userId}` | stop that user's tasks, or one with `?taskId=`: a model call the task is waiting on ends at once, whether or not its reply has started; a running skill is not interrupted, and the task stops when it returns |
 | `POST /api/ops/skills/reload` | re-read the generated skills directory |
 
 ### What it will not do
@@ -326,8 +326,9 @@ curl -s -H "X-Ops-Token: $T" -X POST ".../api/ops/db/query" \
 
 Note when reading outcomes: `success` is `true` only for a task that completed. Every other ending —
 the step cap, a reasoning-failure abort, a question the agent stopped to ask, a cancel — is `false`,
-and `terminationReason` says which it was; `POST /api/ops/agent/run` says so in its `outcomeNote`. A
-run that crashes answers with an `error` instead.
+and `terminationReason` says which it was; `POST /api/ops/agent/run` says so in its `outcomeNote`. An
+exception inside the task is such an ending too (`ERROR`, with the steps that ran); only a failure
+outside the task answers with an `error` instead.
 
 ### Exposure
 

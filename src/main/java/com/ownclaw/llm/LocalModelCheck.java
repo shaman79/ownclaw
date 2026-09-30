@@ -32,8 +32,8 @@ import java.util.concurrent.TimeUnit;
  *       {@code capabilities: ["completion"]} and a template of {@code {{ .Prompt }}}. The chat
  *       endpoint then cannot render the messages array, so the system prompt and the role
  *       structure are discarded — {@code prompt_eval_count} comes back far smaller than the
- *       prompt and the model answers something unrelated. Delegation, conversation
- *       compression and tool pre-selection all return nonsense.</li>
+ *       prompt and the model answers something unrelated. Delegation, and every other call
+ *       made to the local model, returns nonsense.</li>
  * </ul>
  * Runs on a daemon thread so a cold or unreachable Ollama never delays startup. The same facts
  * are available on demand, with a live chat round-trip, from {@code GET /api/ops/ollama}.
@@ -168,8 +168,8 @@ public class LocalModelCheck {
         try {
             installed = installedModels(url);
         } catch (Exception e) {
-            log.warn("Local tier unavailable: {} is not reachable ({}). Delegation and conversation "
-                            + "compression will fail until it is.",
+            log.warn("Local tier unavailable: {} is not reachable ({}). Delegation, and every "
+                            + "other local call, will fail until it is.",
                     url, e.getMessage());
             return;
         }
@@ -198,9 +198,9 @@ public class LocalModelCheck {
                                 + "capabilities={}, template is the bare \"{{ .Prompt }}\" placeholder and "
                                 + "Ollama has no built-in renderer for this architecture, so it cannot "
                                 + "render the message list: the system prompt and the roles are discarded "
-                                + "(prompt_eval_count comes back near 1) and delegation, conversation "
-                                + "compression and tool pre-selection all receive "
-                                + "unrelated text. The weights are almost certainly fine — the GGUF simply "
+                                + "(prompt_eval_count comes back near 1) and delegation, like every other "
+                                + "local call, receives unrelated text. The weights are almost certainly "
+                                + "fine — the GGUF simply "
                                 + "ships without a chat_template, which is common for community HuggingFace "
                                 + "GGUF uploads. Either point OWNCLAW_EXECUTOR_MODEL at a model whose "
                                 + "template renders messages, or re-create this one with a Modelfile that "

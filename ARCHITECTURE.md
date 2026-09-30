@@ -184,11 +184,11 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 │                                              │
 │  Priority Levels:                            │
 │  P0 — Interactive user waiting (classify,    │
-│        compress, skill-match)                │
+│        skill-match)                          │
 │  P1 — Plan execution (Executor following     │
 │        Mentor's plan)                        │
 │  P2 — Background (scheduled cron tasks,      │
-│        conversation compression, cleanup)    │
+│        cleanup)                              │
 │                                              │
 │  Fairness:                                   │
 │  • Round-robin across users at same priority │
@@ -205,7 +205,7 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 │                                              │
 │  Key rule: skill_exec (SkillRunner) does NOT │
 │  need Ollama — runs concurrently with infer. │
-│  Only "inference" items are serialized.      │
+│  Ollama decides how many inferences run.     │
 └──────────────────────────────────────────────┘
 ```
 
@@ -215,12 +215,10 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 |-----------|:---:|:---:|
 | Executor: classify task | Yes | No (queued) |
 | Executor: match skills | Yes | No (queued) |
-| Executor: compress context | Yes | No (queued) |
 | Mentor: plan/review | No (cloud API) | Yes (independent) |
 | SkillRunner: execute script | No (Python process) | Yes (multiple sandboxes) |
-| Executor: compress results | Yes | No (queued) |
 
-**This means**: While Executor is doing inference for User A, SkillRunner can simultaneously execute scripts for User B, and a Mentor API call for User C can be in flight. Only Ollama inference is serialized.
+**This means**: While Executor is doing inference for User A, SkillRunner can simultaneously execute scripts for User B, and a Mentor API call for User C can be in flight. The application serializes nothing: the Ollama server decides how many of its own inferences run at once.
 
 ### 3.4 Async & Long-Running Tasks
 
@@ -316,7 +314,7 @@ The main agent loop (`AgentLoop.java`) runs a reactive cycle:
 │  8. Go to step 1                                         │
 │                                                          │
 │  Max iterations: configurable (default 25)               │
-│  Conversation compression after N messages               │
+│  The task's whole chat, every message whole              │
 │  Prompt caching for Anthropic (CACHE_BOUNDARY_MARKER)    │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -519,9 +517,6 @@ created_by: system       # system | mentor | user
 tested: true
 reversible: false        # Can this action be undone?
 
-# Interaction capabilities
-interactive: false       # Can this skill request user input mid-execution?
-
 # Version history
 changelog:
   - version: 2
@@ -698,40 +693,13 @@ Example: "send_slack_message" + "send_discord_message" → generalized "send_cha
 
 The Executor can propose generalization: "I have 3 skills that all send messages to different platforms. Should I ask Mentor to unify them?"
 
-### 5.8 Skill Interaction (Mid-Execution User Input)
+### 5.8 Skill Output and Progress
 
-Some skills need to communicate with the user during execution. The I/O protocol supports this:
+A skill cannot ask the user anything while it runs. The agent asks between steps (`ask_user`),
+and the owner's answer starts the next task, which reads the chat it came from (§7.1).
 
-**Standard flow** (non-interactive skill):
 ```
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
-```
-
-**Interactive flow** (skill with `interactive: true`):
-```
-Java → [JSON params via stdin] → skill.py
-                                      │
-                                skill writes to stdout:
-                                {"type": "need_input", 
-                                 "prompt": "Found 3 files matching 'meeting*'. Which one?",
-                                 "options": ["meeting_feb20.md", "meeting_feb21.md", "meeting_feb22.md"]}
-                                      │
-                                      ▼
-                                Java reads this, forwards to user chat:
-                                "🔍 Found 3 files. Which one?
-                                 1. meeting_feb20.md
-                                 2. meeting_feb21.md
-                                 3. meeting_feb22.md"
-                                      │
-                                User responds: "3"
-                                      │
-                                      ▼
-                                Java writes to skill's stdin:
-                                {"type": "user_input", "value": "meeting_feb22.md"}
-                                      │
-                                skill.py continues execution...
-                                      │
-                                {"type": "result", "status": "success", "output": {...}}
 ```
 
 **Progress reporting** (any skill):
@@ -898,15 +866,17 @@ The Executor maintains a `preferences.json` per user:
 
 ## 7. Conversation Management
 
-### 7.1 Context Window Strategy
+### 7.1 Context: The Whole Chat
 
-The local Executor LLM has a limited context window (typically 8K-32K tokens for 7-14B models). Strategy:
-
-1. **Active context**: Last N messages (configurable, default 10) in full
-2. **Compressed history**: Executor periodically summarizes older messages into a compact summary
-3. **Skill results**: Only keep structured output, not raw execution logs
-4. **User profile + preferences**: Injected as a compact header (~300 tokens total)
-5. **System status messages**: Excluded from LLM context (UI-only)
+A task started from a chat reads that chat — the one its own message was saved in, not whichever
+is open now — oldest first and every message whole: each question asked before it, each answer so
+far, and under the answer of each earlier task that finished, the record of what it did. Only the
+conversation: status lines, command replies and wizard prompts are not part of it. A handle in an
+earlier message is written in words, because the task numbers its own results from 1. A private
+answer is read as the note that it exists, never its text, and a file as a description, never its
+name or its bytes. Nothing is summarised or dropped to fit a window: a chat longer than the model's
+context window ends the task with the provider's plain message that it is. Scheduled and `/bg`
+runs read no chat.
 
 ### 7.2 Conversation Storage
 
@@ -936,14 +906,14 @@ CREATE TABLE session_summaries (
 );
 ```
 
-### 7.3 Prompt Compression
+Nothing writes `compressed_content` or `session_summaries` any more: the summariser is gone (§7.1),
+and the rows it once marked are read like any other.
 
-Executor handles all compression locally (zero cloud cost):
+### 7.3 Nothing Is Compressed
 
-- **Message compression**: Reduce verbose messages to key information
-- **History rolling summary**: Periodically compress N old messages into 1 summary paragraph
-- **Result compression**: Before sending to Mentor, compress execution results to structured summaries
-- **Skill output trimming**: Extract only relevant fields from skill outputs
+Prompts carry every message and every result whole — a private result as its descriptor — and
+code-written endings and records, not summaries. When a prompt does not fit the model's context
+window, the provider says so and the task ends saying it; nothing is cut beforehand.
 
 ---
 
@@ -984,7 +954,6 @@ Executor handles all compression locally (zero cloud cost):
 │  • Java writes JSON params to skill's stdin  │
 │  • Skill writes JSON lines to stdout:        │
 │    - {"type":"progress","message":"..."}     │
-│    - {"type":"need_input","prompt":"..."}    │
 │    - {"type":"result","status":"...","output"}│
 │  • Stderr captured for debugging             │
 │  • Exit code: 0 = success, non-zero = error  │
@@ -1104,7 +1073,7 @@ All system-level failures (as opposed to skill/task-level failures) are handled 
 | Sandbox process crash | Non-zero exit + no result JSON | Treat as skill failure (step-level `on_fail` applies). Log stderr. | Normal skill failure flow |
 | Sandbox timeout | Process killed after deadline | Same as crash. Log timeout duration. | "⏱️ Skill timed out after {timeout}s" |
 | WebSocket disconnect mid-task | Connection close event | Task continues running. Pending approvals saved to DB. On reconnect: replay pending prompts + deliver results. | Results delivered on reconnect |
-| Telegram API down | HTTP error | Retry with backoff. Buffer outgoing messages (up to 100). | Messages delivered when Telegram recovers |
+| Telegram API down | HTTP error | Messages go out in order on one sender thread. A 429 is waited out for as long as Telegram says; a 5xx or network failure is tried three times (after 1 s, then 2 s), and a part still not taken ends the message there. | The owner is told which part did not arrive; the web chat has the whole answer |
 | Disk full | IOException on write | Alert immediately. Stop accepting new tasks. In-memory tasks continue. | "❌ Disk full. Cannot save data." |
 
 ### 9.2 Circuit Breaker
@@ -1208,7 +1177,7 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 | Unified interface | Internal adapter pattern (`LlmProvider`) | Java interfaces per provider (OpenAI, Anthropic, Ollama) |
 | Provider routing | `LlmRouter` — always cloud, local fallback | Simplified from old confidence-based routing |
 | Prompt caching | Anthropic `CACHE_BOUNDARY_MARKER` | Static prompt content cached to reduce costs |
-| Ollama serialization | Semaphore (single concurrent request) | 7-14B models need exclusive GPU |
+| Ollama concurrency | None in the application: the Ollama server decides how many requests run at once | 7-14B models need most of the GPU |
 
 ### 10.4 Frontend (WebUI)
 
@@ -1255,19 +1224,17 @@ ownclaw/
 │       │   │   ├── SkillMatcher.java              # LLM-based skill matching + cache lookup
 │       │   │   ├── TaskPreprocessor.java          # Compression, context preparation
 │       │   │   ├── ResultCompressor.java          # Compresses outputs for Mentor
-│       │   │   ├── ConversationCompressor.java    # Rolling history summarization
 │       │   │   └── PreferencesManager.java        # Manages per-user preferences (local LLM)
 │       │   │
 │       │   ├── skillrunner/
 │       │   │   ├── SkillRunnerService.java        # Executes skills in sandbox
-│       │   │   ├── SkillInteractionHandler.java   # Handles need_input/progress from skills
+│       │   │   ├── SkillInteractionHandler.java   # Waits for the answer to a setup-wizard question
 │       │   │   ├── SkillRollbackHandler.java      # Handles versioned rollback on failure
 │       │   │   └── SkillOutputParser.java         # Parses JSON-lines from skill stdout
 │       │   │
 │       │   ├── llm/
 │       │   │   ├── LlmProvider.java               # Interface
 │       │   │   ├── OllamaProvider.java            # Local (Executor + SkillRunner)
-│       │   │   ├── OllamaSemaphore.java           # Serializes Ollama requests
 │       │   │   ├── AnthropicProvider.java          # Cloud (Mentor)
 │       │   │   ├── OpenAiProvider.java             # Cloud (Mentor)
 │       │   │   ├── DeepSeekProvider.java           # Cloud (Mentor)
@@ -1393,7 +1360,6 @@ ownclaw:
     provider: openai              # openai | anthropic
     model: gpt-4.1
     api_key: ${OPENAI_API_KEY}
-    max_tokens_per_task: 10000
     temperature: 0.4
 
   # Token budgets (defaults, users can have custom)
@@ -1405,7 +1371,6 @@ ownclaw:
   # Task queue
   queue:
     max_concurrent_tasks: 5          # Total tasks running simultaneously
-    ollama_concurrency: 1            # Serialize Ollama requests (GPU bottleneck)
     cloud_concurrency: 3             # Parallel cloud LLM requests
     sandbox_concurrency: 3           # Parallel sandbox executions
     max_queued_tasks: 50             # Reject if queue exceeds this
@@ -1448,13 +1413,6 @@ ownclaw:
     shared_venv_path: ./data/shared_venv
     per_skill_venv_path: ./data/skill_venvs
 
-  # Plan cache
-  plan_cache:
-    enabled: true
-    max_entries: 500             # LRU eviction
-    ttl_hours: 168               # 7 days
-    invalidate_on_skill_change: true
-
   # Database
   database:
     path: ./data/ownclaw.db
@@ -1465,12 +1423,10 @@ ownclaw:
     max_rounds: 3
     auto_review: true
     auto_review_threshold: medium
-    teaching_log_max_entries: 30      # Per-user limit before distillation
     distillation_interval_days: 7     # Periodic teaching log cleanup
 
   # Observability
   observability:
-    event_log_retention_days: 30     # How long to keep events
     chat_status_messages: true       # Send status messages to user chat
     status_verbosity: concise        # concise | verbose
     log_level: INFO                  # DEBUG | INFO | WARN | ERROR
@@ -1502,7 +1458,7 @@ During task execution, the system sends concise status messages to the user's ch
 | `started` | "⚙️ Starting: summarize emails" | Task begins execution |
 | `step` | "→ Step 2/4: filtering unread emails" | Each plan step begins |
 | `progress` | "⏳ Step 2/4: found 23 unread emails" | Skill sends progress update |
-| `need_input` | "❓ Skill needs input: Which folder? [Inbox/All]" | Skill requests user input |
+| `need_input` | "❓ … waiting for your answer" | The task stopped to ask the user; the answer starts the next task |
 | `credential` | "🔑 Skill requests access to SMTP credentials. [Always/Once/Deny]" | Credential approval needed |
 | `mentor` | "🧠 Escalating to Mentor for planning..." | Cloud LLM invoked |
 | `completed` | "✅ Done: sent summary to john@example.com" | Task finished successfully |
@@ -1601,13 +1557,13 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Ollama integration (Executor)
 - [x] Single cloud provider (OpenAI) for Mentor
 - [x] Task orchestrator: Executor classifies → Mentor plans → SkillRunner executes
-- [x] Task queue (priority-based, with Ollama serialization)
+- [x] Task queue (priority-based)
 - [x] DAG plan format (steps with depends_on, on_fail)
 - [x] Skill manifest + 3 core skills (shell_command, file_operations, http_request)
 - [x] ProcessBuilder sandbox (Windows dev-friendly)
 - [x] SQLite persistence (users, conversations, events)
 - [x] Telegram bot (single user)
-- [x] Basic conversation management (last N messages)
+- [x] Conversation management (the whole chat, every message whole)
 - [x] Simple WebUI (chat only, WebSocket)
 - [x] **Event log + chat status messages (observability from day one)**
 - [x] **Credential grant approval flow (permanent/one-time/declined)**
@@ -1623,11 +1579,11 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Skill validation (static analysis + sandbox test)
 - [x] Skill versioning (numbered dirs, regeneration/repair on failure; no automatic quarantine)
 - [x] More core skills (send_email, browse_web, text_summarize)
-- [x] Conversation compression (Executor summarizes history)
+- [x] ~~Conversation compression~~ (removed: a task reads its whole chat)
 - [x] Feedback loop (Mentor reviews, max N rounds)
 - [x] Plan cache (LRU, invalidation on skill changes)
 - [x] User preferences (maintained by Executor, local LLM)
-- [x] Skill interaction (need_input protocol)
+- [x] ~~Skill interaction (need_input protocol)~~ (removed: the agent asks between steps)
 
 ### Phase 3: Polish & Hardening
 

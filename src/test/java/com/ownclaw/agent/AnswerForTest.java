@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class AnswerForTest {
 
     static final List<String> PDF = List.of("uploaded file",
-            "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)");
+            "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)");
     static final String ANSWER = "Closing balance 48,213.07 CZK on 30 September.";
 
     private static Artifact.Decision label(Label label) {

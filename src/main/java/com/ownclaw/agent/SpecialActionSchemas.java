@@ -144,7 +144,7 @@ public final class SpecialActionSchemas {
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
                                     + "the tools it will need. Only these, and any the goal or an "
-                                    + "unattended (scheduled or /bg) task names, are loaded: the local model's context is small, and every "
-                                    + "tool definition takes room it needs for the work."),
+                                    + "unattended (scheduled or /bg) task names, are loaded: every tool "
+                                    + "definition takes room in the local model's context that the work needs."),
                             "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
 }

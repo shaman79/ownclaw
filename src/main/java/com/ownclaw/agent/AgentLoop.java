@@ -301,15 +301,16 @@ public class AgentLoop {
      * with who asked -- the owner's Stop or /cancel, or the ops API.
      */
     private AgentResult stopped(AgentContext context) {
-        if (longRunningTaskManager.isActive(context.taskId())) {
-            longRunningTaskManager.cancel(context.taskId());
-        }
         String stall = context.stalled();
+        String why = stall != null ? "the stall watchdog stopped it: " + stall
+                : cancellationService.why(context.userId(), context.taskId(), context.startTimeMs());
+        if (longRunningTaskManager.isActive(context.taskId())) {
+            longRunningTaskManager.cancel(context.taskId(), why);
+        }
         if (stall != null) {
             log.info("Task {} stopped by the stall watchdog: {}", context.taskId(), stall);
             return AgentResult.stalled(stall, context.trajectory(), context.elapsedMs());
         }
-        String why = cancellationService.why(context.userId(), context.taskId(), context.startTimeMs());
         log.info("Task {} stopped on request: {}", context.taskId(), why);
         return AgentResult.cancelled(why, context.trajectory(), context.elapsedMs());
     }
@@ -343,7 +344,7 @@ public class AgentLoop {
                 // The type and the size, never the name: a statement's file name carries its
                 // account number, and the why is part of every descriptor the cloud reads.
                 var why = List.of("uploaded file",
-                        ct + ", " + size + " bytes" + (text == null ? ", no text read (not text, over 100 KB, or not UTF-8)" : ""));
+                        ct + ", " + size + " bytes" + (text == null ? ", no text read (not text, or not UTF-8)" : ""));
                 Artifact a = context.addFile(id, text, why);
                 // A row per file, metadata only. No step ever names an attachment, so without
                 // this nothing recorded that a task had one -- the task page could not show the
