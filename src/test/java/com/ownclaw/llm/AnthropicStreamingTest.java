@@ -630,4 +630,89 @@ class AnthropicStreamingTest {
         var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
         assertTrue(e.getMessage().contains("max_tokens"), e.getMessage());
     }
+
+    // ── what an attempt that ended without a reply was billed ──
+
+    /** A hook that throws {@code stop} on event {@code at} (0: never) and keeps what it is told was billed. */
+    static final class StopsAt implements LlmProgress {
+        final List<LlmResponse.Usage> billed = new java.util.ArrayList<>();
+        private final int at;
+        private final RuntimeException stop;
+        private int seen;
+
+        StopsAt(int at, RuntimeException stop) {
+            this.at = at;
+            this.stop = stop;
+        }
+
+        @Override
+        public void onProgress() {
+            if (++seen == at) throw stop;
+        }
+
+        @Override
+        public void billed(LlmResponse.Usage usage) {
+            billed.add(usage);
+        }
+    }
+
+    @Test
+    @DisplayName("a reply stopped part-way tells the hook what its stream said it was billed for, then ends with the stop")
+    void aStoppedReplyReportsWhatItWasBilled() {
+        var http = api(start("claude-opus-5", 120_000, 0, 80_000) + ping() + text(0, "a", "b", "c")
+                + end("end_turn", null, 900));
+        var stop = new Stopped();
+        var hook = new StopsAt(4, stop);
+
+        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook))));
+
+        assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 120_000, 1, 0, 80_000)), hook.billed,
+                "the prompt message_start said was read, and the output counted so far -- once");
+        // Mutation: report nothing from a stream that ends without a reply -> billed is empty,
+        // and the call's 200,000 input tokens are counted nowhere.
+    }
+
+    @Test
+    @DisplayName("a reply cut off, or ended by an error event, tells the hook what it was billed for; a whole reply tells it nothing")
+    void onlyAnAttemptWithoutAReplyReports() {
+        ObjectNode error = node("error");
+        error.putObject("error").put("type", "invalid_request_error").put("message", "bad block");
+        for (String stream : List.of(start("claude-opus-5", 5, 0, 7) + text(0, "half an ans"),
+                start("claude-opus-5", 5, 0, 7) + text(0, "par") + ev(error))) {
+            var hook = new StopsAt(0, null);
+            assertThrows(LlmException.class, () -> provider(api(stream)).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+            assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 5, 1, 0, 7)), hook.billed);
+        }
+
+        var whole = new StopsAt(0, null);
+        LlmResponse r = provider(api(start("claude-opus-5", 5, 0, 7) + text(0, "all") + end("end_turn", null, 3)))
+                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(whole));
+        assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 5, 3, 0, 7)), r.usage());
+        assertTrue(whole.billed.isEmpty(), "its counts are the reply's, and counted once, from it");
+
+        var early = new StopsAt(1, new Stopped());
+        assertThrows(Stopped.class, () -> provider(api(start("claude-opus-5", 5, 0, 7) + text(0, "x")
+                + end("end_turn", null, 1))).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(early)));
+        assertTrue(early.billed.isEmpty(), "stopped before message_start: the stream had said nothing");
+    }
+
+    @Test
+    @DisplayName("a stop during the retry on a named model tells the hook of the refusal it would have returned, and of the retry's own counts")
+    void aStoppedRetryReportsBothAttempts() {
+        String declined = start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
+                + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3));
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MODELS_4_8, 200, LIMITS_4_8)
+                .on(MESSAGES, 200, "text/event-stream", declined)
+                .on(MESSAGES, 200, "text/event-stream", start("claude-opus-4-8", 900, 0, 0) + text(0, "ok")
+                        + end("end_turn", null, 1));
+        var stop = new Stopped();
+        var hook = new StopsAt(events(declined) + 2, stop);   // just after the retry's message_start
+
+        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook))));
+
+        assertEquals(List.of(usage("claude-opus-4-8", 900, 1), usage("claude-opus-5", 900, 3)), hook.billed,
+                "the retry's counts so far, then the refusal the stop took with it");
+        // Mutation: let the stop through without telling the hook of the refusal -> only the
+        // retry's counts.
+    }
 }

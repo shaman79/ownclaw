@@ -278,6 +278,29 @@ class OllamaStreamingTest {
     }
 
     @Test
+    @DisplayName("a server that takes the connection and never answers is unavailable in the check's seconds, not the chat's hour")
+    void aWedgedServerIsUnavailableInSeconds() throws Exception {
+        // A delegation and every task with a file ask first, on the task's thread, and no hook
+        // holds the probe's cancel: a probe that waits as a chat does holds everything behind it.
+        try (var ollama = new WedgedOllama()) {
+            long t0 = System.currentTimeMillis();
+            boolean available = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
+                    () -> ollama.provider().isAvailable(), "the probe waited as a chat waits for its first line");
+            assertFalse(available);
+            assertTrue(System.currentTimeMillis() - t0 < 5_000, "the check's timeout, not the chat client's");
+        }
+        // ...and the check's own client, as production builds it, gives up in seconds.
+        var field = LocalModelCheck.class.getDeclaredField("http");
+        field.setAccessible(true);
+        var http = (okhttp3.OkHttpClient) field.get(new LocalModelCheck(config(), JSON));
+        assertTrue(http.connectTimeoutMillis() + http.readTimeoutMillis() <= 30_000,
+                "a server that has stopped answering costs a probe seconds: " + http.connectTimeoutMillis()
+                        + " + " + http.readTimeoutMillis() + " ms");
+        // Mutation: probe with the provider's own client -> the probe waits up to an hour, and the
+        // preemptive timeout fails the test.
+    }
+
+    @Test
     @DisplayName("the window is <general.architecture>.context_length, or nothing")
     void contextLengthIn() throws Exception {
         assertEquals(262_144, LocalModelCheck.contextLengthIn(JSON.readTree(show("qwen35moe", 262_144))));

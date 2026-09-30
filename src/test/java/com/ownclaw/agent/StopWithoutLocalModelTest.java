@@ -65,7 +65,7 @@ class StopWithoutLocalModelTest {
     }
 
     @Test
-    @DisplayName("executeFull stops a task holding a file when the local model is down or missing")
+    @DisplayName("executeFull stops a task holding a file when the local model is down, missing, or never answers")
     void executeFullStopsBeforeTheCloud(@TempDir Path tmp) throws Exception {
         // The real entry point, so what is pinned is the probe executeFull actually passes, not
         // only the helper: a probe that answers "up" whatever the model says, or that takes a
@@ -81,20 +81,30 @@ class StopWithoutLocalModelTest {
         String pdf = files.store("u1", "statement.pdf", "application/pdf",
                 new ByteArrayInputStream("%PDF-1.7 binary".getBytes(StandardCharsets.UTF_8)));
 
-        for (LlmProvider local : new LlmProvider[]{new Down(), null}) {
-            var loop = new AgentLoop(null, null, null, new ChatStatusEmitter(), config,
-                    new LlmRouter(local, null, config, null), null, null, null, null, null, null,
-                    conversations, null, null, null, new EventLogService(jdbc), null, null, files);
-            String which = local == null ? "no local model" : "a local model that is down";
-            AgentResult r = assertDoesNotThrow(
-                    () -> loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf)),
-                    which + ": the task went on past the stop");
-            assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), which);
-            assertTrue(r.response().startsWith("**Stopped:** " + AgentLoop.LOCAL_DOWN_FOR_FILES + "."),
-                    which + ": the ending says why first: " + r.response());
-            assertTrue(r.response().contains("result 1 (attachment)"), "the file is described: " + r.response());
-            assertFalse(r.response().contains("statement.pdf"), "and never named: " + r.response());
-            assertNotNull(r.taskId(), which + ": stamped, so the chat can link to what happened");
+        // The last is the real provider over a server that takes the connection and never
+        // answers. The probe runs before the task can be stopped or seen by the watchdog, so its
+        // own timeout is all that bounds it.
+        try (var wedged = new com.ownclaw.llm.WedgedOllama()) {
+            for (LlmProvider local : new LlmProvider[]{new Down(), null, wedged.provider()}) {
+                var loop = new AgentLoop(null, null, null, new ChatStatusEmitter(), config,
+                        new LlmRouter(local, null, config, null), null, null, null, null, null, null,
+                        conversations, null, null, null, new EventLogService(jdbc), null, null, files);
+                String which = local == null ? "no local model"
+                        : local instanceof Down ? "a local model that is down" : "a local server that never answers";
+                AgentResult r = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
+                        () -> assertDoesNotThrow(
+                                () -> loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf)),
+                                which + ": the task went on past the stop"),
+                        which + ": the probe waited as a chat waits for its first line");
+                assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), which);
+                assertTrue(r.response().startsWith("**Stopped:** " + AgentLoop.LOCAL_DOWN_FOR_FILES + "."),
+                        which + ": the ending says why first: " + r.response());
+                assertTrue(r.response().contains("result 1 (attachment)"), "the file is described: " + r.response());
+                assertFalse(r.response().contains("statement.pdf"), "and never named: " + r.response());
+                assertNotNull(r.taskId(), which + ": stamped, so the chat can link to what happened");
+            }
         }
+        // Mutation: probe with the Ollama provider's own chat client -> up to an hour on the
+        // server that never answers, and the preemptive timeout fails the test.
     }
 }

@@ -8,14 +8,16 @@ import okhttp3.Response;
 import java.io.IOException;
 
 /**
- * How a provider sends a streamed request: the one place the call is made, so that its caller's
- * hook can end it at any moment ({@link LlmProgress#calling}) -- before the first event too.
+ * How a provider sends a request made for a model call -- the streamed request, and before it
+ * the Anthropic provider's Models API lookup: the one place such a request is made, so that its
+ * caller's hook can end it at any moment ({@link LlmProgress#calling}) -- before the first event
+ * too.
  */
 final class StreamedCall {
 
     private StreamedCall() {}
 
-    /** What the provider does with the response: check its status, then read the stream. */
+    /** What the provider does with the response: check its status, then read it. */
     @FunctionalInterface
     interface Reader<T> {
         T read(Response response) throws IOException;

@@ -1,12 +1,14 @@
 package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.Tool;
+import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.privacy.PrivateIndex;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -173,6 +175,104 @@ class TaskEndToEndTest {
         assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
         assertTrue(System.currentTimeMillis() - t0 < 6_000, "ended past the 1 s limit, not at a timeout");
         assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
+    }
+
+    /** The think call goes to the real Anthropic provider, as scripted, carrying the task's hook. */
+    static Reply anthropic(com.ownclaw.llm.ScriptedAnthropic api) {
+        return c -> api.provider().chat(List.of(LlmMessage.user("audit the routers")), c);
+    }
+
+    @Test
+    @DisplayName("Stop ends a model call that is waiting to try again after an overload, at once")
+    void aStopEndsTheWaitBeforeARetry(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        var api = com.ownclaw.llm.ScriptedAnthropic.overloaded();
+        rig.cloud.think.add(anthropic(api));
+        var stop = new Thread(() -> {
+            try {
+                Thread.sleep(1_000);          // the 529 is in: the provider waits, at least 24 s
+            } catch (InterruptedException e) {
+                return;
+            }
+            rig.cancellation.requestAll("u1", "you pressed Stop");
+        });
+        long t0 = System.currentTimeMillis();
+        stop.start();
+        AgentResult r = assertTimeoutPreemptively(Duration.ofSeconds(20), () -> rig.turn(session(rig), "audit the routers"),
+                "the Stop was heard only when the wait was over");
+        stop.join();
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        assertTrue(System.currentTimeMillis() - t0 < 5_000, "the wait ran on after Stop");
+        assertTrue(r.response().startsWith("**Stopped:** you pressed Stop.\n\n"), r.response());
+        assertEquals(1, api.requests(), "and nothing was sent again");
+        // Mutation: a wait that hands the hook no cancel -> the Stop is heard at the next
+        // attempt, 24 s or more later, and the preemptive timeout fails the test.
+    }
+
+    @Test
+    @DisplayName("the stall watchdog ends a model call that is waiting to try again: STALLED at once, not after the wait")
+    void theWatchdogEndsTheWaitBeforeARetry(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP), 1);
+        rig.cloud.think.add(anthropic(com.ownclaw.llm.ScriptedAnthropic.overloaded()));
+        long t0 = System.currentTimeMillis();
+        AgentResult r;
+        try (var ticking = rig.watchdog()) {
+            r = assertTimeoutPreemptively(Duration.ofSeconds(20), () -> rig.turn(session(rig), "audit the routers"),
+                    "the watchdog's stop was heard only when the wait was over");
+        }
+        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
+        assertTrue(System.currentTimeMillis() - t0 < 6_000, "ended past the 1 s limit, not after the wait");
+        assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
+    }
+
+    @Test
+    @DisplayName("a reply stopped part-way is counted: the tokens its stream reported reach the ending, the budget and the ledger")
+    void aStoppedReplyIsCounted(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        var api = com.ownclaw.llm.ScriptedAnthropic.answering(120_000, 80_000, 900, "The routers ", "are ", "fine.");
+        // The owner presses Stop as the reply's third event arrives, message_start already in.
+        rig.cloud.think.add(c -> anthropic(api).answer(c.withProgress(stopOn(3, c.progress(),
+                () -> rig.cancellation.requestAll("u1", "you pressed Stop")))));
+        AgentResult r = rig.turn(session(rig), "audit the routers");
+
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        long billed = 120_000 + 80_000 + 1;      // input, cache reads, and message_start's output count
+        assertTrue(r.response().contains("200,001 cloud tokens"), r.response());
+        assertEquals(billed, rig.jdbc.queryForObject(
+                "SELECT COALESCE(SUM(tokens_used), 0) FROM token_usage WHERE user_id = 'u1'", Long.class),
+                "the day's budget");
+        String completed = rig.jdbc.queryForObject(
+                "SELECT details FROM events WHERE event_type = 'task_completed'", String.class);
+        assertTrue(completed.contains("\"cloudTokens\":" + billed), completed);
+        String egress = rig.jdbc.queryForObject("SELECT details FROM events WHERE event_type = 'egress'", String.class);
+        assertTrue(egress.contains("\"decision\":\"ERROR\"") && egress.contains("\"promptTokens\":120000")
+                && egress.contains("\"cacheReadTokens\":80000"), egress);
+        assertFalse(egress.contains("\"costUsd\":0.0,"), "priced: " + egress);
+        // Mutation: the loop does not count what the hook is told -> 0 cloud tokens, and an
+        // empty budget, though the ledger has them.
+    }
+
+    /** The task's hook, with the owner pressing Stop as the {@code n}-th event of the reply arrives. */
+    static com.ownclaw.llm.LlmProgress stopOn(int n, com.ownclaw.llm.LlmProgress hook, Runnable stop) {
+        int[] seen = {0};
+        return new com.ownclaw.llm.LlmProgress() {
+            @Override
+            public void onProgress() {
+                if (++seen[0] == n) stop.run();
+                hook.onProgress();
+            }
+
+            @Override
+            public void calling(Runnable cancel) {
+                hook.calling(cancel);
+            }
+
+            @Override
+            public void billed(com.ownclaw.llm.LlmResponse.Usage usage) {
+                hook.billed(usage);
+            }
+        };
     }
 
     static final String PASSWORD = "x7Qp-2Lm-9Rt-Wq4z";

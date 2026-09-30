@@ -148,6 +148,10 @@ class TaskTraceServiceTest {
         // The failed call is not "went out": whether it reached the provider is not recorded.
         assertEquals(Map.of("checkedCalls", 6, "hits", 3, "leaked", 1, "failed", 1, "unchecked", 1),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
+        // One the provider had reported tokens for before it failed did reach it: its text went.
+        row("egress", egress("ERROR", 120_000, 1, 0.6, "{{1}} in part 4 (user) at 10 (call then failed: TaskCancelledException)"));
+        assertEquals(Map.of("checkedCalls", 7, "hits", 4, "leaked", 2, "failed", 1, "unchecked", 1),
+                list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
 
         // A row from before `indexed` was recorded: still reported when a record names it.
         rows.clear();
@@ -240,6 +244,24 @@ class TaskTraceServiceTest {
         var error = list(TaskTraceService.build(rows), "calls").get(1);
         assertNull(error.get("promptTokens"), "a failed call's tokens are not recorded, not 0");
         assertNull(error.get("costUsd"));
+    }
+
+    @Test
+    @DisplayName("a call stopped after the provider reported its tokens shows them, and its step's cost is a lower bound")
+    void aFailedCallShowsWhatWasReported() {
+        row("egress", egress("ERROR", 120_000, 1, 0.64, "TaskCancelledException"));
+        row("step", "{\"step\":1,\"tool\":\"_thinking\",\"success\":false,\"localTokens\":0,\"cloudTokens\":120001}");
+        var t = TaskTraceService.build(rows);
+        var call = list(t, "calls").get(0);
+        assertEquals(120_000L, call.get("promptTokens"));
+        assertEquals(1L, call.get("completionTokens"));
+        assertEquals(0.64, (Double) call.get("costUsd"), 1e-9);
+        var step = list(t, "steps").get(0);
+        assertEquals(120_001L, step.get("cloudTokens"));
+        assertEquals(0.64, (Double) step.get("costUsd"), 1e-9);
+        assertEquals(true, step.get("costIsFloor"), "output streamed before the stop is mostly not in the counts");
+        // Mutation: hide every failed call's figures -> the call shows "not recorded" and the
+        // step 0 tokens, though the ledger row has them.
     }
 
     @Test

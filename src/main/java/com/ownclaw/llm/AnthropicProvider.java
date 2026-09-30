@@ -121,7 +121,9 @@ class AnthropicProvider implements LlmProvider {
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
         String model = reqConfig.model() != null ? reqConfig.model() : config.getAnthropicModel();
-        Attempt first = RateLimitBackoff.execute(() -> send(messages, reqConfig, model, true), "anthropic");
+        LlmProgress progress = reqConfig.progress();
+        Attempt first = RateLimitBackoff.execute(() -> send(messages, reqConfig, model, true),
+                "anthropic", progress);
         if (first.retryOn() == null) return first.reply();
 
         // Anthropic declined without running its fallback and named the model to retry on
@@ -133,13 +135,18 @@ class AnthropicProvider implements LlmProvider {
         LlmResponse retry;
         try {
             retry = RateLimitBackoff.execute(
-                    () -> send(messages, reqConfig, first.retryOn(), false), "anthropic").reply();
+                    () -> send(messages, reqConfig, first.retryOn(), false), "anthropic", progress).reply();
         } catch (LlmException e) {
             // The rescue failed. The decline is still why there is no answer, and its tokens were
             // billed, so it is the refusal the caller gets.
             log.warn("Anthropic: the retry on {} failed ({}); the refusal stands", first.retryOn(),
                     e.getMessage());
             return first.reply();
+        } catch (RuntimeException stopped) {
+            // What the hook threw ends the call during the retry, and the refusal that would have
+            // been returned goes with it: its tokens were billed, so the hook is told of them.
+            first.reply().usage().forEach(progress::billed);
+            throw stopped;
         }
         var usage = new ArrayList<>(first.reply().usage());
         usage.addAll(retry.usage());
@@ -159,7 +166,7 @@ class AnthropicProvider implements LlmProvider {
             throw new LlmException("anthropic", "API key not configured");
         }
 
-        ModelLimits modelLimits = limits(model, apiKey);
+        ModelLimits modelLimits = limits(model, apiKey, reqConfig.progress());
 
         ObjectNode body = requestBody(messages, reqConfig, model, modelLimits.maxOutputTokens());
         if (!withFallbacks) body.remove("fallbacks");
@@ -195,7 +202,9 @@ class AnthropicProvider implements LlmProvider {
 
     /**
      * The reply, event by event. The progress hook hears every event, pings included, and
-     * whatever it throws leaves through here untouched, closing the stream on its way out.
+     * whatever it throws leaves through here untouched, closing the stream on its way out. An
+     * attempt that ends here without a reply -- stopped, cut off, or ended by an error event --
+     * first tells the hook what the stream had said it is billed for ({@link LlmProgress#billed}).
      *
      * @param withFallbacks whether the request asked for fallbacks, so a refusal naming a model
      *                      to retry on is one to retry
@@ -212,76 +221,86 @@ class AnthropicProvider implements LlmProvider {
         JsonNode iterations = null;
         boolean stopped = false;
 
-        ServerSentEvents.Event event;
-        while ((event = events.next()) != null) {
-            progress.onProgress();
-            JsonNode data = reply.parse(event.data());
-            switch (data.path("type").asText("")) {
-                case "message_start" -> {
-                    JsonNode message = data.path("message");
-                    // The model that is answering. When the requested model declined before
-                    // writing anything, this already names the fallback model -- and so it does
-                    // on the turns after a decline, which Anthropic keeps sending straight to the
-                    // model that answered it (sticky routing), with no fallback block to say so.
-                    servedModel = message.path("model").asText(servedModel);
-                    JsonNode usage = message.path("usage");
-                    input = count(usage, "input_tokens", input);
-                    output = count(usage, "output_tokens", output);
-                    cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
-                    cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
-                    if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
-                }
-                case "content_block_start" -> {
-                    int index = data.path("index").asInt();
-                    JsonNode block = data.path("content_block");
-                    switch (block.path("type").asText("")) {
-                        case "text" -> reply.text(block.path("text").asText(""));
-                        case "tool_use" -> reply.call(index, block.path("id").asText(null),
-                                block.path("name").asText(null), null);
-                        // The requested model declined part-way and the fallback model goes on
-                        // from here. Its text continues the text before it; a tool call before
-                        // it was the declined model's and is not part of the reply.
-                        case "fallback" -> {
-                            reply.discardCalls();
-                            servedModel = block.path("to").path("model").asText(servedModel);
+        try {
+            ServerSentEvents.Event event;
+            while ((event = events.next()) != null) {
+                progress.onProgress();
+                JsonNode data = reply.parse(event.data());
+                switch (data.path("type").asText("")) {
+                    case "message_start" -> {
+                        JsonNode message = data.path("message");
+                        // The model that is answering. When the requested model declined before
+                        // writing anything, this already names the fallback model -- and so it
+                        // does on the turns after a decline, which Anthropic keeps sending
+                        // straight to the model that answered it (sticky routing), with no
+                        // fallback block to say so.
+                        servedModel = message.path("model").asText(servedModel);
+                        JsonNode usage = message.path("usage");
+                        input = count(usage, "input_tokens", input);
+                        output = count(usage, "output_tokens", output);
+                        cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                        cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                        if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
+                    }
+                    case "content_block_start" -> {
+                        int index = data.path("index").asInt();
+                        JsonNode block = data.path("content_block");
+                        switch (block.path("type").asText("")) {
+                            case "text" -> reply.text(block.path("text").asText(""));
+                            case "tool_use" -> reply.call(index, block.path("id").asText(null),
+                                    block.path("name").asText(null), null);
+                            // The requested model declined part-way and the fallback model goes on
+                            // from here. Its text continues the text before it; a tool call before
+                            // it was the declined model's and is not part of the reply.
+                            case "fallback" -> {
+                                reply.discardCalls();
+                                servedModel = block.path("to").path("model").asText(servedModel);
+                            }
+                            // thinking, redacted_thinking and block types newer than this code are
+                            // not part of the answer.
+                            default -> { }
                         }
-                        // thinking, redacted_thinking and block types newer than this code are
-                        // not part of the answer.
-                        default -> { }
                     }
-                }
-                case "content_block_delta" -> {
-                    JsonNode delta = data.path("delta");
-                    switch (delta.path("type").asText("")) {
-                        case "text_delta" -> reply.text(delta.path("text").asText(""));
-                        case "input_json_delta" -> reply.call(data.path("index").asInt(), null, null,
-                                delta.path("partial_json").asText(""));
-                        default -> { }     // thinking_delta, signature_delta, ...
+                    case "content_block_delta" -> {
+                        JsonNode delta = data.path("delta");
+                        switch (delta.path("type").asText("")) {
+                            case "text_delta" -> reply.text(delta.path("text").asText(""));
+                            case "input_json_delta" -> reply.call(data.path("index").asInt(), null, null,
+                                    delta.path("partial_json").asText(""));
+                            default -> { }     // thinking_delta, signature_delta, ...
+                        }
                     }
+                    case "content_block_stop" -> reply.close(data.path("index").asInt());
+                    case "message_delta" -> {
+                        JsonNode delta = data.path("delta");
+                        stopReason = delta.path("stop_reason").asText(stopReason);
+                        // Only a refusal has details, and even then they may be null.
+                        JsonNode details = delta.path("stop_details");
+                        stopDetail = details.path("category").asText(stopDetail);
+                        recommendedModel = details.path("recommended_model").asText(recommendedModel);
+                        JsonNode usage = data.path("usage");
+                        input = count(usage, "input_tokens", input);
+                        output = count(usage, "output_tokens", output);
+                        cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                        cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                        if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
+                    }
+                    case "message_stop" -> stopped = true;
+                    case "error" -> throw streamError(data.path("error"));
+                    default -> { }             // ping, and event types newer than this code
                 }
-                case "content_block_stop" -> reply.close(data.path("index").asInt());
-                case "message_delta" -> {
-                    JsonNode delta = data.path("delta");
-                    stopReason = delta.path("stop_reason").asText(stopReason);
-                    // Only a refusal has details, and even then they may be null.
-                    JsonNode details = delta.path("stop_details");
-                    stopDetail = details.path("category").asText(stopDetail);
-                    recommendedModel = details.path("recommended_model").asText(recommendedModel);
-                    JsonNode usage = data.path("usage");
-                    input = count(usage, "input_tokens", input);
-                    output = count(usage, "output_tokens", output);
-                    cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
-                    cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
-                    if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
-                }
-                case "message_stop" -> stopped = true;
-                case "error" -> throw streamError(data.path("error"));
-                default -> { }             // ping, and event types newer than this code
             }
-        }
-        if (!stopped) {
-            throw new LlmException("anthropic",
-                    "the reply stream ended before message_stop, so the reply is incomplete", 0, null);
+            if (!stopped) {
+                throw new LlmException("anthropic",
+                        "the reply stream ended before message_stop, so the reply is incomplete", 0, null);
+            }
+        } catch (IOException | RuntimeException noReply) {
+            // The prompt the stream said was read was billed, and whatever output it had counted:
+            // the call's caller would otherwise never hear of those tokens.
+            if (input + output + cacheWrite + cacheRead > 0) {
+                progress.billed(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead));
+            }
+            throw noReply;
         }
 
         if (cacheRead > 0 || cacheWrite > 0) {
@@ -363,9 +382,10 @@ class AnthropicProvider implements LlmProvider {
      * The model's maximum output and context window, from {@code GET /v1/models/{model}} --
      * asked once per model, and again after a lookup that failed. There is no table of models
      * here to fall back on: a limit is either the one Anthropic states or unknown, and a call
-     * cannot be made without it, because max_tokens is required.
+     * cannot be made without it, because max_tokens is required. The lookup is part of the call
+     * that needs it, so its hook holds the lookup's cancel as it holds the request's.
      */
-    private ModelLimits limits(String model, String apiKey) {
+    private ModelLimits limits(String model, String apiKey, LlmProgress progress) {
         ModelLimits known = limits.get(model);
         if (known != null) return known;
         Request request = new Request.Builder()
@@ -374,29 +394,29 @@ class AnthropicProvider implements LlmProvider {
                 .header("anthropic-version", API_VERSION)
                 .get()
                 .build();
-        try (Response response = httpClient.newCall(request).execute()) {
+        ModelLimits found = StreamedCall.send(httpClient, request, "anthropic", progress, response -> {
             String text = response.body() != null ? response.body().string() : "";
             if (!response.isSuccessful()) {
                 throw new LlmException("anthropic", "the Models API could not describe '" + model
                         + "': HTTP " + response.code() + ": " + text, response.code(), null);
             }
-            JsonNode json = mapper.readTree(text);
+            JsonNode json;
+            try {
+                json = mapper.readTree(text);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new LlmException("anthropic", "the Models API's answer about '" + model
+                        + "' is not JSON (" + e.getOriginalMessage() + ")", 0, e);
+            }
             int maxOutput = json.path("max_tokens").asInt(0);
             int window = json.path("max_input_tokens").asInt(0);
             if (maxOutput <= 0 || window <= 0) {
                 throw new LlmException("anthropic", "the Models API gave no max_tokens and "
                         + "max_input_tokens for '" + model + "', so its limits are unknown");
             }
-            ModelLimits found = new ModelLimits(maxOutput, window);
-            limits.put(model, found);
-            return found;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new LlmException("anthropic", "the Models API's answer about '" + model
-                    + "' is not JSON (" + e.getOriginalMessage() + ")", 0, e);
-        } catch (IOException e) {
-            throw new LlmException("anthropic", "Connection failed asking the Models API about '"
-                    + model + "': " + e.getMessage(), 0, e);
-        }
+            return new ModelLimits(maxOutput, window);
+        });
+        limits.put(model, found);
+        return found;
     }
 
     /**

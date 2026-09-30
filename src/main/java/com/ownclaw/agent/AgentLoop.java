@@ -238,6 +238,12 @@ public class AgentLoop {
         // call.
         context.setExternalCancel(
                 () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
+        // A cloud call that ends without a reply -- stopped part-way, or cut by a timeout, a
+        // dropped connection or an error event -- was billed for what it had read, and no reply
+        // carries those tokens: its hook is told of them, and they are counted here. Only a cloud
+        // provider reports them (LlmProgress#billed).
+        context.setBilledWithoutReply(usage -> account(context, false, llmRouter.cloud(),
+                LlmResponse.billedFor(List.of(usage))));
 
         AgentResult result;
         inFlight.put(taskId, context);
@@ -1998,17 +2004,19 @@ public class AgentLoop {
     /**
      * What one model call made for this task was billed for, counted once: the think, code and
      * analysis calls all come here, with their reply or with the one the exception that ended the
-     * call carries ({@code LlmException.reply()}). Billed means input with the prompt cache's
-     * reads and writes -- Anthropic reports those apart from {@code input_tokens}, and with the
-     * static system prompt cached they are most of the input -- plus output. The tokens go to the
-     * counter of the tier that did the work, and a cloud call's to the budget too, priced attempt
-     * by attempt at the rates of the model that ran each ({@link ModelPricing#costUsd(String,
-     * LlmResponse)}): a declined request can be finished by a fallback model, or retried on the
-     * one the refusal names. Local tokens never reach the cloud budget: an outage that forced
-     * everything local used to spend the daily cloud allowance fastest, without a single cloud
-     * call having been made.
+     * call carries ({@code LlmException.reply()}) -- and so, as it ends, does each of their
+     * attempts that ended without a reply ({@link AgentContext#setBilledWithoutReply}). Billed
+     * means input with the prompt cache's reads and writes -- Anthropic reports those apart from
+     * {@code input_tokens}, and with the static system prompt cached they are most of the input --
+     * plus output. The tokens go to the counter of the tier that did the work, and a cloud call's
+     * to the budget too, priced attempt by attempt at the rates of the model that ran each
+     * ({@link ModelPricing#costUsd(String, LlmResponse)}): a declined request can be finished by a
+     * fallback model, or retried on the one the refusal names. Local tokens never reach the cloud
+     * budget: an outage that forced everything local used to spend the daily cloud allowance
+     * fastest, without a single cloud call having been made.
      *
-     * @param reply the reply, or null when none came (nothing was billed)
+     * @param reply the reply, or null when none came -- what such a call's attempts were billed
+     *              for has been counted as each ended
      * @return the tokens billed
      */
     private int account(AgentContext context, boolean local, LlmProvider provider, LlmResponse reply) {

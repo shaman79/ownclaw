@@ -122,8 +122,8 @@ public class TaskTraceService {
                     cacheWrite += d.path("cacheWriteTokens").asLong();
                     scrubs += d.path("scrubs").asInt();
                     cost += d.path("costUsd").asDouble();
-                    // A failed call is recorded with no tokens and no cost, so a total over it
-                    // is a lower bound.
+                    // A failed call is recorded with at most what its stream had reported when
+                    // it ended, so a total over it is a lower bound.
                     if (isError(c)) costIsFloor = true;
                 }
                 case "step" -> {
@@ -195,10 +195,11 @@ public class TaskTraceService {
 
         // For each artifact: how many later requests left at all, and -- for a PRIVATE result
         // the canary could look for -- how many of those were checked for its text, in how many
-        // it was found, and of those how many went out anyway (the check was only observing) or
-        // failed (whether they reached the provider is not recorded); and how many later
-        // requests were never checked for it. Anything else is shown as not checked, never as
-        // clean.
+        // it was found, and of those how many went out anyway (the check was only observing; a
+        // request that failed after the provider had reported its tokens went out too) or failed
+        // with nothing reported (whether those reached the provider is not recorded); and how
+        // many later requests were never checked for it. Anything else is shown as not checked,
+        // never as clean.
         for (int i = 0; i < artifacts.size(); i++) {
             var a = artifacts.get(i);
             String prefix = a.get("handle") + " in part";
@@ -222,7 +223,7 @@ public class TaskTraceService {
                 checked++;
                 if (named) {
                     hits++;
-                    if ("ERROR".equals(c.get("decision"))) failed++;
+                    if ("ERROR".equals(c.get("decision")) && c.get("promptTokens") == null) failed++;
                     else if (!refused) leaked++;
                 }
             }
@@ -284,8 +285,13 @@ public class TaskTraceService {
             else if (kind.startsWith("schema:")) toolChars += chars;
             else { msgCount++; msgChars += chars; }
         }
-        // A call that failed has no response, so no tokens and no cost: not recorded, not zero.
-        boolean error = "ERROR".equals(d.path("decision").asText());
+        // A call that failed has no reply. Its row holds what the provider's stream had reported
+        // before it ended -- the input it read, and little of its output, which Anthropic counts
+        // only at the end -- or nothing, when it ended before that or was written before failed
+        // calls were counted: then its tokens and cost are not recorded, not zero.
+        boolean unrecorded = "ERROR".equals(d.path("decision").asText())
+                && d.path("promptTokens").asLong() + d.path("completionTokens").asLong()
+                        + d.path("cacheReadTokens").asLong() + d.path("cacheWriteTokens").asLong() == 0;
         var c = new LinkedHashMap<String, Object>();
         c.put("at", at);
         c.put("step", null);
@@ -293,11 +299,11 @@ public class TaskTraceService {
         c.put("model", d.path("model").asText(null));
         c.put("decision", d.path("decision").asText());
         c.put("bytesOut", d.path("bytesOut").asLong());
-        c.put("promptTokens", error ? null : d.path("promptTokens").asLong());
-        c.put("completionTokens", error ? null : d.path("completionTokens").asLong());
-        c.put("cacheReadTokens", error ? null : d.path("cacheReadTokens").asLong());
-        c.put("cacheWriteTokens", error ? null : d.path("cacheWriteTokens").asLong());
-        c.put("costUsd", error ? null : d.path("costUsd").asDouble());
+        c.put("promptTokens", unrecorded ? null : d.path("promptTokens").asLong());
+        c.put("completionTokens", unrecorded ? null : d.path("completionTokens").asLong());
+        c.put("cacheReadTokens", unrecorded ? null : d.path("cacheReadTokens").asLong());
+        c.put("cacheWriteTokens", unrecorded ? null : d.path("cacheWriteTokens").asLong());
+        c.put("costUsd", unrecorded ? null : d.path("costUsd").asDouble());
         c.put("scrubs", d.path("scrubs").asInt());
         c.put("refusal", d.hasNonNull("refusal") ? d.path("refusal").asText() : null);
         // Why the reply ended ("end_turn", "refusal (cyber)", ...). A call with no reply has

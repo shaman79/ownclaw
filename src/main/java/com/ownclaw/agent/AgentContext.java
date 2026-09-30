@@ -34,6 +34,8 @@ public class AgentContext {
     private volatile Runnable callInFlight;
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
+    /** Counts what a model call's attempt without a reply was billed for. See {@link #setBilledWithoutReply}. */
+    private volatile java.util.function.Consumer<com.ownclaw.llm.LlmResponse.Usage> billedWithoutReply = usage -> { };
     private String conversationSummary;
     private String userPreferences;
 
@@ -124,6 +126,16 @@ public class AgentContext {
     public void setExternalCancel(java.util.function.BooleanSupplier supplier) { this.externalCancel = supplier; }
 
     /**
+     * Attach what counts the tokens of a model call's attempt that ended without a reply --
+     * stopped part-way, or cut by a timeout, a dropped connection or an error event -- which the
+     * call's hook is told of ({@link com.ownclaw.llm.LlmProgress#billed}). Set once at task start,
+     * to the loop's own accounting, so they are counted as a reply's tokens are.
+     */
+    public void setBilledWithoutReply(java.util.function.Consumer<com.ownclaw.llm.LlmResponse.Usage> account) {
+        this.billedWithoutReply = account;
+    }
+
+    /**
      * The stall watchdog's stop, with the facts it stopped on: from here {@link #isCancelled()}
      * is true, a model call the task is waiting on is ended ({@link #interruptCall}), and the
      * task ends STALLED saying them. The first facts are kept.
@@ -136,8 +148,9 @@ public class AgentContext {
     /**
      * End the model call this task is waiting on, if it is waiting on one. A stop is otherwise
      * heard on the next event of the reply ({@link #progress}), and a call that sends nothing --
-     * Ollama loading the model and reading the prompt, a cloud call before its first event --
-     * has no next event: it ran until its read timeout, most of an hour for Ollama.
+     * Ollama loading the model and reading the prompt, a cloud call before its first event, a
+     * call waiting minutes to try again after an overload -- has no next event: it ran until its
+     * read timeout, most of an hour for Ollama, or to the end of its wait.
      */
     public void interruptCall() {
         Runnable cancel = callInFlight;
@@ -153,7 +166,9 @@ public class AgentContext {
      * answering as alive; and once the task has been stopped, the next event ends the call by
      * throwing {@code TaskCancelledException}, instead of the stop waiting minutes for it. While
      * the call runs its cancel is kept here, so a stop ends it before any event too
-     * ({@link #interruptCall}); one stopped before the call was under way ends it at once.
+     * ({@link #interruptCall}); one stopped before the call was under way ends it at once. What
+     * an attempt that ended without a reply was billed for is counted
+     * ({@link #setBilledWithoutReply}).
      */
     public com.ownclaw.llm.LlmProgress progress() {
         return new com.ownclaw.llm.LlmProgress() {
@@ -167,6 +182,11 @@ public class AgentContext {
             public void calling(Runnable cancel) {
                 callInFlight = cancel;
                 if (cancel != null && isCancelled()) cancel.run();
+            }
+
+            @Override
+            public void billed(com.ownclaw.llm.LlmResponse.Usage usage) {
+                billedWithoutReply.accept(usage);
             }
         };
     }

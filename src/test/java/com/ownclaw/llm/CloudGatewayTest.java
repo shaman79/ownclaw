@@ -27,10 +27,13 @@ class CloudGatewayTest {
         RuntimeException failWith;
         /** Tell the request's progress hook about an event before answering, as a stream does. */
         boolean streams;
+        /** Tell the hook of an attempt that ended without a reply before answering or failing. */
+        LlmResponse.Usage billsFirst;
         String name = "anthropic";
         String model = "claude-opus-5";
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             calls.add(m); configs.add(c);
+            if (billsFirst != null) c.progress().billed(billsFirst);
             if (failWith != null) throw failWith;
             if (streams) c.progress().onProgress();
             return Replies.of("ok", 120, 7, 30, 90, "end_turn");
@@ -445,21 +448,69 @@ class CloudGatewayTest {
         var provider = new Recording(); provider.streams = true; var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var stop = new IllegalStateException("stopped by the owner");
-        LlmProgress hook = () -> { throw stop; };
+        var handed = new ArrayList<Runnable>();
+        LlmProgress hook = new LlmProgress() {
+            @Override public void onProgress() { throw stop; }
+            @Override public void calling(Runnable cancel) { handed.add(cancel); }
+        };
         var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
                 .withProgress(hook);
 
         assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)),
                 "not wrapped, not replaced");
-        assertSame(hook, provider.configs.get(0).progress());
+        Runnable cancel = () -> { };
+        provider.configs.get(0).progress().calling(cancel);
+        assertEquals(List.of(cancel), handed, "the caller's hook is handed the cancel of what the call waits on");
         assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
 
         var withTools = cfg.withTools(List.of(new ToolSpec("fx_rates", "Rates.", Map.of("type", "object"))));
-        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), withTools)));
-        assertSame(hook, provider.configs.get(1).progress(),
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), withTools)),
                 "the request the door rebuilds around the scrubbed tools keeps the hook");
+        provider.configs.get(1).progress().calling(cancel);
+        assertEquals(List.of(cancel, cancel), handed);
         // Mutation: send the request without its hook -> the provider has none to tell, and the
         // call cannot be stopped.
+    }
+
+    @Test
+    @DisplayName("a call that ends without a reply is on its row with what it was billed, and the caller's hook is told of it")
+    void aCallWithoutAReplyIsRecordedWithItsTokens() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var billed = new ArrayList<LlmResponse.Usage>();
+        var stop = new IllegalStateException("stopped by the owner");
+        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+                .withProgress(new LlmProgress() {
+                    @Override public void onProgress() { }
+                    @Override public void billed(LlmResponse.Usage usage) { billed.add(usage); }
+                });
+        // A reply stopped part-way: message_start had said 120,000 input tokens and 80,000 read
+        // from the cache.
+        var partWay = new LlmResponse.Usage("claude-opus-5", 120_000, 1, 0, 80_000);
+        provider.billsFirst = partWay;
+        provider.failWith = stop;
+
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)));
+
+        var row = rows.last();
+        assertEquals(EgressLedger.Decision.ERROR, row.decision());
+        assertEquals(120_000, row.promptTokens());
+        assertEquals(80_000, row.cacheReadTokens());
+        assertEquals(1, row.completionTokens());
+        assertEquals(ModelPricing.costUsd("claude-opus-5", 120_000, 1, 0, 80_000), row.costUsd(), 1e-9);
+        assertTrue(row.costUsd() > 0.6, "priced as claude-opus-5 input: " + row.costUsd());
+        assertEquals(List.of(partWay), billed, "and the task is told, so it counts them");
+        // Mutation: record the ERROR row with no tokens -> 0 and $0, as before.
+
+        // An attempt that ended without a reply, then one that answered: the row is the call's,
+        // both of them.
+        provider.failWith = null;
+        gw.chat(messages("hi"), cfg);
+        assertEquals(EgressLedger.Decision.SENT, rows.last().decision());
+        assertEquals(120_000 + 120, rows.last().promptTokens());
+        assertEquals(80_000 + 90, rows.last().cacheReadTokens());
+        assertEquals(1 + 7, rows.last().completionTokens());
+        assertEquals(List.of(partWay, partWay), billed, "the reply's own counts are not reported: the caller counts them from it");
     }
 
     @Test

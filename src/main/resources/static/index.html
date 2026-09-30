@@ -3059,7 +3059,7 @@
                     : 'not known: no local tokens were counted'));
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
-        // A failed call has no tokens and no cost on record; if that is all there was, say so.
+        // A failed call can have no tokens and no cost on record; if that is all there was, say so.
         var unrecorded = s.costIsFloor && !s.cloudTokens;
         d.appendChild(tdRow('Tokens', (unrecorded ? 'not recorded' : formatTokenCount(s.cloudTokens)) + ' cloud / '
                 + formatTokenCount(s.localTokens) + ' local'));
@@ -3089,11 +3089,14 @@
         var panel = node('div');
         var calls = t.calls || [], totals = t.totals || {}, dec = totals.decisions || {};
         if (calls.length) {
-            // A failed call is not "went": whether it reached the provider is not recorded.
+            // A failed call is not "went". One the provider had reported tokens for reached it;
+            // for one with nothing on record, whether it did is not recorded.
             var went = (dec.SENT || 0) + (dec.OBSERVED_LEAK || 0), failedN = dec.ERROR || 0;
+            var unknownN = calls.filter(function(c) { return c.decision === 'ERROR' && c.promptTokens == null; }).length;
             var head = tdCount(went, 'request', 'requests') + ' went to the cloud model'
-                    + (failedN ? '; ' + failedN + ' failed, and whether ' + (failedN === 1 ? 'it' : 'they')
-                        + ' reached the provider is not recorded' : '') + '. Together: '
+                    + (failedN ? '; ' + failedN + ' failed' : '')
+                    + (!unknownN ? '' : ', and whether ' + (unknownN === failedN ? (failedN === 1 ? 'it' : 'they')
+                        : unknownN + ' of them') + ' reached the provider is not recorded') + '. Together: '
                     + formatBytes(totals.bytesOut) + ', ' + formatTokenCount(tdBilled(totals)) + ' tokens, '
                     + (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd) + '.';
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
@@ -3214,19 +3217,25 @@
         d.appendChild(tdRow('Contents', tdCount(c.messages.count, 'message part', 'message parts')
                 + ' (' + tdChars(c.messages.chars) + '), ' + tdCount(c.tools.count, 'tool definition', 'tool definitions')
                 + ' (' + tdChars(c.tools.chars) + ')'));
+        // A failed call with tokens on record has what the provider had reported when it failed:
+        // the input it read, and little of the output, which is counted at the end.
+        var failed = c.decision === 'ERROR';
         d.appendChild(tdRow('Tokens', c.decision === 'REFUSED' ? 'none: it was not sent'
                 : c.promptTokens == null ? 'not recorded: the call failed'
                 : 'in ' + formatTokenCount(c.promptTokens) + ' · cache read ' + formatTokenCount(c.cacheReadTokens)
-                    + ' · cache write ' + formatTokenCount(c.cacheWriteTokens) + ' · out ' + formatTokenCount(c.completionTokens)));
+                    + ' · cache write ' + formatTokenCount(c.cacheWriteTokens) + ' · out ' + formatTokenCount(c.completionTokens)
+                    + (failed ? ', as reported before the call failed' : '')));
         d.appendChild(tdRow('Cost', c.decision === 'REFUSED' ? 'none'
-                : c.costUsd == null ? 'not recorded: the call failed' : formatUsd(c.costUsd)));
+                : c.costUsd == null ? 'not recorded: the call failed' : (failed ? '≥ ' : '') + formatUsd(c.costUsd)));
         if (c.scrubs > 0) d.appendChild(tdRow('Vault values replaced', String(c.scrubs)));
         var why = c.refusal ? ' (' + c.refusal + ')' : '';
         d.appendChild(c.decision === 'SENT' ? tdRow('Decision', 'Sent')
                 : c.decision === 'REFUSED' ? tdRow('Decision', 'Stopped before sending' + why + '. Nothing was sent.', 'error')
                 : c.decision === 'OBSERVED_LEAK' ? tdRow('Decision', 'Sent although it contained private text' + why
                         + ': the check was only observing.', 'error')
-                : tdRow('Decision', 'The call failed' + why + '. Whether it reached the provider is not recorded.', 'error'));
+                : tdRow('Decision', 'The call failed' + why + (c.promptTokens == null
+                        ? '. Whether it reached the provider is not recorded.'
+                        : ', after the provider had begun to answer.'), 'error'));
         if (c.stopReason) d.appendChild(tdRow('Reply ended', c.stopReason));
         runEl.appendChild(d);
         return runEl;

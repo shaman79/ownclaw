@@ -192,6 +192,28 @@ class OpenAiStreamingTest {
     }
 
     @Test
+    @DisplayName("a stream cut after its counts came tells the hook what it was billed for; one cut before, or a whole reply, tells it nothing")
+    void aCutStreamReportsWhatItWasBilled() {
+        var billed = new java.util.ArrayList<LlmResponse.Usage>();
+        LlmProgress hook = new LlmProgress() {
+            @Override public void onProgress() { }
+            @Override public void billed(LlmResponse.Usage usage) { billed.add(usage); }
+        };
+        assertThrows(LlmException.class, () -> provider(api(content("Hello") + finish("stop") + usage(1200, 30, 1024)))
+                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+        assertEquals(List.of(new LlmResponse.Usage(SERVED, 176, 30, 0, 1024)), billed,
+                "priced as a reply's counts are: the cached prompt apart");
+        // Mutation: report nothing from a stream that ends without a reply -> billed is empty.
+
+        billed.clear();
+        assertThrows(LlmException.class, () -> provider(api(content("half"))).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+        LlmResponse whole = provider(api(content("Hello") + finish("stop") + usage(1200, 30, 1024) + DONE))
+                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook));
+        assertEquals(List.of(new LlmResponse.Usage(SERVED, 176, 30, 0, 1024)), whole.usage());
+        assertTrue(billed.isEmpty(), "no counts had come; and a whole reply carries its own");
+    }
+
+    @Test
     @DisplayName("a prompt longer than the context window is the plain context-window message")
     void contextLengthExceeded() {
         var http = new FakeHttp().json(COMPLETIONS, 400, "{\"error\":{\"message\":\"This model's maximum context "

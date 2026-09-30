@@ -52,6 +52,16 @@ public record LlmResponse(
         usage = usage == null ? List.of() : List.copyOf(usage);
     }
 
+    /**
+     * Attempts that were billed, with nothing else: no content, no stop reason and no model of
+     * its own -- each attempt names its model. It is no answer; it lets billed attempts be
+     * counted and priced as a reply's are: the gateway's row sums every attempt of a call
+     * through it, and a task counts those that ended without a reply ({@link LlmProgress#billed}).
+     */
+    public static LlmResponse billedFor(List<Usage> usage) {
+        return new LlmResponse(null, null, null, null, null, null, null, null, usage);
+    }
+
     /** Whether the model asked to call a tool. */
     public boolean hasToolCalls() {
         return !toolCalls.isEmpty();

@@ -282,14 +282,17 @@ public class OllamaProvider implements LlmProvider {
                 last.path("done_reason").asText(null), null, model, null, contextLength);
     }
 
+    /**
+     * Whether the server answers, asked by the startup check ({@link LocalModelCheck#reachable})
+     * rather than with this provider's client. That client waits up to an hour for a reply's
+     * first line, which a streamed chat needs and a probe does not: no hook holds the probe's
+     * cancel, and a delegation and every task with a file ask it first, on the task's thread --
+     * so a server that accepts the connection and never answers costs them the check's seconds,
+     * not that hour.
+     */
     @Override
     public boolean isAvailable() {
-        Request request = new Request.Builder().url(endpoint(config.getUrl(), "/api/tags")).get().build();
-        try (Response response = httpClient.newCall(request).execute()) {
-            return response.isSuccessful();
-        } catch (IOException e) {
-            return false;
-        }
+        return localModelCheck.reachable();
     }
 
     /**

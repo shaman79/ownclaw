@@ -81,6 +81,8 @@ public class LocalModelCheck {
 
     @Autowired
     public LocalModelCheck(OwnClawConfig config, ObjectMapper mapper) {
+        // Seconds, not the chat client's hour: every question here is answered from the model
+        // files without inference, so a server silent for longer has stopped answering.
         this(config, mapper, new OkHttpClient.Builder()
                 .connectTimeout(4, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
@@ -289,6 +291,20 @@ public class LocalModelCheck {
     /** The configured model that was abandoned this boot, or null if none was. */
     public String substitutedFrom() {
         return substitutedFrom;
+    }
+
+    /**
+     * Whether the server answers {@code /api/tags} now, within this check's timeouts: the probe
+     * {@link OllamaProvider#isAvailable()} makes. It only proves the server answers -- whether
+     * the model can be driven is {@link #status()}'s question.
+     */
+    public boolean reachable() {
+        try {
+            installedModels(config.getExecutor().getUrl());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

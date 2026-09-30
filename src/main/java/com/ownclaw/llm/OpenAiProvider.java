@@ -61,7 +61,7 @@ class OpenAiProvider implements LlmProvider {
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
-        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "openai");
+        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "openai", reqConfig.progress());
     }
 
     private LlmResponse chatInternal(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
@@ -144,7 +144,9 @@ class OpenAiProvider implements LlmProvider {
 
     /**
      * The reply, chunk by chunk, until {@code data: [DONE]}. The progress hook hears every
-     * chunk, and whatever it throws leaves through here untouched, closing the stream.
+     * chunk, and whatever it throws leaves through here untouched, closing the stream. An
+     * attempt that ends here without a reply after its counts arrived first tells the hook what
+     * it is billed for ({@link LlmProgress#billed}).
      */
     private LlmResponse read(BufferedSource source, String requestedModel, LlmProgress progress)
             throws IOException {
@@ -155,52 +157,67 @@ class OpenAiProvider implements LlmProvider {
         int promptTokens = 0, completionTokens = 0, cachedPromptTokens = 0;
         boolean done = false;
 
-        ServerSentEvents.Event event;
-        while ((event = events.next()) != null) {
-            progress.onProgress();
-            if ("[DONE]".equals(event.data().strip())) {
-                done = true;
-                break;
-            }
-            JsonNode chunk = reply.parse(event.data());
-            if (chunk.hasNonNull("error")) throw streamError(chunk.path("error"));
-            servedModel = chunk.path("model").asText(servedModel);
-            for (JsonNode choice : chunk.path("choices")) {
-                JsonNode delta = choice.path("delta");
-                if (delta.path("content").isTextual()) reply.text(delta.path("content").asText());
-                // Arguments arrive as a JSON STRING in fragments, unlike Anthropic's input
-                // object; the first fragment of a call carries its id and name.
-                for (JsonNode tc : delta.path("tool_calls")) {
-                    reply.call(tc.path("index").asInt(), tc.path("id").asText(null),
-                            tc.path("function").path("name").asText(null),
-                            tc.path("function").path("arguments").asText(null));
+        try {
+            ServerSentEvents.Event event;
+            while ((event = events.next()) != null) {
+                progress.onProgress();
+                if ("[DONE]".equals(event.data().strip())) {
+                    done = true;
+                    break;
                 }
-                finishReason = choice.path("finish_reason").asText(finishReason);
+                JsonNode chunk = reply.parse(event.data());
+                if (chunk.hasNonNull("error")) throw streamError(chunk.path("error"));
+                servedModel = chunk.path("model").asText(servedModel);
+                for (JsonNode choice : chunk.path("choices")) {
+                    JsonNode delta = choice.path("delta");
+                    if (delta.path("content").isTextual()) reply.text(delta.path("content").asText());
+                    // Arguments arrive as a JSON STRING in fragments, unlike Anthropic's input
+                    // object; the first fragment of a call carries its id and name.
+                    for (JsonNode tc : delta.path("tool_calls")) {
+                        reply.call(tc.path("index").asInt(), tc.path("id").asText(null),
+                                tc.path("function").path("name").asText(null),
+                                tc.path("function").path("arguments").asText(null));
+                    }
+                    finishReason = choice.path("finish_reason").asText(finishReason);
+                }
+                // The last chunk before [DONE]: no choices, only the counts.
+                JsonNode usage = chunk.path("usage");
+                if (usage.isObject()) {
+                    promptTokens = usage.path("prompt_tokens").asInt(0);
+                    completionTokens = usage.path("completion_tokens").asInt(0);
+                    cachedPromptTokens = usage.path("prompt_tokens_details").path("cached_tokens").asInt(0);
+                }
             }
-            // The last chunk before [DONE]: no choices, only the counts.
-            JsonNode usage = chunk.path("usage");
-            if (usage.isObject()) {
-                promptTokens = usage.path("prompt_tokens").asInt(0);
-                completionTokens = usage.path("completion_tokens").asInt(0);
-                cachedPromptTokens = usage.path("prompt_tokens_details").path("cached_tokens").asInt(0);
+            if (!done) {
+                throw new LlmException("openai",
+                        "the reply stream ended before [DONE], so the reply is incomplete", 0, null);
             }
-        }
-        if (!done) {
-            throw new LlmException("openai",
-                    "the reply stream ended before [DONE], so the reply is incomplete", 0, null);
+        } catch (IOException | RuntimeException noReply) {
+            if (promptTokens + completionTokens > 0) {
+                progress.billed(billed(servedModel, promptTokens, completionTokens, cachedPromptTokens));
+            }
+            throw noReply;
         }
 
-        // OpenAI reports cached prompt tokens INSIDE prompt_tokens and breaks them out under
-        // prompt_tokens_details.cached_tokens. They were priced at the full input rate, which
-        // on a long conversation is the dominant term and about ten times what it costs. The
-        // cached portion is split out so ModelPricing can charge it as a cache read; the sum
-        // still equals prompt_tokens, so no token is counted twice.
-        int uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
         log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
                 servedModel, promptTokens, cachedPromptTokens, completionTokens);
-        return reply.response(List.of(new LlmResponse.Usage(servedModel, uncachedPromptTokens,
-                        completionTokens, 0, cachedPromptTokens)),
+        return reply.response(List.of(billed(servedModel, promptTokens, completionTokens, cachedPromptTokens)),
                 finishReason, null, servedModel, null, null);
+    }
+
+    /**
+     * What one attempt is billed for, from the counts OpenAI reported.
+     * <p>
+     * OpenAI reports cached prompt tokens INSIDE prompt_tokens and breaks them out under
+     * prompt_tokens_details.cached_tokens. They were priced at the full input rate, which on a
+     * long conversation is the dominant term and about ten times what it costs. The cached
+     * portion is split out so ModelPricing can charge it as a cache read; the sum still equals
+     * prompt_tokens, so no token is counted twice.
+     */
+    private static LlmResponse.Usage billed(String model, int promptTokens, int completionTokens,
+                                            int cachedPromptTokens) {
+        return new LlmResponse.Usage(model, Math.max(0, promptTokens - cachedPromptTokens),
+                completionTokens, 0, cachedPromptTokens);
     }
 
     /** An error in the middle of a reply, with the status the same error has as a whole response. */

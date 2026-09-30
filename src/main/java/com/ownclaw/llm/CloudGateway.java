@@ -98,7 +98,7 @@ public final class CloudGateway implements LlmProvider {
         // (a) Unclassified means denied.
         if (egress == null) {
             ledger.record(row(null, providerName, model, EgressLedger.Decision.REFUSED,
-                    List.of(), 0, null, 0, "unclassified"));
+                    List.of(), 0, null, List.of(), 0, "unclassified"));
             throw new EgressRefused(providerName);
         }
 
@@ -157,7 +157,7 @@ public final class CloudGateway implements LlmProvider {
                 int at = part.text() == null ? -1 : part.text().indexOf(value);
                 if (at < 0) continue;
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, scrubs, null, 0, "vault:" + sv.getKey() + " survived scrubbing"));
+                        parts, scrubs, null, List.of(), 0, "vault:" + sv.getKey() + " survived scrubbing"));
                 log.error("Cloud call REFUSED for task {}: vault value {} survived scrubbing",
                         egress.taskId(), sv.getKey());
                 throw new EgressRefused(providerName, 0, "vault:" + sv.getKey(), part.index(),
@@ -200,7 +200,7 @@ public final class CloudGateway implements LlmProvider {
                         + ") at " + hit.offset();
                 if (mode() == Mode.ENFORCE) {
                     ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                            parts, scrubs, null, 0, ref));
+                            parts, scrubs, null, List.of(), 0, ref));
                     log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
                     throw new EgressRefused(providerName, hit.handle(),
                             egress.toolOf().apply(hit.handle()), part.index(), part.kind(), hit.offset());
@@ -215,8 +215,20 @@ public final class CloudGateway implements LlmProvider {
             }
         }
 
-        // (d) Send, and record what happened either way.
-        LlmRequestConfig outbound = scrubbedTools == null ? cfg : cfg.withTools(scrubbedTools);
+        // (d) Send, and record what happened either way. The caller's hook goes with the request,
+        // and what it is told of attempts that ended without a reply is kept here too: they were
+        // billed, no reply carries their counts, and they belong on this call's row.
+        var billedWithoutReply = new ArrayList<LlmResponse.Usage>();
+        LlmProgress hook = cfg.progress();
+        LlmRequestConfig outbound = (scrubbedTools == null ? cfg : cfg.withTools(scrubbedTools))
+                .withProgress(new LlmProgress() {
+                    @Override public void onProgress() { hook.onProgress(); }
+                    @Override public void calling(Runnable cancel) { hook.calling(cancel); }
+                    @Override public void billed(LlmResponse.Usage usage) {
+                        billedWithoutReply.add(usage);
+                        hook.billed(usage);
+                    }
+                });
         LlmResponse response;
         try {
             response = provider.chat(scrubbedMessages, outbound);
@@ -225,7 +237,7 @@ public final class CloudGateway implements LlmProvider {
             // the send, so a provider error used to discard it: the bytes had gone out and the
             // only note that they should not have went with the exception.
             ledger.record(row(egress, providerName, model, EgressLedger.Decision.ERROR, parts,
-                    scrubs, null, tools == null ? 0 : tools.size(),
+                    scrubs, null, billedWithoutReply, tools == null ? 0 : tools.size(),
                     observed == null ? e.getClass().getSimpleName()
                             : observed + " (call then failed: " + e.getClass().getSimpleName() + ")"));
             throw e;
@@ -234,7 +246,7 @@ public final class CloudGateway implements LlmProvider {
         // request can be answered by Anthropic's fallback model.
         ledger.record(row(egress, providerName, response.model() != null ? response.model() : model,
                 observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
-                parts, scrubs, response, tools == null ? 0 : tools.size(), observed));
+                parts, scrubs, response, billedWithoutReply, tools == null ? 0 : tools.size(), observed));
         // (e) Only then the check, so a refused or cut-off reply is on the ledger with its tokens
         // and why it ended before its caller is told it is no answer.
         return response.requireComplete(providerName);
@@ -311,9 +323,16 @@ public final class CloudGateway implements LlmProvider {
 
     // ── the row ──
 
+    /**
+     * @param response           the reply, or null when none came
+     * @param billedWithoutReply what the call's attempts that ended without a reply were billed
+     *                           for ({@link LlmProgress#billed}); with the reply's own, the row's
+     *                           tokens and cost
+     */
     private static EgressLedger.Row row(EgressContext egress, String provider, String model,
                                         EgressLedger.Decision decision, List<Part> parts,
-                                        int scrubs, LlmResponse response, int toolCount,
+                                        int scrubs, LlmResponse response,
+                                        List<LlmResponse.Usage> billedWithoutReply, int toolCount,
                                         String refusalRef) {
         long bytes = 0;
         var ledgerParts = new ArrayList<EgressLedger.Part>(parts.size());
@@ -322,11 +341,14 @@ public final class CloudGateway implements LlmProvider {
             ledgerParts.add(lp);
             bytes += p.text() == null ? 0 : p.text().getBytes(StandardCharsets.UTF_8).length;
         }
-        int pt = response == null ? 0 : response.promptTokens();
-        int ct = response == null ? 0 : response.completionTokens();
-        int cw = response == null ? 0 : response.cacheCreationTokens();
-        int cr = response == null ? 0 : response.cacheReadTokens();
-        double cost = response == null ? 0.0 : safeCost(model, response);
+        var usage = new ArrayList<>(billedWithoutReply);
+        if (response != null) usage.addAll(response.usage());
+        LlmResponse billed = LlmResponse.billedFor(usage);
+        int pt = billed.promptTokens();
+        int ct = billed.completionTokens();
+        int cw = billed.cacheCreationTokens();
+        int cr = billed.cacheReadTokens();
+        double cost = safeCost(model, billed);
         return new EgressLedger.Row(
                 egress == null ? null : egress.userId(),
                 egress == null ? null : egress.taskId(),

@@ -748,6 +748,24 @@ class DelegationBehaviourTest {
     }
 
     @Test
+    @DisplayName("a delegation to a local server that takes the connection and never answers fails in seconds, not an hour")
+    void aWedgedLocalServerFailsTheDelegationInSeconds() throws Exception {
+        // The availability probe comes first and no hook holds its cancel, so neither Stop nor
+        // the watchdog could end it: its own timeout is all that bounds it.
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        try (var ollama = new com.ownclaw.llm.WedgedOllama()) {
+            var outcome = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
+                    () -> executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), task()),
+                    "the probe waited on the wedged server as a chat waits for its first line");
+            assertFalse(outcome.ok());
+            assertTrue(outcome.text().contains("Local LLM (Ollama) is not available"), outcome.text());
+        }
+        assertTrue(ping.calls.isEmpty());
+        // Mutation: probe with the provider's own chat client -> up to an hour, and the preemptive
+        // timeout fails the test.
+    }
+
+    @Test
     @DisplayName("the owner's status line names the whole goal")
     void theStatusLineIsWhole() {
         var emitter = new ChatStatusEmitter();
