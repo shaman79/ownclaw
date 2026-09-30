@@ -5,13 +5,18 @@ import java.util.List;
 /**
  * Per-request overrides for LLM calls.
  * Any {@code null} field means "use provider default from config."
+ * <p>
+ * There is no output limit here, deliberately: every provider asks for the model's own maximum,
+ * so no call site can cap what the model may write.
  */
 public record LlmRequestConfig(
     String model,
     Double temperature,
-    Integer maxTokens,
     boolean jsonMode,
-    /** Per-request HTTP read timeout override in seconds. {@code null} = use provider default. */
+    /**
+     * Per-request HTTP read timeout override in seconds. {@code null} = use provider default.
+     * Replies are streamed, so it bounds the silence between two events, not the whole call.
+     */
     Integer readTimeoutSec,
     /**
      * Tools to offer natively on this call, or null to use the text protocol.
@@ -24,45 +29,41 @@ public record LlmRequestConfig(
      * On whose behalf this call is made, for the cloud gateway. Null means unclassified, and
      * an unclassified cloud call is refused — a local call ignores it.
      */
-    EgressContext egress
+    EgressContext egress,
+    /** Told about every event of the streamed reply; never null (see {@link LlmProgress}). */
+    LlmProgress progress
 ) {
-    /** Without native tools or a context — every call site that existed before either did. */
-    public LlmRequestConfig(String model, Double temperature, Integer maxTokens,
-                            boolean jsonMode, Integer readTimeoutSec) {
-        this(model, temperature, maxTokens, jsonMode, readTimeoutSec, null, null);
+    public LlmRequestConfig {
+        progress = progress == null ? LlmProgress.NONE : progress;
     }
 
-    /** With tools, without a context. */
-    public LlmRequestConfig(String model, Double temperature, Integer maxTokens,
-                            boolean jsonMode, Integer readTimeoutSec, List<ToolSpec> tools) {
-        this(model, temperature, maxTokens, jsonMode, readTimeoutSec, tools, null);
+    /** Without native tools, a context or a progress hook. */
+    public LlmRequestConfig(String model, Double temperature, boolean jsonMode, Integer readTimeoutSec) {
+        this(model, temperature, jsonMode, readTimeoutSec, null, null, null);
+    }
+
+    /** With tools, without a context or a progress hook. */
+    public LlmRequestConfig(String model, Double temperature, boolean jsonMode, Integer readTimeoutSec,
+                            List<ToolSpec> tools) {
+        this(model, temperature, jsonMode, readTimeoutSec, tools, null, null);
     }
 
     /** Use all defaults from the provider config. */
-    public static final LlmRequestConfig DEFAULT = new LlmRequestConfig(null, null, null, false, null);
-
-    public static LlmRequestConfig withMaxTokens(int maxTokens) {
-        return new LlmRequestConfig(null, null, maxTokens, false, null);
-    }
-
-    /** Force the provider to return valid JSON (OpenAI response_format: json_object). */
-    public static LlmRequestConfig withJsonMode(int maxTokens) {
-        return new LlmRequestConfig(null, null, maxTokens, true, null);
-    }
-
-    /** Create a config with a custom read timeout (in seconds) for long-running inference. */
-    public static LlmRequestConfig withReadTimeout(int readTimeoutSec) {
-        return new LlmRequestConfig(null, null, null, false, readTimeoutSec);
-    }
+    public static final LlmRequestConfig DEFAULT = new LlmRequestConfig(null, null, false, null);
 
     /** This request, but offering the model these tools natively. */
     public LlmRequestConfig withTools(List<ToolSpec> toolSpecs) {
-        return new LlmRequestConfig(model, temperature, maxTokens, jsonMode, readTimeoutSec, toolSpecs, egress);
+        return new LlmRequestConfig(model, temperature, jsonMode, readTimeoutSec, toolSpecs, egress, progress);
     }
 
     /** This request, made on behalf of a task. */
     public LlmRequestConfig withEgress(EgressContext egressContext) {
-        return new LlmRequestConfig(model, temperature, maxTokens, jsonMode, readTimeoutSec, tools, egressContext);
+        return new LlmRequestConfig(model, temperature, jsonMode, readTimeoutSec, tools, egressContext, progress);
+    }
+
+    /** This request, telling {@code hook} about every event of the reply as it streams in. */
+    public LlmRequestConfig withProgress(LlmProgress hook) {
+        return new LlmRequestConfig(model, temperature, jsonMode, readTimeoutSec, tools, egress, hook);
     }
 
     /** Whether native tools are being offered on this call. */

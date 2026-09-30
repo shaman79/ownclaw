@@ -16,8 +16,9 @@ import java.util.Map;
  *   <li><b>input</b> — uncached prompt tokens, the base rate.</li>
  *   <li><b>cache write</b> — tokens written into the cache, about 1.25x base. Writing is a
  *       premium, which is why caching a prompt that is never re-read is a net loss.</li>
- *   <li><b>cache read</b> — tokens served from the cache, about 0.1x base. This is where the
- *       saving lives, and it was invisible because the provider discarded the field.</li>
+ *   <li><b>cache read</b> — tokens served from the cache, about 0.1x base (less on some models,
+ *       below). This is where the saving lives, and it was invisible because the provider
+ *       discarded the field.</li>
  * </ul>
  * Rates are USD per million tokens. They are published prices that change, so this is a
  * best-effort estimate rather than a bill: treat the number as a strong relative signal for
@@ -28,20 +29,32 @@ public final class ModelPricing {
 
     /** USD per million tokens. */
     public record Rates(double input, double output, double cacheWrite, double cacheRead) {
+        /** The usual cache prices: writes (5-minute) at 1.25x the input rate, reads at 0.1x. */
         public static Rates of(double input, double output) {
             return new Rates(input, output, input * 1.25, input * 0.10);
         }
     }
 
-    // Prefix-matched, longest first, so a dated variant like claude-opus-5-20260101 resolves
-    // to its family without needing an entry per release.
+    // Prefix-matched, longest wins, so a dated variant like claude-haiku-4-5-20251001 resolves
+    // to its family without an entry per release, and claude-opus-5-5 is not priced as
+    // claude-opus-5. The Claude rates are Anthropic's published first-party prices; the Claude
+    // models not listed here fall back to the unknown-Claude entry.
     private static final Map<String, Rates> RATES = new LinkedHashMap<>();
     static {
-        RATES.put("claude-opus-5",      Rates.of(15.00, 75.00));
-        RATES.put("claude-sonnet-5",    Rates.of(3.00, 15.00));
+        // Cache reads at 0.025x the input rate; Claude Mythos 5.1 has the same per-token price,
+        // and whether it shares that cache-read rate was open at launch, so it keeps 0.1x.
+        RATES.put("claude-fable-5-1",   new Rates(10.00, 50.00, 12.50, 0.25));
+        RATES.put("claude-mythos-5-1",  Rates.of(10.00, 50.00));
+        RATES.put("claude-fable-5",     Rates.of(10.00, 50.00));
+        RATES.put("claude-mythos-5",    Rates.of(10.00, 50.00));
+        RATES.put("claude-opus-5-5",    new Rates(4.00, 20.00, 5.00, 0.20));   // reads at 0.05x
+        RATES.put("claude-opus-5",      Rates.of(5.00, 25.00));
+        RATES.put("claude-opus-4-8",    Rates.of(5.00, 25.00));   // what serves a cyber fallback
+        RATES.put("claude-opus-4-7",    Rates.of(5.00, 25.00));
+        RATES.put("claude-opus-4-6",    Rates.of(5.00, 25.00));
+        RATES.put("claude-sonnet-5",    Rates.of(2.00, 10.00));
         RATES.put("claude-sonnet-4",    Rates.of(3.00, 15.00));
         RATES.put("claude-haiku-4",     Rates.of(1.00, 5.00));
-        RATES.put("claude-3-5-haiku",   Rates.of(0.80, 4.00));
         RATES.put("claude-",            Rates.of(3.00, 15.00));   // unknown Claude: assume mid
         RATES.put("gpt-5",              Rates.of(1.25, 10.00));
         RATES.put("gpt-4o-mini",        Rates.of(0.15, 0.60));

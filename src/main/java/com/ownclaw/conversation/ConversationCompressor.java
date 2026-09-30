@@ -204,9 +204,9 @@ public class ConversationCompressor {
         semaphore.acquire();
         try {
             // Local generation is free, so no token cap is set: Ollama then generates until the model stops or
-            // the context window fills. The real bounds are num_ctx and the 600 s read timeout. Capping output
-            // here used to starve thinking models, which spend part of the budget reasoning before they
-            // answer.
+            // the context window fills. The real bound is num_ctx, the model's own context window. Capping
+            // output here used to starve thinking models, which spend part of the budget reasoning before
+            // they answer.
             var response = ollama.chat(messages, LlmRequestConfig.DEFAULT);
             return response.content();
         } finally {

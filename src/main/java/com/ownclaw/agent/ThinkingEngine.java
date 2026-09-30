@@ -108,7 +108,6 @@ public class ThinkingEngine {
         LlmRequestConfig requestConfig = new LlmRequestConfig(
                 null,   // use provider default model
                 null,   // use provider default temperature
-                8192,   // enough for structured action with long response messages
                 // JSON mode is for the TEXT protocol. With native tools it is actively harmful:
                 // it pushes the model to put JSON in the text body instead of emitting a
                 // tool_use block, which is the one thing this change exists to stop.
@@ -135,11 +134,10 @@ public class ThinkingEngine {
             log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
                     truncate(response.content(), 200));
 
-            // A reply cut off by the output cap is truncated mid-JSON, so it fails to parse and
-            // looks exactly like a malformed one. Both used to be retried with a byte-identical
-            // prompt, which produced an identically truncated reply, until the run gave up and
-            // threw away prose the model really had written. Say which it is, so the retry
-            // carries information instead of repeating itself.
+            // A refused reply, or one cut off by a limit of the model, never gets this far: the
+            // provider path throws ProviderRefused or OutputTruncated for it
+            // (LlmResponse.requireComplete), so everything below reads a whole reply.
+            //
             // No tool call came back, but tools were offered.
             //
             // On Anthropic that means the model chose to answer in prose, and treating it as a
@@ -150,8 +148,7 @@ public class ThinkingEngine {
             // treat it as prose when it genuinely is not an action -- which costs one cheap
             // parse attempt and removes a whole class of local-tier regression.
             if (nativeTools && !response.hasToolCalls()
-                    && response.content() != null && !response.content().isBlank()
-                    && !response.truncated()) {
+                    && response.content() != null && !response.content().isBlank()) {
                 AgentAction parsed = tryParseAction(response.content());
                 if (parsed != null) {
                     log.info("protocol=native-but-text — the model ignored the tools array and "
@@ -216,21 +213,6 @@ public class ThinkingEngine {
                         provider.model());
             }
 
-            if (response.truncated()) {
-                log.warn("Model hit its output cap ({} completion tokens) and was cut off "
-                        + "mid-answer. The action JSON is incomplete by construction.",
-                        response.completionTokens());
-                AgentAction cut = new AgentAction(AgentAction.RESPOND,
-                        Map.of("message", "My answer ran past the length limit and was cut off. "
-                                + "Here is what I had written:\n\n"
-                                + salvagePartialMessage(response.content())),
-                        "Output truncated at the max_tokens limit");
-                return new ThinkResult(cut, messages, response.content(), response.totalTokens(),
-                        response.promptTokens(), response.completionTokens(),
-                        response.cacheCreationTokens(), response.cacheReadTokens(),
-                        provider.model());
-            }
-
             AgentAction action = parseAction(response.content());
             return new ThinkResult(action, messages, response.content(), response.totalTokens(),
                     response.promptTokens(), response.completionTokens(),
@@ -247,35 +229,6 @@ public class ThinkingEngine {
                     "LLM call failed: " + e.getMessage());
             return new ThinkResult(action, messages, "ERROR: " + e.getMessage(), 0);
         }
-    }
-
-    /**
-     * Recover whatever prose survived a truncated action JSON.
-     * <p>
-     * The reply is cut off mid-structure, so it cannot be parsed — but the "message" field is
-     * usually the longest thing in it and usually the part that got cut, which means most of
-     * what the user actually wanted is sitting there. Returning it is strictly better than
-     * discarding the whole reply and reporting a generic failure, which is what happened before.
-     * <p>
-     * Deliberately string surgery rather than a lenient parser: the input is known-invalid JSON,
-     * and the goal is to salvage text for a human to read, not to reconstruct a valid action.
-     */
-    private String salvagePartialMessage(String raw) {
-        if (raw == null || raw.isBlank()) return "(nothing was recovered)";
-        int idx = raw.indexOf("\"message\"");
-        if (idx < 0) return truncate(raw.strip(), 4000);
-        int colon = raw.indexOf(':', idx);
-        if (colon < 0) return truncate(raw.strip(), 4000);
-        int quote = raw.indexOf('"', colon + 1);
-        if (quote < 0) return truncate(raw.strip(), 4000);
-        String tail = raw.substring(quote + 1);
-        // Stop at the closing quote if the field happens to be complete; otherwise take the lot.
-        int end = -1;
-        for (int i = 0; i < tail.length(); i++) {
-            if (tail.charAt(i) == '"' && (i == 0 || tail.charAt(i - 1) != '\\')) { end = i; break; }
-        }
-        String body = end >= 0 ? tail.substring(0, end) : tail;
-        return truncate(body.replace("\\n", "\n").replace("\\\"", "\"").strip(), 4000);
     }
 
     /**
@@ -785,8 +738,6 @@ public class ThinkingEngine {
             LlmRequestConfig req = new LlmRequestConfig(
                     null,
                     0.0,
-                    // Uncapped: local generation is free and a cap starves thinking models.
-                    null,
                     true,
                     null
             );

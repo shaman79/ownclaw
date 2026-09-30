@@ -3207,6 +3207,7 @@
                 : c.decision === 'OBSERVED_LEAK' ? tdRow('Decision', 'Sent although it contained private text' + why
                         + ': the check was only observing.', 'error')
                 : tdRow('Decision', 'The call failed' + why + '. Whether it reached the provider is not recorded.', 'error'));
+        if (c.stopReason) d.appendChild(tdRow('Reply ended', c.stopReason));
         runEl.appendChild(d);
         return runEl;
     }

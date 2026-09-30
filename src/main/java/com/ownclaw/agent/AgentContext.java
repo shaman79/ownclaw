@@ -343,12 +343,15 @@ public class AgentContext {
      * Four sources count. What the task started with — the message, the conversation summary,
      * the preferences, the recalled memories. The output of every PUBLIC artifact recorded
      * BEFORE the private one that hit; the order matters there. What the CLOUD itself wrote —
-     * its own tool-call arguments and reasoning, which the Anthropic renderer replays verbatim
-     * as assistant turns: a skill that echoes an argument it was given would otherwise make the
-     * next prompt unsendable. And the SOURCE of the skill that produced the hit artifact: a
-     * Python traceback quotes the line that threw, so a credentialed skill's failure would
-     * otherwise make its own repair prompt — the loop this project exists for — impossible. A public artifact recorded after a
-     * private one can be that private content laundered — a skill that echoes what it was given,
+     * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
+     * scans: a result that echoes an argument it was given (which would otherwise make the next
+     * prompt unsendable), the code generator's request, the correction after a reply that could
+     * not be parsed, the OpenAI history. Its own turns, which the Anthropic renderer replays as
+     * JSON, are assistant parts and are not scanned at all. And the SOURCE of the skill that
+     * produced the hit artifact: a Python traceback quotes the line that threw, so a credentialed
+     * skill's failure would otherwise make its own repair prompt — the loop this project exists
+     * for — impossible. A public artifact recorded after a private one can be that private
+     * content laundered — a skill that echoes what it was given,
      * a summary the local model wrote — and whitelisting it would let the leak through as
      * "already public". The smtp confirmation that quotes the public digest it just sent is the
      * case the order exists to allow; a public result quoting a private one is the case it

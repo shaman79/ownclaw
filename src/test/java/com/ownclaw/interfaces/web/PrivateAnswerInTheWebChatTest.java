@@ -84,7 +84,7 @@ class PrivateAnswerInTheWebChatTest {
                 return "t".equals(token) ? Optional.of(USER) : Optional.empty();
             }
         };
-        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null) {
+        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null, null) {
             @Override
             public boolean isSetupNeeded() { return false; }
         };

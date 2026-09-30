@@ -8,6 +8,17 @@ package com.ownclaw.llm;
  * @param completionTokens     output tokens
  * @param cacheCreationTokens  input tokens written to the prompt cache this call (0 if unsupported)
  * @param cacheReadTokens      input tokens served from the prompt cache this call (0 if unsupported)
+ * @param stopReason           why the model stopped, as the provider said it ("end_turn",
+ *                             "tool_use", "max_tokens", "refusal", "length", "stop", ...), or null
+ * @param stopDetail           what the provider adds to that reason -- on Anthropic, the category
+ *                             of a refusal ("cyber", ...), which it may leave out -- or null
+ * @param model                the model that wrote the reply, as the provider named it -- not
+ *                             necessarily the one asked for: Anthropic can hand a declined request
+ *                             to a fallback model -- or null when the provider did not say
+ * @param maxOutputTokens      the output limit the reply was written under (the model's own
+ *                             maximum), or null when the request set none
+ * @param contextWindow        the model's context window, or null when the provider does not
+ *                             say what it is
  */
 public record LlmResponse(
     String content,
@@ -16,18 +27,25 @@ public record LlmResponse(
     int cacheCreationTokens,
     int cacheReadTokens,
     String stopReason,
-    java.util.List<ToolCall> toolCalls
+    java.util.List<ToolCall> toolCalls,
+    String stopDetail,
+    String model,
+    Integer maxOutputTokens,
+    Integer contextWindow
 ) {
-    /** Without native tool calls — every provider path that does not offer tools. */
+    /** A reply described by its stop reason alone -- what a fake provider in a test returns. */
+    public LlmResponse(String content, int promptTokens, int completionTokens,
+                       int cacheCreationTokens, int cacheReadTokens, String stopReason,
+                       java.util.List<ToolCall> toolCalls) {
+        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens,
+                stopReason, toolCalls, null, null, null, null);
+    }
+
+    /** Without native tool calls. */
     public LlmResponse(String content, int promptTokens, int completionTokens,
                        int cacheCreationTokens, int cacheReadTokens, String stopReason) {
         this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens,
                 stopReason, java.util.List.of());
-    }
-
-    /** Whether the model asked to call a tool. */
-    public boolean hasToolCalls() {
-        return toolCalls != null && !toolCalls.isEmpty();
     }
 
     /** For providers with no prompt cache, or calls that did not touch one. */
@@ -35,23 +53,67 @@ public record LlmResponse(
         this(content, promptTokens, completionTokens, 0, 0, null);
     }
 
-    public LlmResponse(String content, int promptTokens, int completionTokens,
-                       int cacheCreationTokens, int cacheReadTokens) {
-        this(content, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, null);
+    /** Whether the model asked to call a tool. */
+    public boolean hasToolCalls() {
+        return toolCalls != null && !toolCalls.isEmpty();
     }
 
     /**
-     * Whether the model was cut off by the output limit rather than finishing.
-     * <p>
-     * Nothing read this before. The consequence was specific and expensive: an answer longer
-     * than max_tokens comes back truncated mid-JSON, so parsing fails, and a truncated reply is
-     * indistinguishable from a malformed one. Both were retried with a byte-identical prompt,
-     * which produced an identically truncated reply, and after a few rounds the run aborted —
-     * discarding prose the model had actually written. Knowing the difference turns "the model
-     * returned nonsense" into "the answer did not fit", which has an obvious fix.
+     * Whether the provider declined the request: Anthropic's "refusal", OpenAI's
+     * "content_filter". Such a reply is a normal HTTP 200 whose content is empty, or a partial
+     * answer that must be discarded -- never an answer.
      */
-    public boolean truncated() {
-        return "max_tokens".equals(stopReason) || "length".equals(stopReason);
+    public boolean refused() {
+        return "refusal".equals(stopReason) || "content_filter".equals(stopReason);
+    }
+
+    /** The stop reason as a person reads it, with its detail: "refusal (cyber)", "end_turn", or null. */
+    public String stopDescription() {
+        if (stopReason == null) return null;
+        return stopDetail == null ? stopReason : stopReason + " (" + stopDetail + ")";
+    }
+
+    /**
+     * This reply, if it is one the caller may use as the model's answer; otherwise the reason
+     * it is not, thrown.
+     * <p>
+     * The one check, applied on every path that hands a reply to a caller: the cloud gateway
+     * applies it after writing the call's ledger row, the local provider before it returns. A
+     * refused reply throws {@link ProviderRefused}. A reply cut off by a limit throws
+     * {@link OutputTruncated} naming the limit and its size: Anthropic's "max_tokens" is the
+     * model's maximum output and its "model_context_window_exceeded" the context window; a
+     * "length" (OpenAI, Ollama) is the output limit when the request set one and the context
+     * window when it did not, which is always the case on Ollama, where no output limit is sent.
+     * Before this, a cut-off reply looked exactly like a malformed one and was parsed, salvaged
+     * or retried as if it were the model's whole answer.
+     *
+     * @param provider the provider's name, for the exception
+     */
+    public LlmResponse requireComplete(String provider) {
+        LlmException notAnAnswer = incompleteness(provider);
+        if (notAnAnswer != null) throw notAnAnswer;
+        return this;
+    }
+
+    /** Whether {@link #requireComplete} lets this reply through. For the providers' own use. */
+    boolean complete() {
+        return incompleteness("") == null;
+    }
+
+    private LlmException incompleteness(String provider) {
+        if (refused()) return new ProviderRefused(provider, this);
+        if ("max_tokens".equals(stopReason)) {
+            return new OutputTruncated(provider, OutputTruncated.Limit.MAX_OUTPUT, maxOutputTokens, this);
+        }
+        if ("model_context_window_exceeded".equals(stopReason)) {
+            return new OutputTruncated(provider, OutputTruncated.Limit.CONTEXT_WINDOW, contextWindow, this);
+        }
+        if ("length".equals(stopReason)) {
+            return maxOutputTokens == null && contextWindow != null
+                    ? new OutputTruncated(provider, OutputTruncated.Limit.CONTEXT_WINDOW, contextWindow, this)
+                    : new OutputTruncated(provider, OutputTruncated.Limit.MAX_OUTPUT, maxOutputTokens, this);
+        }
+        return null;
     }
 
     /**

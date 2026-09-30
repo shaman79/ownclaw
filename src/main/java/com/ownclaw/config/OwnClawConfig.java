@@ -35,7 +35,6 @@ public class OwnClawConfig {
         private String url = "http://localhost:11434";
         private String model = "qwen2.5:14b";
         private double temperature = 0.3;
-        private int contextWindow = 16384;
 
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
@@ -45,8 +44,6 @@ public class OwnClawConfig {
         public void setModel(String model) { this.model = model; }
         public double getTemperature() { return temperature; }
         public void setTemperature(double temperature) { this.temperature = temperature; }
-        public int getContextWindow() { return contextWindow; }
-        public void setContextWindow(int contextWindow) { this.contextWindow = contextWindow; }
     }
 
     public static class Mentor {

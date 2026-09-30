@@ -12,9 +12,11 @@ public interface LlmProvider {
      * Send a chat completion request with the given messages and optional overrides.
      *
      * @param messages ordered conversation (system, user, assistant, ...)
-     * @param config   per-request overrides (model, temperature, max tokens)
-     * @return the provider's response
-     * @throws LlmException on network errors, rate limits, or invalid responses
+     * @param config   per-request overrides (model, temperature, tools, progress hook, ...)
+     * @return the provider's response -- through the cloud gateway or the local provider, only
+     *         one that passed {@link LlmResponse#requireComplete}
+     * @throws LlmException on network errors, rate limits, or invalid responses; a refused
+     *         reply is a {@link ProviderRefused}, one cut off by a limit an {@link OutputTruncated}
      */
     LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config);
 
@@ -24,9 +26,6 @@ public interface LlmProvider {
     boolean isAvailable();
 
     /**
-     * Human-readable name for logging (e.g. "ollama", "openai").
-     */
-    /**
      * Whether this provider can be offered tools natively on the CURRENT model.
      * <p>
      * Defaults to false so a provider that has not been taught the protocol keeps the text
@@ -35,6 +34,9 @@ public interface LlmProvider {
      */
     default boolean supportsTools() { return false; }
 
+    /**
+     * Human-readable name for logging (e.g. "ollama", "openai").
+     */
     String name();
 
     /**

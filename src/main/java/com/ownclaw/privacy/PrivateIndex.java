@@ -8,7 +8,8 @@ import java.util.Locale;
  * The canary: can this text contain a run of any PRIVATE artifact's bytes?
  * <p>
  * Every PRIVATE artifact of a task is indexed here as hashes of its 32-character windows, and
- * every outbound cloud body is checked against them before the socket opens. That is what
+ * every outbound cloud body is checked against them before the socket opens -- all of it but
+ * the model's own replayed turns, which it wrote itself (see CloudGateway). That is what
  * makes privacy a property of the code path rather than of a prompt builder's carefulness: the
  * builders can be wrong about what they rendered and this still refuses the call.
  * <p>

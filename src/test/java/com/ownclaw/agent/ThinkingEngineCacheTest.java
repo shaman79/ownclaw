@@ -53,7 +53,7 @@ class ThinkingEngineCacheTest {
                 List.class, com.ownclaw.llm.LlmRequestConfig.class, String.class, int.class);
         requestBody.setAccessible(true);
         var body = (com.fasterxml.jackson.databind.JsonNode) requestBody.invoke(provider, messages,
-                com.ownclaw.llm.LlmRequestConfig.DEFAULT, "claude-opus-5", 1024);
+                com.ownclaw.llm.LlmRequestConfig.DEFAULT, "claude-opus-5", 128_000);
         var first = body.path("messages").get(0).path("content");
         assertTrue(first.isArray(), "split into two blocks: " + first);
         String joined = first.get(0).path("text").asText() + first.get(1).path("text").asText();

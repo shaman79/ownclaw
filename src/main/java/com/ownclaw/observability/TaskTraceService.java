@@ -292,6 +292,9 @@ public class TaskTraceService {
         c.put("costUsd", error ? null : d.path("costUsd").asDouble());
         c.put("scrubs", d.path("scrubs").asInt());
         c.put("refusal", d.hasNonNull("refusal") ? d.path("refusal").asText() : null);
+        // Why the reply ended ("end_turn", "refusal (cyber)", ...). A call with no reply has
+        // none, and neither does a row written before it was recorded.
+        c.put("stopReason", d.hasNonNull("stopReason") ? d.path("stopReason").asText() : null);
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
         c.put("tools", Map.of("count", toolCount, "chars", toolChars));
         return c;

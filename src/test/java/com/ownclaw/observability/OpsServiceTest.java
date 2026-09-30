@@ -29,7 +29,7 @@ class OpsServiceTest {
         var conversations = new ConversationService(jdbc, null);
         String session = conversations.createSession("u1", "Statements");
         conversations.saveMessage("u1", session, "assistant", "[Private answer]", List.of(), "a1b2c3d4", SECRET);
-        var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper());
+        var ops = new OpsService(new OwnClawConfig(), jdbc, null, null, null, null, null, new ObjectMapper(), null);
 
         // Guarding the column was not enough: a CTE column list renames it without naming it.
         for (String sql : List.of("SELECT * FROM conversations",

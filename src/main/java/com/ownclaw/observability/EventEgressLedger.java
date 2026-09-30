@@ -49,6 +49,7 @@ public class EventEgressLedger implements EgressLedger {
             d.put("costUsd", r.costUsd());
             d.put("scrubs", r.scrubs());
             if (r.refusalRef() != null) d.put("refusal", r.refusalRef());
+            if (r.stopReason() != null) d.put("stopReason", r.stopReason());
             d.put("parts", r.parts().stream().map(p -> {
                 var m = new LinkedHashMap<String, Object>();
                 m.put("i", p.index()); m.put("kind", p.kind());

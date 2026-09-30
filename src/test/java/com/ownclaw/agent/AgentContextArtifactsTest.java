@@ -113,8 +113,10 @@ class AgentContextArtifactsTest {
     void theCloudsOwnWritingIsAllowed() {
         var ctx = task("send the digest");
         String subject = "Faktura 2026-09 od dodavatele Novák s.r.o. splatná 15. října";
-        // The cloud typed this into a tool call; the renderer replays it verbatim as an
-        // assistant turn, which the gateway then scans.
+        // The cloud typed this into a tool call. Its own replayed turn is an assistant part the
+        // gateway does not scan (AssistantPartsTest); this is for the parts it does scan, where
+        // the words appear as typed -- a result that echoes the argument, the code generator's
+        // request.
         ctx.trajectory().record(new AgentAction("smtp_send_email",
                 Map.of("subject", subject), "sending the invoice"),
                 AgentObservation.success("smtp_send_email", "sent", Map.of(), 10));
@@ -124,7 +126,7 @@ class AgentContextArtifactsTest {
                 "a skill that echoes an argument it was given would otherwise make the next "
                         + "prompt unsendable, after the email had gone out");
         assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise("sending the invoice")),
-                "the reasoning too — the renderer replays that as well");
+                "the reasoning too — the OpenAI history quotes it as typed");
     }
 
     @Test

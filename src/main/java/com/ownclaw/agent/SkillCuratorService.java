@@ -382,7 +382,7 @@ public class SkillCuratorService {
             // Every skill's full source goes out in this call. It carries the asking task's
             // context like the other two sites, so it is scrubbed, checked and ledgered -- and
             // the ledger row will show its size, which is the first time anyone sees it.
-            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, 4096, true, null)
+            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, true, null)
                     .withEgress(egress);
             LlmResponse response = provider.chat(
                     List.of(LlmMessage.user(sb.toString())),

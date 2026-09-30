@@ -281,43 +281,29 @@ public class LocalExecutor {
             LlmResponse response;
             try {
 
-                // Local generation is free, so no token cap is set: Ollama then generates until the model stops or
-                // the context window fills. The real bounds are num_ctx and the 600 s read timeout. Capping output
-                // here used to starve thinking models, which spend part of the budget reasoning before they
-                // answer.
+                // No output limit is sent (a request cannot carry one): Ollama generates until the
+                // model stops or its context window -- the model's own -- is full. Capping output
+                // here used to starve thinking models, which spend part of the budget reasoning
+                // before they answer.
                 // format:json and tools are mutually exclusive in Ollama, so JSON mode is
                 // only asked for on the text protocol, where it is what holds the output shape.
                 response = localProvider.chat(messages,
-                        new LlmRequestConfig(null, null, null, !nativeTools, null, specs));
+                        new LlmRequestConfig(null, null, !nativeTools, null, specs));
             } catch (Exception e) {
-                // Name the two failures that actually happen, because the orchestrator reads this
-                // string and guesses otherwise -- it reported "local LLM token limits" when the
-                // real answer was a context window one step too small, which points at the model
-                // instead of at one config line.
+                // A delegation that outgrew the local model's context window fails with
+                // OutputTruncated, whose message names the window and its size.
                 String msg = String.valueOf(e.getMessage());
-                String hint = "";
-                if (msg.contains("exceed_context_size") || msg.contains("exceeds the available context")) {
-                    hint = " The local context window is too small for this delegation prompt"
-                            + " (tool manifest plus results so far). Raise"
-                            + " ownclaw.executor.context-window / OWNCLAW_EXECUTOR_CONTEXT."
-                            + " This is a configuration limit, not a fault in the model or the goal.";
-                } else if (msg.contains("whole output budget on reasoning")) {
-                    hint = " The prompt nearly filled the context window, so almost nothing was"
-                            + " left to answer with and the model spent it reasoning. Same fix:"
-                            + " raise the local context window.";
-                }
                 // After a private read the error can quote it -- a tool-call parse error echoes
                 // the model's raw output -- so then neither the cloud nor the log gets the
-                // message, only its type and the hint above, which the code wrote.
+                // message, only its type.
                 if (tainted) {
                     String kept = e.getClass().getSimpleName()
                             + " (its text is kept out: this delegation had read private data)";
-                    log.error("Local LLM call failed during delegation step {}: {}{}", step + 1, kept, hint);
-                    return partial("Local LLM call failed: " + kept + hint, mine);
+                    log.error("Local LLM call failed during delegation step {}: {}", step + 1, kept);
+                    return partial("Local LLM call failed: " + kept, mine);
                 }
-                log.error("Local LLM call failed during delegation step {}: {}{}",
-                        step + 1, msg, hint, e);
-                return partial("Local LLM call failed: " + msg + hint, mine);
+                log.error("Local LLM call failed during delegation step {}: {}", step + 1, msg, e);
+                return partial("Local LLM call failed: " + msg, mine);
             }
 
             parentContext.addLocalTokens(response.totalTokens());
@@ -863,9 +849,10 @@ public class LocalExecutor {
      * eight exchanges on top of the system prompt and 27 tool schemas, the prompt had nearly
      * filled a 24,576-token window, and the model spent the 4,954 tokens left on reasoning and
      * never answered. That delegation burned 407 seconds and then failed, and the cloud did the
-     * work in fourteen. The owner's constraints rule out the other two levers — the local model
-     * is to think freely and keep its full output budget — and VRAM rules out a bigger window,
-     * so what has to shrink is the part nobody chose: the transcript.
+     * work in fourteen. The owner's constraints ruled out the other two levers — the local model
+     * is to think freely and keep its full output budget — and the window was then a setting kept
+     * small for VRAM (it is now the model's own), so what had to shrink was the part nobody
+     * chose: the transcript.
      * <p>
      * Nothing is lost that matters, because results do not live here. The delegation's list
      * holds every output in full, {@code {{N}}} still resolves against it, and the ledger says which
@@ -931,8 +918,8 @@ public class LocalExecutor {
     /**
      * How much private text a delegation on a file task may be shown in full, across all its
      * results. The local model is the only reader of the file, so it needs more than an excerpt
-     * to answer from; a few thousand tokens of a 24,576-token window leaves the rest for the
-     * prompt, the model's thinking and the answer.
+     * to answer from; a few thousand tokens of what was then a 24,576-token window left the rest
+     * for the prompt, the model's thinking and the answer.
      */
     static final int PRIVATE_READ_CHARS = 16_000;
 

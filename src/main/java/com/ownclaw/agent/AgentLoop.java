@@ -2065,7 +2065,6 @@ public class AgentLoop {
             LlmRequestConfig codeGenConfig = new LlmRequestConfig(
                     null,   // use provider default model
                     0.2,    // low temperature for precise code generation
-                    null,   // no token limit — let the model finish naturally
                     false,  // no JSON mode — we want raw Python code
                     null    // use provider default read timeout
             ).withEgress(context.egress("codegen"));
@@ -2287,8 +2286,9 @@ public class AgentLoop {
             }
         }
 
-        // Handle TRUNCATED responses: opening ```python fence but no closing ``` fence
-        // (happens when the LLM hits max_tokens and output is cut off mid-code)
+        // Handle a ```python fence that is never closed. A reply cut off at the model's maximum
+        // output never gets here -- the provider path refuses it (OutputTruncated) -- so this is
+        // a model that left the fence open.
         java.util.regex.Matcher truncatedPy = java.util.regex.Pattern
                 .compile("```[Pp]ython\\s*\n(.*)", java.util.regex.Pattern.DOTALL)
                 .matcher(response);
@@ -2300,7 +2300,7 @@ public class AgentLoop {
                 code = code.substring(0, nextFence).strip();
             }
             if (!code.isBlank() && code.contains("def run")) {
-                log.warn("Extracted Python code from TRUNCATED response (no closing fence). "
+                log.warn("Extracted Python code from a ```python fence that was never closed. "
                         + "Code may be incomplete — {} chars extracted.", code.length());
                 return code;
             }
@@ -2689,9 +2689,10 @@ public class AgentLoop {
      * through the ordinary mechanism -- the same flag the Stop button sets -- so it unwinds the
      * way any cancelled task does, emits a proper outcome and releases its permits.
      *
-     * <p>Honest about its limits: cancellation is cooperative. A task blocked in a socket read
-     * cannot notice until that read returns, so this bounds a stall by the stall timeout PLUS
-     * whatever the in-flight call takes to give up -- for Ollama, up to its 600 s read timeout.
+     * <p>Honest about its limits: cancellation is cooperative. A task in the middle of a model
+     * call cannot notice until the call returns -- a streamed reply returns when the model
+     * stops, or after the provider's read timeout of silence (600 s for Ollama) -- so this bounds
+     * a stall by the stall timeout PLUS however long that call still runs.
      * That is a real improvement on never noticing, and it is not a kill switch. Making it one
      * would mean interrupting threads mid-call, which risks leaving a half-written skill
      * directory or a dangling sandbox process behind.

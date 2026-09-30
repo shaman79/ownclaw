@@ -1,18 +1,19 @@
 package com.ownclaw.llm;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ownclaw.config.OwnClawConfig;
 import okhttp3.*;
+import okio.BufferedSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,14 +21,18 @@ import java.util.regex.Pattern;
 /**
  * Anthropic Messages API provider for cloud LLM inference.
  * <p>
- * API: POST https://api.anthropic.com/v1/messages
+ * API: POST https://api.anthropic.com/v1/messages, with the reply streamed as server-sent
+ * events.
  * <p>
  * Claude uses a different message format than OpenAI:
  * - System prompt is a top-level field, NOT in the messages array
  * - No response_format: json_object — use prompt engineering for JSON mode
- * - Uses max_tokens instead of max_completion_tokens
- * - Returns usage.input_tokens / usage.output_tokens
+ * - max_tokens is required. It is always the model's own maximum, which the Models API
+ *   ({@code GET /v1/models/{model}}) reports together with the context window
+ * - Returns usage.input_tokens / usage.output_tokens, plus the two cache counters
  * - Newer models reject sampling parameters — see {@link #supportsSampling(String)}
+ * - A request the model's safety classifiers decline is re-run on the fallback model Anthropic
+ *   recommends, inside the same call ({@code "fallbacks": "default"})
  */
 // Not a bean, and not public: CloudGateway is the only thing that constructs this, and a
 // test walks the source tree to keep it so. Every cloud call goes through the door.
@@ -39,14 +44,12 @@ class AnthropicProvider implements LlmProvider {
     private static final String API_VERSION = "2023-06-01";
 
     /**
-     * Fallback output budget when the caller doesn't set one. {@code max_tokens} is a
-     * required field on the Messages API, so it can't simply be omitted. It is set well
-     * above the old 4096 because on the newer models this budget also has to cover
-     * thinking tokens — a tight ceiling truncates the answer mid-JSON, which surfaces as
-     * a parse failure rather than an obvious error. 16k still returns comfortably inside
-     * the non-streaming read timeout.
+     * The beta that {@code "fallbacks": "default"} requires. Anthropic's recommendation for every
+     * claude-opus-5 caller: a declined request is handed to the model Anthropic picks for the
+     * refusal's category -- a cyber-category decline to Opus 4.8 -- instead of ending in a
+     * refusal. It is the only beta this provider sends.
      */
-    private static final int DEFAULT_MAX_TOKENS = 16000;
+    static final String FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
     /**
      * Matches a modern model id: {@code claude-<family>-<major>[-<minor>][-<date>]}.
@@ -56,18 +59,36 @@ class AnthropicProvider implements LlmProvider {
     private static final Pattern MODEL_GENERATION =
             Pattern.compile("claude-([a-z]+)-(\\d+)(?:-(\\d{1,2})(?!\\d))?");
 
+    /** What the Models API says about one model: its maximum output and its context window. */
+    record ModelLimits(int maxOutputTokens, int contextWindow) {}
+
     private final OwnClawConfig.Mentor config;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
 
+    /**
+     * Each model's limits, as the Models API reported them the first time this process asked.
+     * A lookup that failed is not remembered: that call fails with the reason, and the next one
+     * asks again.
+     */
+    private final Map<String, ModelLimits> limits = new ConcurrentHashMap<>();
+
     AnthropicProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper) {
-        this.config = ownClawConfig.getMentor();
-        this.mapper = mapper;
-        this.httpClient = new OkHttpClient.Builder()
+        this(ownClawConfig, mapper, new OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
+                // The reply is streamed, so this is the longest silence allowed between two
+                // events -- Anthropic sends pings while the model thinks -- not the length of
+                // the call.
                 .readTimeout(300, TimeUnit.SECONDS)
                 .writeTimeout(10, TimeUnit.SECONDS)
-                .build();
+                .build());
+    }
+
+    /** With the HTTP client given, so a test can answer the calls itself. */
+    AnthropicProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper, OkHttpClient httpClient) {
+        this.config = ownClawConfig.getMentor();
+        this.mapper = mapper;
+        this.httpClient = httpClient;
     }
 
     @Override
@@ -82,93 +103,214 @@ class AnthropicProvider implements LlmProvider {
         }
 
         String model = reqConfig.model() != null ? reqConfig.model() : config.getAnthropicModel();
-        int maxTokens = reqConfig.maxTokens() != null ? reqConfig.maxTokens() : DEFAULT_MAX_TOKENS;
+        ModelLimits modelLimits = limits(model, apiKey);
 
-        ObjectNode body = requestBody(messages, reqConfig, model, maxTokens);
+        ObjectNode body = requestBody(messages, reqConfig, model, modelLimits.maxOutputTokens());
 
         Request request = new Request.Builder()
                 .url(BASE_URL + "/messages")
                 .header("x-api-key", apiKey)
                 .header("anthropic-version", API_VERSION)
+                .header("anthropic-beta", FALLBACK_BETA)
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
                 .build();
 
         try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
-            String responseBody = response.body() != null ? response.body().string() : "";
-
+            ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 int code = response.code();
-                // Anthropic uses 429 for rate limits, 401 for auth — same as OpenAI
-                throw new LlmException("anthropic", "HTTP " + code + ": " + responseBody,
-                        code, null);
-            }
-
-            JsonNode json = mapper.readTree(responseBody);
-
-            // Extract text content from the response
-            // Anthropic returns: { content: [ { type: "text", text: "..." } ], usage: {...} }
-            StringBuilder contentBuilder = new StringBuilder();
-            JsonNode contentArray = json.path("content");
-            if (contentArray.isArray()) {
-                for (JsonNode block : contentArray) {
-                    if ("text".equals(block.path("type").asText())) {
-                        contentBuilder.append(block.path("text").asText(""));
-                    }
+                String error = responseBody != null ? responseBody.string() : "";
+                if (code == 400 && error.contains("prompt is too long")) {
+                    throw new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW,
+                            modelLimits.contextWindow(), null);
                 }
+                // Anthropic uses 429 for rate limits, 529 for overload, 401 for auth
+                throw new LlmException("anthropic", "HTTP " + code + ": " + error, code, null);
             }
-            String content = contentBuilder.toString();
-
-            // tool_use blocks sit alongside the text blocks in the same content array; the text
-            // is the model's reasoning and is kept as such.
-            var toolCalls = new java.util.ArrayList<ToolCall>();
-            if (contentArray.isArray()) {
-                for (JsonNode block : contentArray) {
-                    if (!"tool_use".equals(block.path("type").asText())) continue;
-                    Map<String, Object> args = mapper.convertValue(
-                            block.path("input"), new TypeReference<Map<String, Object>>() {});
-                    toolCalls.add(new ToolCall(block.path("id").asText(null),
-                            block.path("name").asText(null),
-                            args == null ? Map.of() : args));
-                }
+            if (responseBody == null) {
+                throw new LlmException("anthropic", "HTTP " + response.code() + " with no body", 0, null);
             }
-
-            int promptTokens = json.path("usage").path("input_tokens").asInt(0);
-            int completionTokens = json.path("usage").path("output_tokens").asInt(0);
-            int cacheCreation = json.path("usage").path("cache_creation_input_tokens").asInt(0);
-            int cacheRead = json.path("usage").path("cache_read_input_tokens").asInt(0);
-
-            if (cacheRead > 0 || cacheCreation > 0) {
-                log.info("Anthropic [{}]: {} input + {} output tokens (cache: {} created, {} read)",
-                        model, promptTokens, completionTokens, cacheCreation, cacheRead);
-            } else {
-                log.debug("Anthropic [{}]: {} input + {} output tokens", model, promptTokens, completionTokens);
-            }
-            // Carry the cache counters through. input_tokens excludes both of these, so dropping
-            // them (as this did) understates the billed input by most of the prompt on a cached
-            // conversation, and makes any token or cost figure downstream unreconcilable with
-            // the actual bill.
-            String stopReason = json.path("stop_reason").asText(null);
-            if ("max_tokens".equals(stopReason)) {
-                log.warn("Anthropic [{}]: response hit the {}-token output cap and was cut off. "
-                        + "Downstream parsing will fail on the truncated JSON.", model, maxTokens);
-            }
-            return new LlmResponse(content, promptTokens, completionTokens,
-                    cacheCreation, cacheRead, stopReason, toolCalls);
-
+            return read(responseBody.source(), model, modelLimits, reqConfig.progress());
         } catch (IOException e) {
             throw new LlmException("anthropic", "Connection failed: " + e.getMessage(), 0, e);
         }
     }
 
     /**
+     * The reply, event by event. The progress hook hears every event, pings included, and
+     * whatever it throws leaves through here untouched, closing the stream on its way out.
+     */
+    private LlmResponse read(BufferedSource source, String requestedModel, ModelLimits modelLimits,
+                             LlmProgress progress) throws IOException {
+        var events = new ServerSentEvents(source);
+        var reply = new StreamedReply("anthropic", mapper);
+        String servedModel = requestedModel;
+        String stopReason = null;
+        String stopDetail = null;
+        int input = 0, output = 0, cacheWrite = 0, cacheRead = 0;
+        boolean stopped = false;
+
+        ServerSentEvents.Event event;
+        while ((event = events.next()) != null) {
+            progress.onProgress();
+            JsonNode data = reply.parse(event.data());
+            switch (data.path("type").asText("")) {
+                case "message_start" -> {
+                    JsonNode message = data.path("message");
+                    // The model that is answering. When the requested model declined before
+                    // writing anything, this already names the fallback model.
+                    servedModel = message.path("model").asText(servedModel);
+                    JsonNode usage = message.path("usage");
+                    input = count(usage, "input_tokens", input);
+                    output = count(usage, "output_tokens", output);
+                    cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                    cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                }
+                case "content_block_start" -> {
+                    int index = data.path("index").asInt();
+                    JsonNode block = data.path("content_block");
+                    switch (block.path("type").asText("")) {
+                        case "text" -> reply.text(block.path("text").asText(""));
+                        case "tool_use" -> reply.call(index, block.path("id").asText(null),
+                                block.path("name").asText(null), null);
+                        // The requested model declined part-way and the fallback model goes on
+                        // from here. Its text continues the text before it; a tool call before
+                        // it was the declined model's and is not part of the reply.
+                        case "fallback" -> {
+                            reply.discardCalls();
+                            servedModel = block.path("to").path("model").asText(servedModel);
+                        }
+                        // thinking, redacted_thinking and block types newer than this code are
+                        // not part of the answer.
+                        default -> { }
+                    }
+                }
+                case "content_block_delta" -> {
+                    JsonNode delta = data.path("delta");
+                    switch (delta.path("type").asText("")) {
+                        case "text_delta" -> reply.text(delta.path("text").asText(""));
+                        case "input_json_delta" -> reply.call(data.path("index").asInt(), null, null,
+                                delta.path("partial_json").asText(""));
+                        default -> { }     // thinking_delta, signature_delta, ...
+                    }
+                }
+                case "content_block_stop" -> reply.close(data.path("index").asInt());
+                case "message_delta" -> {
+                    JsonNode delta = data.path("delta");
+                    stopReason = delta.path("stop_reason").asText(stopReason);
+                    // Only a refusal has details, and even then they may be null.
+                    stopDetail = delta.path("stop_details").path("category").asText(stopDetail);
+                    JsonNode usage = data.path("usage");
+                    input = count(usage, "input_tokens", input);
+                    output = count(usage, "output_tokens", output);
+                    cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                    cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
+                }
+                case "message_stop" -> stopped = true;
+                case "error" -> throw streamError(data.path("error"));
+                default -> { }             // ping, and event types newer than this code
+            }
+        }
+        if (!stopped) {
+            throw new LlmException("anthropic",
+                    "the reply stream ended before message_stop, so the reply is incomplete", 0, null);
+        }
+
+        if (cacheRead > 0 || cacheWrite > 0) {
+            log.info("Anthropic [{}]: {} input + {} output tokens (cache: {} created, {} read)",
+                    servedModel, input, output, cacheWrite, cacheRead);
+        } else {
+            log.debug("Anthropic [{}]: {} input + {} output tokens", servedModel, input, output);
+        }
+        // Carry the cache counters through. input_tokens excludes both of them, so dropping them
+        // understates the billed input by most of the prompt on a cached conversation.
+        return reply.response(input, output, cacheWrite, cacheRead, stopReason, stopDetail,
+                servedModel, modelLimits.maxOutputTokens(), modelLimits.contextWindow());
+    }
+
+    /** A counter from a usage object, or {@code otherwise} when the object does not carry it. */
+    private static int count(JsonNode usage, String field, int otherwise) {
+        JsonNode n = usage.get(field);
+        return n != null && n.isNumber() ? n.asInt() : otherwise;
+    }
+
+    /**
+     * An {@code error} event in the middle of a reply, with the status the same error has as a
+     * whole response -- so an overload part-way through is retried like an HTTP 529.
+     */
+    static LlmException streamError(JsonNode error) {
+        String type = error.path("type").asText("error");
+        int status = switch (type) {
+            case "invalid_request_error" -> 400;
+            case "authentication_error" -> 401;
+            case "billing_error" -> 402;
+            case "permission_error" -> 403;
+            case "not_found_error" -> 404;
+            case "request_too_large" -> 413;
+            case "rate_limit_error" -> 429;
+            case "api_error" -> 500;
+            case "timeout_error" -> 504;
+            case "overloaded_error" -> 529;
+            default -> 0;
+        };
+        return new LlmException("anthropic", "the reply stream reported " + type + ": "
+                + error.path("message").asText(""), status, null);
+    }
+
+    /**
+     * The model's maximum output and context window, from {@code GET /v1/models/{model}} --
+     * asked once per model, and again after a lookup that failed. There is no table of models
+     * here to fall back on: a limit is either the one Anthropic states or unknown, and a call
+     * cannot be made without it, because max_tokens is required.
+     */
+    private ModelLimits limits(String model, String apiKey) {
+        ModelLimits known = limits.get(model);
+        if (known != null) return known;
+        Request request = new Request.Builder()
+                .url(HttpUrl.get(BASE_URL).newBuilder().addPathSegment("models").addPathSegment(model).build())
+                .header("x-api-key", apiKey)
+                .header("anthropic-version", API_VERSION)
+                .get()
+                .build();
+        try (Response response = httpClient.newCall(request).execute()) {
+            String text = response.body() != null ? response.body().string() : "";
+            if (!response.isSuccessful()) {
+                throw new LlmException("anthropic", "the Models API could not describe '" + model
+                        + "': HTTP " + response.code() + ": " + text, response.code(), null);
+            }
+            JsonNode json = mapper.readTree(text);
+            int maxOutput = json.path("max_tokens").asInt(0);
+            int window = json.path("max_input_tokens").asInt(0);
+            if (maxOutput <= 0 || window <= 0) {
+                throw new LlmException("anthropic", "the Models API gave no max_tokens and "
+                        + "max_input_tokens for '" + model + "', so its limits are unknown");
+            }
+            ModelLimits found = new ModelLimits(maxOutput, window);
+            limits.put(model, found);
+            return found;
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new LlmException("anthropic", "the Models API's answer about '" + model
+                    + "' is not JSON (" + e.getOriginalMessage() + ")", 0, e);
+        } catch (IOException e) {
+            throw new LlmException("anthropic", "Connection failed asking the Models API about '"
+                    + model + "': " + e.getMessage(), 0, e);
+        }
+    }
+
+    /**
      * The request body for one call: system blocks, messages with their cache breakpoints, and
      * tools. Package-private so a test can see exactly what would be sent.
+     *
+     * @param maxOutputTokens the model's own maximum output, from the Models API
      */
-    ObjectNode requestBody(List<LlmMessage> messages, LlmRequestConfig reqConfig, String model, int maxTokens) {
+    ObjectNode requestBody(List<LlmMessage> messages, LlmRequestConfig reqConfig, String model,
+                           int maxOutputTokens) {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
-        body.put("max_tokens", maxTokens);
+        body.put("max_tokens", maxOutputTokens);
+        body.put("stream", true);
+        body.put("fallbacks", "default");
 
         // Newer models decide sampling themselves and reject the parameter with
         // HTTP 400 "temperature is deprecated for this model."
@@ -263,6 +405,12 @@ class AnthropicProvider implements LlmProvider {
         // re-billed at full rate on every step. As a tools array with cache_control on the last
         // entry it is billed once and then read at a tenth.
         //
+        // eager_input_streaming: the reply is streamed, and without it Anthropic holds each tool
+        // input back until the whole of it is generated -- a skill's full source, say, arriving
+        // as one burst after minutes of silence on the stream. With it the input streams as it
+        // is written, unchecked by Anthropic, and StreamedReply parses it strictly when the
+        // block ends.
+        //
         // disable_parallel_tool_use: the loop executes exactly one action per step and records
         // one observation. Accepting two calls would mean either dropping one -- silently losing
         // work the model asked for -- or restructuring the trajectory. That is a later stage,
@@ -274,6 +422,7 @@ class AnthropicProvider implements LlmProvider {
                 t.put("name", spec.name());
                 t.put("description", spec.description() == null ? "" : spec.description());
                 t.set("input_schema", mapper.valueToTree(spec.inputSchema()));
+                t.put("eager_input_streaming", true);
             }
             if (toolsArray.size() > 0) {
                 ((ObjectNode) toolsArray.get(toolsArray.size() - 1))
@@ -346,14 +495,9 @@ class AnthropicProvider implements LlmProvider {
     @Override
     public boolean isAvailable() {
         String apiKey = config.getAnthropicApiKey();
-        if (apiKey == null || apiKey.isBlank()) {
-            return false;
-        }
-        // Anthropic doesn't have a /models endpoint like OpenAI.
-        // Use a minimal messages call to verify the key works.
-        // Actually, just check if the key is set — actual validation
-        // happens on first use to avoid unnecessary API calls.
-        return true;
+        // Whether the key is set. It is checked on first use rather than here: a request just
+        // to test it would be spent on every availability check.
+        return apiKey != null && !apiKey.isBlank();
     }
 
     @Override

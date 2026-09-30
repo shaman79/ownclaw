@@ -40,6 +40,7 @@ public class SetupWizardService {
     private final ObjectMapper mapper;
     private final ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider;
     private final ObjectProvider<LlmRouter> llmRouterProvider;
+    private final com.ownclaw.llm.LocalModelCheck localModelCheck;
 
     /** Cached diagnostic result, refreshed on demand. */
     private volatile DiagnosticResult lastDiagnostic;
@@ -54,12 +55,14 @@ public class SetupWizardService {
 
     public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
                               ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider,
-                              ObjectProvider<LlmRouter> llmRouterProvider) {
+                              ObjectProvider<LlmRouter> llmRouterProvider,
+                              com.ownclaw.llm.LocalModelCheck localModelCheck) {
         this.jdbc = jdbc;
         this.config = config;
         this.mapper = mapper;
         this.telegramBotProvider = telegramBotProvider;
         this.llmRouterProvider = llmRouterProvider;
+        this.localModelCheck = localModelCheck;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
@@ -202,9 +205,11 @@ public class SetupWizardService {
             var bodyNode = mapper.createObjectNode();
             bodyNode.put("model", modelName);
             bodyNode.put("stream", false);
-            var options = bodyNode.putObject("options");
-            options.put("temperature", 0);
-            options.put("num_predict", 64);
+            bodyNode.putObject("options").put("temperature", 0);
+            // No num_predict, and the same num_ctx, truncate and shift as every local call: a
+            // sample taken with other settings would make Ollama load the model again, which
+            // takes minutes, for the sample and again for the next real call.
+            com.ownclaw.llm.OllamaProvider.contextSettings(bodyNode, localModelCheck.contextLength(modelName));
             var msgs = bodyNode.putArray("messages");
             msgs.addObject()
                 .put("role", "user")

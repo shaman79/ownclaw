@@ -92,6 +92,7 @@ public class OpsService {
     private final AuthService authService;
     private final com.ownclaw.agent.SkillCuratorService curatorService;
     private final ObjectMapper mapper;
+    private final com.ownclaw.llm.LocalModelCheck localModelCheck;
     private final OkHttpClient http;
     private final Instant startedAt = Instant.now();
 
@@ -99,7 +100,7 @@ public class OpsService {
                       DynamicSkillRegistry skillRegistry, TaskQueue taskQueue,
                       AuthService authService,
                       com.ownclaw.agent.SkillCuratorService curatorService,
-                      ObjectMapper mapper) {
+                      ObjectMapper mapper, com.ownclaw.llm.LocalModelCheck localModelCheck) {
         this.config = config;
         this.jdbc = jdbc;
         this.toolRegistry = toolRegistry;
@@ -108,6 +109,7 @@ public class OpsService {
         this.authService = authService;
         this.curatorService = curatorService;
         this.mapper = mapper;
+        this.localModelCheck = localModelCheck;
         // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
         // longer than a normal call would. A hung Ollama therefore blocks one ops request
         // for up to this long; that is acceptable for a probe and is stated in the response.
@@ -284,21 +286,23 @@ public class OpsService {
         String canary = "BANANA-" + Integer.toHexString(model.hashCode()).toUpperCase(Locale.ROOT);
         try {
             long t0 = System.currentTimeMillis();
-            JsonNode r = postJson(url + "/api/chat", Map.of(
-                    "model", model,
-                    "stream", false,
-                    "messages", List.of(
-                            Map.of("role", "system",
-                                    "content", "Reply with exactly the word " + canary + " and nothing else."),
-                            Map.of("role", "user", "content", "hello")),
-                    // 32 was not a budget, it was a trap: a thinking model spends its output on
-                    // reasoning first, so it hit the cap mid-thought every time, returned an empty
-                    // answer, and got reported as unable to follow a system message. 256 is enough
-                    // for a short reasoning pass plus one word, and the probe still costs one call.
-                    "options", Map.of("temperature", 0, "num_predict", 256)));
+            var body = mapper.createObjectNode();
+            body.put("model", model);
+            body.put("stream", false);
+            var messages = body.putArray("messages");
+            messages.addObject().put("role", "system")
+                    .put("content", "Reply with exactly the word " + canary + " and nothing else.");
+            messages.addObject().put("role", "user").put("content", "hello");
+            body.putObject("options").put("temperature", 0);
+            // No num_predict -- an output cap made a thinking model spend it all on reasoning
+            // and look unable to follow a system message -- and the same num_ctx, truncate and
+            // shift as every local call: a probe with other settings would make Ollama load the
+            // model again, which takes minutes, for the probe and again for the next real call.
+            com.ownclaw.llm.OllamaProvider.contextSettings(body, localModelCheck.contextLength(model));
+            JsonNode r = postJson(url + "/api/chat", body);
             String content = r.path("message").path("content").asText("");
             // A thinking model answers in two parts, so the canary may legitimately appear in
-            // the reasoning when the budget ran out before the final answer.
+            // the reasoning of a model that never wrote the answer.
             String thinking = r.path("message").path("thinking").asText("");
             int promptEval = r.path("prompt_eval_count").asInt(-1);
             String doneReason = r.path("done_reason").asText("");
@@ -319,23 +323,21 @@ public class OpsService {
             m.put("promptEvalCount", promptEval);
             m.put("doneReason", doneReason);
             m.put("latencyMs", System.currentTimeMillis() - t0);
-            m.put("reply", content.length() > 200 ? content.substring(0, 200) + "..." : content);
+            m.put("reply", content);
             m.put("thinkingChars", thinking.length());
 
             if (honoured && content.isBlank() && !thinking.isBlank()) {
-                m.put("note", "The system message was followed, but the answer never arrived: the whole "
-                        + "output budget went on reasoning. Local calls need a larger max_tokens for this "
-                        + "model, not a different model.");
+                m.put("note", "The system message was followed -- the canary is in the reasoning -- "
+                        + "but the model stopped without writing an answer (done_reason=" + doneReason + ").");
             } else if (!honoured && ranOutThinking && rendered) {
                 // The case that produced a confidently wrong answer: a thinking model that never
                 // reached its answer was reported as proof of a missing chat_template, sending
                 // whoever read it to replace a model that renders messages perfectly well.
                 m.put("diagnosis", "Inconclusive, and NOT a template problem: the message list rendered "
                         + "fine (promptEvalCount=" + promptEval + ", far above the ~1 a bare "
-                        + "\"{{ .Prompt }}\" fallback would give), but this is a thinking model and it hit "
-                        + "the output cap mid-reasoning, so there was no answer left to check the canary "
-                        + "against. It says nothing bad about the model. Re-run after raising num_predict, "
-                        + "or judge it on a real task instead.");
+                        + "\"{{ .Prompt }}\" fallback would give), but this thinking model reasoned until "
+                        + "its context window was full (done_reason=length) and never wrote an answer to "
+                        + "check the canary against. Judge it on a real task instead.");
             } else if (!honoured && !rendered) {
                 m.put("diagnosis", "The message list was NOT rendered: promptEvalCount=" + promptEval
                         + " for a prompt of roughly 30 tokens, so Ollama passed the user text through the "

@@ -23,29 +23,42 @@ class ToolRequestConfigTest {
     @Test
     @DisplayName("a config without tools is unchanged, so no existing call site behaves differently")
     void defaultsAreInert() {
-        var c = new LlmRequestConfig(null, null, 8192, true, null);
+        var c = new LlmRequestConfig(null, null, true, null);
         assertNull(c.tools());
         assertFalse(c.hasTools());
         assertTrue(c.jsonMode(), "the text protocol still asks for JSON");
+        assertSame(LlmProgress.NONE, c.progress(), "a provider calls the hook without a null check");
     }
 
     @Test
     @DisplayName("withTools preserves every other setting")
     void withToolsPreservesTheRest() {
-        var base = new LlmRequestConfig("m", 0.3, 4096, false, 600);
+        LlmProgress hook = () -> { };
+        var base = new LlmRequestConfig("m", 0.3, false, 600).withProgress(hook);
         var withTools = base.withTools(SOME_TOOLS);
         assertEquals("m", withTools.model());
         assertEquals(0.3, withTools.temperature());
-        assertEquals(4096, withTools.maxTokens());
         assertEquals(600, withTools.readTimeoutSec());
+        assertSame(hook, withTools.progress(), "the gateway's withTools must not drop the hook");
+        assertSame(hook, withTools.withEgress(null).progress());
         assertTrue(withTools.hasTools());
         assertFalse(base.hasTools(), "the original must not be mutated");
     }
 
     @Test
+    @DisplayName("a request cannot carry an output limit: the provider asks for the model's own")
+    void noOutputLimitCanBeSet() {
+        for (var component : LlmRequestConfig.class.getRecordComponents()) {
+            String name = component.getName().toLowerCase(java.util.Locale.ROOT);
+            assertFalse(name.contains("token") || name.contains("max") || name.contains("predict"),
+                    "a component a call site could cap the reply with: " + component.getName());
+        }
+    }
+
+    @Test
     @DisplayName("an empty tool list counts as no tools")
     void emptyIsNotTools() {
-        assertFalse(new LlmRequestConfig(null, null, null, false, null)
+        assertFalse(new LlmRequestConfig(null, null, false, null)
                 .withTools(List.of()).hasTools(),
                 "sending an empty tools array would turn on the native path with nothing to call");
     }

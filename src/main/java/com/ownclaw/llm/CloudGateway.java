@@ -21,10 +21,12 @@ import java.util.Map;
  * This is the only object in the application that can construct or call {@code AnthropicProvider}
  * or {@code OpenAiProvider}: they are not beans, their constructors are package-private, and a
  * test walks the source tree to keep it that way. Every call passes through {@link #chat} in a
- * fixed order — refuse if unclassified, scrub vault values, check the canary, send, record —
- * so privacy is a property of the code path. A prompt builder can be wrong about what it
- * rendered and the call is still refused; a new call site next month either carries a context
- * or does not get through.
+ * fixed order — refuse if unclassified, scrub vault values, check the canary, send, record,
+ * then hand back only a reply that is complete — so privacy is a property of the code path. A
+ * prompt builder can be wrong about what it rendered and the call is still refused -- in every
+ * part but an assistant turn, which holds the model's own earlier output and is not scanned
+ * (see the canary loop); a new call site next month either carries a context or does not get
+ * through.
  * <p>
  * Deliberately not a policy engine. There is one mode switch, {@code ENFORCE} or {@code OBSERVE},
  * and OBSERVE changes exactly one thing: a canary hit is sent and recorded as such instead of
@@ -120,7 +122,7 @@ public final class CloudGateway implements LlmProvider {
             }
         }
 
-        // (c) The canary: every part, before the socket opens.
+        // (c) The canary: every part the model did not write itself, before the socket opens.
         String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
         // A tool description or schema is authored by the cloud at skill_create or by the
@@ -141,11 +143,13 @@ public final class CloudGateway implements LlmProvider {
         //
         // Known limit, and it is the trust boundary rather than a bug: if a prompt builder ever
         // renders artifact content INTO a tool description, this excuses it. The registry is
-        // trusted input here; the canary's promise covers the message parts.
-        // The scrubber's post-condition, checked rather than trusted. A marker is built from
-        // the key name and a value can be a substring of its own replacement, so the fallback
-        // marker was itself unverified -- a value of "redacted" would have been written out
-        // inside «vault:redacted». Whatever the markers are, no vault value survives this point.
+        // trusted input here; the canary's promise covers the message parts the model did not
+        // write (see the assistant clause below).
+        // The scrubber's post-condition, checked rather than trusted, on every part -- assistant
+        // parts included. A marker is built from the key name and a value can be a substring of
+        // its own replacement, so the fallback marker was itself unverified -- a value of
+        // "redacted" would have been written out inside «vault:redacted». Whatever the markers
+        // are, no vault value survives this point.
         for (var sv : egress.secretValues().entrySet()) {
             String value = sv.getValue();
             if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
@@ -164,6 +168,21 @@ public final class CloudGateway implements LlmProvider {
         boolean leaked = false;
         for (Part part : parts) {
             if (leaked) break;
+            // An assistant part is the model's own earlier output, replayed: the actions it chose
+            // (ThinkingEngine renders them as JSON), a reply of its that could not be parsed, the
+            // code generator's previous answer. The model wrote it in answer to requests that
+            // passed this loop, and it is only ever shown descriptors of PRIVATE results, so
+            // nothing in it is new to the cloud. Scanned, it was refused whenever a private
+            // result repeated the model's own words the way JSON prints them: a task ended on a
+            // skill spec the cloud had written at its first step, because a later private result
+            // quoted the report headings that spec had dictated. The allowance for the cloud's
+            // own words could not excuse it -- it compares each argument as typed, and the replay
+            // is JSON, so a window that starts at a quote or spans an escape never matches.
+            //
+            // Sound only while nothing but model output goes into an assistant message:
+            // AssistantPartsTest pins that the replay carries a reference as the model wrote it,
+            // never the bytes it resolves to. The vault check above still covers these parts.
+            if ("assistant".equals(part.kind())) continue;
             String normalised = PrivateIndex.normalise(part.text());
             int from = 0;
             PrivateIndex.Hit hit;
@@ -203,12 +222,9 @@ public final class CloudGateway implements LlmProvider {
 
         // (d) Send, and record what happened either way.
         LlmRequestConfig outbound = scrubbedTools == null ? cfg : cfg.withTools(scrubbedTools);
+        LlmResponse response;
         try {
-            LlmResponse response = provider.chat(scrubbedMessages, outbound);
-            ledger.record(row(egress, providerName, model,
-                    observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
-                    parts, scrubs, response, tools == null ? 0 : tools.size(), observed));
-            return response;
+            response = provider.chat(scrubbedMessages, outbound);
         } catch (RuntimeException e) {
             // The leak record survives a failing call. Consolidating to one row moved it after
             // the send, so a provider error used to discard it: the bytes had gone out and the
@@ -219,6 +235,14 @@ public final class CloudGateway implements LlmProvider {
                             : observed + " (call then failed: " + e.getClass().getSimpleName() + ")"));
             throw e;
         }
+        // Recorded under the model that wrote the reply and priced at its rates: a declined
+        // request can be answered by Anthropic's fallback model.
+        ledger.record(row(egress, providerName, response.model() != null ? response.model() : model,
+                observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
+                parts, scrubs, response, tools == null ? 0 : tools.size(), observed));
+        // (e) Only then the check, so a refused or cut-off reply is on the ledger with its tokens
+        // and why it ended before its caller is told it is no answer.
+        return response.requireComplete(providerName);
     }
 
     // ── parts ──
@@ -316,7 +340,8 @@ public final class CloudGateway implements LlmProvider {
                 // Bytes that LEFT. A refused call sent none, and counting its payload as egress
                 // is the one arithmetic error that would make the ledger overstate exposure.
                 decision == EgressLedger.Decision.REFUSED ? 0 : bytes,
-                toolCount, pt, ct, cw, cr, cost, scrubs, refusalRef);
+                toolCount, pt, ct, cw, cr, cost, scrubs, refusalRef,
+                response == null ? null : response.stopDescription());
     }
 
     private static double safeCost(String model, LlmResponse response) {
