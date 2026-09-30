@@ -27,7 +27,7 @@ class ScheduledSessionTest {
 
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
     }
 
     private List<Object> listed() {
@@ -139,7 +139,7 @@ class ScheduledSessionTest {
                 return super.update(sql, args);
             }
         };
-        var conversations = new ConversationService(db, null);
+        var conversations = new ConversationService(db);
         var runs = Executors.newFixedThreadPool(2);
         try {
             var first = runs.submit(() -> conversations.scheduledSession("u1"));

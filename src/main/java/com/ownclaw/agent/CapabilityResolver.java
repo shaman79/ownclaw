@@ -260,13 +260,13 @@ public class CapabilityResolver {
                             + "Returns structured JSON: [{\"uid\": \"...\", \"from\": \"...\", \"to\": \"...\", \"subject\": \"...\", "
                             + "\"date\": \"...\", \"body_text\": \"...\", \"has_attachments\": true/false}]. "
                             + "Handles encoding (RFC2047 headers, multipart bodies, charset detection). "
-                            + "Extracts plain text body (prefers text/plain, falls back to text/html with tag stripping). "
-                            + "Limits body to first 2000 chars per email to avoid huge outputs.",
+                            + "Extracts the whole plain text body (prefers text/plain, falls back to text/html with tag stripping). "
+                            + "Returns every matching email unless 'limit' is given.",
                     List.of(),
                     List.of(),
                     "{ \"mailbox\": { \"type\": \"string\", \"description\": \"IMAP mailbox folder (default: INBOX)\", \"required\": false }, "
                             + "\"search\": { \"type\": \"string\", \"description\": \"IMAP search criteria (default: UNSEEN). Examples: UNSEEN, ALL, FROM \\\"user@example.com\\\", SUBJECT \\\"keyword\\\"\", \"required\": false }, "
-                            + "\"limit\": { \"type\": \"string\", \"description\": \"Max number of emails to fetch (default: 20)\", \"required\": false } }",
+                            + "\"limit\": { \"type\": \"string\", \"description\": \"How many of the newest matching emails to fetch (default: every match)\", \"required\": false } }",
                     60,
                     List.of("email", "mail", "imap", "inbox", "unread", "fetch", "check"),
                     List.of("IMAP_HOST", "IMAP_PORT", "IMAP_USER", "IMAP_PASS")

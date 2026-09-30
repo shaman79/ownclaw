@@ -17,7 +17,7 @@ class SearchSessionsTest {
     @Test
     @DisplayName("a chat with many matches does not hide the others: every matching chat, once, and no archived one")
     void everyMatchingChatOnce(@TempDir Path tmp) throws Exception {
-        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
+        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         String busy = conversations.createSession("u1", "Busy");
         String quiet = conversations.createSession("u1", "Quiet");
         String elsewhere = conversations.createSession("u2", "Someone else's");
@@ -45,7 +45,7 @@ class SearchSessionsTest {
     @Test
     @DisplayName("a snippet is 64 tokens, the most SQLite gives")
     void snippetOf64Tokens(@TempDir Path tmp) throws Exception {
-        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
+        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         String chat = conversations.createSession("u1", "Words");
         String words = IntStream.range(1, 100).mapToObj(i -> "w" + i).collect(Collectors.joining(" "));
         conversations.saveMessage("u1", chat, "user", "needle " + words);

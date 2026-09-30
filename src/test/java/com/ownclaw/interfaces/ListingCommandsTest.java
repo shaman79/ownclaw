@@ -24,7 +24,7 @@ class ListingCommandsTest {
     private void start(Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         events = new EventLogService(jdbc);
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
         commands = new CommandHandler(null, conversations, events, null, null, null, null, null, null, null,
                 null, null, null);
     }

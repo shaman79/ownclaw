@@ -121,13 +121,13 @@ class StepOutcomeTest {
     }
 
     @Test
-    @DisplayName("the excerpt is the head and the tail")
-    void excerpt() {
-        assertEquals("", AgentLoop.failureExcerpt(null));
-        assertEquals("short", AgentLoop.failureExcerpt("short"));
-        String long_ = "H".repeat(300) + "M".repeat(400) + "T".repeat(300);
-        String e = AgentLoop.failureExcerpt(long_);
-        assertEquals("H".repeat(200) + "\n…\n" + "T".repeat(200), e);
+    @DisplayName("how a step failed is kept whole: the middle of a traceback is where it failed")
+    void theReasonIsWhole() {
+        String traceback = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 12\n".repeat(200)
+                + "KeyError: 'uid'";
+        var d = outcome(AgentObservation.failure("imap_fetch", traceback, 5), Optional.empty());
+        assertEquals(traceback, d.get("reason"));
+        // Mutation: cut it to a head and a tail again -> the reason is shorter than the failure.
     }
 
     @Test

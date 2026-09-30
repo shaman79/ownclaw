@@ -7,15 +7,18 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Locale;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 /**
  * SQLite-backed implementation of AgentMemory.
  *
- * Episodic memory uses tag-based keyword matching for recall (lightweight, no embeddings).
- * This is effective for the single-user or small-scale scenario and avoids
- * external dependencies for vector search.
+ * Episodic memory is recalled by keyword: every episode that has a word of the query
+ * (lightweight, no embeddings). This is effective for the single-user or small-scale scenario
+ * and avoids external dependencies for vector search.
  *
  * Upgrade path: swap this for an embedding-based implementation when needed.
  */
@@ -46,68 +49,50 @@ public class SqliteAgentMemory implements AgentMemory {
     }
 
     @Override
-    public List<MemoryEntry> recallEpisodes(String userId, String query, int maxResults) {
-        try {
-            // Extract keywords from the query for tag matching
-            List<String> keywords = extractKeywords(query);
-
-            if (keywords.isEmpty()) {
-                // No keywords — return most recent episodes
-                return jdbc.query(
-                        "SELECT id, content, outcome, tags, created_at FROM agent_memory " +
-                                "WHERE user_id = ? AND memory_type = 'episode' " +
-                                "ORDER BY created_at DESC LIMIT ?",
-                        (rs, rowNum) -> new MemoryEntry(
-                                rs.getString("id"),
-                                rs.getString("content"),
-                                rs.getInt("outcome") == 1,
-                                parseTags(rs.getString("tags")),
-                                rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
-                        ),
-                        userId, maxResults
-                );
-            }
-
-            // Build a scoring query — episodes matching more keywords rank higher.
-            // SQLite doesn't have full-text search without FTS extension, so we use LIKE.
-            // We wrap in a subquery because SQLite rejects HAVING on non-aggregate queries.
-            StringBuilder inner = new StringBuilder();
-            inner.append("SELECT id, content, outcome, tags, created_at, (");
-            List<Object> params = new ArrayList<>();
-
-            for (int i = 0; i < keywords.size(); i++) {
-                if (i > 0) inner.append(" + ");
-                inner.append("(CASE WHEN (tags LIKE ? OR content LIKE ?) THEN 1 ELSE 0 END)");
-                String pattern = "%" + keywords.get(i) + "%";
-                params.add(pattern);
-                params.add(pattern);
-            }
-
-            inner.append(") AS relevance FROM agent_memory ")
-                    .append("WHERE user_id = ? AND memory_type = 'episode'");
-            params.add(userId);
-
-            String sql = "SELECT id, content, outcome, tags, created_at, relevance "
-                    + "FROM (" + inner + ") "
-                    + "WHERE relevance > 0 "
-                    + "ORDER BY relevance DESC, created_at DESC "
-                    + "LIMIT ?";
-            params.add(maxResults);
-
-            return jdbc.query(sql,
-                    (rs, rowNum) -> new MemoryEntry(
-                            rs.getString("id"),
-                            rs.getString("content"),
-                            rs.getInt("outcome") == 1,
-                            parseTags(rs.getString("tags")),
-                            rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
-                    ),
-                    params.toArray()
-            );
-        } catch (Exception e) {
-            log.warn("Failed to recall episodes: {}", e.getMessage());
-            return List.of();
+    public Recall recallEpisodes(String userId, String query) {
+        var words = new ArrayList<String>();
+        var skipped = new ArrayList<String>();
+        for (String w : queryWords(query)) {
+            (STOP_WORDS.contains(w) || w.codePointCount(0, w.length()) < 2 ? skipped : words).add(w);
         }
+        if (words.isEmpty()) return new Recall(List.of(), List.copyOf(skipped), List.of());
+        List<Predicate<String>> finders = words.stream().map(SqliteAgentMemory::finder).toList();
+        // Scored here rather than in SQL: every episode is compared with every word -- LIKE with
+        // two bound parameters per word runs into SQLite's parameter limit on a long query, and
+        // lowercases only ASCII, so "Škoda" never matched "škoda". Newest first, and the sort is
+        // stable, so among equals the newest stays first.
+        List<MemoryEntry> episodes = jdbc.query(
+                "SELECT id, content, outcome, tags, created_at FROM agent_memory "
+                        + "WHERE user_id = ? AND memory_type = 'episode' ORDER BY created_at DESC, id DESC",
+                (rs, rowNum) -> new MemoryEntry(
+                        rs.getString("id"),
+                        rs.getString("content"),
+                        rs.getInt("outcome") == 1,
+                        parseTags(rs.getString("tags")),
+                        createdAt(rs)
+                ),
+                userId);
+        record Scored(MemoryEntry entry, long relevance) {}
+        return new Recall(List.copyOf(words), List.copyOf(skipped), episodes.stream()
+                .map(e -> {
+                    String text = (String.join(",", e.tags()) + " " + e.content()).toLowerCase(Locale.ROOT);
+                    return new Scored(e, finders.stream().filter(f -> f.test(text)).count());
+                })
+                .filter(s -> s.relevance() > 0)
+                .sorted(Comparator.comparingLong(Scored::relevance).reversed())
+                .map(Scored::entry)
+                .toList());
+    }
+
+    /**
+     * Whether an episode's lowercased text has this word: anywhere for a word of three
+     * characters or more -- "audit" finds "audited" -- and as a whole word for one of two, which
+     * would be found inside too many others: "ap" is in "map", "ip" in "script".
+     */
+    private static Predicate<String> finder(String word) {
+        if (word.codePointCount(0, word.length()) > 2) return text -> text.contains(word);
+        Pattern whole = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}])");
+        return text -> whole.matcher(text).find();
     }
 
     @Override
@@ -158,7 +143,7 @@ public class SqliteAgentMemory implements AgentMemory {
                             rs.getString("content"),
                             rs.getInt("outcome") == 1,
                             parseTags(rs.getString("tags")),
-                            rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").getTime() : 0
+                            createdAt(rs)
                     ),
                     userId
             );
@@ -168,34 +153,39 @@ public class SqliteAgentMemory implements AgentMemory {
         }
     }
 
-    /**
-     * Extract simple keywords from a query string for tag matching.
-     * Filters out common stop words and short words.
-     */
-    private List<String> extractKeywords(String query) {
+    /** Words nearly every task has: looked for, they would find every episode. */
+    private static final java.util.Set<String> STOP_WORDS = java.util.Set.of(
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "can", "shall", "to", "of", "in", "for",
+            "on", "with", "at", "by", "from", "as", "into", "through", "during",
+            "before", "after", "above", "below", "between", "and", "but", "or",
+            "not", "no", "nor", "so", "yet", "both", "either", "neither", "each",
+            "every", "all", "any", "few", "more", "most", "some", "such", "than",
+            "too", "very", "just", "about", "up", "out", "if", "then", "else",
+            "when", "where", "why", "how", "what", "which", "who", "whom", "this",
+            "that", "these", "those", "i", "me", "my", "we", "our", "you", "your",
+            "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
+            "please", "want", "need", "like", "get", "make", "help"
+    );
+
+    /** The distinct words of a query, lowercased, in order. */
+    private static List<String> queryWords(String query) {
         if (query == null || query.isBlank()) return List.of();
-
-        var stopWords = java.util.Set.of(
-                "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-                "have", "has", "had", "do", "does", "did", "will", "would", "could",
-                "should", "may", "might", "can", "shall", "to", "of", "in", "for",
-                "on", "with", "at", "by", "from", "as", "into", "through", "during",
-                "before", "after", "above", "below", "between", "and", "but", "or",
-                "not", "no", "nor", "so", "yet", "both", "either", "neither", "each",
-                "every", "all", "any", "few", "more", "most", "some", "such", "than",
-                "too", "very", "just", "about", "up", "out", "if", "then", "else",
-                "when", "where", "why", "how", "what", "which", "who", "whom", "this",
-                "that", "these", "those", "i", "me", "my", "we", "our", "you", "your",
-                "he", "him", "his", "she", "her", "it", "its", "they", "them", "their",
-                "please", "want", "need", "like", "get", "make", "help"
-        );
-
-        return Arrays.stream(query.toLowerCase().split("[\\s,.;:!?()\\[\\]{}\"']+"))
-                .filter(w -> w.length() > 2)
-                .filter(w -> !stopWords.contains(w))
+        return Arrays.stream(query.toLowerCase(Locale.ROOT).split("[\\s,.;:!?()\\[\\]{}\"']+"))
+                .filter(w -> !w.isEmpty())
                 .distinct()
-                .limit(10)
-                .collect(Collectors.toList());
+                .toList();
+    }
+
+    /**
+     * When the row was written: {@code datetime('now')} is UTC, stored as text. Read as a
+     * timestamp it was taken for the JVM's local time.
+     */
+    private static long createdAt(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String at = rs.getString("created_at");
+        return at == null ? 0 : java.time.LocalDateTime.parse(at.replace(' ', 'T'))
+                .toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
     }
 
     private List<String> parseTags(String tagStr) {

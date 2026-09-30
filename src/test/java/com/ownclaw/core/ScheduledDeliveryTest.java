@@ -58,7 +58,7 @@ class ScheduledDeliveryTest {
     private JdbcTemplate jdbc;
     private ConversationService conversations;
     /** The conversation store the scheduler is given; a test may hand it one that fails. */
-    private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db, null);
+    private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db);
     private final Finished queue = new Finished();
     private ScheduledTaskService scheduler;
     private final List<StatusMessage> emitted = new ArrayList<>();
@@ -161,7 +161,7 @@ class ScheduledDeliveryTest {
     @Test
     @DisplayName("a pinned chat that cannot be had just now costs the saved row, not the push or the run's record")
     void aLostChatLosesOnlyTheRow(@TempDir Path tmp) throws Exception {
-        store = db -> new ConversationService(db, null) {
+        store = db -> new ConversationService(db) {
             @Override public synchronized String scheduledSession(String userId) {
                 throw new org.springframework.dao.CannotAcquireLockException("[SQLITE_BUSY] The database file is locked");
             }

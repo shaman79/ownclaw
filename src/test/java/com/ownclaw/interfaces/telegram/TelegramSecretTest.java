@@ -55,7 +55,7 @@ class TelegramSecretTest {
                 null, null, null, null, null, null);
         OwnClawConfig config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
-        ConversationService conv = new ConversationService(jdbc, null);
+        ConversationService conv = new ConversationService(jdbc);
         // No task queue: a message handed to the agent fails the test at taskQueue.submit.
         return new TelegramBotService(config, null, new UserRepository(jdbc), new ChatStatusEmitter(),
                 new ObjectMapper(), conv, interactions, null, commands, null, null, jdbc, telegram.client);

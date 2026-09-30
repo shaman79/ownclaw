@@ -15,6 +15,8 @@ import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.observability.TaskTraceService;
+import com.ownclaw.privacy.PrivateIndex;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -66,22 +68,12 @@ public class AgentLoop {
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
-    /**
-     * Above this many characters, an unattended tool result is worth a local summary.
-     * Below it, a 60-133 second call would be spent shortening something already short.
-     */
-    private static final int LOCAL_COMPRESSION_THRESHOLD = 8_000;
-
-    /** What the summary should aim for — comfortably inside what the cloud sees at full detail. */
-    private static final int LOCAL_COMPRESSION_TARGET = 4_000;
-
     private final EventLogService eventLog;
+    /** A task's rows in events, parsed as the owner's task page parses them: its record. */
+    private final TaskTraceService taskTraces;
     private final ScheduledTaskService scheduledTaskService;
     private final LocalExecutor localExecutor;
     private final FileStorageService fileStorage;
-
-    /** Max recent messages to include as conversation context for the LLM. */
-    private static final int CONVERSATION_CONTEXT_MESSAGES = 20;
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -122,35 +114,10 @@ public class AgentLoop {
         this.capabilityResolver = capabilityResolver;
         this.budgetTracker = budgetTracker;
         this.eventLog = eventLog;
+        this.taskTraces = new TaskTraceService(eventLog);
         this.scheduledTaskService = scheduledTaskService;
         this.localExecutor = localExecutor;
         this.fileStorage = fileStorage;
-    }
-
-    /**
-     * Execute the agent loop for a user message.
-     * This is the main entry point — replaces the old orchestrator.processMessage().
-     *
-     * @param userId  the user who submitted the task
-     * @param message the user's message
-     * @return the agent's final response string
-     */
-    public String execute(String userId, String message) {
-        return execute(userId, message, false);
-    }
-
-    /**
-     * @param unattended nobody is waiting for this result — see AgentContext.isUnattended
-     */
-    public String execute(String userId, String message, boolean unattended) {
-        try {
-            AgentResult result = executeFull(userId, message, unattended);
-            return result.response();
-        } catch (Exception e) {
-            log.error("AgentLoop fatal error for user={}: {}", userId, e.getMessage(), e);
-            statusEmitter.emit(userId, StatusMessage.Type.FAILED, "An unexpected error occurred.");
-            return "I encountered an unexpected error while processing your request. Please try again.";
-        }
     }
 
     /**
@@ -171,9 +138,8 @@ public class AgentLoop {
 
     /**
      * @param currentMessageId the chat row this task answers, or null for a scheduled or
-     *                         background run — which then stops inheriting the last chat row's
-     *                         files and stops dropping that row from the prior context, both
-     *                         of which the old index-0 guess did
+     *                         background run: its chat is the one that row was saved in, and a
+     *                         run without one has no chat
      * @param attachmentIds    the files sent with this turn; each one this user owns is
      *                         registered PRIVATE, and every result of the task is PRIVATE with it
      */
@@ -183,8 +149,9 @@ public class AgentLoop {
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
 
-        // Load conversation history so the LLM sees prior exchanges -- a chat task only.
-        loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage);
+        // The chat this task came from, whole, with the record of each finished task in it.
+        loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage,
+                id -> TaskRecord.forLaterTask(id, traceOf(userId, id)));
         registerAttachments(context, attachmentIds, fileStorage, eventLog);
         AgentResult stopped = stopWithoutLocalModel(context, () -> {
             LlmProvider local = llmRouter.local();
@@ -192,21 +159,13 @@ public class AgentLoop {
         });
         if (stopped != null) {
             // Before any cloud call and with no episode: nothing was done, so there is nothing
-            // to remember, and the owner is told why in the result itself.
-            stopped = stopped.withTaskId(taskId);
-            emitResult(context, stopped);
-            return stopped;
+            // to remember, and the owner is told why in the ending itself.
+            return end(context, stopped, false);
         }
 
-        // Recall relevant past experiences to enrich context
+        // Past episodes are not put into the prompt: the agent asks for them when it needs them
+        // (memory_manage action=recall). The facts the owner asked it to keep always go in.
         try {
-            List<AgentMemory.MemoryEntry> relevantMemories = memory.recallEpisodes(userId, message, 3);
-            if (!relevantMemories.isEmpty()) {
-                String memoryContext = relevantMemories.stream()
-                        .map(m -> (m.outcome() ? "[SUCCESS] " : "[FAILED] ") + m.content())
-                        .collect(Collectors.joining("\n"));
-                context.metadata().put("relevantMemories", memoryContext);
-            }
             List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
             if (!facts.isEmpty()) {
                 String factContext = facts.stream()
@@ -215,7 +174,7 @@ public class AgentLoop {
                 context.setUserPreferences(factContext);
             }
         } catch (Exception e) {
-            log.debug("Failed to recall memories for user {}: {}", userId, e.getMessage());
+            log.debug("Failed to load facts for user {}: {}", userId, e.getMessage());
         }
 
         // Load credential keys so the LLM knows what's in the vault without calling credential_manage list
@@ -256,29 +215,101 @@ public class AgentLoop {
             log.debug("Capability resolution failed (non-fatal): {}", e.getMessage());
         }
 
+        return run(context);
+    }
+
+    /**
+     * Run a task whose context is ready, and end it: a stop and an exception each become its
+     * ending here, with the task's record and its episode. {@link #executeFull} prepares the
+     * context and calls this.
+     */
+    AgentResult run(AgentContext context) {
+        String userId = context.userId();
+        String taskId = context.taskId();
         // Clear any stale cancel flag from a previous task
         cancellationService.clear(userId, taskId);
 
         // Point the context at the authoritative cancel source. Without this, every
-        // context.isCancelled() check inside a step — LocalExecutor's per-step poll and the
-        // supplier handed to every tool — reads a flag nothing ever sets, so Stop could only
-        // take effect between steps. A step here can be a 60-133 s local call.
+        // context.isCancelled() check inside a step — LocalExecutor's per-step poll, the
+        // supplier handed to every tool, the progress hook of every model call — misses a Stop,
+        // which could then only take effect between steps. A step here can be a 60-133 s local
+        // call.
         context.setExternalCancel(
                 () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
 
         AgentResult result;
         inFlight.put(taskId, context);
         try {
-            result = withLocalAnswers(runLoop(context), context).withTaskId(taskId);
+            result = runLoop(context);
+        } catch (TaskCancellationService.TaskCancelledException stop) {
+            // A model call made for the task heard the stop on its progress hook and ended.
+            result = stopped(context);
+        } catch (RuntimeException e) {
+            // Here, with the context, not in the queue without it: escaping, it took the task's
+            // record with it -- the owner read "Internal error: ..." with no step listed, and no
+            // task_completed row or episode was written.
+            log.error("Task {} failed: {}", taskId, e.getMessage(), e);
+            result = AgentResult.error(internalError(e, context), context.trajectory(), context.elapsedMs());
         } finally {
             inFlight.remove(taskId);
         }
-        emitResult(context, result);
+        return end(context, result, true);
+    }
 
-        // Store this execution as an episodic memory
-        storeEpisode(context, result);
+    /**
+     * Every way a task ends goes through here once: the ending written around the result
+     * (TaskEnding), the outcome emitted and recorded, and -- for a task that ran -- its episode.
+     */
+    private AgentResult end(AgentContext context, AgentResult result, boolean remember) {
+        AgentResult ended = TaskEnding.apply(result, context, traceOf(context.userId(), context.taskId()))
+                .withTaskId(context.taskId());
+        emitResult(context, ended);
+        if (remember) storeEpisode(context, ended);
+        return ended;
+    }
 
-        return result;
+    /**
+     * A task's record as the task page parses it, or an empty one when its rows cannot be read:
+     * the ending and the next turn read it, and neither may break for want of it.
+     */
+    private Map<String, Object> traceOf(String userId, String taskId) {
+        try {
+            return taskTraces.trace(userId, taskId).orElse(Map.of());
+        } catch (RuntimeException e) {
+            log.warn("Could not read the record of task {}: {}", taskId, e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /**
+     * Why an exception ended the task: its type, and its message unless it holds a private
+     * result's text the gateway would not send ({@link AgentContext#firstLeakIn}) -- the ending is
+     * read by later prompts, and the log has it.
+     */
+    static String internalError(RuntimeException e, AgentContext context) {
+        String message = e.getMessage();
+        boolean quotesPrivate = context.firstLeakIn(message) != null;
+        return "an internal error: " + e.getClass().getSimpleName()
+                + (message == null ? "" : quotesPrivate ? " (its message quotes a private result; it is in the log)"
+                        : ": " + message);
+    }
+
+    /**
+     * The result of a task that was stopped: STALLED with the watchdog's facts, or CANCELLED
+     * with who asked -- the owner's Stop or /cancel, or the ops API.
+     */
+    private AgentResult stopped(AgentContext context) {
+        if (longRunningTaskManager.isActive(context.taskId())) {
+            longRunningTaskManager.cancel(context.taskId());
+        }
+        String stall = context.stalled();
+        if (stall != null) {
+            log.info("Task {} stopped by the stall watchdog: {}", context.taskId(), stall);
+            return AgentResult.stalled(stall, context.trajectory(), context.elapsedMs());
+        }
+        String why = cancellationService.why(context.userId(), context.taskId(), context.startTimeMs());
+        log.info("Task {} stopped on request: {}", context.taskId(), why);
+        return AgentResult.cancelled(why, context.trajectory(), context.elapsedMs());
     }
 
     /**
@@ -330,87 +361,57 @@ public class AgentLoop {
     }
 
     /**
-     * The open chat, for a task that came from it: the compressed summary and the recent
-     * messages in full.
+     * The chat a task came from: the conversation of the session its own message was saved in
+     * -- every question before it and every answer so far ({@link ConversationService#contextOf}),
+     * oldest first, each whole -- and, under the answer of each earlier task there that finished,
+     * the record of what that task did ({@code recordOf}; see {@link TaskRecord}). A task that
+     * ended otherwise answered with its ending, which already carries the record.
+     * <p>
+     * All of it, because a message left out is one the next task cannot know was said: the
+     * window this replaced showed at most fifteen, and older ones only as the local model's
+     * 200-word summary of their first 1,500 characters each. A chat longer than the model's
+     * context window ends its task with the provider's plain message that it is.
      * <p>
      * Not for unattended work. A scheduled task or /bg is a self-contained instruction, and
      * loading whatever chat happened to be open sent all of it to the cloud on every call of
      * every such run: on 2026-09-24 that was 65 KB of an 83 KB request, most of what the run
      * cost, and the morning digest email ended with a reminder about an unrelated server task
-     * it could only have known from the chat. Static, so a test can run it against a database.
+     * it could only have known from the chat. Nor for a task with no message row -- it came from
+     * no chat. Static, so a test can run it against a database.
+     *
+     * @param recordOf a task id to the record shown under that task's answer, or null for none
      */
     static void loadConversationContext(AgentContext context, String userId, String currentMessageId,
                                         ConversationService conversationService,
-                                        FileStorageService fileStorage) {
-        if (context.isUnattended()) return;
+                                        FileStorageService fileStorage,
+                                        java.util.function.Function<String, String> recordOf) {
+        if (context.isUnattended() || currentMessageId == null) return;
         try {
-            String sessionId = conversationService.getCurrentSession(userId);
-
-            // Load the compressed summary of older messages (if any)
-            String sessionSummary = conversationService.getSessionSummary(userId, sessionId);
-
-            // Load recent messages (excluding the current message which is already in context.originalMessage).
-            // The current user message was saved by ChatWebSocketHandler before queue submission,
-            // so it will be at index 0 (DESC order). Skip it and reverse the rest to chronological.
-            List<Map<String, Object>> recent = conversationService.getRecentMessages(
-                    userId, sessionId, CONVERSATION_CONTEXT_MESSAGES + 1);
-
             StringBuilder sb = new StringBuilder();
+            for (Map<String, Object> row : conversationService.contextOf(userId, currentMessageId)) {
+                String role = (String) row.get("role");
+                sb.append(role.toUpperCase()).append(": ").append(row.get("content")).append("\n");
+                String record = row.get("task_id") == null ? null : recordOf.apply(String.valueOf(row.get("task_id")));
+                if (record != null) sb.append(record).append("\n");
 
-            // Include compressed summary of older conversation if available
-            if (sessionSummary != null && !sessionSummary.isBlank()) {
-                sb.append("### Compressed history of earlier messages\n");
-                sb.append(sessionSummary).append("\n\n");
-            }
-
-            // Recent messages in chronological order, each in FULL -- cutting mid-sentence can
-            // make the model misread what was said -- but only those the summariser may still
-            // leave uncompressed (ConversationCompressor.shownToTheAgent); anything older is in the
-            // summary above. Twenty in full were 65 KB in a chat of long answers, about half of a
-            // 70k-token first call. The row this task answers is skipped -- it is already the task
-            // text -- and only that one: a scheduled or background run has no current row.
-            List<Map<String, Object>> others = recent.stream()
-                    .filter(row -> currentMessageId == null || !currentMessageId.equals(row.get("id")))
-                    .toList();
-            int shown = com.ownclaw.conversation.ConversationCompressor.shownToTheAgent(others.stream()
-                    .map(row -> String.valueOf(row.get("content")).length()).toList());
-            if (shown > 0) {
-                sb.append("### Recent conversation\n");
-                if (shown < others.size()) {
-                    // Only while the summariser is behind (the local model is busy or down):
-                    // what is left out here is uncompressed, so not in the summary either.
-                    sb.append("(Earlier messages are not shown here and are not in the summary yet.)\n");
-                }
-                for (int i = shown - 1; i >= 0; i--) {
-                    Map<String, Object> row = others.get(i);
-                    String role = (String) row.get("role");
-                    String content = (String) row.get("content");
-                    sb.append(role.toUpperCase()).append(": ").append(content).append("\n");
-
-                    // Include file attachment info for messages that have them
-                    String msgId = (String) row.get("id");
-                    if (msgId != null) {
-                        List<Map<String, Object>> attachments = fileStorage.getMessageAttachmentDetails(msgId);
-                        for (var att : attachments) {
-                            String ct = (String) att.get("content_type");
-                            // Never inlined, and not named. A file is PRIVATE: its bytes went to
-                            // the cloud on every later task of the session, up to 100 KB each, for
-                            // as long as the row stayed in the window; and its name can carry what
-                            // it holds -- a statement's account number. Skills are handed it only
-                            // on the turn it was sent, so this task cannot read it.
-                            sb.append("[A file was attached here (").append(ct).append(", ")
-                              .append(att.get("size_bytes")).append(" bytes). It is private and not ")
-                              .append("available to this task; the user can attach it again.]\n");
-                        }
-                    }
+                // Include file attachment info for messages that have them
+                for (var att : fileStorage.getMessageAttachmentDetails((String) row.get("id"))) {
+                    String ct = (String) att.get("content_type");
+                    // Never inlined, and not named. A file is PRIVATE: inlined, its bytes
+                    // went to the cloud on every later task of the session; and its name can
+                    // carry what it holds -- a statement's account number. Skills are handed
+                    // it only on the turn it was sent, so this task cannot read it.
+                    sb.append("[A file was attached here (").append(ct).append(", ")
+                      .append(att.get("size_bytes")).append(" bytes). It is private and not ")
+                      .append("available to this task; the user can attach it again.]\n");
                 }
             }
 
             String conversationContext = sb.toString().strip();
             if (!conversationContext.isEmpty()) {
-                context.setConversationSummary(conversationContext);
-                log.debug("Loaded conversation context for user {} session {}: {} chars",
-                        userId, sessionId, conversationContext.length());
+                context.setConversationSummary("### The conversation so far\n" + conversationContext);
+                log.debug("Loaded conversation context for user {}: {} chars",
+                        userId, conversationContext.length());
             }
         } catch (Exception e) {
             log.warn("Failed to load conversation context for user {}: {}", userId, e.getMessage());
@@ -418,34 +419,11 @@ public class AgentLoop {
         }
     }
 
-    /**
-     * Execute the agent loop with a pre-built context (for advanced use cases).
-     */
-    public AgentResult executeWithContext(AgentContext context) {
-        try {
-            return runLoop(context);
-        } catch (Exception e) {
-            log.error("AgentLoop error: {}", e.getMessage(), e);
-            return AgentResult.error(
-                    "An unexpected error occurred: " + e.getMessage(),
-                    context.trajectory(),
-                    context.elapsedMs()
-            );
-        }
-    }
-
-    /**
-     * The core loop implementation.
-     */
     /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
     static final String PRIVATE_HEADER = "**Private — written by your local model, not seen by the cloud:**\n\n";
 
     /** Above any other private result the cloud gives the owner: a skill's output, a file. */
     static final String PRIVATE_RESULT_HEADER = "**Private — not seen by the cloud:**\n\n";
-
-    /** What a task that ended before the cloud replied says above the local model's answer. */
-    static final String ENDED_WITH_AN_ANSWER =
-            "The task ended before the cloud model replied, but your local model had already answered.";
 
     /**
      * What history, memory, search, the scheduler's records and every later prompt get in place
@@ -456,9 +434,10 @@ public class AgentLoop {
     static final String PRIVATE_NOTE =
             "[Private answer: sent to you only, never to the cloud model.]";
 
-    static final String LOCAL_DOWN_FOR_FILES = "I can't read your file right now. Files you send "
-            + "are read only by your local model, and it is not answering. Nothing was sent to "
-            + "the cloud. Send the file again when the local model is back.";
+    /** Why a task holding a file stops when the local model is not answering. */
+    static final String LOCAL_DOWN_FOR_FILES = "files you send are read only by your local model, "
+            + "and it is not answering; nothing was sent to the cloud. Send the file again when "
+            + "the local model is back";
 
     /**
      * An answer as the cloud wrote it, and what it becomes.
@@ -485,6 +464,9 @@ public class AgentLoop {
      * does not place its handle -- "Done, see above" is a likely reply from a model that never
      * saw the answer -- because relying on the cloud to remember is an instruction, and this is
      * the one answer the task exists for.
+     * <p>
+     * Every result an answer shows in full is marked on the context ({@link AgentContext#markShown}),
+     * so the ending of a task that asked a question does not show it a second time.
      */
     static Answer answerFor(String written, AgentContext ctx) {
         String text = written == null ? "" : written;
@@ -511,6 +493,8 @@ public class AgentLoop {
                 // The cloud was shown this text already; nothing here is new to it.
                 response = value;
             }
+            // Only the whole result: a field of it ({{2.body_text}}) shows part of it.
+            if (ArtifactRef.parse(text).field() == null) ctx.markShown(placed);
         }
 
         return withLocalAnswers(new Answer(response, ownerText, null), placed, ctx);
@@ -527,27 +511,12 @@ public class AgentLoop {
         for (Artifact x : ctx.artifacts()) {
             if ("local_answer".equals(x.tool()) && (placed == null || placed.n() != x.n())) {
                 owed.append("\n\n").append(PRIVATE_HEADER).append(x.output());
+                ctx.markShown(x);
             }
         }
         if (owed.length() == 0) return a;
         String response = a.response().contains(PRIVATE_NOTE) ? a.response() : a.response() + "\n\n" + PRIVATE_NOTE;
         return new Answer(response, (a.ownerText() != null ? a.ownerText() : a.response()) + owed, a.refusal());
-    }
-
-    /**
-     * The same, for every way a task ends: respond and ask_user go through answerFor, but a task
-     * that stops at its step limit, on three cloud errors or on a privacy block after the local
-     * model answered still owes the owner that answer.
-     */
-    static AgentResult withLocalAnswers(AgentResult r, AgentContext ctx) {
-        if (r.ownerText() != null) return r;
-        // Only an exit other than respond or ask_user gets here with an answer owed, and its text
-        // is progress addressed to the cloud -- "make {{3}} the whole of respond's message", "say
-        // continue" -- none of which the owner can use. The code says what happened instead.
-        Answer a = withLocalAnswers(new Answer(ENDED_WITH_AN_ANSWER, null, null), null, ctx);
-        if (a.ownerText() == null) return r;
-        return new AgentResult(r.success(), a.response(), r.trajectory(), r.totalSteps(),
-                r.totalDurationMs(), r.terminationReason(), r.taskId(), a.ownerText());
     }
 
     /**
@@ -569,51 +538,15 @@ public class AgentLoop {
 
     private AgentResult runLoop(AgentContext context) {
         int maxSteps = config.getTasks().getMaxPlanSteps();
-        long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
         int consecutiveFallbacks = 0; // Track consecutive LLM failures to cap retries
         int totalThinkingFailures = 0; // Track total thinking failures across entire task
         int unansweredQuestions = 0;   // ask_user calls on a task with nobody to answer them
 
         for (int step = 0; step < maxSteps; step++) {
-            // Check cancellation — both local flag and service flag from WebSocket cancel button
-            if (context.isCancelled()
-                    || cancellationService.isCancelled(context.userId(), context.taskId(),
-                                                       context.startTimeMs())) {
-                log.info("Task {} cancelled by user", context.taskId());
-                // Clean up any long-running task tracking
-                if (longRunningTaskManager.isActive(context.taskId())) {
-                    longRunningTaskManager.cancel(context.taskId());
-                }
-                return AgentResult.cancelled(
-                        "Task was cancelled.",
-                        context.trajectory(),
-                        context.elapsedMs()
-                );
-            }
-
-            // Backstop only. This cannot realistically fire: markProgress() runs at the end of
-            // every branch below, so by the time execution returns here the reading is
-            // microseconds old -- and a task that HANGS hangs inside a step, never reaching this
-            // line at all. cancelStalledTasks() on the scheduler is what actually notices, and
-            // its cancellation surfaces through the isCancelled() check just above. This stays
-            // because it costs nothing and correctly reports a stall that somehow arrives here.
-            if (context.msSinceLastProgress() > stallTimeoutMs) {
-                long stallSec = context.msSinceLastProgress() / 1000;
-                long elapsedSec = context.elapsedMs() / 1000;
-                log.warn("Task {} stalled — no progress for {}s (total elapsed {}s)",
-                        context.taskId(), stallSec, elapsedSec);
-                if (longRunningTaskManager.isActive(context.taskId())) {
-                    longRunningTaskManager.fail(context.taskId(),
-                            "Task stalled — no progress for " + stallSec + "s");
-                }
-                String progress = summarizeProgress(context);
-                return AgentResult.stalled(
-                        "This task stalled (no progress for " + formatDuration(stallSec)
-                                + ", total elapsed " + formatDuration(elapsedSec) + "). " + progress,
-                        context.trajectory(),
-                        context.elapsedMs()
-                );
-            }
+            // Stopped from outside -- the owner's Stop or /cancel, the ops API, or the stall
+            // watchdog (cancelStalledTasks) -- between steps. Inside one, a model call hears it on
+            // its progress hook and a tool through the supplier it was handed.
+            if (context.isCancelled()) return stopped(context);
 
             boolean debug = debugService.isEnabled(context.userId());
 
@@ -660,29 +593,14 @@ public class AgentLoop {
                                     + " (bypassed ThinkingEngine, no LLM call)");
                 }
 
-                // Generate code with cloud LLM and create the skill
-                Map<String, Object> enhancedParams = generateSkillCodeWithCloud(skillParams, context);
-                if (enhancedParams != null) {
-                    long startMs = System.currentTimeMillis();
-                    String result = skillManager.createSkill(enhancedParams);
-                    long durationMs = System.currentTimeMillis() - startMs;
-                    boolean ok = !result.startsWith("ERROR");
-                    AgentObservation obs = ok
-                            ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
-                            : AgentObservation.failure(action.tool(), result, durationMs);
-                    recordAndEmitObservation(context, action, obs, step + 1);
-                    context.markProgress();
-                    if (debug) {
-                        emitDebug(context.userId(),
-                                "SKILL_CREATE [" + hint.suggestedName() + "] "
-                                        + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                        + truncate(result, 2000));
-                    }
-                } else {
-                    AgentObservation cloudFailObs = AgentObservation.failure(action.tool(),
-                                    "ERROR: Cloud LLM unavailable — cannot generate skill code", 0);
-                    recordAndEmitObservation(context, action, cloudFailObs, step + 1);
-                    context.markProgress();
+                AgentObservation obs = createSkill(action, context);
+                recordAndEmitObservation(context, action, obs, step + 1);
+                context.markProgress();
+                if (debug) {
+                    emitDebug(context.userId(),
+                            "SKILL_CREATE [" + hint.suggestedName() + "] "
+                                    + (obs.success() ? "OK" : "FAIL") + " (" + obs.durationMs() + "ms)\n"
+                                    + obs.output());
                 }
 
                 // Clear the hint so subsequent steps don't re-trigger
@@ -703,49 +621,37 @@ public class AgentLoop {
             ThinkResult thinkResult;
             try {
                 thinkResult = thinkingEngine.decideNextActionFull(context, provider);
-            } catch (com.ownclaw.llm.EgressRefused refused) {
+            } catch (EgressRefused refused) {
                 // The gateway found bytes of a PRIVATE artifact in the request and nothing was
                 // sent. Deterministic, so there is no retry; and no valve, because handing the
                 // registry back would not change what the next prompt contains. Expected count
                 // in normal operation: zero. An occurrence is a bug report with the handle and
-                // the part index attached, and that is what the message carries.
+                // the part index attached: that goes to the log and the ledger, and the owner
+                // gets an ending that names the result and hands him his private results.
                 log.error("Task {} step {}: PRIVACY_BLOCKED — {}", context.taskId(), step + 1,
                         refused.getMessage());
-                return AgentResult.privacyBlocked(
-                        "Blocked before sending: " + refused.getMessage()
-                                + " See task " + context.taskId() + " in ops.",
+                return AgentResult.privacyBlocked(TaskEnding.blocked(refused, context),
                         context.trajectory(), context.elapsedMs());
+            } catch (ProviderRefused declined) {
+                return noAnswer(context, local, provider, declined.reply(), declined);
+            } catch (OutputTruncated cutOff) {
+                return noAnswer(context, local, provider, cutOff.reply(), cutOff);
             } finally {
                 stopHeartbeat(thinkHeartbeat);
             }
             context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
 
-            // Track token usage per provider.
-            //
             // billedTokens(), not totalTokens(): the latter is prompt + completion as reported,
             // and Anthropic reports cache reads and writes separately and additionally. With the
             // static system prompt cached -- which is the whole point of keeping it static -- the
             // cached prefix is most of the input, so every figure derived from totalTokens was a
             // fraction of what was actually billed: the live counter, token_usage, and every
             // budget ceiling that is supposed to stop a runaway task.
-            if (local) {
-                context.addLocalTokens(thinkResult.billedTokens());
-            } else {
-                context.addCloudTokens(thinkResult.billedTokens());
-                // Persist cloud usage for budget tracking
-                if (thinkResult.billedTokens() > 0) {
-                    // Priced from the component breakdown, not the total: cache reads cost about
-                    // a tenth of base input and cache writes about a quarter more, so a single
-                    // summed figure cannot be costed. This was hardcoded 0.0, which left
-                    // token_usage.cost_usd a column of zeros and every budget ceiling inert.
-                    double cost = ModelPricing.costUsd(thinkResult.model(),
+            account(context, local, provider.name(), thinkResult.billedTokens(),
+                    ModelPricing.costUsd(thinkResult.model(),
                             thinkResult.promptTokens(), thinkResult.completionTokens(),
-                            thinkResult.cacheWriteTokens(), thinkResult.cacheReadTokens());
-                    budgetTracker.recordUsage(context.userId(), provider.name(),
-                            thinkResult.billedTokens(), cost);
-                }
-            }
+                            thinkResult.cacheWriteTokens(), thinkResult.cacheReadTokens()));
 
             // Emit running token totals so the frontend can update the live counter
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
@@ -934,33 +840,15 @@ public class AgentLoop {
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
 
-                // Generate skill code exclusively with cloud LLM — never use local model for code gen
-                Map<String, Object> enhancedParams = generateSkillCodeWithCloud(action.params(), context);
-                if (enhancedParams == null) {
-                    String errMsg = "ERROR: Cloud LLM unavailable — cannot generate skill code. " +
-                            "Skill creation requires the cloud provider.";
-                    recordAndEmitObservation(context, action,
-                            AgentObservation.failure(action.tool(), errMsg, 0), step + 1);
-                    context.markProgress();
-                    if (debug) emitDebug(context.userId(), "SKILL_CREATE FAILED: cloud unavailable");
-                    continue;
-                }
-
-                long startMs = System.currentTimeMillis();
-                String result = skillManager.createSkill(enhancedParams);
-                long durationMs = System.currentTimeMillis() - startMs;
-                boolean ok = !result.startsWith("ERROR");
-                AgentObservation obs = ok
-                        ? AgentObservation.success(action.tool(), result, Map.of(), durationMs)
-                        : AgentObservation.failure(action.tool(), result, durationMs);
+                AgentObservation obs = createSkill(action, context);
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
                 if (debug) {
                     emitDebug(context.userId(),
-                            "SKILL_CREATE [" + enhancedParams.getOrDefault("name", "?") + "] "
-                                    + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                    + truncate(result, 2000));
+                            "SKILL_CREATE [" + action.params().getOrDefault("name", "?") + "] "
+                                    + (obs.success() ? "OK" : "FAIL") + " (" + obs.durationMs() + "ms)\n"
+                                    + obs.output());
                 }
                 continue;
             }
@@ -1000,7 +888,7 @@ public class AgentLoop {
                     emitDebug(context.userId(),
                             "SKILL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                    + truncate(result, 2000));
+                                    + result);
                 }
                 continue;
             }
@@ -1021,7 +909,7 @@ public class AgentLoop {
                     emitDebug(context.userId(),
                             "MEMORY_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                    + truncate(result, 500));
+                                    + result);
                 }
                 continue;
             }
@@ -1052,7 +940,7 @@ public class AgentLoop {
                     emitDebug(context.userId(),
                             "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                    + truncate(result, 500));
+                                    + result);
                 }
                 continue;
             }
@@ -1073,7 +961,7 @@ public class AgentLoop {
                     emitDebug(context.userId(),
                             "SCHEDULE_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
-                                    + truncate(result, 500));
+                                    + result);
                 }
                 continue;
             }
@@ -1127,8 +1015,8 @@ public class AgentLoop {
                 if (debug) {
                     emitDebug(context.userId(),
                             "DELEGATE (" + durationMs + "ms, goal: "
-                                    + truncate(plan.goal(), 80) + ")\n"
-                                    + truncate(result, 2000));
+                                    + plan.goal() + ")\n"
+                                    + result);
                 }
                 continue;
             }
@@ -1189,7 +1077,7 @@ public class AgentLoop {
                         "TOOL RESULT [" + action.tool() + "] "
                                 + (observation.success() ? "OK" : "FAIL")
                                 + " (" + observation.durationMs() + "ms)\n"
-                                + truncate(observation.output(), 50_000));
+                                + observation.output());
             }
 
             // Track tool usage for skill curation analytics. On a FAILURE, keep the parameters
@@ -1199,11 +1087,11 @@ public class AgentLoop {
             // worked, and doing so would put far more of the user's data in the database.
             if (observation.success()) {
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
-                        action.tool() + " ✓ " + formatDurationMs(observation.durationMs()),
+                        action.tool() + " ✓ " + TaskRecord.duration(observation.durationMs()),
                         tokenData(context));
             } else {
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.WARNING,
-                        action.tool() + " ✗ " + truncate(observation.output(), 100));
+                        action.tool() + " ✗ " + observation.output());
             }
 
             // === DELEGATION NUDGE ===
@@ -1216,19 +1104,16 @@ public class AgentLoop {
             injectReflection(context, action);
         }
 
-        // Exhausted max steps — ask user if they want to continue instead of hard-failing
+        // A stop that came during the last step -- the owner's, the ops API's, the stall
+        // watchdog's -- is how this task ended, not the step limit: ended as MAX_STEPS, its
+        // ending invited "continue" to the owner who had just pressed Stop.
+        if (context.isCancelled()) return stopped(context);
+
+        // maxSteps, not completed: the task did NOT finish and must not be stored as a
+        // successful episode. Its ending invites the owner to reply "continue".
         log.warn("Task {} hit max steps ({})", context.taskId(), maxSteps);
-        String progress = summarizeProgress(context);
-        // maxSteps, not completed. The message invites the user to continue, which is friendly,
-        // but the task did NOT finish and must not be stored as a successful episode.
-        return AgentResult.maxSteps(
-                "I've used all " + maxSteps + " steps allocated for this task. " +
-                        "Here's what I've done so far:\n" + progress + "\n\n" +
-                        "Would you like me to continue working on this? " +
-                        "Just say **continue** and I'll pick up where I left off.",
-                context.trajectory(),
-                context.elapsedMs()
-        );
+        return AgentResult.maxSteps("it used all " + maxSteps + " steps a task may take",
+                context.trajectory(), context.elapsedMs());
     }
 
     /**
@@ -1274,9 +1159,8 @@ public class AgentLoop {
             public void onProgress(String message, Integer percent) {
                 if (!registered) {
                     registered = true;
-                    String desc = truncate(context.originalMessage(), 200);
                     longRunningTaskManager.register(
-                            context.taskId(), context.userId(), desc, action.tool());
+                            context.taskId(), context.userId(), context.originalMessage(), action.tool());
                 }
                 longRunningTaskManager.reportProgress(context.taskId(), message, percent);
             }
@@ -1320,8 +1204,9 @@ public class AgentLoop {
         // further up the loop constructs a fresh observation -- which is why the label cannot be
         // a flag on the observation: that rebuild would drop it. The bytes go to the task's
         // store; what goes on is either the bytes (PUBLIC) or the descriptor (PRIVATE), and
-        // nothing downstream -- the renderers, the progress summary, the episode, the events
-        // rows, the repair evidence -- ever sees the other.
+        // nothing downstream that reads the observation -- the renderers, the episode, the events
+        // rows, the repair evidence -- ever sees the other. The owner's own copy of a private
+        // result is taken from the store (answerFor, TaskEnding).
         // The label from what the resolver actually pulled in, so it describes what moved.
         // The same decision the delegation uses. Never tainted here -- the cloud has not read
         // private bytes -- but a call that pulled in an unindexed result stays unindexed, and
@@ -1340,13 +1225,16 @@ public class AgentLoop {
 
         // If this tool was tracked as long-running, finalize it -- with the shaped text.
         if (longRunningTaskManager.isActive(context.taskId())) {
-            String shown = truncate(artifact.isPrivate() ? artifact.describe() : result.output(), 200);
+            String shown = artifact.isPrivate() ? artifact.describe() : result.output();
             if (result.success()) longRunningTaskManager.complete(context.taskId(), shown);
             else longRunningTaskManager.fail(context.taskId(), shown);
         }
 
         return Artifact.asObservation(artifact, result, durationMs);
     }
+
+    /** What skill_manage can do: the cases of {@link #executeSkillManage}. */
+    static final List<String> SKILL_MANAGE_ACTIONS = List.of("read", "delete", "list", "analyze");
 
     /**
      * Dispatch a skill_manage action to the appropriate SkillManager method.
@@ -1359,8 +1247,8 @@ public class AgentLoop {
             case "read" -> skillManager.readSkill(name);
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
-            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"));
-            default -> "ERROR: Unknown action '" + action + "'. Use one of: read, delete, list, analyze";
+            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress());
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
     }
 
@@ -1377,7 +1265,7 @@ public class AgentLoop {
             case "list" -> {
                 List<String> keys = credentialVault.listCredentialKeys(userId);
                 if (keys.isEmpty()) {
-                    yield "No credentials stored. Ask the user for needed credentials and store them with action='store'.";
+                    yield "No credentials stored. " + credSetInstruction("KEY");
                 }
                 yield "Stored credentials: " + String.join(", ", keys);
             }
@@ -1388,7 +1276,7 @@ public class AgentLoop {
                 boolean exists = credentialVault.hasCredential(userId, key);
                 yield exists
                         ? "Credential '" + key + "' exists in the vault."
-                        : "Credential '" + key + "' NOT found. Use ask_user to request it from the user, then store it with action='store'.";
+                        : "Credential '" + key + "' NOT found. " + credSetInstruction(key);
             }
             // Storing through this action is refused on purpose.
             //
@@ -1406,19 +1294,28 @@ public class AgentLoop {
                 String name = (key == null || key.isBlank()) ? "THE_KEY" : key;
                 log.info("credential_manage(store) refused for key='{}' — directing user to /cred set", name);
                 yield "Storing a credential through this action is disabled: it would send the secret "
-                        + "through the model and leave it in plaintext chat history. Ask the user to type "
-                        + "this in chat instead, which writes it straight to the encrypted vault without "
-                        + "the value passing through you:\n\n    /cred set " + name + " <value>\n\n"
-                        + "Then continue — the value is injected into skills that declare '" + name + "' "
-                        + "as a required credential. Do not ask the user to paste the value to you.";
+                        + "through the model and leave it unencrypted in the chat history. " + credSetInstruction(name);
             }
             default -> "ERROR: Unknown action '" + action + "'. Use one of: list, check";
         };
     }
 
     /**
+     * How a credential gets into the vault: the owner types it himself with /cred set, which
+     * writes it straight to the encrypted vault and never reaches a model. The one way this
+     * action tells the model to ask for a credential -- the missing-key answer used to say "use
+     * ask_user, then store it", which is how a password ends up typed into the chat.
+     */
+    private static String credSetInstruction(String key) {
+        return "Ask the user to type this in the chat, which writes it straight to the encrypted "
+                + "vault without the value passing through you:\n\n    /cred set " + key + " <value>\n\n"
+                + "Then continue — the value is injected into skills that declare '" + key + "' "
+                + "as a required credential. Do not ask the user to paste the value to you.";
+    }
+
+    /**
      * Dispatch a memory_manage action to the AgentMemory.
-     * Supports: store, list, delete.
+     * Supports: store, list, delete, recall.
      */
     private String executeMemoryManage(Map<String, Object> params, String userId) {
         String action = params.get("action") != null ? params.get("action").toString() : "";
@@ -1426,6 +1323,7 @@ public class AgentLoop {
         String content = params.get("content") != null ? params.get("content").toString().strip() : null;
 
         return switch (action) {
+            case "recall" -> recall(userId, params.get("query") == null ? null : params.get("query").toString());
             case "list" -> {
                 List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
                 if (facts.isEmpty()) {
@@ -1465,8 +1363,47 @@ public class AgentLoop {
                     yield "ERROR: Failed to delete fact: " + e.getMessage();
                 }
             }
-            default -> "ERROR: Unknown action '" + action + "'. Use one of: store, list, delete";
+            default -> "ERROR: Unknown action '" + action + "'. Use one of: store, list, delete, recall";
         };
+    }
+
+    /**
+     * memory_manage action=recall: every past task of this user that has a word of the query,
+     * whole, most relevant first. Asked for, where "Past Experience" used to put the three best
+     * keyword matches into every task's prompt unasked -- unrelated tasks from other chats, and
+     * failures filed as [SUCCESS]. The words that were not looked for are named, so "no match" is
+     * never said of a word nobody looked for. Handles in the tasks named another task's results,
+     * so they are written as words.
+     */
+    private String recall(String userId, String query) {
+        if (query == null || query.isBlank()) {
+            return "ERROR: 'query' parameter is required for action='recall': words that appear "
+                    + "in the task to find.";
+        }
+        AgentMemory.Recall recalled;
+        try {
+            recalled = memory.recallEpisodes(userId, query);
+        } catch (Exception e) {
+            return "ERROR: could not read past tasks: " + e.getMessage();
+        }
+        String skipped = recalled.skipped().isEmpty() ? ""
+                : " (not looked for: " + String.join(", ", recalled.skipped())
+                        + " — words and letters nearly every task has)";
+        if (recalled.words().isEmpty()) {
+            return "ERROR: '" + query + "' has no word to look for" + skipped + ". Ask with words "
+                    + "the task itself would contain: a host, a name, a skill, a term.";
+        }
+        List<AgentMemory.MemoryEntry> found = recalled.episodes();
+        if (found.isEmpty()) return "No past task matches '" + query + "'" + skipped + ".";
+        var sb = new StringBuilder(found.size() + (found.size() == 1 ? " past task matches '" : " past tasks match '"))
+                .append(query).append("'").append(skipped).append(", most relevant first:");
+        for (int i = 0; i < found.size(); i++) {
+            AgentMemory.MemoryEntry e = found.get(i);
+            sb.append("\n\n--- ").append(i + 1).append(" of ").append(found.size()).append(", ")
+              .append(java.time.Instant.ofEpochMilli(e.timestamp())).append(" ---\n")
+              .append(e.content());
+        }
+        return TaskRecord.inWords(sb.toString());
     }
 
     /**
@@ -1704,54 +1641,6 @@ public class AgentLoop {
     }
 
     /**
-     * Summarize the progress made so far (for timeout/max-steps responses).
-     */
-    private String summarizeProgress(AgentContext context) {
-        var trajectory = context.trajectory();
-        if (trajectory.isEmpty()) return "No actions were taken.";
-
-        var sb = new StringBuilder();
-        int successCount = (int) trajectory.turns().stream()
-                .filter(t -> t.observation().success())
-                .count();
-        int total = trajectory.size();
-        sb.append("**").append(total).append(" action").append(total != 1 ? "s" : "")
-                .append(" taken** (").append(successCount).append(" successful).\n\n");
-
-        // Show each step with its outcome
-        int stepNum = 0;
-        for (var turn : trajectory.turns()) {
-            stepNum++;
-            String tool = turn.action().tool();
-            boolean ok = turn.observation().success();
-            sb.append(stepNum).append(". **").append(tool).append("** — ")
-                    .append(ok ? "✓" : "✗");
-            // Add brief context: reasoning or failure message
-            if (!ok && turn.observation().output() != null && !turn.observation().output().isBlank()) {
-                String err = truncate(turn.observation().output(), 200);
-                sb.append(" ").append(err);
-            } else if (turn.action().reasoning() != null && !turn.action().reasoning().isBlank()) {
-                sb.append(" ").append(truncate(turn.action().reasoning(), 120));
-            }
-            sb.append("\n");
-        }
-
-        // Include the last successful observation's output as the partial result
-        for (int i = trajectory.turns().size() - 1; i >= 0; i--) {
-            var turn = trajectory.turns().get(i);
-            if (turn.observation().success() && turn.observation().output() != null
-                    && !turn.observation().output().isBlank()) {
-                sb.append("\n**Last successful result:**\n");
-                String output = turn.observation().output();
-                sb.append(output);
-                break;
-            }
-        }
-
-        return sb.toString();
-    }
-
-    /**
      * Store the completed task as an episodic memory for future recall.
      */
     private void storeEpisode(AgentContext context, AgentResult result) {
@@ -1783,14 +1672,14 @@ public class AgentLoop {
     }
 
     /**
-     * The text an episode is remembered by. It is recalled into later cloud prompts as Past
-     * Experience, so it reads {@code response()}, never the owner's private text.
+     * The text an episode is remembered by, whole. memory_manage recall hands it to later cloud
+     * prompts, so it reads {@code response()}, never the owner's private text.
      */
     static String episodeSummary(String originalMessage, AgentResult result) {
-        return "Task: " + truncate(originalMessage, 200) +
+        return "Task: " + originalMessage +
                 "\nSteps: " + result.totalSteps() +
                 "\nOutcome: " + result.terminationReason() +
-                "\nResponse: " + truncate(result.response(), 500);
+                "\nResponse: " + result.response();
     }
 
     private void emitResult(AgentContext context, AgentResult result) {
@@ -1802,7 +1691,7 @@ public class AgentLoop {
         StringBuilder summary = new StringBuilder();
         if (result.success()) {
             summary.append(result.totalSteps()).append(" steps · ")
-                    .append(formatDurationMs(result.totalDurationMs()));
+                    .append(TaskRecord.duration(result.totalDurationMs()));
         } else if (result.awaitingUser()) {
             summary.append("waiting for your answer");
         } else {
@@ -1837,7 +1726,7 @@ public class AgentLoop {
                     cloud, local, result.totalSteps(), result.totalDurationMs(), result.terminationReason());
             eventLog.log(userId, context.taskId(), "task_completed",
                     result.success() || result.awaitingUser() ? "info" : "warn",
-                    truncate(context.originalMessage(), 200),
+                    context.originalMessage(),
                     details, cloud + local);
         } catch (Exception e) {
             log.warn("Failed to log token usage for task {}: {}", context.taskId(), e.getMessage());
@@ -1860,26 +1749,6 @@ public class AgentLoop {
         return sb.toString();
     }
 
-    /** Format seconds as human-readable duration, e.g. "5m 23s" or "45s". */
-    private static String formatDuration(long totalSec) {
-        if (totalSec >= 3600) {
-            return (totalSec / 3600) + "h " + ((totalSec % 3600) / 60) + "m " + (totalSec % 60) + "s";
-        } else if (totalSec >= 60) {
-            return (totalSec / 60) + "m " + (totalSec % 60) + "s";
-        } else {
-            return totalSec + "s";
-        }
-    }
-
-    /** Format milliseconds as compact duration, e.g. "5.4s" or "2m 12s". */
-    private static String formatDurationMs(long ms) {
-        if (ms < 1000) return ms + "ms";
-        double sec = ms / 1000.0;
-        if (sec < 60) return String.format("%.1fs", sec);
-        long totalSec = ms / 1000;
-        return (totalSec / 60) + "m " + (totalSec % 60) + "s";
-    }
-
     /** Build structured token data for status messages. */
     private Map<String, Object> tokenData(AgentContext context) {
         int totalSteps = context.trajectory().size();
@@ -1893,24 +1762,18 @@ public class AgentLoop {
         );
     }
 
-    // ── Cloud skill code generation ──
+    // ── Skill code generation ──
+
+    /** How many times a syntax error in generated code is sent back for repair. */
+    private static final int SYNTAX_REPAIRS = 3;
 
     /**
-     * Generate skill code using the cloud LLM exclusively.
-     *
-     * <p>The local model decides WHAT skill to create (name, description, parameter
-     * intent) — that's fast routing.  The cloud model writes the actual Python
-     * code — that's where quality matters most.  Skill code is never generated
-     * by the local model: it is too sensitive to LLM quality.
-     *
-     * @return enhanced params with cloud-generated code, or {@code null} if cloud
-     *         generation fails (caller should record the failure).
-     */
-    /**
-     * Real calls to this skill that failed, as evidence for a repair.
+     * Real calls to this skill that failed, as evidence for a repair: every recorded PUBLIC
+     * failure, whole -- the same call failing the same way once, with how many times it did.
      * <p>
-     * Returns null when there is nothing recorded. The parameters were redacted and truncated
-     * when they were stored, so this is safe to put in a prompt.
+     * Returns null when there is nothing recorded. Parameters whose names say they are secrets
+     * were redacted when they were stored, and only PUBLIC rows are read, so this is safe to put
+     * in a prompt.
      * <p>
      * Deliberately evidence and not a test harness. Re-running these calls to check whether a
      * repair worked would be the obvious next step and it is not safe: replaying a recorded
@@ -1923,14 +1786,15 @@ public class AgentLoop {
      */
     private String pastFailureEvidence(String skillName) {
         try {
-            var failures = curatorService.recentFailures(skillName, 3);
+            var failures = curatorService.failures(skillName);
             if (failures.isEmpty()) return null;
             var sb = new StringBuilder("Real calls to this skill that FAILED previously "
                     + "(parameters are redacted where they looked sensitive):\n");
             for (var f : failures) {
-                sb.append("- called with: ").append(f.get("params_json")).append('\n')
-                  .append("  failed with: ").append(truncate(String.valueOf(f.get("error")), 600))
-                  .append('\n');
+                long times = f.get("times") instanceof Number n ? n.longValue() : 1;
+                sb.append("- called with: ").append(f.get("params_json"))
+                  .append(times > 1 ? " (" + times + " times)" : "").append('\n')
+                  .append("  failed with: ").append(f.get("error")).append('\n');
             }
             sb.append("Make sure the fixed code handles these cases.");
             return sb.toString();
@@ -1940,24 +1804,68 @@ public class AgentLoop {
         }
     }
 
-    private Map<String, Object> generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
-        LlmProvider cloud = llmRouter.cloud();
-        boolean usingLocalFallback = false;
-        LlmProvider codeGenProvider = cloud;
-        if (!cloud.isAvailable()) {
-            // Degraded fallback: attempt code generation with local LLM
-            LlmProvider local = llmRouter.local();
-            if (local.isAvailable()) {
-                log.warn("Cloud provider unavailable — falling back to local LLM for skill code generation (degraded quality)");
-                codeGenProvider = local;
-                usingLocalFallback = true;
-            } else {
-                log.error("Both cloud and local providers unavailable — cannot generate skill code");
-                return null;
-            }
+    /**
+     * What code generation gave: the skill's parameters with its code, or -- when there is none
+     * -- why, as the ERROR line the step records. It used to return null for four different
+     * causes, and the caller named one of them, "Cloud LLM unavailable": a cloud model that had
+     * answered with code cut off at its output limit was reported to the owner as an outage.
+     */
+    record Codegen(Map<String, Object> params, String error) {
+        static Codegen failed(String why) {
+            return new Codegen(null, "ERROR: " + why);
         }
 
+        static Codegen stopped(String name) {
+            return failed("the task was stopped while the code for '" + name + "' was being "
+                    + "written, so nothing was created.");
+        }
+    }
+
+    /**
+     * skill_create: the code, written by a model, then the skill made from it. Timed from the
+     * first code call, so the step's duration is the code generation as much as the write -- a
+     * step that took four calls of two minutes each used to say 0ms.
+     */
+    private AgentObservation createSkill(AgentAction action, AgentContext context) {
+        long startMs = System.currentTimeMillis();
+        Codegen code = generateSkillCodeWithCloud(action.params(), context);
+        String result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
+        long durationMs = System.currentTimeMillis() - startMs;
+        return result.startsWith("ERROR")
+                ? AgentObservation.failure(action.tool(), result, durationMs)
+                : AgentObservation.success(action.tool(), result, Map.of(), durationMs);
+    }
+
+    /**
+     * Write a skill's Python on the cloud model, or on the local one when the cloud is not
+     * available. The thinking model decides what the skill is; this writes its code.
+     * <p>
+     * One loop over attempts: the first reply, then up to {@link #SYNTAX_REPAIRS} repairs of a
+     * syntax error. A repair sends the specification and the latest attempt only, in the
+     * specification's own message so the roles still alternate. Each used to append the reply and
+     * a numbered copy of it to everything sent before, so the third repair resent both earlier
+     * attempts twice over: 195,723 bytes for a 6,434-byte request. A reply that reached the
+     * model's maximum output is refused -- never syntax-checked, never repaired: the file is
+     * incomplete, and asking for the complete corrected code asks for the same length again.
+     * <p>
+     * Every call streams with the task's progress hook, so a long one is seen as alive and a
+     * Stop ends it; between calls the stop is checked before the next is sent. Every call's
+     * tokens are counted against the tier that did the work.
+     */
+    Codegen generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
         String name = str(originalParams, "name");
+        LlmProvider provider = llmRouter.cloud();
+        boolean local = !provider.isAvailable();
+        if (local) {
+            provider = llmRouter.local();
+            if (provider == null || !provider.isAvailable()) {
+                log.error("Both cloud and local providers unavailable — cannot generate skill code");
+                return Codegen.failed("no model can write the code for '" + name + "': neither the "
+                        + "cloud model nor the local model is available, so nothing was created.");
+            }
+            log.warn("Cloud provider unavailable — falling back to local LLM for skill code generation (degraded quality)");
+        }
+
         String description = str(originalParams, "description");
         String parameters = str(originalParams, "parameters");
         String requirements = str(originalParams, "requirements");
@@ -1990,149 +1898,135 @@ public class AgentLoop {
                     history != null ? " + recorded failure history" : "");
         }
 
-        String providerLabel = usingLocalFallback ? "local (degraded)" : "cloud";
+        String providerLabel = local ? "local (degraded)" : "cloud";
         statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     oldCode != null ? "Fixing skill code · " + providerLabel : "Generating skill code · " + providerLabel,
                     tokenData(context));
-        try {
-            List<LlmMessage> messages = buildSkillCodePrompt(
-                    name, description, parameters, requirements, originalParams, context,
-                    oldCode, lastError);
+        List<LlmMessage> spec = buildSkillCodePrompt(
+                name, description, parameters, requirements, originalParams, context,
+                oldCode, lastError, local);
+        // 0.2 where the model takes a temperature: AnthropicProvider leaves it out for the models
+        // that reject one -- Opus 4.7 and later and every 5.x model, claude-opus-5 among them.
+        LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)
+                .withEgress(context.egress("codegen"))
+                .withProgress(context.progress());
 
-            // For local LLM fallback: add extra constraint to keep code simple
-            if (usingLocalFallback) {
-                messages.add(LlmMessage.user(
-                        "CRITICAL: You are a local model. Keep code SIMPLE. "
-                        + "Use only stdlib + one well-known library. Avoid complex logic. "
-                        + "Prefer straightforward imperative code over abstractions."));
+        List<LlmMessage> prompt = spec;
+        for (int attempt = 0; ; attempt++) {
+            if (context.isCancelled()) return Codegen.stopped(name);
+            if (attempt > 0) {
+                statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                        "Repairing syntax error · " + providerLabel + " (attempt " + attempt + "/" + SYNTAX_REPAIRS + ")",
+                        tokenData(context));
             }
-
-            LlmRequestConfig codeGenConfig = new LlmRequestConfig(
-                    null,   // use provider default model
-                    0.2,    // low temperature for precise code generation
-                    false   // no JSON mode — we want raw Python code
-            ).withEgress(context.egress("codegen"));
-
             ScheduledFuture<?> heartbeat = startLlmHeartbeat(context.userId(),
-                    "Generating code for '" + name + "'");
-            LlmResponse response;
+                    (attempt == 0 ? "Generating code for '" : "Repairing code for '") + name + "'");
+            LlmResponse reply;
             try {
-                response = codeGenProvider.chat(messages, codeGenConfig);
+                reply = provider.chat(prompt, codeGenConfig);
+            } catch (TaskCancellationService.TaskCancelledException stop) {
+                return Codegen.stopped(name);
+            } catch (ProviderRefused declined) {
+                account(context, local, provider, declined.reply());
+                return Codegen.failed("the model declined to write the code for '" + name + "' ("
+                        + declined.getMessage() + "), so nothing was created.");
+            } catch (OutputTruncated cutOff) {
+                if (cutOff.reply() != null) account(context, local, provider, cutOff.reply());
+                return Codegen.failed(cutOff.limit() == OutputTruncated.Limit.MAX_OUTPUT
+                        ? "the code for '" + name + "' did not fit in one reply (" + cutOff.getMessage()
+                                + "). It was discarded, not repaired, and nothing was created. A "
+                                + "smaller skill fits: one job per skill, or split this one into several."
+                        : "the request for the code of '" + name + "' did not fit ("
+                                + cutOff.getMessage() + "), so nothing was created.");
+            } catch (EgressRefused refused) {
+                return Codegen.failed("the request for the code of '" + name + "' was not sent ("
+                        + refused.getMessage() + "), so nothing was created.");
+            } catch (LlmException callFailed) {
+                return Codegen.failed("the request for the code of '" + name + "' failed ("
+                        + callFailed.getMessage() + "), so nothing was created.");
             } finally {
                 stopHeartbeat(heartbeat);
             }
-            String cloudCode = extractPythonCode(response.content());
+            // A reply came back: the task is alive, whatever the reply holds.
+            context.markProgress();
+            account(context, local, provider, reply);
 
-            if (cloudCode == null || cloudCode.isBlank()) {
-                log.warn("extractPythonCode returned null. Raw response (first 500 chars): {}",
-                        response.content() == null ? "(null)"
-                                : response.content().substring(0, Math.min(500, response.content().length())));
+            String code = extractPythonCode(reply.content());
+            if (code == null || !code.contains("def run(")) {
+                log.warn("Skill '{}': a reply of {} chars held {}", name,
+                        reply.content() == null ? 0 : reply.content().length(),
+                        code == null ? "no Python code" : "Python code without def run(params)");
+                return Codegen.failed(code == null
+                        ? "the reply for '" + name + "' held no Python code, so nothing was created."
+                        : "the reply for '" + name + "' held Python code but no def run(params), which "
+                                + "every skill needs, so nothing was created.");
             }
-
-            // Track tokens for skill code generation against the tier that actually did it.
-            //
-            // The context counter already excluded the local fallback, but the budget did not:
-            // when the cloud provider was unavailable and Ollama generated the code, those free
-            // local tokens were still recorded against the cloud budget. So an outage that
-            // forced everything local consumed the daily cloud allowance fastest, and could
-            // exhaust a ceiling without a single cloud call having been made.
-            if (usingLocalFallback) {
-                context.addLocalTokens(response.billedInputTokens() + response.completionTokens());
-            } else {
-                context.addCloudTokens(response.billedInputTokens() + response.completionTokens());
-            }
-            if (response.totalTokens() > 0 && !usingLocalFallback) {
-                budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
-                        response.billedInputTokens() + response.completionTokens(),
-                        ModelPricing.costUsd(codeGenProvider.model(), response));
-            }
-
-            // --- Structural pre-check: reject obviously broken code early ---
-            if (cloudCode != null && !cloudCode.isBlank() && !cloudCode.contains("def run(")) {
-                log.warn("Skill '{}': generated code missing 'def run(params)' — treating as extraction failure", name);
-                cloudCode = null;
-            }
-
-            // --- Inner syntax-repair loop: fix syntax errors without burning outer agent steps ---
-            if (cloudCode != null && !cloudCode.isBlank()) {
-                String syntaxError = skillManager.checkPythonSyntax(cloudCode);
-                for (int repair = 0; repair < 3 && syntaxError != null; repair++) {
-                    log.warn("Skill '{}' syntax error (repair attempt {}/3): {}", name, repair + 1, syntaxError);
-                    statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
-                            "Repairing syntax error · " + providerLabel + " (attempt " + (repair + 1) + "/3)",
-                            tokenData(context));
-
-                    // Build a focused repair prompt with the error and numbered code context
-                    String numberedCode = numberCodeLines(cloudCode);
-                    messages.add(LlmMessage.assistant(response.content()));
-                    messages.add(LlmMessage.user(
-                            "Syntax error:\n" + syntaxError
-                            + "\n\nNumbered code:\n" + numberedCode
-                            + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
-
-                    ScheduledFuture<?> repairHeartbeat = startLlmHeartbeat(context.userId(),
-                            "Repairing code for '" + name + "'");
-                    LlmResponse repairResponse;
-                    try {
-                        repairResponse = codeGenProvider.chat(messages, codeGenConfig);
-                    } finally {
-                        stopHeartbeat(repairHeartbeat);
-                    }
-
-                    if (!usingLocalFallback) {
-                        context.addCloudTokens(repairResponse.totalTokens());
-                    }
-                    if (repairResponse.totalTokens() > 0) {
-                        budgetTracker.recordUsage(context.userId(), codeGenProvider.name(),
-                                repairResponse.totalTokens(),
-                                ModelPricing.costUsd(codeGenProvider.model(), repairResponse));
-                    }
-
-                    String repairedCode = extractPythonCode(repairResponse.content());
-                    if (repairedCode != null && !repairedCode.isBlank()) {
-                        cloudCode = repairedCode;
-                        response = repairResponse;
-                        syntaxError = skillManager.checkPythonSyntax(cloudCode);
-                    } else {
-                        log.warn("Repair attempt {}/3 returned no extractable code", repair + 1);
-                        break;
-                    }
-                }
-                if (syntaxError != null) {
-                    log.error("Skill '{}' still has syntax errors after {} repair attempts: {}", name, 3, syntaxError);
-                    // Still return the code — let SkillManager.createSkill() report the error
-                    // so the outer agent loop can track the failure properly
-                }
-            }
-
-            if (cloudCode != null && !cloudCode.isBlank()) {
+            String syntaxError = skillManager.checkPythonSyntax(code);
+            if (syntaxError == null) {
                 log.info("{} generated {} chars of skill code for '{}' ({} tokens)",
-                        usingLocalFallback ? "Local LLM (fallback)" : "Cloud LLM",
-                        cloudCode.length(), name, response.totalTokens());
-
-                // Build enhanced params with cloud-generated code
+                        local ? "Local LLM (fallback)" : "Cloud LLM", code.length(), name, reply.totalTokens());
                 Map<String, Object> enhanced = new HashMap<>(originalParams);
-                enhanced.put("code", cloudCode);
-
-                // Cloud may also suggest better requirements — extract if present
-                String cloudRequirements = extractRequirements(response.content());
+                enhanced.put("code", code);
+                // The model may also name better requirements
+                String cloudRequirements = extractRequirements(reply.content());
                 if (cloudRequirements != null) {
                     enhanced.put("requirements", cloudRequirements);
                 }
-
-                return enhanced;
-            } else {
-                log.error("Cloud LLM returned no extractable Python code for '{}'", name);
-                return null;
+                return new Codegen(enhanced, null);
             }
-        } catch (Exception e) {
-            log.error("Cloud skill code generation failed for '{}': {}", name, e.getMessage());
-            return null;
+            if (attempt == SYNTAX_REPAIRS) {
+                log.error("Skill '{}' still has syntax errors after {} repair attempts: {}", name, SYNTAX_REPAIRS, syntaxError);
+                return Codegen.failed("Python syntax error:\n" + syntaxError);
+            }
+            log.warn("Skill '{}' syntax error (repair attempt {}/{}): {}", name, attempt + 1, SYNTAX_REPAIRS, syntaxError);
+            prompt = List.of(spec.get(0), LlmMessage.user(spec.get(1).content()
+                    + "\n\nThe previous attempt failed the syntax check:\n" + syntaxError
+                    + "\n\nNumbered code:\n" + numberCodeLines(code)
+                    + "\n\nFix the error. Return the COMPLETE corrected code in a ```python fence."));
         }
     }
 
     /**
-     * Build a specialized prompt for the cloud LLM to generate high-quality skill code.
+     * {@link #account(AgentContext, boolean, String, int, double)} for a reply: its billed input
+     * (cache reads and writes included) and its output, priced as the model that wrote it.
+     */
+    private void account(AgentContext context, boolean local, LlmProvider provider, LlmResponse reply) {
+        String model = reply.model() != null ? reply.model() : provider.model();
+        account(context, local, provider.name(), reply.billedInputTokens() + reply.completionTokens(),
+                ModelPricing.costUsd(model, reply));
+    }
+
+    /**
+     * The tokens one model call made for this task was billed for: to the counter of the tier
+     * that did the work and -- a cloud call only -- to the budget, priced from its components
+     * (cache reads cost about a tenth of base input, cache writes about a quarter more). Local
+     * tokens never reach the cloud budget: an outage that forced everything local used to spend
+     * the daily cloud allowance fastest, without a single cloud call having been made.
+     */
+    private void account(AgentContext context, boolean local, String providerName, int billed, double costUsd) {
+        if (local) {
+            context.addLocalTokens(billed);
+            return;
+        }
+        context.addCloudTokens(billed);
+        if (billed > 0) budgetTracker.recordUsage(context.userId(), providerName, billed, costUsd);
+    }
+
+    /**
+     * A think call the provider declined, or whose reply or request did not fit a limit of the
+     * model: the same request would end the same way, so the task ends saying which. The reply's
+     * tokens were billed all the same.
+     */
+    private AgentResult noAnswer(AgentContext context, boolean local, LlmProvider provider,
+                                 LlmResponse reply, LlmException why) {
+        if (reply != null) account(context, local, provider, reply);
+        log.warn("Task {}: no usable reply from the model — {}", context.taskId(), why.getMessage());
+        return AgentResult.error(why.getMessage(), context.trajectory(), context.elapsedMs());
+    }
+
+    /**
+     * Build a specialized prompt for the cloud LLM to generate high-quality skill code: a system
+     * message and one user message, the specification.
      *
      * <p>When {@code oldCode} is non-null, the prompt switches to "fix" mode:
      * the cloud LLM sees the existing code and the error, and is instructed to
@@ -2140,11 +2034,12 @@ public class AgentLoop {
      *
      * @param oldCode   the current Python code of the skill (null for new skills)
      * @param lastError the most recent execution error (null if unknown)
+     * @param local     the local model writes it, the cloud being unavailable
      */
     private List<LlmMessage> buildSkillCodePrompt(
             String name, String description, String parameters,
             String requirements, Map<String, Object> originalParams, AgentContext context,
-            String oldCode, String lastError) {
+            String oldCode, String lastError, boolean local) {
 
         List<LlmMessage> messages = new ArrayList<>();
 
@@ -2171,6 +2066,11 @@ public class AgentLoop {
         } else {
             sys.append("Clean, efficient code. Established libraries. No unnecessary boilerplate.\n");
         }
+        if (local) {
+            sys.append("CRITICAL: You are a local model. Keep code SIMPLE. Use only stdlib + one "
+                    + "well-known library. Avoid complex logic. Prefer straightforward imperative "
+                    + "code over abstractions.\n");
+        }
 
         messages.add(LlmMessage.system(sys.toString()));
 
@@ -2191,12 +2091,12 @@ public class AgentLoop {
         if (oldCode != null) {
             user.append("\nBroken code:\n```python\n").append(oldCode).append("\n```\n");
             if (lastError != null && !lastError.isBlank()) {
-                user.append("Error: ").append(truncate(lastError, 1000)).append("\n");
+                user.append("Error: ").append(lastError).append("\n");
             }
             user.append("Return complete fixed code.\n");
         }
 
-        user.append("\nTask context: \"").append(truncate(context.originalMessage(), 500)).append("\"\n");
+        user.append("\nTask context: \"").append(context.originalMessage()).append("\"\n");
 
         messages.add(LlmMessage.user(user.toString()));
 
@@ -2204,8 +2104,17 @@ public class AgentLoop {
     }
 
     /**
-     * Extract Python code from a cloud LLM response.
-     * Handles ```python fences, plain ``` fences, and raw code.
+     * Where a module starts, in a reply with no fence around its code: a line that begins with
+     * an import, a def, a class, a decorator or a shebang. Prose such as "Here is the code from
+     * the spec:" is not one.
+     */
+    private static final java.util.regex.Pattern CODE_START = java.util.regex.Pattern.compile(
+            "(?m)^(?:import \\S|from \\S+ import |def |class |@|#!)");
+
+    /**
+     * Extract Python code from a model's reply: a ```python fence, a plain ``` fence holding
+     * code, a ```python fence that is never closed, or -- with no fence -- everything from the
+     * first line that starts a module.
      */
     private String extractPythonCode(String response) {
         if (response == null || response.isBlank()) return null;
@@ -2233,42 +2142,29 @@ public class AgentLoop {
         // Handle a ```python fence that is never closed. A reply cut off at the model's maximum
         // output never gets here -- the provider path refuses it (OutputTruncated) -- so this is
         // a model that left the fence open.
-        java.util.regex.Matcher truncatedPy = java.util.regex.Pattern
+        java.util.regex.Matcher unclosedPy = java.util.regex.Pattern
                 .compile("```[Pp]ython\\s*\n(.*)", java.util.regex.Pattern.DOTALL)
                 .matcher(response);
-        if (truncatedPy.find()) {
-            String code = truncatedPy.group(1).strip();
+        if (unclosedPy.find()) {
+            String code = unclosedPy.group(1).strip();
             // Remove any trailing ``` fences from other blocks (e.g. ```requirements)
             int nextFence = code.indexOf("```");
             if (nextFence > 0) {
                 code = code.substring(0, nextFence).strip();
             }
             if (!code.isBlank() && code.contains("def run")) {
-                log.warn("Extracted Python code from a ```python fence that was never closed. "
-                        + "Code may be incomplete — {} chars extracted.", code.length());
+                log.warn("Extracted {} chars of Python code from a ```python fence that was never closed.",
+                        code.length());
                 return code;
             }
         }
 
-        // If the response looks like raw Python code (starts with import, from, def, or #), use it directly
-        String trimmed = response.strip();
-        if (trimmed.startsWith("import ") || trimmed.startsWith("from ") || trimmed.startsWith("def ") || trimmed.startsWith("#!/")) {
-            return trimmed;
-        }
-
-        // Last resort: look for def run( anywhere in the response
-        int defRunIdx = response.indexOf("def run(");
-        if (defRunIdx >= 0) {
-            // Walk backwards to find the first import/from line or start of code block
-            String beforeDef = response.substring(0, defRunIdx);
-            int codeStart = Math.max(beforeDef.lastIndexOf("import "), beforeDef.lastIndexOf("from "));
-            if (codeStart >= 0) {
-                // Go to the start of that line
-                codeStart = beforeDef.lastIndexOf('\n', codeStart) + 1;
-            } else {
-                codeStart = defRunIdx;
-            }
-            String candidate = response.substring(codeStart).strip();
+        // No fence: from the first line that starts a module -- every import with it, where
+        // this used to start at the LAST import before def run and drop the ones above it, so
+        // the skill loaded and then died with NameError on its first real call.
+        java.util.regex.Matcher start = CODE_START.matcher(response);
+        if (start.find()) {
+            String candidate = response.substring(start.start()).strip();
             // Remove any trailing explanation after the code
             int trailingFence = candidate.indexOf("```");
             if (trailingFence > 0) {
@@ -2318,17 +2214,17 @@ public class AgentLoop {
         var promptParts = new ArrayList<String>();
         for (var msg : result.promptMessages()) {
             if (msg.role() == LlmMessage.Role.SYSTEM) continue;
-            promptParts.add("[" + msg.role().apiValue() + "] " + truncate(msg.content(), 800));
+            promptParts.add("[" + msg.role().apiValue() + "] " + msg.content());
         }
         detail.put("prompt", String.join("\n---\n", promptParts));
 
         // LLM decision
         detail.put("tool", result.action().tool());
-        detail.put("reasoning", truncate(result.action().reasoning(), 500));
+        detail.put("reasoning", result.action().reasoning());
 
-        // Include params preview for non-respond actions
+        // The params, for every action but the answer
         if (!result.action().isResponse() && result.action().params() != null) {
-            detail.put("params", truncate(result.action().params().toString(), 300));
+            detail.put("params", result.action().params().toString());
         }
 
         statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
@@ -2342,13 +2238,11 @@ public class AgentLoop {
         detail.put("step", step);
         detail.put("tool", action.tool());
         if (action.params() != null && !action.params().isEmpty()) {
-            // Show param keys + truncated values
-            var paramPreview = new LinkedHashMap<String, String>();
+            var params = new LinkedHashMap<String, String>();
             for (var entry : action.params().entrySet()) {
-                String val = entry.getValue() != null ? entry.getValue().toString() : "null";
-                paramPreview.put(entry.getKey(), truncate(val, 200));
+                params.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : "null");
             }
-            detail.put("params", paramPreview);
+            detail.put("params", params);
         }
         statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
                 "⚡ Act · " + action.tool(), detail));
@@ -2357,57 +2251,9 @@ public class AgentLoop {
     /** Record an observation in trajectory AND emit detail to the frontend (for live stats). */
     private void recordAndEmitObservation(AgentContext context, AgentAction action,
                                            AgentObservation obs, int step) {
-        obs = compressIfUnattended(context, obs);
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
         persistStep(context, action, obs, step);
-    }
-
-    /**
-     * When nobody is waiting, have the local model compress a large tool result before it is
-     * recorded — and therefore before it is sent to the cloud.
-     * <p>
-     * This is the first place the local tier does real work rather than post-hoc bookkeeping,
-     * and it is the one job that clearly pays for itself. A large result otherwise reaches the
-     * cloud head-and-tail truncated, so the middle is simply gone: the model reasons over a
-     * result with a hole in it, and pays for the parts that survived. A local summary keeps the
-     * meaning of the whole thing, and local tokens cost nothing.
-     * <p>
-     * Only when unattended. The call takes 60-133 seconds on this hardware, which is
-     * unacceptable on a turn someone is watching and irrelevant on a scheduled job at 3am.
-     * That is the entire reason the attended/unattended distinction was worth building.
-     * <p>
-     * Only above a threshold, because a local call to shorten something that is already short
-     * would spend a minute to save nothing. And failures are swallowed: summarizeIfLong falls
-     * back to truncation on its own, and a compression step must never be able to fail a task.
-     */
-    private AgentObservation compressIfUnattended(AgentContext context, AgentObservation obs) {
-        if (!context.isUnattended() || obs == null) return obs;
-        // A delegation that failed keeps its full text. Its output carries the verbatim
-        // traceback of whatever threw, and rewriting a skill from its stack trace is the
-        // self-learning loop this project exists for -- it cannot run on a paraphrase of a
-        // paraphrase by the same small model that already summarised it once. A delegation
-        // that SUCCEEDED is compressed like anything else: there the summary is the point, and
-        // a large one costs the cloud exactly what a large tool result would.
-        if (AgentAction.DELEGATE.equals(obs.tool()) && !obs.success()) return obs;
-        String output = obs.output();
-        if (output == null || output.length() < LOCAL_COMPRESSION_THRESHOLD) return obs;
-        try {
-            long t0 = System.currentTimeMillis();
-            String compressed = localExecutor.summarizeIfLong(output, LOCAL_COMPRESSION_TARGET);
-            if (compressed == null || compressed.isBlank() || compressed.length() >= output.length()) {
-                return obs;
-            }
-            log.info("Unattended task {}: compressed {} chars of {} output to {} in {}ms",
-                    context.taskId(), output.length(), obs.tool(), compressed.length(),
-                    System.currentTimeMillis() - t0);
-            return new AgentObservation(obs.tool(), obs.success(), compressed,
-                    obs.structured(), obs.durationMs());
-        } catch (Exception e) {
-            log.debug("Local compression failed for task {}, keeping the raw output: {}",
-                    context.taskId(), e.getMessage());
-            return obs;
-        }
     }
 
     /**
@@ -2452,6 +2298,18 @@ public class AgentLoop {
         var details = new LinkedHashMap<String, Object>();
         details.put("step", step);
         details.put("tool", action.tool());
+        // Which skill a skill_create or skill_manage step was about: a name the cloud chose, not
+        // the owner's data -- and without it no record could say which skill was built or failed.
+        if ((action.isSkillCreate() || action.isSkillManage())
+                && action.params().get("name") instanceof String skill && SkillManager.isSkillName(skill)) {
+            details.put("skill", skill);
+        }
+        // And what a skill_manage step did -- one of its actions, or nothing: a skill written and
+        // then deleted was reported as kept.
+        if (action.isSkillManage() && action.params().get("action") instanceof String what
+                && SKILL_MANAGE_ACTIONS.contains(what)) {
+            details.put("skillAction", what);
+        }
         details.put("success", obs.success());
         details.put("durationMs", obs.durationMs());
         details.put("localTokens", context.localTokens());
@@ -2487,10 +2345,10 @@ public class AgentLoop {
         }
         // A delegation's failure text is its own words plus whatever the local model and its
         // server said, which after a private read can quote that data -- so then, none. Nor
-        // when the text holds anything the canary would refuse to send: a PUBLIC step can fail
+        // when the text holds anything the gateway would refuse to send: a PUBLIC step can fail
         // quoting a file a delegation wrote private data into.
         boolean withhold = action.isDelegate() && context.localTierReadPrivate()
-                || context.privateIndex().firstHitIn(String.valueOf(obs.output())) != null;
+                || context.firstLeakIn(obs.output()) != null;
         stepOutcome(details, obs, claimed, withhold, context.secretValues());
         return details;
     }
@@ -2498,15 +2356,17 @@ public class AgentLoop {
     /**
      * What a step's row says about how it went, beyond success: whether its result is indexed
      * for the canary, whether the skill reported a failure the loop counted as success, and --
-     * for a failed step -- an excerpt of how it failed.
+     * for a failed step -- how it failed, whole.
      * <p>
      * reportedFailure is always written, so a row without it is one from before it existed and
      * the page can say "not recorded" instead of reading its absence as "no".
      * <p>
-     * The excerpt is kept locally and shown to the owner, so it must not hold what the gateway
-     * would keep from the cloud: vault values are scrubbed out, and there is none at all for a
-     * PRIVATE step, or when the caller says to withhold it (see stepDetails). Without it a failure's reason reached only the log and the model -- the
-     * 2026-09-24 "context window full" delegation left a row that said FAILED and nothing else.
+     * The reason is kept locally, shown to the owner, and read by later tasks in the record of
+     * this one (TaskRecord), so it must not hold what the gateway would keep from the cloud:
+     * vault values are scrubbed out, and there is none at all for a PRIVATE step, or when the
+     * caller says to withhold it (see stepDetails). Without it a failure's reason reached only
+     * the log and the model -- the 2026-09-24 "context window full" delegation left a row that
+     * said FAILED and nothing else.
      */
     static void stepOutcome(Map<String, Object> details, AgentObservation obs,
                             java.util.Optional<Artifact> claimed, boolean withhold,
@@ -2516,17 +2376,9 @@ public class AgentLoop {
         details.put("reportedFailure", reported);
         boolean privateText = withhold || claimed.map(Artifact::isPrivate).orElse(false);
         if ((!obs.success() || reported) && !privateText) {
-            // Scrubbed before cutting, so a cut cannot leave half a secret the scrub misses.
             String text = com.ownclaw.llm.CloudGateway.scrub(obs.output(), secrets).text();
-            details.put("reason", failureExcerpt(text));
+            details.put("reason", text == null ? "" : text);
         }
-    }
-
-    /** The head and the tail: the first line says what failed, the last says why. */
-    static String failureExcerpt(String text) {
-        if (text == null) return "";
-        if (text.length() <= 400) return text;
-        return text.substring(0, 200) + "\n…\n" + text.substring(text.length() - 200);
     }
 
     /**
@@ -2554,7 +2406,7 @@ public class AgentLoop {
         detail.put("tool", action.tool());
         detail.put("success", obs.success());
         detail.put("durationMs", obs.durationMs());
-        detail.put("output", truncate(obs.output(), 1000));
+        detail.put("output", obs.output());
 
         // Stats snapshot
         int totalSteps = context.trajectory().size();
@@ -2568,7 +2420,7 @@ public class AgentLoop {
 
         String status = obs.success() ? "✓" : "✗";
         statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
-                "👁 Observe · " + action.tool() + " " + status + " " + formatDurationMs(obs.durationMs()),
+                "👁 Observe · " + action.tool() + " " + status + " " + TaskRecord.duration(obs.durationMs()),
                 detail));
     }
 
@@ -2596,78 +2448,58 @@ public class AgentLoop {
         sb.append(raw != null ? raw : "(null)").append("\n```\n");
 
         sb.append("**Parsed action**: tool=`").append(result.action().tool())
-                .append("` reasoning=").append(truncate(result.action().reasoning(), 300));
+                .append("` reasoning=").append(result.action().reasoning());
 
         emitDebug(userId, sb.toString());
     }
 
-    // ── LLM heartbeat ──
+    // ── Stall watchdog ──
 
     /**
-     * Start a periodic heartbeat that emits PROGRESS status messages while
-     * the LLM inference call is blocking. Keeps the UI activity indicator
-     * alive so users know the system isn't hung.
-     *
-     * @param userId      target user for status messages
-     * @param description what's happening (e.g. "Generating code")
-     * @return a ScheduledFuture to cancel when the LLM call completes
-     */
-    /**
-     * Tasks currently inside the loop, so a watchdog can see them.
-     * <p>
-     * The in-loop stall check cannot fire. It runs at the top of the iteration and
-     * {@code markProgress()} is called at the end of every branch below it, so
-     * {@code msSinceLastProgress()} is a few microseconds old by the time it is read. Worse,
-     * that is the wrong place entirely: a task that hangs is hanging INSIDE a step -- in a tool
-     * call, or a local model call that never returns -- and while it does, the loop never
-     * reaches the top of the next iteration to check anything at all. A check on the stuck
-     * thread can only run when the thread is not stuck.
+     * Tasks currently inside the loop, so the stall watchdog can see them: a task that hangs
+     * hangs INSIDE a step -- in a tool call, or a model call that never returns -- and while it
+     * does, no check on its own thread runs.
      */
     private final Map<String, AgentContext> inFlight = new ConcurrentHashMap<>();
 
     /**
-     * Cancel tasks that have stopped making progress.
+     * Whether a task has stalled long enough to be stopped.
      *
-     * <p>Runs on the scheduler, not on the task's own thread, which is the whole point. When a
-     * task has not marked progress for longer than the stall timeout it is asked to cancel
-     * through the ordinary mechanism -- the same flag the Stop button sets -- so it unwinds the
-     * way any cancelled task does, emits a proper outcome and releases its permits.
-     *
-     * <p>Honest about its limits: cancellation is cooperative. A task in the middle of a model
-     * call cannot notice until the call returns -- a streamed reply returns when the model
-     * stops, or after the provider's read timeout of silence (an hour for Ollama, which sends
-     * nothing until it has loaded the model and read the prompt) -- so this bounds a stall by
-     * the stall timeout PLUS however long that call still runs.
-     * That is a real improvement on never noticing, and it is not a kill switch. Making it one
-     * would mean interrupting threads mid-call, which risks leaving a half-written skill
-     * directory or a dangling sandbox process behind.
+     * @param alreadyStopped a stopped task has not reached a point that notices it yet; stopping
+     *                       it again does not make it notice sooner
      */
-    /**
-     * Whether a task has stalled long enough to be cancelled.
-     *
-     * @param alreadyAsked a second request would only re-log; the task has not noticed the first
-     *                     yet, and asking again does not make it notice sooner
-     */
-    static boolean shouldCancelForStall(long idleMs, long stallTimeoutMs, boolean alreadyAsked) {
-        if (alreadyAsked) return false;
+    static boolean shouldCancelForStall(long idleMs, long stallTimeoutMs, boolean alreadyStopped) {
+        if (alreadyStopped) return false;
         if (stallTimeoutMs <= 0) return false;   // disabled
         return idleMs > stallTimeoutMs;
     }
 
+    /**
+     * Stop tasks that have stopped making progress.
+     *
+     * <p>Runs on the scheduler, not on the task's own thread, which is the whole point. Progress
+     * is a step finishing, a model's reply, or any event of a reply as it streams in -- the
+     * progress hook every model call made for the task carries -- so a long call that is still
+     * answering is alive. A task idle past the stall timeout is marked stalled with the facts
+     * ({@link AgentContext#stall}): it then reads as stopped wherever it checks -- the top of the
+     * next step, the next event of a streamed reply, the supplier a tool polls -- unwinds like a
+     * task the owner stopped, and ends STALLED saying why.
+     *
+     * <p>Cooperative, not a kill switch: a call that has gone silent altogether ends only at its
+     * provider's read timeout, and a tool that does not poll at its own. Interrupting threads
+     * mid-call instead would risk a half-written skill directory or a dangling sandbox process.
+     */
     @Scheduled(fixedDelay = 30_000L)
     public void cancelStalledTasks() {
         long stallTimeoutMs = config.getTasks().getStallTimeout() * 1000L;
         for (var entry : inFlight.entrySet()) {
             AgentContext ctx = entry.getValue();
             long idle = ctx.msSinceLastProgress();
-            boolean asked = cancellationService.isCancelled(
-                    ctx.userId(), entry.getKey(), ctx.startTimeMs());
-            if (!shouldCancelForStall(idle, stallTimeoutMs, asked)) continue;
-            log.warn("Task {} has made no progress for {}s (limit {}s) — requesting cancellation. "
-                            + "It will stop at its next checkpoint; a call already in flight has "
-                            + "to return first.",
+            if (!shouldCancelForStall(idle, stallTimeoutMs, ctx.isCancelled())) continue;
+            log.warn("Task {} has made no progress for {}s (limit {}s): the stall watchdog is stopping it.",
                     entry.getKey(), idle / 1000, stallTimeoutMs / 1000);
-            cancellationService.request(ctx.userId(), entry.getKey());
+            ctx.stall("no progress for " + TaskRecord.duration(idle) + " — no step finished and no "
+                    + "model reply streamed in — and the limit is " + TaskRecord.duration(stallTimeoutMs));
             statusEmitter.emitForTask(ctx.userId(), entry.getKey(), StatusMessage.Type.WARNING,
                     "No progress for " + (idle / 1000) + "s — stopping this task.");
         }
@@ -2692,6 +2524,14 @@ public class AgentLoop {
                 return t;
             });
 
+    /**
+     * Start a periodic heartbeat that emits PROGRESS status messages while a model or tool call
+     * is running. Keeps the UI activity indicator alive so users know the system isn't hung.
+     *
+     * @param userId      target user for status messages
+     * @param description what's happening (e.g. "Generating code")
+     * @return a ScheduledFuture to cancel when the call completes
+     */
     private ScheduledFuture<?> startLlmHeartbeat(String userId, String description) {
         ScheduledExecutorService scheduler = HEARTBEAT_SCHEDULER;
         long[] startMs = { System.currentTimeMillis() };

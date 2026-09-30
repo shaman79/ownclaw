@@ -68,7 +68,7 @@ class TelegramDeliveryTest {
         var config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
         bot = new TelegramBotService(config, new Answering(answer), new UserRepository(jdbc), emitter, JSON,
-                new ConversationService(jdbc, null), new SkillInteractionHandler(null), null,
+                new ConversationService(jdbc), new SkillInteractionHandler(null), null,
                 new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null),
                 null, null, jdbc, telegram.client);
     }

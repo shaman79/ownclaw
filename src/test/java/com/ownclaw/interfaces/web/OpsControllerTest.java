@@ -99,7 +99,7 @@ class OpsControllerTest {
 
     /** The controller over a migrated database and the real OpsService, on a clock the test moves. */
     static Setup setup(Path tmp) throws Exception {
-        return setup(tmp, jdbc -> new ConversationService(jdbc, null));
+        return setup(tmp, jdbc -> new ConversationService(jdbc));
     }
 
     /** The same, with the conversation store the test gives it. */
@@ -164,7 +164,7 @@ class OpsControllerTest {
     @DisplayName("a \"new\" chat is never made the open one, not even for a moment, and no chat is opened for an account with none open")
     void aNewChatIsNeverOpened(@TempDir Path tmp) throws Exception {
         var opened = new CopyOnWriteArrayList<String>();
-        var s = setup(tmp, jdbc -> new ConversationService(jdbc, null) {
+        var s = setup(tmp, jdbc -> new ConversationService(jdbc) {
             @Override public void setActiveSession(String userId, String sessionId) {
                 opened.add(sessionId);
                 super.setActiveSession(userId, sessionId);

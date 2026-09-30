@@ -56,7 +56,7 @@ class SetupOwnerOnlyTest {
     private final List<String> sent = new ArrayList<>();
 
     private void start(Path tmp) throws Exception {
-        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
+        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override public Optional<String> validateToken(String token) { return Optional.of(token); }
             @Override public boolean isOwner(String userId) { return "owner".equals(userId); }

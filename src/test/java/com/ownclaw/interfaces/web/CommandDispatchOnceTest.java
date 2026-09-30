@@ -80,7 +80,7 @@ class CommandDispatchOnceTest {
     private WebSocketSession socket;
 
     private void start(Path tmp) throws Exception {
-        conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
+        conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         queue = new CountingQueue();
         commands = new CountingCommandHandler(conversations, queue);
         chat = new ChatWebSocketHandler(queue, null, conversations, null, commands, null, null,

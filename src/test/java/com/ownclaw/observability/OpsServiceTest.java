@@ -58,7 +58,7 @@ class OpsServiceTest {
     @DisplayName("the conversations table is refused whole: no renaming reaches the private text")
     void privateContentNeverLeavesThroughOps(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
         String session = conversations.createSession("u1", "Statements");
         conversations.saveMessage("u1", session, "assistant", "[Private answer]", List.of(), "a1b2c3d4", SECRET);
         var ops = opsOn(jdbc);
@@ -179,7 +179,7 @@ class OpsServiceTest {
             jdbc.update("INSERT INTO skill_usage (tool_name, user_id, task_id, success, label, error) "
                     + "VALUES ('probe', 'u1', 't" + i + "', 0, 'PUBLIC', ?)", longText + i);
         }
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
         String session = conversations.createSession("u1", "A chat");
         conversations.saveMessage("u1", session, "user", longText);
         jdbc.update("UPDATE chat_sessions SET preview = ? WHERE id = ?", longText, session);

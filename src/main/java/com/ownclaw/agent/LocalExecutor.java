@@ -1149,47 +1149,6 @@ public class LocalExecutor {
         return v != null ? v.toString() : null;
     }
 
-    /**
-     * Summarize text using the local LLM if it exceeds maxLen, otherwise return as-is.
-     * Falls back to smart truncation (head + tail) if the LLM is unavailable.
-     */
-    /**
-     * Compress long text with the local model, falling back to head-and-tail truncation.
-     * <p>
-     * Public because AgentLoop is now the caller. This sat private and unused since it was
-     * written: the job it does — turning a large tool result into something small without
-     * throwing the middle away — is worth a local call only where the 60-133 seconds does not
-     * land on someone waiting, and until there was a notion of unattended work there was
-     * nowhere safe to call it from.
-     */
-    public String summarizeIfLong(String text, int maxLen) {
-        if (text == null) return "";
-        if (text.length() <= maxLen) return text;
-
-        try {
-            LlmProvider local = llmRouter.local();
-            if (local.isAvailable()) {
-                List<LlmMessage> msgs = List.of(
-                        LlmMessage.system("Summarize preserving ALL key facts, data, numbers, URLs. Output ONLY the summary."),
-                        LlmMessage.user(text.length() > 12000 ? text.substring(0, 12000) : text)
-                );
-                // Length is asked for in the prompt, not enforced by a token cap: a cap would be
-                // spent on reasoning first and leave no summary at all.
-                var response = local.chat(msgs, LlmRequestConfig.DEFAULT);
-                if (response.content() != null && !response.content().isBlank()) {
-                    return "[summarized] " + response.content();
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Summarization failed, using smart truncation: {}", e.getMessage());
-        }
-
-        // Fallback: keep head + tail for context
-        int half = maxLen / 2;
-        return text.substring(0, half) + "\n...[" + text.length() + " chars, middle omitted]...\n"
-                + text.substring(text.length() - half);
-    }
-
     // ── Inner types ──
 
     /**

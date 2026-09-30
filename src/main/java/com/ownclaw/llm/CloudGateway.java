@@ -202,8 +202,8 @@ public final class CloudGateway implements LlmProvider {
                     ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
                             parts, scrubs, null, 0, ref));
                     log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
-                    throw new EgressRefused(providerName, hit.handle(), "artifact", part.index(),
-                            part.kind(), hit.offset());
+                    throw new EgressRefused(providerName, hit.handle(),
+                            egress.toolOf().apply(hit.handle()), part.index(), part.kind(), hit.offset());
                 }
                 // OBSERVE: remember it and go on to send. The row is written once, after the
                 // call, so it carries the tokens and the cost like any other -- two rows for one

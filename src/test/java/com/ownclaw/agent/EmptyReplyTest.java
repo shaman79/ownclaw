@@ -160,7 +160,7 @@ class EmptyReplyTest {
                                    ToolRegistry registry, OwnClawConfig config) {
         config.getMentor().setProvider("anthropic");
         return AssistantPartsTest.loop(jdbc, registry, AssistantPartsTest.gateway(cloud, new ArrayList<>()),
-                config).executeWithContext(ctx);
+                config).run(ctx);
     }
 
     static LlmResponse call(String tool, Map<String, Object> args) {
@@ -177,7 +177,8 @@ class EmptyReplyTest {
         AgentResult r = run(jdbc, cloud, ctx);
 
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
-        assertEquals("The model produced nothing that could be run 3 times in a row.", r.response());
+        assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run 3 times "
+                + "in a row.\n\n"), r.response());
         assertEquals(3, cloud.requests.size());
 
         var turns = ctx.trajectory().turns();
@@ -215,7 +216,8 @@ class EmptyReplyTest {
         AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
 
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
-        assertEquals("The model produced nothing that could be run 5 times in this task.", r.response());
+        assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run 5 times "
+                + "in this task.\n\n"), r.response());
         var told = ctx.trajectory().turns().stream()
                 .filter(t -> ThinkingEngine.THINKING.equals(t.action().tool()))
                 .map(t -> t.observation().output()).toList();
@@ -237,8 +239,8 @@ class EmptyReplyTest {
         AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, new ToolRegistry(List.of()), config);
 
         assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason(), r.response());
-        assertEquals("The task used all 2 steps it may take; the last produced nothing that could be run.",
-                r.response(), "not an offer to continue a task whose last step did nothing");
+        assertTrue(r.response().startsWith("**Stopped:** The task used all 2 steps it may take; the last produced "
+                + "nothing that could be run.\n\n"), "the last step's failure, not the bare step limit: " + r.response());
         assertFalse(ctx.trajectory().turns().get(1).observation().output().contains("WARNING"),
                 "the task stopped; a warning about the next step would not be true");
     }

@@ -520,8 +520,10 @@ class DelegationBehaviourTest {
     @DisplayName("Stop pressed during a call of a turn: the calls after it do not run")
     void stopMidTurnRunsNothingMore() {
         var ctx = task();
+        var stop = new java.util.concurrent.atomic.AtomicBoolean();
+        ctx.setExternalCancel(stop::get);      // what the Stop button writes to
         var scan = new FakeTool("net_scan", false, List.of(), p -> {
-            ctx.cancel();                      // the owner presses Stop while the scan runs
+            stop.set(true);                    // the owner presses Stop while the scan runs
             return ToolResult.success("3 hosts up");
         });
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
@@ -663,6 +665,8 @@ class DelegationBehaviourTest {
     @DisplayName("every event of a local reply is progress, and Stop ends the call at the next one")
     void theProgressHookKeepsTheTaskAliveAndStops() throws Exception {
         var ctx = task();
+        var stop = new java.util.concurrent.atomic.AtomicBoolean();
+        ctx.setExternalCancel(stop::get);       // what the Stop button writes to
         long[] quiet = new long[2];
         boolean[] carriedOn = {false};
         LlmProvider llm = new LlmProvider() {
@@ -675,7 +679,7 @@ class DelegationBehaviourTest {
                     quiet[1] = ctx.msSinceLastProgress();
                     return Replies.of(call("ping", Map.of()), 1, 1);
                 }
-                ctx.cancel();                           // Stop, while the model is writing
+                stop.set(true);                         // Stop, while the model is writing
                 c.progress().onProgress();
                 carriedOn[0] = true;
                 return Replies.of(done("pinged"), 1, 1);

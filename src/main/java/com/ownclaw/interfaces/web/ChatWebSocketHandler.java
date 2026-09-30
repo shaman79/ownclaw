@@ -304,7 +304,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Cancel: user requested task interruption
         if ("cancel".equals(messageType)) {
             // Stop with no task named means "whatever is running, stop it".
-            cancellationService.requestAll(userId);
+            cancellationService.requestAll(userId, "you pressed Stop");
             interactionHandler.cancelPending(userId);
             sendToSession(session, "system", "⏹ Cancellation requested.");
             return;

@@ -14,26 +14,36 @@ import java.util.List;
 public interface AgentMemory {
 
     /**
-     * Store an episodic memory — a summary of a completed task execution.
+     * Store an episodic memory — the record of a finished task execution.
      *
      * @param userId   the user who executed the task
      * @param taskId   unique task identifier
-     * @param summary  a concise summary of what was attempted and what happened
+     * @param summary  what was asked and what the task answered, whole
      * @param outcome  whether the task succeeded
      * @param tags     searchable tags derived from the task
      */
     void storeEpisode(String userId, String taskId, String summary, boolean outcome, List<String> tags);
 
     /**
-     * Recall episodic memories relevant to a query.
-     * Returns the most relevant past experiences.
+     * Every episode of this user that has a word of the query, whole: the most words in common
+     * first, and the newest first among equals. Asked for by the agent (memory_manage
+     * action=recall), never put into a prompt unasked.
      *
-     * @param userId   the user to search memories for
-     * @param query    natural language query or task description
-     * @param maxResults maximum number of memories to return
-     * @return list of relevant memory entries, most relevant first
+     * @param userId the user to search memories for
+     * @param query  words to look for
      */
-    List<MemoryEntry> recallEpisodes(String userId, String query, int maxResults);
+    Recall recallEpisodes(String userId, String query);
+
+    /**
+     * What a recall looked for, and what it found.
+     *
+     * @param words    the words of the query that were looked for, lowercased, in order
+     * @param skipped  the words that were not: ones nearly every task has -- "the", "and", a
+     *                 single letter -- which would find every episode; so the caller can say so
+     * @param episodes every episode with at least one of {@code words}, as above; none when
+     *                 there is no word to look for
+     */
+    record Recall(List<String> words, List<String> skipped, List<MemoryEntry> episodes) {}
 
     /**
      * Store a semantic fact — a distilled piece of knowledge.

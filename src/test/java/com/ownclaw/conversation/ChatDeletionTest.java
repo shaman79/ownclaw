@@ -23,7 +23,7 @@ class ChatDeletionTest {
 
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
     }
 
     private void indexIsWhole() {

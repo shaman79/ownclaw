@@ -182,7 +182,7 @@ class RepeatedPrivateResultTest {
         var config = new OwnClawConfig();
         config.getMentor().setProvider(cloud.name);
         var gateway = new CloudGateway(cloud, cloud, config, rows::add, null);
-        return AssistantPartsTest.loop(MigratedDatabase.at(db), registry, gateway, config).executeWithContext(ctx);
+        return AssistantPartsTest.loop(MigratedDatabase.at(db), registry, gateway, config).run(ctx);
     }
 
     @Test
@@ -368,7 +368,7 @@ class RepeatedPrivateResultTest {
         var ctx = new AgentContext("u1", "t-cat", "Audit the routers and show me the saved report.");
 
         AgentResult r = AssistantPartsTest.loop(jdbc, registry, AssistantPartsTest.gateway(cloud, rows), config)
-                .executeWithContext(ctx);
+                .run(ctx);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(),
                 "the step after cat_report was refused over the audit's bytes: " + r.response());

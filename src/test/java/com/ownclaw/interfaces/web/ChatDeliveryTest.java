@@ -82,7 +82,7 @@ class ChatDeliveryTest {
     private final ChatStatusEmitter emitter = new ChatStatusEmitter();
     private final List<JsonNode> sent = new CopyOnWriteArrayList<>();
     /** The conversation store the chat is given; a test may hand it one that fails. */
-    private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db, null);
+    private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db);
     /** Frames the socket refuses, as Tomcat's does: with an IllegalStateException. */
     private Predicate<JsonNode> refused = frame -> false;
     /** Called with each frame as the socket is sending it, before it is taken. */
@@ -223,7 +223,7 @@ class ChatDeliveryTest {
     @Test
     @DisplayName("an answer that cannot be saved is still sent, and nothing says the task failed")
     void anUnsavedAnswerIsStillSent(@TempDir Path tmp) throws Exception {
-        store = db -> new ConversationService(db, null) {
+        store = db -> new ConversationService(db) {
             @Override
             public String saveMessage(String userId, String sessionId, String role, String content,
                                       List<String> attachmentIds, String taskId, String privateContent) {

@@ -1,45 +1,29 @@
 package com.ownclaw.conversation;
 
 import com.ownclaw.agent.AgentResult;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * Manages chat sessions and message persistence.
  * Supports multiple named sessions per user with search.
- * Integrates with ConversationCompressor for rolling history summarization.
  */
 @Service
 public class ConversationService {
 
-    private static final Logger log = LoggerFactory.getLogger(ConversationService.class);
-
     private final JdbcTemplate jdbc;
-    private final ConversationCompressor compressor;
-    private final ExecutorService compressionExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "conversation-compressor");
-                t.setDaemon(true);
-                return t;
-            });
 
-    public ConversationService(JdbcTemplate jdbc, ConversationCompressor compressor) {
+    public ConversationService(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
-        this.compressor = compressor;
     }
 
     /**
      * Save a message to the conversation store.
-     * Updates the session's updated_at timestamp and preview snippet.
-     * Triggers compression check after saving.
+     * Updates the session's updated_at timestamp and preview.
      *
      * @return the generated message ID
      */
@@ -68,7 +52,8 @@ public class ConversationService {
 
     /**
      * @param content        the cloud-safe text. Everything that feeds a prompt reads this
-     *                       column: the recent messages, the compressor, search, the preview.
+     *                       column: a chat task's context ({@link #contextOf}), search, the
+     *                       preview.
      * @param privateContent what only the owner's chat shows in its place, or null. Read back by
      *                       {@link #getSessionMessages} alone, so a reader added later gets the
      *                       safe text unless it asks for this one by name.
@@ -91,23 +76,13 @@ public class ConversationService {
             }
         }
 
-        // Update session timestamp and preview (first user message becomes the preview)
+        // Update session timestamp and preview (the first user message, whole, is the preview;
+        // the sidebar lays it out)
         jdbc.update("""
             UPDATE chat_sessions SET updated_at = datetime('now'),
-                preview = COALESCE(preview, CASE WHEN ? = 'user' THEN substr(?, 1, 120) ELSE preview END)
+                preview = COALESCE(preview, CASE WHEN ? = 'user' THEN ? ELSE preview END)
             WHERE id = ?
             """, role, content, sessionId);
-
-        // Trigger compression check on a background thread so it never blocks
-        // the caller (web thread or agent loop). The compressor may call the LLM
-        // which can take minutes if Ollama is busy.
-        compressionExecutor.execute(() -> {
-            try {
-                compressor.compressIfNeeded(userId, sessionId);
-            } catch (Exception e) {
-                log.warn("Background compression failed (non-fatal): {}", e.getMessage());
-            }
-        });
         return messageId;
     }
 
@@ -125,23 +100,34 @@ public class ConversationService {
     }
 
     /**
-     * Get the last N messages in a session (for LLM context).
+     * A chat task's context: the conversation of the session {@code messageId} was saved in,
+     * oldest first, each message whole, with the task each answer came from -- every question
+     * asked before that message, and every answer given so far. Not that message itself, which
+     * is the task's own text.
+     * <p>
+     * The session is the one the task's message belongs to, not whichever chat is open now: the
+     * owner can switch chats while a task waits in the queue. A question typed after this one is
+     * left out -- it is its own task, which runs next and reads this one's answer; read here, it
+     * was presented as already asked, before the question being answered. An answer is read
+     * whenever it came: the one to a question queued before this one arrives while this task
+     * waits, and it is what the owner's follow-up builds on.
+     * <p>
+     * Only the conversation: a {@code system} row is a command's reply or the setup wizard's
+     * prompt -- /files lists uploaded files by name, and a file's name can carry an account
+     * number -- and no part of what is being continued. Rows an earlier summariser marked
+     * {@code compressed} are read like any other; they were marked, never changed.
      */
-    public List<Map<String, Object>> getRecentMessages(String userId, String sessionId, int limit) {
+    public List<Map<String, Object>> contextOf(String userId, String messageId) {
         return jdbc.queryForList("""
-            SELECT id, role, content, timestamp FROM conversations
-            WHERE user_id = ? AND session_id = ? AND compressed = 0 AND role != 'status'
-            ORDER BY timestamp DESC, rowid DESC LIMIT ?
-            """, userId, sessionId, limit);
-    }
-
-    /**
-     * Get the rolling summary for a session (compressed history of older messages).
-     *
-     * @return summary text, or null if no compression has occurred yet
-     */
-    public String getSessionSummary(String userId, String sessionId) {
-        return compressor.getSessionSummary(userId, sessionId);
+            SELECT id, role, content, timestamp,
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id
+            FROM conversations
+            WHERE user_id = ? AND id != ?
+              AND session_id = (SELECT session_id FROM conversations WHERE id = ? AND user_id = ?)
+              AND (role = 'assistant'
+                   OR role = 'user' AND rowid < (SELECT rowid FROM conversations WHERE id = ? AND user_id = ?))
+            ORDER BY timestamp ASC, rowid ASC
+            """, userId, messageId, messageId, userId, messageId, userId);
     }
 
     // ── Session Management ──
@@ -381,23 +367,18 @@ public class ConversationService {
                 "SELECT title FROM chat_sessions WHERE id = ? AND user_id = ?",
                 String.class, sessionId, userId);
         if (!currentTitle.isEmpty() && "New Chat".equals(currentTitle.getFirst())) {
-            // Generate title from first message: take first sentence or first 60 chars
             String title = generateTitle(firstMessage);
             jdbc.update("UPDATE chat_sessions SET title = ? WHERE id = ? AND user_id = ?",
                     title, sessionId, userId);
         }
     }
 
-    private String generateTitle(String message) {
+    /**
+     * The first line of the message that has text on it, whole; the sidebar lays it out. It used
+     * to end at the first '.', so "Check 192.0.2.1" became "Check 192", and was cut at 60.
+     */
+    static String generateTitle(String message) {
         if (message == null || message.isBlank()) return "New Chat";
-        // Use first line or first sentence
-        String title = message.split("[\\n.!?]")[0].trim();
-        if (title.length() > 60) {
-            title = title.substring(0, 57) + "...";
-        }
-        if (title.isBlank()) {
-            title = message.substring(0, Math.min(60, message.length()));
-        }
-        return title;
+        return message.strip().lines().findFirst().orElseThrow().strip();
     }
 }

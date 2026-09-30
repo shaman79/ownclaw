@@ -60,7 +60,7 @@ class ResultDeliveryTest {
     @DisplayName("a private answer is saved and sent beside the safe text, never as it")
     void privateAnswerIsSavedAndEmittedSafely(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
         String session = conversations.createSession("u1", "Where it was asked");
         var emitter = new ChatStatusEmitter();
         var messages = new ArrayList<StatusMessage>();
@@ -102,7 +102,7 @@ class ResultDeliveryTest {
     @DisplayName("a result is saved into the chat the caller names, not the open one, and says which")
     void savedIntoTheNamedChat(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
         String asked = conversations.createSession("u1", "Where /bg was typed");
         String open = conversations.createSession("u1", "Opened since");   // the active chat now
         var emitter = new ChatStatusEmitter();

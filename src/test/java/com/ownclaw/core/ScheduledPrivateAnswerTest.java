@@ -61,7 +61,7 @@ class ScheduledPrivateAnswerTest {
 
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
         var emitter = new ChatStatusEmitter();
         emitter.subscribe("u1", "web", m -> {
             if (m.type() == StatusMessage.Type.RESULT) results.add(m);
