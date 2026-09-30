@@ -61,6 +61,7 @@ class ResultDeliveryTest {
     void privateAnswerIsSavedAndEmittedSafely(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         var conversations = new ConversationService(jdbc, null);
+        String session = conversations.createSession("u1", "Where it was asked");
         var emitter = new ChatStatusEmitter();
         var messages = new ArrayList<StatusMessage>();
         var telegram = new ArrayList<String>();
@@ -74,8 +75,8 @@ class ResultDeliveryTest {
 
         // With a task id and without one: the two are emitted by different calls.
         var delivery = new ResultDelivery(conversations, emitter);
-        delivery.deliver("u1", "Background task", answer.withTaskId("a1b2c3d4"));
-        delivery.deliver("u1", "Background task", answer);
+        delivery.deliver("u1", () -> session, "Background task", answer.withTaskId("a1b2c3d4"));
+        delivery.deliver("u1", () -> session, "Background task", answer);
 
         var rows = jdbc.queryForList("SELECT content, private_content FROM conversations");
         assertEquals(2, rows.size());
@@ -95,6 +96,26 @@ class ResultDeliveryTest {
         assertEquals(2, telegram.size());
         assertTrue(telegram.stream().allMatch(t -> t.contains(secret)),
                 "Telegram gets the owner's answer -- his decision: " + telegram);
+    }
+
+    @Test
+    @DisplayName("a result is saved into the chat the caller names, not the open one, and says which")
+    void savedIntoTheNamedChat(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc, null);
+        String asked = conversations.createSession("u1", "Where /bg was typed");
+        String open = conversations.createSession("u1", "Opened since");   // the active chat now
+        var emitter = new ChatStatusEmitter();
+        var messages = new ArrayList<StatusMessage>();
+        emitter.subscribe("u1", "web", messages::add);
+
+        new ResultDelivery(conversations, emitter).deliver("u1", () -> asked, "Background task",
+                AgentResult.completed("the weather is fine", new AgentTrajectory(), 1));
+
+        assertEquals(List.of(asked), jdbc.queryForList(
+                "SELECT session_id FROM conversations WHERE content LIKE '%the weather is fine%'", String.class));
+        assertEquals(open, conversations.getCurrentSession("u1"), "delivering does not switch chats");
+        assertEquals(asked, messages.get(0).data().get("sessionId"), "the page is told which chat it is for");
     }
 
     @Test

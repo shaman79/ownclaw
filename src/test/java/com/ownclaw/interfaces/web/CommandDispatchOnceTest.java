@@ -138,7 +138,7 @@ class CommandDispatchOnceTest {
 
         type("/nosuchcommand");
         assertEquals(1, commands.asked.size(), String.valueOf(commands.asked));
-        assertTrue(sent.stream().anyMatch(s -> s.contains("Unknown command: /nosuchcommand")), String.valueOf(sent));
+        assertTrue(sent.stream().anyMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
 
         // The web chat adds its own line to the shared status text.
         commands.asked.clear();

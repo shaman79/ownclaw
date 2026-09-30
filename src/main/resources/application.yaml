@@ -34,15 +34,16 @@ spring:
 
   servlet:
     multipart:
-      # FileUploadController accepts files up to 50 MB (its MAX_FILE_SIZE) and says so when it
-      # refuses one, but the container parses the upload before the controller runs, and Spring's
-      # defaults there are 1 MB a file and 10 MB a request. Any file over 1 MB -- a scanned
-      # statement, a PDF with images -- was refused before the controller saw it. Keep both equal
-      # to MAX_FILE_SIZE; MultipartLimitTest reads this file and fails when they differ. The
-      # browser sends every file picked at once in one request, so together they must fit in
-      # max-request-size.
-      max-file-size: 50MB
-      max-request-size: 50MB
+      # 100 MB: the request body Cloudflare accepts in front of production -- a larger upload
+      # never reaches this server, so nothing lower is set here. FileUploadController accepts
+      # files up to the same size (its MAX_FILE_SIZE) and says so when it refuses one, but the
+      # container parses the upload before the controller runs, and Spring's defaults there are
+      # 1 MB a file and 10 MB a request. Any file over 1 MB -- a scanned statement, a PDF with
+      # images -- was refused before the controller saw it. Keep both equal to MAX_FILE_SIZE;
+      # MultipartLimitTest reads this file and fails when they differ. The browser sends every
+      # file picked at once in one request, so together they must fit in max-request-size.
+      max-file-size: 100MB
+      max-request-size: 100MB
 
 server:
   port: ${OWNCLAW_SERVER_PORT:${ownclaw.server.port:8080}}
@@ -149,7 +150,6 @@ ownclaw:
     stall-timeout: 600
     heartbeat-interval: 30
     scheduler-poll-interval: 30
-    max-scheduled-tasks-per-user: 50
 
   telegram:
     enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}

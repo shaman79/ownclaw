@@ -137,11 +137,14 @@ class PrivateAnswerInTheWebChatTest {
         emitter.subscribe(USER, "telegram", m -> telegram.add(
                 com.ownclaw.interfaces.telegram.TelegramBotService.telegramText(m)));
 
-        new ResultDelivery(conversations, emitter).deliver(USER, "Background task", privateAnswer());
+        String session = conversations.getCurrentSession(USER);
+        new ResultDelivery(conversations, emitter).deliver(USER, () -> session, "Background task", privateAnswer());
 
         List<String> shown = frames("result");
         assertEquals(1, shown.size(), String.valueOf(sent));
         assertTrue(shown.get(0).contains(SECRET), "the web chat shows the answer: " + shown);
+        assertEquals(List.of(session), sent.stream().filter(f -> "result".equals(f.path("type").asText()))
+                .map(f -> f.path("sessionId").asText()).toList(), "with the chat it was saved into");
         assertTrue(telegram.stream().anyMatch(t -> t.contains(SECRET)),
                 "Telegram gets the answer too -- the owner's decision: " + telegram);
     }

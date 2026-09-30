@@ -27,10 +27,12 @@ public class FileUploadController {
     private static final Logger log = LoggerFactory.getLogger(FileUploadController.class);
 
     /**
-     * Maximum file size: 50 MB. The container refuses a larger upload before this controller runs,
-     * under spring.servlet.multipart in application.yaml, which must equal it (MultipartLimitTest).
+     * Maximum upload: 100 MB, the request body Cloudflare accepts in front of production -- a
+     * larger upload never reaches this server at all. The container refuses a larger upload
+     * before this controller runs, under spring.servlet.multipart in application.yaml, which
+     * must equal it (MultipartLimitTest).
      */
-    static final long MAX_FILE_SIZE = 50 * 1024 * 1024;
+    static final long MAX_FILE_SIZE = 100L * 1024 * 1024;
 
     private final FileStorageService fileStorage;
 

@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.function.Supplier;
+
 /**
  * Delivers the result of work nobody was sitting and waiting for.
  * <p>
@@ -23,6 +25,10 @@ import org.springframework.stereotype.Service;
  * conversation, because unattended work finishes when by definition nobody is watching and a push
  * to a closed socket goes nowhere — persistence is what makes it there when you next open the
  * chat. It is also <em>emitted</em>, so that if an interface is attached it appears immediately.
+ * <p>
+ * Which chat it is saved into is the caller's to say: the one {@code /bg} was typed in, or the
+ * pinned chat of scheduled results. It used to be whichever chat was open when the work finished,
+ * so a morning digest landed in the middle of an unrelated conversation.
  */
 @Service
 public class ResultDelivery {
@@ -40,10 +46,12 @@ public class ResultDelivery {
     /**
      * Deliver a finished task's outcome, phrased according to how it ended.
      *
+     * @param chat  the chat it is saved into, as {@link #deliver(String, Supplier, String, String,
+     *              String, String)} takes it
      * @param label what the task was, for a header — the result arrives long after the request,
      *              so it has to say what it is answering
      */
-    public void deliver(String userId, String label, AgentResult result) {
+    public void deliver(String userId, Supplier<String> chat, String label, AgentResult result) {
         String header;
         if (result.success()) {
             header = label;
@@ -53,7 +61,7 @@ public class ResultDelivery {
             header = label + " — did not finish (" + result.terminationReason() + ")";
         }
         String withheld = withheldLine(result);
-        deliver(userId, header, result.response() + withheld, result.taskId(),
+        deliver(userId, chat, header, result.response() + withheld, result.taskId(),
                 result.ownerText() == null ? null : result.ownerText() + withheld);
     }
 
@@ -97,27 +105,24 @@ public class ResultDelivery {
                 + "_";
     }
 
-    /** Deliver text as a real assistant message in the user's current conversation. */
-    public void deliver(String userId, String header, String text) {
-        deliver(userId, header, text, null);
-    }
-
     /**
-     * @param taskId the agent task this is the outcome of, or null. Saved with the message and
-     *               sent with it, so the chat can offer "what this task did" -- now and after a
-     *               reload.
-     */
-    public void deliver(String userId, String header, String text, String taskId) {
-        deliver(userId, header, text, taskId, null);
-    }
-
-    /**
+     * Deliver text as a real assistant message in the chat the caller names.
+     *
+     * @param chat      the chat it is saved into, looked up here as part of saving it: finding the
+     *                  pinned chat of scheduled results can create it, and fail like any write.
+     *                  Looked up by the caller, a failure escaped before this was called, and the
+     *                  result was neither saved nor sent. Sent with the message, so a page showing
+     *                  another chat does not append it there.
+     * @param taskId    the agent task this is the outcome of, or null. Saved with the message and
+     *                  sent with it, so the chat can offer "what this task did" -- now and after a
+     *                  reload.
      * @param ownerText what the owner is shown in place of {@code text} -- web chat and
      *                  Telegram -- or null. Saved as the row's private text and sent only in the
      *                  message's data; the message's text stays the safe one, and that is what
      *                  history, search and later prompts read.
      */
-    public void deliver(String userId, String header, String text, String taskId, String ownerText) {
+    public void deliver(String userId, Supplier<String> chat, String header, String text, String taskId,
+                        String ownerText) {
         if (text == null || text.isBlank()) {
             // Nothing useful to show. Saying so beats an empty bubble, which reads like a bug.
             text = "(the task produced no output)";
@@ -125,15 +130,18 @@ public class ResultDelivery {
         String message = withHeader(header, text);
         String owner = ownerText == null ? null : withHeader(header, ownerText);
 
+        String sessionId = null;
         try {
-            String sessionId = conversations.getCurrentSession(userId);
+            sessionId = chat.get();
             conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(),
                     taskId, owner);
         } catch (Exception e) {
             // Persisting is the more important half, but failing it must not also lose the push.
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
         }
-        java.util.Map<String, Object> data = owner == null ? null : java.util.Map.of("ownerText", owner);
+        var data = new java.util.HashMap<String, Object>();
+        if (sessionId != null) data.put("sessionId", sessionId);
+        if (owner != null) data.put("ownerText", owner);
         if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message, data);
         else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message, data);
     }

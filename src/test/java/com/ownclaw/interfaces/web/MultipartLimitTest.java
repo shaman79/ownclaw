@@ -38,4 +38,10 @@ class MultipartLimitTest {
         assertEquals(FileUploadController.MAX_FILE_SIZE, multipart.getMaxRequestSize().toBytes(),
                 "spring.servlet.multipart.max-request-size");
     }
+
+    @Test
+    @DisplayName("the limit is the 100 MB request body Cloudflare accepts in front of production, no lower")
+    void theLimitIsTheProxys() {
+        assertEquals(100L * 1024 * 1024, FileUploadController.MAX_FILE_SIZE);
+    }
 }

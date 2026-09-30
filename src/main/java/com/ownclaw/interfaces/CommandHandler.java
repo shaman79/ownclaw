@@ -19,16 +19,20 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Shared command handler for slash commands.
  * Used by both the Web UI (ChatWebSocketHandler) and Telegram bot (TelegramBotService)
  * to ensure consistent behavior across interfaces.
  * <p>
- * Returns the command response text, or {@link Optional#empty()} if the input
- * is not a recognized command and should be routed to the agent.
+ * Returns the command response text, or {@link Optional#empty()} if the input is not one of
+ * these commands: the caller may have its own, may be waiting for an answer that starts with a
+ * slash, or answers {@link #UNKNOWN_COMMAND}. It is never handed to the agent as a message.
  */
 @Service
 public class CommandHandler {
@@ -72,8 +76,7 @@ public class CommandHandler {
     }
 
     /**
-     * Try to handle a slash command. Returns the response if it's a known command,
-     * or empty if the message should be routed to the agent instead.
+     * Try to handle a slash command. Returns the response if it's a known command, or empty.
      *
      * @param userId  the user ID
      * @param message the raw message text
@@ -82,6 +85,12 @@ public class CommandHandler {
     public Optional<String> handle(String userId, String message) {
         if (message == null || !message.startsWith("/")) {
             return Optional.empty();
+        }
+        Matcher secret = SECRET_COMMAND.matcher(message);
+        if (secret.matches()) {
+            return Optional.of(secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred")
+                    ? storeCredential(userId, secret.group(2), secret.group(3))
+                    : addUser(userId, secret.group(2), secret.group(3)));
         }
 
         String command = message.trim().toLowerCase();
@@ -115,8 +124,8 @@ public class CommandHandler {
                 if (command.startsWith("/switch ")) {
                     yield Optional.of(handleSwitch(userId, message.trim().substring(8).strip()));
                 }
-                if (command.startsWith("/log")) {
-                    yield Optional.of(handleLog(userId, command));
+                if (command.equals("/log") || command.startsWith("/log ")) {
+                    yield Optional.of(handleLog(userId, command.substring(4).strip()));
                 }
                 if (command.startsWith("/grant ")) {
                     yield Optional.of(handleGrant(userId, message.trim().substring(7).strip()));
@@ -146,6 +155,36 @@ public class CommandHandler {
         };
     }
 
+    /**
+     * The two commands whose text carries a secret -- {@code /cred set KEY VALUE} and
+     * {@code /user add NAME PASSWORD} -- read once: group 1 is the command, 2 the name, 3 the
+     * secret. {@link #handle} takes the secret from this match and {@link #displayed} hides the
+     * same span, so no text can be stored as a secret and then shown, logged or kept as typed.
+     * A second reading of the same text differs at some space or letter case, and the secret
+     * sits in the gap: the parse this replaces split on ' ' and routed on the lowercased text, so
+     * "/cred&lt;NBSP&gt;set KEY VALUE" was no command at all and came back into the chat whole.
+     * Neighbouring parts never match the same character, so a text splits one way only and a
+     * long run of spaces cannot make the matcher try every split: the time is linear in the text.
+     */
+    private static final Pattern SECRET_COMMAND = Pattern.compile(
+            "(/cred\\s+set|/user\\s+add)\\s+(\\S+)\\s+(\\S.*)",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** What a chat shows for an unknown command. The text itself is not repeated: it may hold a secret. */
+    public static final String UNKNOWN_COMMAND = "Unknown command. Try /help";
+
+    /** The text as a chat may show, log or keep it: a command's secret masked, anything else as sent. */
+    public static String displayed(String message) {
+        Matcher m = message == null ? null : SECRET_COMMAND.matcher(message);
+        return m != null && m.matches()
+                ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022" : message;
+    }
+
+    /** Whether this text carries a secret that {@link #handle} stores. */
+    public static boolean carriesSecret(String message) {
+        return message != null && SECRET_COMMAND.matcher(message).matches();
+    }
+
     // ── Help ──
 
     /**
@@ -153,12 +192,11 @@ public class CommandHandler {
      * <p>
      * Submitted at background priority, which means two things. It runs on the background lane
      * rather than ahead of your next message (when that lane is enabled), and it is marked
-     * unattended, which lets the agent spend local inference time it could never justify while
-     * someone is watching — compressing a large tool result with the local model instead of
-     * truncating it, for instance.
+     * unattended: nobody is waiting on it (see AgentContext.isUnattended).
      * <p>
-     * Returns as soon as it is queued. The result arrives on every interface you have attached,
-     * so starting something here and reading the answer on Telegram works.
+     * Returns as soon as it is queued. The result is saved into the chat this was typed in --
+     * the one Telegram messages are saved in, when typed there -- and arrives on every interface
+     * you have attached, so starting something here and reading the answer on Telegram works.
      */
     private String handleBackground(String userId, String fullMessage) {
         String task = fullMessage.length() > 3 ? fullMessage.substring(3).strip() : "";
@@ -166,12 +204,14 @@ public class CommandHandler {
             return "Usage: `/bg <task>` — runs it in the background and tells you when it is done.\n"
                     + "Use it for anything you do not want to sit and wait for.";
         }
+        // Where it was typed, read now: minutes later the open chat can be another one, and the
+        // answer would be saved under a conversation it has nothing to do with.
+        String sessionId = conversationService.getCurrentSession(userId);
         // The future used to be discarded, so this promise was never kept: the task ran, the
         // answer was produced, and nothing delivered it. Only the status lines appeared.
         taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY)
                 .thenAccept(result -> resultDelivery.deliver(
-                        userId, "Background task: "
-                                + (task.length() > 60 ? task.substring(0, 60) + "…" : task), result));
+                        userId, () -> sessionId, "Background task: " + task, result));
         return "Running in the background:\n> " + task
                 + "\n\nYou will get the result here when it finishes — no need to wait.";
     }
@@ -227,10 +267,10 @@ public class CommandHandler {
         return """
                 ### Commands
                 - `/new [title]` — Start a new chat session
-                - `/history` — List recent chat sessions
+                - `/history` — List your chat sessions
                 - `/switch <N>` — Switch to session N from history
-                - `/log` — Last 10 events
-                - `/log errors` — Recent errors
+                - `/log [count|all] [page N]` — Recent events, newest first (10 unless a count is given)
+                - `/log errors [count|all] [page N]` — Recent errors, the same way
                 - `/log tokens` — Token usage today
                 - `/tokens` — Token budget summary
                 - `/skills` — List available tools
@@ -283,15 +323,7 @@ public class CommandHandler {
                 return sb.toString();
             }
             case "add" -> {
-                if (parts.length != 3 || parts[2].length() < 4) {
-                    return "Usage: /user add <username> <password> (password: at least 4 characters, no spaces)";
-                }
-                try {
-                    authService.register(parts[1], parts[2], userId);
-                    return "\u2705 Account **" + parts[1] + "** created.";
-                } catch (IllegalArgumentException e) {
-                    return "\u274C " + e.getMessage();
-                }
+                return ADD_USAGE;   // a well-formed add is read by SECRET_COMMAND in handle()
             }
             case "disable" -> {
                 if (parts.length != 2) return usage;
@@ -322,6 +354,24 @@ public class CommandHandler {
         }
     }
 
+    private static final String ADD_USAGE =
+            "Usage: /user add <username> <password> (password: at least 4 characters, no spaces)";
+
+    /** A well-formed {@code /user add}, as SECRET_COMMAND read it. */
+    private String addUser(String userId, String username, String password) {
+        if (!authService.isOwner(userId)) {
+            return "Only the owner can manage accounts.";
+        }
+        password = password.strip();
+        if (!password.matches("(?U)\\S{4,}")) return ADD_USAGE;
+        try {
+            authService.register(username, password, userId);
+            return "\u2705 Account **" + username + "** created.";
+        } catch (IllegalArgumentException e) {
+            return "\u274C " + e.getMessage();
+        }
+    }
+
     // ── Session management ──
 
     private String handleNew(String userId, String raw) {
@@ -340,7 +390,6 @@ public class CommandHandler {
         int n = 0;
         for (var s : sessions) {
             n++;
-            if (n > 15) break; // cap at 15
             String title = String.valueOf(s.get("title"));
             Object msgCount = s.get("message_count");
             Object updatedAt = s.get("updated_at");
@@ -409,47 +458,87 @@ public class CommandHandler {
 
     // ── Log ──
 
-    private String handleLog(String userId, String command) {
-        String sub = command.length() > 4 ? command.substring(4).strip().toLowerCase() : "";
+    /** Rows on a /log page when no count is given. Every row stays reachable: by count, by page, or all. */
+    private static final int LOG_PAGE = 10;
 
-        return switch (sub) {
-            case "errors" -> {
-                List<Map<String, Object>> errors = eventLog.recentErrors(userId, 10);
-                if (errors.isEmpty()) yield "No recent errors.";
-                var sb = new StringBuilder("Recent errors:\n");
-                for (var e : errors) {
-                    sb.append("  [").append(e.get("timestamp")).append("] ")
-                            .append(e.get("event_type")).append(": ").append(e.get("summary")).append('\n');
-                }
-                yield sb.toString();
+    private static final String LOG_USAGE = "Usage: `/log [errors] [count|all] [page N]` — newest first, "
+            + LOG_PAGE + " to a page unless a count is given. `/log tokens` — token usage today.";
+
+    /**
+     * {@code /log [errors] [count|all] [page N]} and {@code /log tokens}.
+     * <p>
+     * It showed the last ten events, or errors, and nothing older could be reached from the chat
+     * at all -- which on Telegram, with no ops page at hand, was the only way to look.
+     *
+     * @param args the text after {@code /log}, lowercased
+     */
+    private String handleLog(String userId, String args) {
+        if (args.equals("tokens")) {
+            Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
+            String budget = budgetTracker.getUsageSummary(userId);
+            long cloud = ((Number) detail.get("cloud_tokens")).longValue();
+            long local = ((Number) detail.get("local_tokens")).longValue();
+            long total = ((Number) detail.get("total_tokens")).longValue();
+            long tasks = ((Number) detail.get("task_count")).longValue();
+            return String.format("Token usage today:\n  Cloud: %,d  |  Local: %,d  |  Total: %,d\n  Tasks: %d\n  Budget: %s",
+                    cloud, local, total, tasks, budget);
+        }
+        String[] words = args.isEmpty() ? new String[0] : args.split("\\s+");
+        int i = 0;
+        boolean errors = i < words.length && words[i].equals("errors");
+        if (errors) i++;
+        long count = LOG_PAGE;   // negative: every row
+        long page = 1;
+        try {
+            if (i < words.length && words[i].equals("all")) {
+                count = -1;
+                i++;
+            } else if (i < words.length && words[i].matches("\\d+")) {
+                count = Long.parseLong(words[i++]);
             }
-            case "tokens" -> {
-                Map<String, Object> detail = eventLog.tokenUsageDetailToday(userId);
-                String budget = budgetTracker.getUsageSummary(userId);
-                long cloud = ((Number) detail.get("cloud_tokens")).longValue();
-                long local = ((Number) detail.get("local_tokens")).longValue();
-                long total = ((Number) detail.get("total_tokens")).longValue();
-                long tasks = ((Number) detail.get("task_count")).longValue();
-                yield String.format("Token usage today:\n  Cloud: %,d  |  Local: %,d  |  Total: %,d\n  Tasks: %d\n  Budget: %s",
-                        cloud, local, total, tasks, budget);
+            if (i + 1 < words.length && words[i].equals("page") && words[i + 1].matches("\\d+")) {
+                page = Long.parseLong(words[i + 1]);
+                i += 2;
             }
-            default -> {
-                List<Map<String, Object>> events = eventLog.recentEvents(userId, 10);
-                if (events.isEmpty()) yield "No recent events.";
-                var sb = new StringBuilder("Last 10 events:\n");
-                for (var e : events) {
-                    String sev = String.valueOf(e.get("severity"));
-                    String icon = switch (sev) {
-                        case "error" -> "\u274c";
-                        case "warn" -> "\u26a0\ufe0f";
-                        default -> "\u2139\ufe0f";
-                    };
-                    sb.append("  ").append(icon).append(" [").append(e.get("timestamp")).append("] ")
-                            .append(e.get("event_type")).append(": ").append(e.get("summary")).append('\n');
-                }
-                yield sb.toString();
-            }
-        };
+        } catch (NumberFormatException e) {
+            return LOG_USAGE;   // more digits than a long holds
+        }
+        if (i != words.length || count == 0 || page < 1 || (count < 0 && page > 1)) return LOG_USAGE;
+        long offset;
+        try {
+            offset = count < 0 ? 0 : Math.multiplyExact(page - 1, count);
+        } catch (ArithmeticException e) {
+            return LOG_USAGE;
+        }
+
+        // One more than asked for, to know whether an older page exists.
+        long fetch = count < 0 ? -1 : count + 1;
+        List<Map<String, Object>> rows = errors
+                ? eventLog.recentErrors(userId, fetch, offset)
+                : eventLog.recentEvents(userId, fetch, offset);
+        String what = errors ? "errors" : "events";
+        if (rows.isEmpty()) {
+            return page == 1 ? "No recent " + what + "." : "No " + what + " on page " + page + ".";
+        }
+        boolean older = count >= 0 && rows.size() > count;
+        if (older) rows = rows.subList(0, (int) count);
+
+        var sb = new StringBuilder(errors ? "Errors " : "Events ")
+                .append(offset + 1).append('\u2013').append(offset + rows.size()).append(", newest first:\n");
+        for (var e : rows) {
+            String icon = switch (String.valueOf(e.get("severity"))) {
+                case "error" -> "\u274c";
+                case "warn" -> "\u26a0\ufe0f";
+                default -> "\u2139\ufe0f";
+            };
+            sb.append("  ").append(icon).append(" [").append(e.get("timestamp")).append("] ")
+                    .append(e.get("event_type")).append(": ").append(e.get("summary")).append('\n');
+        }
+        if (older) {
+            sb.append("Older: `/log ").append(errors ? "errors " : "").append(count)
+                    .append(" page ").append(page + 1).append('`');
+        }
+        return sb.toString();
     }
 
     // ── Credentials ──
@@ -469,16 +558,6 @@ public class CommandHandler {
             return sb.toString();
         }
 
-        if (args.startsWith("set ")) {
-            String rest = args.substring(4).strip();
-            int space = rest.indexOf(' ');
-            if (space < 1) return "Usage: /cred set <KEY> <VALUE>";
-            String key = rest.substring(0, space).toUpperCase();
-            String value = rest.substring(space + 1).strip();
-            credentialVault.storeCredential(userId, key, value);
-            return "\u2705 Credential '" + key + "' stored (encrypted).";
-        }
-
         if (args.startsWith("delete ")) {
             String key = args.substring(7).strip().toUpperCase();
             if (key.isEmpty()) return "Usage: /cred delete <KEY>";
@@ -487,6 +566,13 @@ public class CommandHandler {
         }
 
         return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
+    }
+
+    /** A well-formed {@code /cred set}, as SECRET_COMMAND read it. */
+    private String storeCredential(String userId, String key, String value) {
+        key = key.toUpperCase(Locale.ROOT);
+        credentialVault.storeCredential(userId, key, value.strip());
+        return "\u2705 Credential '" + key + "' stored (encrypted).";
     }
 
     // ── Scheduled Tasks ──

@@ -56,3 +56,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/019-conversation-private-content.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/020-chat-session-kind.sql
+      relativeToChangelogFile: false
