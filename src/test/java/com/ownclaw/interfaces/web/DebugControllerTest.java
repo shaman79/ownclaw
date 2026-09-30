@@ -13,15 +13,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /** The owner's stored debug traces: kept for a day however many there are, listed whole. */
 class DebugControllerTest {
+
+    static final long T0 = Instant.parse("2026-09-30T12:00:00Z").toEpochMilli();
+
+    /** A day, written out: the test pins the duration itself, not whatever a constant says. */
+    static final long DAY = 24L * 60 * 60 * 1000;
 
     @Test
     @DisplayName("a trace is kept for a day, not until fifty newer ones push it out, and listed whole")
@@ -37,8 +44,9 @@ class DebugControllerTest {
                         .withTaskId(String.format("%08x", calls.incrementAndGet()));
             }
         };
+        var clock = new AtomicLong(T0);
         var debug = new DebugController(loop, null, null, new DebugSessionService(), new ChatStatusEmitter(),
-                jdbc, new AuthService(jdbc, null, new OwnClawConfig()));
+                jdbc, new AuthService(jdbc, null, new OwnClawConfig()), clock::get);
 
         String longMessage = "m".repeat(300) + " END";
         var ids = new ArrayList<String>();
@@ -56,11 +64,11 @@ class DebugControllerTest {
         assertEquals(ids, listed.stream().map(t -> t.get("taskId")).toList(), "every trace, oldest first");
         assertEquals(longMessage, listed.getFirst().get("message"), "whole");
 
-        long now = System.currentTimeMillis();
-        debug.dropExpiredTraces(now + DebugController.TRACE_KEPT.toMillis() - 60_000);
-        assertEquals(200, debug.getOutput(ids.getFirst(), "owner").getStatusCode().value(), "under a day: kept");
-        debug.dropExpiredTraces(now + DebugController.TRACE_KEPT.toMillis() + 60_000);
-        assertEquals(404, debug.getOutput(ids.getFirst(), "owner").getStatusCode().value());
+        clock.set(T0 + DAY);
+        assertEquals(200, debug.getOutput(ids.getFirst(), "owner").getStatusCode().value(),
+                "a day after it was stored: kept");
+        clock.set(T0 + DAY + 1);
+        assertEquals(404, debug.getOutput(ids.getFirst(), "owner").getStatusCode().value(), "past a day: dropped");
         assertEquals(List.of(), debug.listTraces("owner").getBody());
     }
 }

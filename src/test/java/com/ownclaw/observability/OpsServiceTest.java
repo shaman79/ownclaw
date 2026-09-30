@@ -16,7 +16,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -24,8 +26,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.IntFunction;
 import java.util.stream.IntStream;
 import java.util.zip.GZIPOutputStream;
@@ -88,6 +92,37 @@ class OpsServiceTest {
         Map<String, Object> settings = ops.query("SELECT key, value FROM system_settings", FIRST_500);
         assertEquals(true, settings.get("redactedColumns"), String.valueOf(settings));
         assertFalse(String.valueOf(settings).contains("not-for-the-cloud"), String.valueOf(settings));
+    }
+
+    @Test
+    @DisplayName("db/query changes nothing, whatever the statement: SQLite refuses the write, and the connection still takes writes after")
+    void queryChangesNothing(@TempDir Path tmp) throws Exception {
+        MigratedDatabase.at(tmp.resolve("t.db"));
+        // One connection for everything, the way a pool hands the same one out again.
+        var one = new SingleConnectionDataSource("jdbc:sqlite:" + tmp.resolve("t.db"), true);
+        try {
+            var jdbc = new JdbcTemplate(one);
+            insertEvents(jdbc, 3, i -> "e" + i);
+            var ops = opsOn(jdbc);
+            List<String> before = List.of("e0", "e1", "e2");
+
+            for (String sql : List.of(
+                    "WITH x AS (SELECT 1) UPDATE events SET summary = 'changed'",
+                    "WITH x AS (SELECT 1) DELETE FROM events",
+                    "WITH x AS (SELECT 1) DELETE FROM events RETURNING summary",
+                    "WITH x AS (SELECT 1) INSERT INTO events (user_id, event_type, severity, summary) "
+                            + "SELECT 'u1', 'egress', 'info', 'added'")) {
+                Map<String, Object> refused = ops.query(sql, FIRST_500);
+                assertTrue(String.valueOf(refused.get("error")).contains("readonly"), sql + " -> " + refused);
+                assertNull(refused.get("rows"), sql + " -> " + refused);
+                assertEquals(before, jdbc.queryForList("SELECT summary FROM events ORDER BY id", String.class), sql);
+            }
+            assertEquals(List.of(Map.of("n", 3)), rows(ops.query("SELECT count(*) AS n FROM events", FIRST_500)));
+            jdbc.update("INSERT INTO events (user_id, event_type, severity, summary) VALUES ('u1', 'egress', 'info', 'e3')");
+            assertEquals(4, jdbc.queryForObject("SELECT count(*) FROM events", Integer.class));
+        } finally {
+            one.destroy();
+        }
     }
 
     @Test
@@ -178,6 +213,50 @@ class OpsServiceTest {
     }
 
     @Test
+    @DisplayName("forensics: rows written in the same second page newest-written first, one each")
+    void forensicsBreaksTiesByWhatWasWrittenLast(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'someone')");
+        String at = "2026-09-30 10:00:00";
+        // Written in this order, the reverse of their order as text, so a query that settled the
+        // tie by the value instead of by which row was written last would put the wrong one first.
+        for (String which : List.of("older", "newer")) {
+            jdbc.update("INSERT INTO conversations (id, user_id, session_id, role, content, timestamp) "
+                    + "VALUES (?, 'u1', 's', 'user', ?, ?)", "c-" + which, which, at);
+            jdbc.update("INSERT INTO chat_sessions (id, user_id, title, created_at) VALUES (?, 'u1', ?, ?)",
+                    "s-" + which, which, at);
+            jdbc.update("INSERT INTO events (user_id, event_type, severity, summary, timestamp) "
+                    + "VALUES ('u1', 'step', 'info', ?, ?)", which, at);
+            jdbc.update("INSERT INTO skill_usage (tool_name, user_id, created_at) VALUES (?, 'u1', ?)", which, at);
+            jdbc.update("INSERT INTO agent_memory (user_id, memory_type, content, created_at) "
+                    + "VALUES ('u1', 'fact', ?, ?)", which, at);
+            jdbc.update("INSERT INTO scheduled_tasks (user_id, description, next_run_at, created_at) "
+                    + "VALUES ('u1', ?, ?, ?)", which, at, at);
+            jdbc.update("INSERT INTO scheduled_task_runs (task_id, user_id, description, task_type, status, "
+                    + "result, executed_at) VALUES (1, 'u1', 'daily', 'recurring', 'ok', ?, ?)", which, at);
+            jdbc.update("INSERT INTO file_attachments (id, user_id, original_name, stored_name, uploaded_at) "
+                    + "VALUES (?, 'u1', ?, ?, ?)", "f-" + which, which, "f-" + which, at);
+            jdbc.update("INSERT INTO long_running_tasks (task_id, user_id, description, started_at) "
+                    + "VALUES (?, 'u1', ?, ?)", "l-" + which, which, at);
+            jdbc.update("INSERT INTO token_usage (user_id, date, provider) VALUES ('u1', '2026-09-30', ?)", which);
+        }
+        var ops = opsOn(jdbc);
+        Map<String, String> shown = Map.of("conversations", "content", "sessions", "title", "events", "summary",
+                "toolCalls", "tool_name", "memory", "content", "scheduledTasks", "description",
+                "scheduledRuns", "result", "attachments", "original_name", "longRunningTasks", "description",
+                "tokenUsage", "provider");
+
+        Map<String, Object> newest = ops.forensics("u1", new OpsService.Page(0, 1));
+        Map<String, Object> older = ops.forensics("u1", new OpsService.Page(1, 1));
+        shown.forEach((section, column) -> {
+            assertEquals(List.of("newer"), list(newest, section).stream().map(r -> r.get(column)).toList(), section);
+            assertEquals(List.of("older"), list(older, section).stream().map(r -> r.get(column)).toList(), section);
+        });
+        assertEquals(shown.keySet(), Set.copyOf((List<?>) newest.get("more")));
+        assertEquals(List.of(), older.get("more"));
+    }
+
+    @Test
     @DisplayName("tasks and the egress ledger page newest first to their last row; the task view cuts nothing")
     void tasksAndEgressPage(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
@@ -220,10 +299,9 @@ class OpsServiceTest {
         // Past the 4 MB that was the only part of the current file ever read.
         String pad = " " + "p".repeat(1500);
         writeLines(current, "cur", 3000, pad);
-        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.0.gz"), "mid", 3000, -3_600_000);
-        gzipLines(tmp.resolve("ownclaw.log.2026-09-28.0.gz"), "old", 3000, -7_200_000);
-        // logback's rename in progress: its lines reach the archive once that is written.
-        Files.writeString(tmp.resolve("ownclaw.log.2026-09-29.1123456789.tmp"), "tmp-0000\n");
+        // Rolled the same day, .10 after .9: newest first by name would read .9 first.
+        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.10.gz"), "mid", 3000, "", -3_600_000);
+        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.9.gz"), "old", 3000, "", -7_200_000);
         var ops = opsOn(null);
 
         withLogFile(current, () -> {
@@ -251,7 +329,7 @@ class OpsServiceTest {
                     expected.add(String.format("%s-%04d", prefix, i) + (prefix.equals("cur") ? pad : ""));
                 }
             }
-            assertEquals(expected, all, "every line, once, in order, and nothing from the .tmp");
+            assertEquals(expected, all, "every line, once, in order");
             assertEquals(10, pages, "nine full pages, then the empty one that has reached the start");
 
             // grep runs across the rolled files too.
@@ -261,12 +339,19 @@ class OpsServiceTest {
         });
     }
 
+    /**
+     * Lines long enough that the half of an archive that decodes is more than the 8,192
+     * characters a reader fills at a time: its first line reads, and the reading fails later on,
+     * as it does in a real rolled file cut off part way.
+     */
+    static final String ROLL_PAD = " " + "p".repeat(100);
+
     @Test
-    @DisplayName("a /logs cursor follows its lines when the current file rolls over between pages")
+    @DisplayName("a /logs cursor follows its lines through a rollover: renamed to .tmp, archive half written, both, archive alone")
     void aCursorSurvivesRollover(@TempDir Path tmp) throws Exception {
         Path current = tmp.resolve("ownclaw.log");
-        writeLines(current, "cur", 50, "");
-        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.0.gz"), "mid", 5, -3_600_000);
+        writeLines(current, "cur", 200, ROLL_PAD);
+        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.0.gz"), "mid", 5, "", -3_600_000);
         // Not a gzip file: named as unreadable, and the pages go on past it.
         Path broken = tmp.resolve("ownclaw.log.2026-09-28.0.gz");
         Files.writeString(broken, "not gzip");
@@ -275,21 +360,37 @@ class OpsServiceTest {
 
         withLogFile(current, () -> {
             Map<String, Object> newest = ops.logs(10, null, null, null);
-            assertEquals("cur-0040", strings(newest, "lines").getFirst());
+            assertEquals("cur-0190" + ROLL_PAD, strings(newest, "lines").getFirst());
             String cursor = (String) newest.get("next");
 
-            // Roll over: the current file's lines move to a new archive, and a new file starts.
-            gzipLines(tmp.resolve("ownclaw.log.2026-09-30.0.gz"), "cur", 50, 0);
-            writeLines(current, "new", 3, "");
+            // What the cursor's page holds, and every line there is, at each step of the rollover.
+            var fromCursor = new ArrayList<String>();
+            IntStream.range(0, 5).forEach(i -> fromCursor.add(String.format("mid-%04d", i)));
+            IntStream.range(0, 190).forEach(i -> fromCursor.add(String.format("cur-%04d", i) + ROLL_PAD));
+            var everything = new ArrayList<String>(fromCursor);
+            IntStream.range(190, 200).forEach(i -> everything.add(String.format("cur-%04d", i) + ROLL_PAD));
+            IntStream.range(0, 3).forEach(i -> everything.add(String.format("new-%04d", i)));
 
-            Map<String, Object> next = ops.logs(50, null, null, cursor);
-            var expected = new ArrayList<String>();
-            IntStream.range(0, 5).forEach(i -> expected.add(String.format("mid-%04d", i)));
-            IntStream.range(0, 40).forEach(i -> expected.add(String.format("cur-%04d", i)));
-            assertEquals(expected, strings(next, "lines"));
-            assertNull(next.get("next"));
-            assertEquals(List.of("ownclaw.log.2026-09-28.0.gz"),
-                    List.copyOf(((Map<?, ?>) next.get("unreadable")).keySet()));
+            // 1. Logback renames the current file to a .tmp and starts a new one; no archive yet.
+            Path renamed = tmp.resolve("ownclaw.log.2026-09-30.0123456789.tmp");
+            Files.move(current, renamed);
+            Files.setLastModifiedTime(renamed, FileTime.fromMillis(System.currentTimeMillis() - 600_000));
+            writeLines(current, "new", 3, "");
+            assertPages(ops, cursor, fromCursor, everything, "renamed, no archive yet");
+
+            // 2. The archive is half written: it is newer than the .tmp, and fails part way.
+            Path archive = tmp.resolve("ownclaw.log.2026-09-30.0.gz");
+            partialGzip(archive, "cur", 100, 200, ROLL_PAD, -300_000);
+            assertPages(ops, cursor, fromCursor, everything, "archive half written");
+            assertTrue(((Map<?, ?>) ops.logs(300, null, null, null).get("unreadable")).containsKey(archive.getFileName().toString()));
+
+            // 3. The archive is whole and the .tmp not deleted yet: one of them is read, not both.
+            gzipLines(archive, "cur", 200, ROLL_PAD, -300_000);
+            assertPages(ops, cursor, fromCursor, everything, "archive whole, .tmp still there");
+
+            // 4. The .tmp is gone.
+            Files.delete(renamed);
+            assertPages(ops, cursor, fromCursor, everything, "archive alone");
 
             // Refused, not guessed: a cursor this endpoint did not issue, or whose file is gone.
             assertThrows(IllegalArgumentException.class, () -> ops.logs(10, null, null, "cur-0040"));
@@ -297,6 +398,54 @@ class OpsServiceTest {
                     () -> ops.logs(10, null, null, "0123456789abcdef:10"));
             assertThrows(IllegalArgumentException.class, () -> ops.logs(0, null, null, null));
         });
+    }
+
+    @Test
+    @DisplayName("a cursor into an archive that cannot be read that far waits with the same cursor; a fresh page goes past it")
+    void aCursorWaitsForItsFile(@TempDir Path tmp) throws Exception {
+        Path current = tmp.resolve("ownclaw.log");
+        writeLines(current, "cur", 200, ROLL_PAD);
+        gzipLines(tmp.resolve("ownclaw.log.2026-09-29.0.gz"), "mid", 5, "", -3_600_000);
+        var ops = opsOn(null);
+
+        withLogFile(current, () -> {
+            String cursor = (String) ops.logs(10, null, null, null).get("next");
+            // Rolled into an archive whose writing failed half way; logback deleted the .tmp.
+            Path archive = tmp.resolve("ownclaw.log.2026-09-30.0.gz");
+            partialGzip(archive, "cur", 100, 200, ROLL_PAD, -300_000);
+            writeLines(current, "new", 3, "");
+
+            Map<String, Object> waiting = ops.logs(50, null, null, cursor);
+            assertEquals(List.of(), strings(waiting, "lines"));
+            assertEquals(cursor, waiting.get("next"), "the same cursor, to ask again");
+            assertEquals(Set.of(archive.getFileName().toString()), ((Map<?, ?>) waiting.get("unreadable")).keySet());
+
+            Map<String, Object> fresh = ops.logs(50, null, null, null);
+            var expected = new ArrayList<String>();
+            IntStream.range(0, 5).forEach(i -> expected.add(String.format("mid-%04d", i)));
+            IntStream.range(0, 3).forEach(i -> expected.add(String.format("new-%04d", i)));
+            assertEquals(expected, strings(fresh, "lines"), "past the archive, which is named");
+            assertNull(fresh.get("next"));
+            assertEquals(Set.of(archive.getFileName().toString()), ((Map<?, ?>) fresh.get("unreadable")).keySet());
+        });
+    }
+
+    /** The cursor's page, and every line when paged from the newest end, are what they should be. */
+    static void assertPages(OpsService ops, String cursor, List<String> fromCursor, List<String> everything,
+                            String when) {
+        Map<String, Object> next = ops.logs(300, null, null, cursor);
+        assertEquals(fromCursor, strings(next, "lines"), when);
+        assertNull(next.get("next"), when);
+        var all = new ArrayList<String>();
+        String at = null;
+        int pages = 0;
+        do {
+            assertTrue(++pages <= everything.size() / 50 + 1, when + ": a cursor that does not move on");
+            Map<String, Object> page = ops.logs(50, null, null, at);
+            all.addAll(0, strings(page, "lines"));
+            at = (String) page.get("next");
+        } while (at != null);
+        assertEquals(everything, all, when);
     }
 
     @Test
@@ -356,12 +505,29 @@ class OpsServiceTest {
     }
 
     /** A rolled file as logback leaves it: gzip-compressed, written {@code ageMs} from now. */
-    static void gzipLines(Path file, String prefix, int count, long ageMs) throws IOException {
-        try (OutputStream out = new GZIPOutputStream(Files.newOutputStream(file))) {
+    static void gzipLines(Path file, String prefix, int count, String pad, long ageMs) throws IOException {
+        partialGzip(file, prefix, count, count, pad, ageMs);
+    }
+
+    /**
+     * The archive of {@code count} lines, cut off after the first {@code whole} of them -- as one
+     * logback is still writing, or one whose writing failed, is.
+     */
+    static void partialGzip(Path file, String prefix, int whole, int count, String pad, long ageMs)
+            throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        int cut = -1;
+        // Sync-flushed after the whole lines, so the part kept decodes to exactly those.
+        try (OutputStream out = new GZIPOutputStream(bytes, true)) {
             for (int i = 0; i < count; i++) {
-                out.write((String.format("%s-%04d", prefix, i) + "\n").getBytes(StandardCharsets.UTF_8));
+                if (i == whole) {
+                    out.flush();
+                    cut = bytes.size();
+                }
+                out.write((String.format("%s-%04d", prefix, i) + pad + "\n").getBytes(StandardCharsets.UTF_8));
             }
         }
+        Files.write(file, cut < 0 ? bytes.toByteArray() : Arrays.copyOf(bytes.toByteArray(), cut));
         Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + ageMs));
     }
 

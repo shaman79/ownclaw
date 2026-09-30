@@ -16,8 +16,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
@@ -30,6 +30,8 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -438,9 +440,16 @@ public class OpsService {
      * The log, a page at a time from the newest end: the newest {@code lines} lines that pass
      * the filters, returned oldest first, read from the current file and then from every file
      * it was rolled into. A full page carries {@code next}, the cursor for the lines before it
-     * (the page it returns can be empty); a page that is not full was read down to the first
-     * line of the oldest file, and its {@code next} is null. So every line still on disk can be
-     * reached.
+     * (the page it returns can be empty); any other page was read down to the first line of the
+     * oldest file, and its {@code next} is null -- except the page of a cursor that has to wait,
+     * below. So every line of every file that can be read is reached, and a file that cannot be
+     * is named in {@code unreadable}.
+     * <p>
+     * A cursor waits for its own file. If that file is on disk but no copy of it reads as far as
+     * the cursor -- an archive read while logback was still writing it, or one whose writing
+     * failed -- the page comes back empty with the same cursor as {@code next}: asking again
+     * reads an archive finished since, and starting again without a cursor pages past one that
+     * stays unreadable.
      */
     public Map<String, Object> logs(int lines, String grep, String level, String cursor) {
         if (lines < 1) throw new IllegalArgumentException("lines must be 1 or more, not " + lines);
@@ -473,32 +482,44 @@ public class OpsService {
         Predicate<String> keep = logFilter(grep, level);
         var page = new ArrayDeque<String>();
         var unreadable = new LinkedHashMap<String, String>();
+        // The files read, by id. Logback's .tmp and the archive it writes from it hold the same
+        // lines under the same id, and the first of them that reads is the one used.
+        var read = new HashSet<String>();
+        boolean cursorFileFound = false;
         String next = null;
         for (int i = 0; i < files.size() && page.size() < lines; i++) {
             Path f = files.get(i);
             try (BufferedReader r = openLog(f)) {
                 String first = r.readLine();
                 String id = logFileId(first);
+                if (read.contains(id)) continue;
                 long bound = Long.MAX_VALUE;
                 if (fromFile != null) {
                     // A file newer than the cursor's was read by the pages before it.
                     if (!fromFile.equals(id)) continue;
-                    fromFile = null;
+                    cursorFileFound = true;
                     bound = before;
                 }
                 List<LogLine> found = lastLines(first, r, bound, lines - page.size(), keep);
+                // Only a file read as far as it had to be is done with, the cursor's included.
+                read.add(id);
+                fromFile = null;
                 for (int k = found.size() - 1; k >= 0; k--) page.addFirst(found.get(k).text());
                 if (page.size() == lines) next = id + ":" + found.getFirst().number();
             } catch (IOException e) {
-                // Named, not skipped silently: logback writes a rolled file's archive after the
-                // rename, and one caught mid-write cannot be read to its end yet.
+                // Named, not skipped silently. An archive logback is still writing reads only as
+                // far as the writing has got; the .tmp it is written from, listed after it, is
+                // read instead.
                 unreadable.put(f.getFileName().toString(), String.valueOf(e.getMessage()));
             }
         }
         if (fromFile != null) {
-            throw new IllegalArgumentException("The log file this cursor points into is not on disk "
-                    + "any more (log retention removes the oldest) or could not be read"
-                    + (unreadable.isEmpty() ? "" : " " + unreadable) + ". Start again without a cursor.");
+            if (!cursorFileFound) {
+                throw new IllegalArgumentException("The log file this cursor points into is not on disk "
+                        + "any more (log retention removes the oldest) or could not be read"
+                        + (unreadable.isEmpty() ? "" : " " + unreadable) + ". Start again without a cursor.");
+            }
+            next = cursor.trim();
         }
 
         out.put("sizeBytes", fileSize(file));
@@ -533,22 +554,22 @@ public class OpsService {
      * <p>
      * Logback rolls the current file into {@code <name>.<date>.<index>.gz} beside it (Spring
      * Boot's default pattern; application.yaml sets only the sizes and the history), so the
-     * rolled files are every file there whose name extends the current one's. The one
-     * exception is logback's {@code .tmp}: the renamed file while its archive is written, whose
-     * lines are in the {@code .gz} once that finishes.
+     * rolled files are every file there whose name extends the current one's. That includes
+     * logback's {@code .tmp}: it renames the current file to one, writes the archive from it,
+     * then deletes it, so until the archive is whole the .tmp is the copy that reads to its end.
      */
     private static List<Path> logFiles(Path current) throws IOException {
         String prefix = current.getFileName() + ".";
         var rolled = new ArrayList<Path>();
         try (var listing = Files.list(current.toAbsolutePath().getParent())) {
-            listing.filter(p -> p.getFileName().toString().startsWith(prefix)
-                            && !p.getFileName().toString().endsWith(".tmp")
-                            && Files.isRegularFile(p))
+            listing.filter(p -> p.getFileName().toString().startsWith(prefix) && Files.isRegularFile(p))
                     .forEach(rolled::add);
         }
-        // Newest first by when each was written; the name settles a tie.
+        // Newest first by when each was written; the name settles a tie. A file deleted since
+        // the listing -- a .tmp whose archive is done, the oldest file under retention -- reads
+        // as written at 0, so it goes last, and is named unreadable when it cannot be opened.
         var written = new HashMap<Path, Long>();
-        for (Path p : rolled) written.put(p, Files.getLastModifiedTime(p).toMillis());
+        for (Path p : rolled) written.put(p, p.toFile().lastModified());
         rolled.sort(Comparator.comparing((Path p) -> written.get(p))
                 .thenComparing(p -> p.getFileName().toString()).reversed());
         var files = new ArrayList<Path>();
@@ -684,10 +705,11 @@ public class OpsService {
     /**
      * Run one read-only SELECT and return a page of its rows. Guards, in order: single
      * statement; must start with SELECT or WITH; must not name a secret column or a dangerous
-     * statement keyword; and finally every returned column whose name holds a secret is
-     * redacted, which also catches {@code SELECT * FROM users}. The statement runs as written
-     * and the page is taken from its rows in the order it returns them, so the query's own
-     * ORDER BY and LIMIT mean what they say.
+     * statement keyword; the statement runs on a connection SQLite itself holds read-only, so
+     * one that would change the database is refused whatever its text; and finally every
+     * returned column whose name holds a secret is redacted, which also catches
+     * {@code SELECT * FROM users}. The statement runs as written and the page is taken from its
+     * rows in the order it returns them, so the query's own ORDER BY and LIMIT mean what they say.
      */
     public Map<String, Object> query(String sql, Page page) {
         var out = new LinkedHashMap<String, Object>();
@@ -711,14 +733,7 @@ public class OpsService {
         log.info("Ops SQL: {}", trimmed);
         out.put("sql", trimmed);
         try {
-            Rows result = Rows.of(jdbc.query(trimmed, (ResultSetExtractor<List<Map<String, Object>>>) rs -> {
-                var columns = new ColumnMapRowMapper();
-                var fetched = new ArrayList<Map<String, Object>>();
-                for (long row = 0; fetched.size() <= page.limit() && rs.next(); row++) {
-                    if (row >= page.offset()) fetched.add(columns.mapRow(rs, fetched.size()));
-                }
-                return fetched;
-            }), page);
+            Rows result = Rows.of(readOnly(trimmed, page), page);
             boolean redacted = false;
             var safe = new ArrayList<Map<String, Object>>(result.rows().size());
             for (Map<String, Object> row : result.rows()) {
@@ -743,6 +758,31 @@ public class OpsService {
             out.put("error", String.valueOf(e.getMessage()));
         }
         return out;
+    }
+
+    /**
+     * The rows of {@code page}, plus one, from a statement run on a connection SQLite holds
+     * read-only: {@code PRAGMA query_only} makes SQLite refuse anything that would change the
+     * database, and it is switched off again before the connection goes back to the pool.
+     */
+    private List<Map<String, Object>> readOnly(String sql, Page page) {
+        return jdbc.execute((ConnectionCallback<List<Map<String, Object>>>) con -> {
+            try (Statement st = con.createStatement()) {
+                st.execute("PRAGMA query_only = ON");
+                try (ResultSet rs = st.executeQuery(sql)) {
+                    var columns = new ColumnMapRowMapper();
+                    var fetched = new ArrayList<Map<String, Object>>();
+                    for (long row = 0; fetched.size() <= page.limit() && rs.next(); row++) {
+                        if (row >= page.offset()) fetched.add(columns.mapRow(rs, fetched.size()));
+                    }
+                    return fetched;
+                }
+            } finally {
+                try (Statement off = con.createStatement()) {
+                    off.execute("PRAGMA query_only = OFF");
+                }
+            }
+        });
     }
 
     private static boolean isSecretColumn(String column) {

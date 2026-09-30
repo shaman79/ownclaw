@@ -11,6 +11,7 @@ import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 /**
@@ -38,7 +40,7 @@ public class DebugController {
     private static final Logger log = LoggerFactory.getLogger(DebugController.class);
 
     /** How long a stored trace stays readable. */
-    static final Duration TRACE_KEPT = Duration.ofDays(1);
+    private static final Duration TRACE_KEPT = Duration.ofDays(1);
 
     private final AgentLoop agentLoop;
     private final ToolRegistry toolRegistry;
@@ -47,13 +49,19 @@ public class DebugController {
     private final ChatStatusEmitter statusEmitter;
     private final JdbcTemplate jdbc;
     private final AuthService authService;
+    /** Milliseconds now: what stored traces are aged by. */
+    private final LongSupplier clock;
 
     /** A stored execution trace, and when it was stored. */
     private record StoredTrace(long storedAtMs, Map<String, Object> trace) {}
 
-    /** Stored execution traces by taskId, oldest first, each kept for {@link #TRACE_KEPT}. */
-    private final Map<String, StoredTrace> storedTraces = Collections.synchronizedMap(new LinkedHashMap<>());
+    /**
+     * Stored execution traces by taskId, oldest first, each kept for {@link #TRACE_KEPT}. Read
+     * through {@link #storedTraces()}, which drops the expired ones first.
+     */
+    private final Map<String, StoredTrace> traces = Collections.synchronizedMap(new LinkedHashMap<>());
 
+    @Autowired
     public DebugController(
             AgentLoop agentLoop,
             ToolRegistry toolRegistry,
@@ -63,6 +71,14 @@ public class DebugController {
             JdbcTemplate jdbc,
             AuthService authService
     ) {
+        this(agentLoop, toolRegistry, skillManager, debugService, statusEmitter, jdbc, authService,
+                System::currentTimeMillis);
+    }
+
+    /** With the clock stored traces are aged by, so a test can move it. */
+    DebugController(AgentLoop agentLoop, ToolRegistry toolRegistry, SkillManager skillManager,
+                    DebugSessionService debugService, ChatStatusEmitter statusEmitter,
+                    JdbcTemplate jdbc, AuthService authService, LongSupplier clock) {
         this.agentLoop = agentLoop;
         this.toolRegistry = toolRegistry;
         this.skillManager = skillManager;
@@ -70,6 +86,7 @@ public class DebugController {
         this.statusEmitter = statusEmitter;
         this.jdbc = jdbc;
         this.authService = authService;
+        this.clock = clock;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -103,7 +120,7 @@ public class DebugController {
             return ResponseEntity.badRequest().body(Map.of("error", "Message is required"));
         }
 
-        log.info("Debug API prompt from user={}: {}", userId, truncate(message, 200));
+        log.info("Debug API prompt from user={}: {} chars", userId, message.length());
 
         // Ensure debug mode is on for this user so we get detailed logging
         boolean wasDebugEnabled = debugService.isEnabled(userId);
@@ -157,8 +174,7 @@ public class DebugController {
     public ResponseEntity<?> getOutput(@PathVariable String taskId,
                                        @RequestAttribute("userId") String userId) {
         if (!authService.isOwner(userId)) return ownerOnly();
-        dropExpiredTraces(System.currentTimeMillis());
-        var stored = storedTraces.get(taskId);
+        var stored = storedTraces().get(taskId);
         if (stored == null) {
             return ResponseEntity.notFound().build();
         }
@@ -172,9 +188,8 @@ public class DebugController {
     @GetMapping("/traces")
     public ResponseEntity<?> listTraces(@RequestAttribute("userId") String userId) {
         if (!authService.isOwner(userId)) return ownerOnly();
-        dropExpiredTraces(System.currentTimeMillis());
         List<Map<String, Object>> summaries = new ArrayList<>();
-        for (var e : new ArrayList<>(storedTraces.entrySet())) {
+        for (var e : new ArrayList<>(storedTraces().entrySet())) {
             var trace = e.getValue().trace();
             summaries.add(Map.of(
                     "taskId", e.getKey(),
@@ -300,19 +315,14 @@ public class DebugController {
     }
 
     private void storeTrace(String taskId, Map<String, Object> trace) {
-        long now = System.currentTimeMillis();
-        dropExpiredTraces(now);
-        storedTraces.put(taskId, new StoredTrace(now, trace));
+        storedTraces().put(taskId, new StoredTrace(clock.getAsLong(), trace));
     }
 
-    /** Drop the traces stored more than {@link #TRACE_KEPT} before {@code nowMs}. */
-    void dropExpiredTraces(long nowMs) {
-        storedTraces.values().removeIf(t -> nowMs - t.storedAtMs() > TRACE_KEPT.toMillis());
-    }
-
-    private String truncate(String s, int maxLen) {
-        if (s == null) return "";
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    /** The stored traces, less those stored more than {@link #TRACE_KEPT} ago. */
+    private Map<String, StoredTrace> storedTraces() {
+        long now = clock.getAsLong();
+        traces.values().removeIf(t -> now - t.storedAtMs() > TRACE_KEPT.toMillis());
+        return traces;
     }
 
     // GET /api/debug/credentials was REMOVED on 2026-09-17. It returned every vault entry in

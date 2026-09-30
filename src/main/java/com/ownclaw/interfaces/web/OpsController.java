@@ -2,6 +2,7 @@ package com.ownclaw.interfaces.web;
 
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
+import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
@@ -9,6 +10,7 @@ import com.ownclaw.observability.OpsService;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 
 /**
  * Ops API: diagnostics and a small set of safe actions, for an operator or an AI assistant
@@ -44,12 +47,25 @@ public class OpsController {
     private final com.ownclaw.agent.SkillMaintenanceService skillMaintenance;
     private final com.ownclaw.config.OwnClawConfig config;
     private final ConversationService conversations;
+    /** Milliseconds now: what async runs are timed and aged by. */
+    private final LongSupplier clock;
 
+    @Autowired
     public OpsController(OpsService ops, AgentLoop agentLoop, AuthService authService,
                          DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
                          com.ownclaw.agent.SkillMaintenanceService skillMaintenance,
                          com.ownclaw.config.OwnClawConfig config,
                          ConversationService conversations) {
+        this(ops, agentLoop, authService, skillRegistry, cancellation, skillMaintenance, config,
+                conversations, System::currentTimeMillis);
+    }
+
+    /** With the clock async runs are timed and aged by, so a test can move it. */
+    OpsController(OpsService ops, AgentLoop agentLoop, AuthService authService,
+                  DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
+                  com.ownclaw.agent.SkillMaintenanceService skillMaintenance,
+                  com.ownclaw.config.OwnClawConfig config,
+                  ConversationService conversations, LongSupplier clock) {
         this.ops = ops;
         this.agentLoop = agentLoop;
         this.authService = authService;
@@ -58,6 +74,7 @@ public class OpsController {
         this.skillMaintenance = skillMaintenance;
         this.config = config;
         this.conversations = conversations;
+        this.clock = clock;
     }
 
     // ── discovery ──
@@ -101,7 +118,8 @@ public class OpsController {
                         "db/query accepts a single SELECT only.",
                         "Listings are paged, never cut: a response with more rows gives nextOffset "
                                 + "(and names the sections in more), /logs gives the cursor next; "
-                                + "ask again from there. Any limit may be asked for.",
+                                + "ask again from there. Any limit may be asked for. An offset "
+                                + "counts rows, so rows added or deleted between two pages shift it.",
                         "agent/run with sessionId is a chat turn, saved to that chat the way the web "
                                 + "chat saves one (\"new\" opens a chat titled Ops check); the "
                                 + "response names the chat.",
@@ -402,9 +420,10 @@ public class OpsController {
      * <p>
      * Defaults to the owner's account so context, memory and credentials match normal use.
      * <p>
-     * With {@code sessionId} the run is a chat turn: the message is saved to that chat and the
-     * answer after it, as the web chat saves them, so the task reads the chat it belongs to --
-     * the way to check on production what a conversation remembers from one turn to the next.
+     * With {@code sessionId} the run is a chat turn: the message is saved to that chat as the
+     * user row, the task runs attended with that row as the message it answers -- what a
+     * web-chat task is handed, so AgentLoop loads its conversation the way it does for one --
+     * and the answer is saved after it, as the web chat saves one.
      */
     @PostMapping("/agent/run")
     public ResponseEntity<?> runAgent(@RequestBody Map<String, Object> body) {
@@ -423,8 +442,7 @@ public class OpsController {
                     "error", "No owner account exists yet and no userId was given"));
         }
 
-        log.info("Ops agent run as user={}: {}", userId,
-                message.length() > 200 ? message.substring(0, 200) + "..." : message);
+        log.info("Ops agent run as user={}: {} chars", userId, message.length());
 
         // Long work -- a delegation to the local model runs minutes -- outlives the reverse
         // proxy in front of this service, which closes the connection after about two minutes and
@@ -457,14 +475,14 @@ public class OpsController {
             return ResponseEntity.accepted().body(startAsyncRun(userId, message, unattended, turn));
         }
 
-        long t0 = System.currentTimeMillis();
+        long t0 = clock.getAsLong();
         try {
             return ResponseEntity.ok(describeRun(userId, runTask(userId, message, unattended, turn), turn, t0));
         } catch (Exception e) {
             log.error("Ops agent run failed: {}", e.getMessage(), e);
             var failed = new LinkedHashMap<String, Object>();
             failed.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
-            failed.put("durationMs", System.currentTimeMillis() - t0);
+            failed.put("durationMs", clock.getAsLong() - t0);
             if (turn != null) failed.put("sessionId", turn.sessionId());
             return ResponseEntity.internalServerError().body(failed);
         }
@@ -490,8 +508,11 @@ public class OpsController {
     /**
      * A fresh chat titled "Ops check". createSession also makes it the account's active chat,
      * which is where the web page files what the owner types next, so the chat that was active
-     * is put back: an ops check must not move the owner's conversation. (An account with no
-     * active chat gets one from getCurrentSession, as it would on the owner's next message.)
+     * is put back straight after: an ops check must not move the owner's conversation. A message
+     * the owner sends between those two statements is still filed in the new chat:
+     * ConversationService cannot yet create a chat without making it the active one. (An
+     * account with no active chat gets one from getCurrentSession, as it would on the owner's
+     * next message.)
      */
     private String openOpsCheck(String userId) {
         String active = conversations.getCurrentSession(userId);
@@ -502,17 +523,30 @@ public class OpsController {
 
     /**
      * Run the task. A chat turn runs attended, with its user row as the current message, and
-     * its answer is saved as the web chat saves one: the response as the content, the owner's
-     * text beside it, the task id in the metadata.
+     * its answer is saved as the web chat saves one -- also when the task throws: the web chat's
+     * task runs on TaskQueue, which answers one that throws with this internal error, and that
+     * is saved as the answer. The exception still reaches the caller.
      */
     private AgentResult runTask(String userId, String message, boolean unattended, ChatTurn turn) {
-        AgentResult result = agentLoop.executeFull(userId, message, unattended,
-                turn == null ? null : turn.messageId(), List.of());
-        if (turn != null) {
-            conversations.saveMessage(userId, turn.sessionId(), "assistant", result.response(),
-                    List.of(), result.taskId(), result.ownerText());
+        AgentResult result;
+        try {
+            result = agentLoop.executeFull(userId, message, unattended,
+                    turn == null ? null : turn.messageId(), List.of());
+        } catch (RuntimeException e) {
+            if (turn != null) {
+                saveAnswer(userId, turn, AgentResult.error("Internal error: " + e.getMessage(),
+                        new AgentTrajectory(), 0));
+            }
+            throw e;
         }
+        if (turn != null) saveAnswer(userId, turn, result);
         return result;
+    }
+
+    /** A chat turn's answer: the response as the content, the owner's text beside it, the task id in the metadata. */
+    private void saveAnswer(String userId, ChatTurn turn, AgentResult result) {
+        conversations.saveMessage(userId, turn.sessionId(), "assistant", result.response(),
+                List.of(), result.taskId(), result.ownerText());
     }
 
     /** Everything the caller is told about a finished run. Shared by the sync and async paths. */
@@ -547,7 +581,7 @@ public class OpsController {
             out.put("agentDurationMs", result.totalDurationMs());
             out.put("response", result.response());
             out.put("steps", steps);
-            out.put("durationMs", System.currentTimeMillis() - t0);
+            out.put("durationMs", clock.getAsLong() - t0);
             out.put("traceHint", taskId == null ? "no task id recorded"
                     : "GET /api/ops/tasks/" + taskId + " and /api/ops/logs?grep=Task+" + taskId);
             // The caveat this used to carry -- success() being true for every non-cancelled
@@ -569,31 +603,34 @@ public class OpsController {
     private static final class AsyncRun {
         final String userId;
         final String sessionId;   // the chat of a chat turn, else null
-        final long startedAt = System.currentTimeMillis();
+        final long startedAt;
         volatile Map<String, Object> result;
         volatile String error;
         /** When the run ended, 0 while it runs. Written after result or error, so it publishes them. */
         volatile long finishedAt;
-        AsyncRun(String userId, String sessionId) {
+        AsyncRun(String userId, String sessionId, long startedAt) {
             this.userId = userId;
             this.sessionId = sessionId;
+            this.startedAt = startedAt;
         }
     }
 
     /** How long a finished run nobody collects is kept. */
-    static final Duration UNCOLLECTED_KEPT = Duration.ofDays(1);
+    private static final Duration UNCOLLECTED_KEPT = Duration.ofDays(1);
 
     /**
      * Async runs, each until its result is collected. One nobody collects is dropped a day after
      * it ended, and a running one never is, so the map holds what is running and what is waiting
-     * to be read -- and no run is lost because others were started after it.
+     * to be read -- and no run is lost because others were started after it. Looked up through
+     * {@link #asyncRuns()}, which drops the expired ones first.
      */
-    private final Map<String, AsyncRun> asyncRuns = new ConcurrentHashMap<>();
+    private final Map<String, AsyncRun> runs = new ConcurrentHashMap<>();
 
-    /** Drop the runs that ended more than {@link #UNCOLLECTED_KEPT} before {@code nowMs}. */
-    void dropUncollected(long nowMs) {
-        asyncRuns.values().removeIf(
-                run -> run.finishedAt != 0 && nowMs - run.finishedAt > UNCOLLECTED_KEPT.toMillis());
+    /** The async runs, less those that ended more than {@link #UNCOLLECTED_KEPT} ago. */
+    private Map<String, AsyncRun> asyncRuns() {
+        long now = clock.getAsLong();
+        runs.values().removeIf(run -> run.finishedAt != 0 && now - run.finishedAt > UNCOLLECTED_KEPT.toMillis());
+        return runs;
     }
 
     /** One thread: ops runs are for diagnosis, and serialising them keeps them out of each other's way. */
@@ -606,12 +643,11 @@ public class OpsController {
 
     private Map<String, Object> startAsyncRun(String userId, String message, boolean unattended,
                                               ChatTurn turn) {
-        dropUncollected(System.currentTimeMillis());
         String runId = java.util.UUID.randomUUID().toString().substring(0, 8);
-        AsyncRun run = new AsyncRun(userId, turn == null ? null : turn.sessionId());
-        asyncRuns.put(runId, run);
+        AsyncRun run = new AsyncRun(userId, turn == null ? null : turn.sessionId(), clock.getAsLong());
+        asyncRuns().put(runId, run);
         asyncExecutor.submit(() -> {
-            long t0 = System.currentTimeMillis();
+            long t0 = clock.getAsLong();
             try {
                 run.result = describeRun(userId, runTask(userId, message, unattended, turn), turn, t0);
             } catch (Throwable e) {
@@ -619,7 +655,7 @@ public class OpsController {
                 log.error("Async ops agent run {} failed: {}", runId, e.getMessage(), e);
                 run.error = e.getClass().getSimpleName() + ": " + e.getMessage();
             }
-            run.finishedAt = System.currentTimeMillis();
+            run.finishedAt = clock.getAsLong();
         });
         var out = new LinkedHashMap<String, Object>();
         out.put("runId", runId);
@@ -635,8 +671,7 @@ public class OpsController {
     /** Collect an async run. A finished run is handed over once and then forgotten. */
     @GetMapping("/agent/run/{runId}")
     public ResponseEntity<?> asyncRunResult(@PathVariable String runId) {
-        dropUncollected(System.currentTimeMillis());
-        AsyncRun run = asyncRuns.get(runId);
+        AsyncRun run = asyncRuns().get(runId);
         if (run == null) {
             return ResponseEntity.status(404).body(Map.of(
                     "error", "No such run. A finished run is kept until it is collected once, or for "
@@ -648,16 +683,16 @@ public class OpsController {
             out.put("status", "running");
             out.put("userId", run.userId);
             if (run.sessionId != null) out.put("sessionId", run.sessionId);
-            out.put("elapsedMs", System.currentTimeMillis() - run.startedAt);
+            out.put("elapsedMs", clock.getAsLong() - run.startedAt);
             out.put("hint", "GET /api/ops/logs?grep=Delegation shows local execution as it happens.");
             return ResponseEntity.ok(out);
         }
-        asyncRuns.remove(runId);
+        runs.remove(runId);
         if (run.error != null) {
             out.put("status", "failed");
             out.put("error", run.error);
             if (run.sessionId != null) out.put("sessionId", run.sessionId);
-            out.put("elapsedMs", System.currentTimeMillis() - run.startedAt);
+            out.put("elapsedMs", clock.getAsLong() - run.startedAt);
             return ResponseEntity.ok(out);
         }
         out.put("status", "done");
