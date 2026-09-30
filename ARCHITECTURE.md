@@ -1542,11 +1542,10 @@ CREATE INDEX idx_events_type ON events(event_type);
 
 Users can query their own event log through chat commands:
 
-- `/log` — Last 10 events
-- `/log task <id>` — All events for a specific task
-- `/log errors` — Recent errors
-- `/log tokens` — Token usage summary (today/week/month)
-- `/log skills` — Recent skill executions
+- `/log [count|all] [page N]` — Recent events, newest first: the last 10 unless a count is given, and
+  older ones a page at a time (`/log 10 page 2`) or all at once (`/log all`)
+- `/log errors [count|all] [page N]` — Recent errors, the same way
+- `/log tokens` — Token usage today
 
 The WebUI may also render a simple event timeline alongside the chat, but the chat interface is the primary access method.
 

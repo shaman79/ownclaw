@@ -193,8 +193,8 @@ public class OllamaProvider implements LlmProvider {
         //
         // Nothing here set keep_alive, so every request inherited whatever the server default
         // happened to be. Ollama's own default is five minutes, and this deployment makes
-        // local calls in bursts separated by much longer gaps -- a scheduled summary, then
-        // nothing for an hour -- so the model was liable to be evicted between them. Reloading
+        // local calls in bursts separated by much longer gaps -- a scheduled run's delegations,
+        // then nothing for an hour -- so the model was liable to be evicted between them. Reloading
         // it costs 35-119 seconds measured on this hardware, which is longer than most of the
         // calls themselves.
         //

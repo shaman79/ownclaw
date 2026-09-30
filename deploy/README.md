@@ -274,16 +274,16 @@ curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops | jq      # lists eve
 |---|---|
 | `GET /api/ops/health` | database, cloud provider, local model, queue, JVM, log file, owner |
 | `GET /api/ops/config` | effective configuration with secrets redacted, plus `system_settings` key names and their `updated_at` (useful for spotting tampering) |
-| `GET /api/ops/logs?lines=200&grep=&level=` | tail of the log file, filtered; newest matches first |
+| `GET /api/ops/logs?lines=200&grep=&level=&cursor=` | the newest `lines` lines that pass the filters, oldest first, read from the log file and every file it was rolled into; pass the page's `next` as `cursor` for the lines before it |
 | `GET /api/ops/db/tables` | every table with its row count |
-| `POST /api/ops/db/query` | one read-only `SELECT` — `{"sql":"SELECT ...","limit":200}` |
+| `POST /api/ops/db/query` | one read-only `SELECT`, a page of its rows — `{"sql":"SELECT ...","offset":0,"limit":500}`; `nextOffset` is where the next page starts |
 | `GET /api/ops/users` | accounts, who the owner is, who is disabled |
-| `GET /api/ops/forensics/{userId}` | everything recorded for one account: messages, tasks, tool calls, memory, scheduled tasks, uploads, spend |
+| `GET /api/ops/forensics/{userId}?offset=0&limit=200` | everything recorded for one account: messages, tasks, tool calls, memory, scheduled tasks, uploads, spend — a page of each, newest first; `more` names the sections that go on and `nextOffset` is where their next page starts |
 | `GET /api/ops/skills` | each generated skill with size, mtime and SHA-256, so an unexpected change is visible |
 | `GET /api/ops/ollama` | installed and loaded models, capabilities, and a live chat round-trip test |
-| `GET /api/ops/tasks`, `GET /api/ops/tasks/{taskId}` | recent tasks; one task correlated across events, tool calls and memory |
+| `GET /api/ops/tasks?offset=0&limit=50`, `GET /api/ops/tasks/{taskId}` | recent tasks, paged like forensics; one task correlated across events, tool calls and memory |
 | `POST /api/ops/selftest` | pass/fail across database, tools, cloud key, local model, skills dir, log file |
-| `POST /api/ops/agent/run` | run one agent task and get the outcome plus the full step trajectory |
+| `POST /api/ops/agent/run` | run one agent task and get the outcome plus the full step trajectory; with `"sessionId"` (`"new"` or a chat's id) the run is a chat turn, saved to that chat as the web chat saves one |
 | `POST /api/ops/agent/cancel/{userId}` | request cancellation (observed between steps) |
 | `POST /api/ops/skills/reload` | re-read the generated skills directory |
 
@@ -324,10 +324,10 @@ curl -s -H "X-Ops-Token: $T" -X POST ".../api/ops/db/query" \
      -d "{\"sql\":\"SELECT * FROM skill_usage WHERE task_id='$ID'\"}"
 ```
 
-Note when reading outcomes: in this build `success` is `true` for every ending except a cancel or a
-crash, including the step cap and a reasoning-failure abort. Check `terminationReason` and the
-response text before believing a task delivered anything. `POST /api/ops/agent/run` repeats that
-caveat in its own response.
+Note when reading outcomes: `success` is `true` only for a task that completed. Every other ending —
+the step cap, a reasoning-failure abort, a question the agent stopped to ask, a cancel — is `false`,
+and `terminationReason` says which it was; `POST /api/ops/agent/run` says so in its `outcomeNote`. A
+run that crashes answers with an `error` instead.
 
 ### Exposure
 

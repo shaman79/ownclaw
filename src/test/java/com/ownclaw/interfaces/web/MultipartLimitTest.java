@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code spring.servlet.multipart}. Left at Spring's defaults -- 1 MB a file, 10 MB a request --
  * any file over 1 MB was rejected there and never reached the controller or its message. So the
  * application.yaml the app loads is read here with Spring's own loader and bound the way the
- * running app binds it, which also checks how "50MB" is converted to bytes.
+ * running app binds it, which also checks how "100MB" is converted to bytes.
  */
 class MultipartLimitTest {
 
