@@ -165,6 +165,27 @@ class PrivateIndexTest {
     }
 
     @Test
+    @DisplayName("the first leak is the first run nothing excuses: excused runs are passed, later ones still found")
+    void firstLeakSkipsExcusedRuns() {
+        String given = prose(400, 31), secret = prose(400, 32);
+        var idx = new PrivateIndex();
+        idx.addPrivate(2, given + " " + secret);
+        String excusedWindow = PrivateIndex.normalise(given);
+
+        // Only the part the task was given is excused: the scan goes on past it.
+        String text = "sent: " + given + " " + secret;
+        var leak = idx.firstLeakIn(text, (h, w) -> excusedWindow.contains(w));
+        assertNotNull(leak, "one excused run does not clear the text");
+        assertEquals(2, leak.handle());
+        String reported = PrivateIndex.normalise(text).substring(leak.offset(), leak.offset() + leak.length());
+        assertFalse(excusedWindow.contains(reported), "the run reported is one nothing excuses: " + reported);
+
+        assertNull(idx.firstLeakIn("sent: " + given, (h, w) -> excusedWindow.contains(w)),
+                "every run excused: nothing to refuse");
+        assertNull(idx.firstLeakIn("nothing of either here, only other words", (h, w) -> false));
+    }
+
+    @Test
     @DisplayName("normalisation folds case, compatibility forms and whitespace runs")
     void normalisation() {
         assertEquals("kancelář novák 42", PrivateIndex.normalise("  Kancelář\n\tNOVÁK   42 "));

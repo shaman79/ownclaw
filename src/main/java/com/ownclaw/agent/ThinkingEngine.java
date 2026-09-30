@@ -3,10 +3,7 @@ package com.ownclaw.agent;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.ownclaw.agent.tools.Tool;
-import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
@@ -40,20 +37,14 @@ public class ThinkingEngine {
     static final String CACHE_BOUNDARY_MARKER = com.ownclaw.llm.LlmMessage.CACHE_BOUNDARY;
 
     /**
-     * Ceiling on a single tool output sent to the cloud at full detail.
-     *
-     * Generous — about 3k tokens — because the recent turns are what the model reasons over and
-     * clipping them too hard makes it ask for the same thing again, which costs more than it
-     * saves. The point is only that there IS a ceiling.
-     *
-     * A local summary would be strictly better than head-and-tail here: it preserves meaning
-     * rather than discarding the middle, and local tokens are free. It costs 60-133 seconds on
-     * this hardware, which is unacceptable while a user is waiting — but work can now be
-     * classified, and {@link AgentLoop#compressIfUnattended} uses LocalExecutor.summarizeIfLong
-     * on exactly the runs where those seconds are free. This constant remains the ceiling for
-     * the attended case, where there is no time to do better.
+     * The tool name of a step that produced no action the loop can run: a reply that was empty,
+     * that is not an action, that never came because the call failed, or -- on unattended work
+     * before anything ran -- that answered instead of doing the work. The action's params carry
+     * what the model wrote, if it wrote anything ({@code message}); its reasoning is what the
+     * model is told about it. {@link AgentLoop} runs nothing for it, records the step under
+     * this name, and asks again.
      */
-    private static final int FULL_DETAIL_MAX_CHARS = 12_000;
+    static final String THINKING = "_thinking";
 
     // Lenient mapper: tolerates common LLM JSON quirks.
     // - ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: \' and other non-standard escapes
@@ -71,13 +62,11 @@ public class ThinkingEngine {
             .build();
 
     private final ToolRegistry toolRegistry;
-    private final ToolSelector toolSelector;
     private final OwnClawConfig config;
     private final LlmRouter llmRouter;
 
-    public ThinkingEngine(ToolRegistry toolRegistry, ToolSelector toolSelector, OwnClawConfig config, LlmRouter llmRouter) {
+    public ThinkingEngine(ToolRegistry toolRegistry, OwnClawConfig config, LlmRouter llmRouter) {
         this.toolRegistry = toolRegistry;
-        this.toolSelector = toolSelector;
         this.config = config;
         this.llmRouter = llmRouter;
     }
@@ -137,7 +126,8 @@ public class ThinkingEngine {
             // A refused reply, or one cut off by a limit of the model, never gets this far: the
             // provider path throws ProviderRefused or OutputTruncated for it
             // (LlmResponse.requireComplete), so everything below reads a whole reply.
-            //
+            String text = response.content() == null ? "" : response.content();
+
             // No tool call came back, but tools were offered.
             //
             // On Anthropic that means the model chose to answer in prose, and treating it as a
@@ -147,18 +137,12 @@ public class ThinkingEngine {
             // would deliver the raw JSON to the user as the answer. So parse first, and only
             // treat it as prose when it genuinely is not an action -- which costs one cheap
             // parse attempt and removes a whole class of local-tier regression.
-            if (nativeTools && !response.hasToolCalls()
-                    && response.content() != null && !response.content().isBlank()) {
-                AgentAction parsed = tryParseAction(response.content());
+            if (nativeTools && !response.hasToolCalls() && !text.isBlank()) {
+                AgentAction parsed = tryParseAction(text);
                 if (parsed != null) {
                     log.info("protocol=native-but-text — the model ignored the tools array and "
                             + "emitted a text action; parsed it rather than delivering JSON.");
-                    log.debug("Native tools were offered but the model replied with a text "
-                            + "action; parsed it rather than delivering the JSON as an answer.");
-                    return new ThinkResult(parsed, messages, response.content(),
-                            response.totalTokens(), response.promptTokens(),
-                            response.completionTokens(), response.cacheCreationTokens(),
-                            response.cacheReadTokens(), provider.model());
+                    return result(parsed, messages, text, response, provider);
                 }
                 log.info("protocol=native — answered directly with no tool call, provider={}",
                         provider.name());
@@ -166,23 +150,17 @@ public class ThinkingEngine {
                 // reply is a plan ("I'll fetch today's news digest first"), not an answer, and
                 // delivering it as the final answer is how this change would quietly break the
                 // owner's morning email: task COMPLETED, nothing done.
-                boolean nothingRanYet = nothingRanYet(context, mode);
-                AgentAction answer = new AgentAction(AgentAction.RESPOND,
-                        Map.of("message", response.content()),
-                        nothingRanYet
-                                ? AgentLoop.ANSWERED_WITHOUT_WORKING
-                                // Deliberately NOT one of the strings AgentLoop treats as a
-                                // fallback: choosing to answer is not a reasoning failure.
-                                : "Answered directly without calling a tool");
-                return new ThinkResult(answer, messages, response.content(),
-                        response.totalTokens(), response.promptTokens(),
-                        response.completionTokens(), response.cacheCreationTokens(),
-                        response.cacheReadTokens(), provider.model());
+                AgentAction answer = nothingRanYet(context, mode)
+                        ? answeredBeforeWork(text)
+                        : new AgentAction(AgentAction.RESPOND, Map.of("message", text),
+                                "Answered directly without calling a tool");
+                return result(answer, messages, text, response, provider);
             }
 
             // A native tool call is unambiguous: no parsing, so no parse failure.
             if (nativeTools && response.hasToolCalls()) {
                 var call = response.toolCalls().get(0);
+                Map<String, Object> args = call.arguments() == null ? Map.of() : call.arguments();
                 // The same guard, on the channel the prompt actually teaches. Under native
                 // tools the system prompt says "For respond: put the whole answer in the message
                 // argument" -- so a model that cannot run daily_news_digest says so by CALLING
@@ -190,52 +168,84 @@ public class ThinkingEngine {
                 // text as its reasoning, and AgentLoop returned COMPLETED: a scheduled run
                 // recorded green with no email and nothing run. The prose guard covered the
                 // less likely half.
-                String reasoning = response.content() == null ? "" : response.content();
                 if (AgentAction.RESPOND.equals(call.name()) && nothingRanYet(context, mode)) {
                     log.info("Unattended task {}: refused to finish — nothing has run yet.",
                             context.taskId());
-                    reasoning = AgentLoop.ANSWERED_WITHOUT_WORKING;
+                    return result(answeredBeforeWork(String.valueOf(args.getOrDefault("message", ""))),
+                            messages, renderToolCallForDebug(response), response, provider);
                 }
                 // Logged at INFO because otherwise there is no way to tell from outside which
                 // protocol a step used: a correct answer looks identical either way, and the
                 // token counts do not distinguish them. Without this the flag cannot be
                 // verified in production at all, only assumed.
                 log.info("Native tool call: {} ({} args) — protocol=native, provider={}",
-                        call.name(),
-                        call.arguments() == null ? 0 : call.arguments().size(),
-                        provider.name());
-                AgentAction action = new AgentAction(call.name(),
-                        call.arguments() == null ? Map.of() : call.arguments(), reasoning);
-                return new ThinkResult(action, messages,
-                        renderToolCallForDebug(response), response.totalTokens(),
-                        response.promptTokens(), response.completionTokens(),
-                        response.cacheCreationTokens(), response.cacheReadTokens(),
-                        provider.model());
+                        call.name(), args.size(), provider.name());
+                return result(new AgentAction(call.name(), args, text), messages,
+                        renderToolCallForDebug(response), response, provider);
             }
 
-            AgentAction action = parseAction(response.content());
-            return new ThinkResult(action, messages, response.content(), response.totalTokens(),
-                    response.promptTokens(), response.completionTokens(),
-                    response.cacheCreationTokens(), response.cacheReadTokens(),
-                    provider.model());
-        } catch (com.ownclaw.llm.EgressRefused refused) {
-            // Deterministic: the same prompt refuses again. Retrying it three times as
-            // "reasoning failures" is the wrong branch; the loop ends the task on it.
-            throw refused;
+            // Nothing came back: no text and no tool call. There is nothing to parse, so it is
+            // not reported as a parse failure -- that told a model holding a tools array it had
+            // broken the text envelope -- and no sentence is invented to stand for the reply.
+            if (text.isBlank()) {
+                String stop = response.stopDescription();
+                return result(unusable("", "Your previous reply was empty"
+                                + (stop == null ? "" : " (stop_reason: " + stop + ")")
+                                + ": no text and no tool call, so nothing was run.",
+                                "Continue from where the task stands."),
+                        messages, text, response, provider);
+            }
+
+            return result(parseAction(text), messages, text, response, provider);
+        } catch (EgressRefused | ProviderRefused | OutputTruncated notToAskAgain) {
+            // Not a step to ask again. The gateway refuses the same prompt again; the provider
+            // declined to answer it; the reply or the conversation reached a limit of the model.
+            // Asked again as steps that had gone wrong, a refusal and a cut-off came back the
+            // same way until the owner was told "3 consecutive reasoning failures". The loop
+            // ends the task on each, saying which.
+            throw notToAskAgain;
         } catch (LlmException e) {
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
-            AgentAction action = new AgentAction(AgentAction.RESPOND,
-                    Map.of("message", "I encountered an error while reasoning about this task. Please try again."),
-                    "LLM call failed: " + e.getMessage());
-            return new ThinkResult(action, messages, "ERROR: " + e.getMessage(), 0);
+            return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
+                            + "model failed (" + e.getMessage() + "), so nothing was run.",
+                    "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(), 0);
         }
     }
 
+    /** A step's result, with the tokens the reply was billed and the model that wrote it. */
+    private static ThinkResult result(AgentAction action, List<LlmMessage> messages, String raw,
+                                      LlmResponse response, LlmProvider provider) {
+        // The model that wrote the reply, when the provider says: a declined request can be
+        // answered by Anthropic's fallback model, and it is priced at that model's rates.
+        return new ThinkResult(action, messages, raw, response.totalTokens(),
+                response.promptTokens(), response.completionTokens(),
+                response.cacheCreationTokens(), response.cacheReadTokens(),
+                response.model() != null ? response.model() : provider.model());
+    }
+
     /**
-     * Build the full message list for the LLM.
+     * A step that produced no action the loop can run, as {@link #THINKING}. What the model wrote
+     * is kept whole in {@code message}, when it wrote anything; the reasoning is what it is told:
+     * what happened, that reply quoted whole, and what to do now.
      */
-    private List<LlmMessage> buildMessages(AgentContext context, String providerName) {
-        return buildMessages(context, providerName, new StepMode(false, false));
+    private static AgentAction unusable(String wrote, String what, String next) {
+        boolean said = wrote != null && !wrote.isBlank();
+        return new AgentAction(THINKING, said ? Map.of("message", wrote) : Map.of(),
+                what + (said ? " It was:\n\n" + wrote + "\n\n" : "\n\n") + next);
+    }
+
+    /**
+     * An answer on restricted unattended work before anything has run. "I'll fetch today's news
+     * digest first" is a plan, not an answer, and delivering it as COMPLETED is the specific way
+     * withholding the registry would break the owner's morning email: the model cannot call the
+     * skill, says what it would do, and the task ends successfully having done nothing.
+     */
+    private static AgentAction answeredBeforeWork(String answer) {
+        return unusable(answer, "You described what you were going to do instead of doing it, "
+                        + "and nothing has run yet.",
+                "Nobody is waiting for this, so the work runs on the local model. Call "
+                        + "'delegate' with the goal stated in full. Answer only once there is a "
+                        + "result to report.");
     }
 
     /** Package-private: the whole prompt, so a test can assert what the model is actually told. */
@@ -262,137 +272,49 @@ public class ThinkingEngine {
     }
 
     /**
-     * Build Anthropic-optimized message list with multi-turn trajectory.
+     * The task, then every step in the order it happened: the model's action as an assistant
+     * turn, its result as the user turn after it -- each whole, PRIVATE results as the
+     * descriptions they were recorded as.
      * <p>
-     * Instead of a single trajectory summary message, each action/observation pair
-     * becomes an alternating assistant/user turn. This enables Anthropic's prefix
-     * caching: the stable conversation prefix (older turns) is cached at 10% cost,
-     * and only the latest turn + dynamic context pay full price.
+     * A step the loop took itself ({@link AgentTrajectory.Turn#byTheLoop}) has no assistant turn:
+     * the model did not write it. What the model was told about it -- a reply that could not be
+     * used, a reflection -- joins the user turn it follows, in its place. So an assistant turn
+     * holds nothing but what the model wrote, and the roles alternate as the Messages API
+     * requires.
      * <p>
-     * Dynamic content (datetime, tools, user prefs) is appended to the last user
-     * message, keeping the system prompt 100% static for reliable caching.
+     * Every message but the last is the same bytes on every later step, so the conversation is
+     * append-only and the provider's sliding cache breakpoints keep hitting. The last user turn
+     * carries what changes on every step (the date, the tools on the text protocol, the vault),
+     * behind the cache breakpoints. While no action has been replayed the task is the only
+     * message, and the cache boundary marks where the task ends, so the task is cached on the
+     * first call and read back on the next.
      */
-    /** Package-private so the parse-failure replay can be tested without a Spring context. */
-    void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context) {
-        buildAnthropicMessages(messages, context, new StepMode(false, false));
-    }
-
     void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context, StepMode mode) {
-        messages.add(LlmMessage.user(buildUserMessage(context)));
-
-        AgentTrajectory trajectory = context.trajectory();
-
-        // Separate the parse-failure turns from the real ones.
-        //
-        // These used to be dropped outright, as "noise without useful info". They are the
-        // opposite: they carry the only correction the model ever gets. When it answers in prose
-        // instead of the action JSON, AgentLoop records the raw output plus the required format
-        // as a _thinking failure and retries — and on Anthropic, which is what production runs,
-        // that feedback reached the model nowhere else. The system prompt is static by design,
-        // the user message holds only the task, and the dynamic block never reads the
-        // trajectory. So every retry sent a byte-identical prompt, drew the identical reply, and
-        // the run aborted at three with "3 consecutive reasoning failures" — for a question the
-        // model had answered correctly three times. Four of those are in this deployment's chat
-        // history. The OpenAI path was unaffected because toPromptSummary keeps the last two
-        // turns in full.
-        List<AgentTrajectory.Turn> effectiveTurns = new ArrayList<>();
-        AgentTrajectory.Turn lastParseFailure = null;
-        int olderParseFailures = 0;
-        for (var turn : trajectory.turns()) {
-            if (!turn.observation().success() && "_thinking".equals(turn.observation().tool())) {
-                if (lastParseFailure != null) olderParseFailures++;
-                lastParseFailure = turn;
+        String task = buildUserMessage(context);
+        var user = new StringBuilder(task);
+        boolean replayed = false;
+        for (var turn : context.trajectory().turns()) {
+            if (turn.byTheLoop()) {
+                String told = turn.observation().output();
+                if (told != null && !told.isBlank()) user.append("\n\n").append(told);
                 continue;
             }
-            effectiveTurns.add(turn);
+            messages.add(LlmMessage.user(user.toString()));
+            messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action())));
+            user = new StringBuilder(formatObservationForMultiTurn(turn));
+            replayed = true;
         }
-
-        if (effectiveTurns.isEmpty() && lastParseFailure == null) {
-            // Genuine step 0: append dynamic context to the user message -- after the cache
-            // boundary, so the task above it is cached now and read back on step 1, where it is
-            // the whole first message.
-            LlmMessage lastMsg = messages.get(messages.size() - 1);
-            messages.set(messages.size() - 1, LlmMessage.user(
-                    lastMsg.content() + CACHE_BOUNDARY_MARKER + "\n\n---\n" + buildDynamicContext(context, mode)));
-            return;
-        }
-
-        // Multi-turn: each action/observation becomes assistant/user message pair.
-        // Last 2 turns get full output detail; older turns are compressed.
-        // Same budget policy as the OpenAI path, rather than a hardcoded "last two turns".
-        // Keeping a fixed count made "read three pages and compare them" impossible: the first
-        // page was a 300-character stub by the time the third arrived.
-        int fullDetailFrom = AgentTrajectory.firstTurnKeptInFull(
-                effectiveTurns, AgentTrajectory.FULL_OUTPUT_BUDGET_CHARS);
-        for (int i = 0; i < effectiveTurns.size(); i++) {
-            var turn = effectiveTurns.get(i);
-            boolean isFull = i >= fullDetailFrom;
-            // Not necessarily the last message any more — a parse failure may follow.
-            boolean isLast = i == effectiveTurns.size() - 1 && lastParseFailure == null;
-
-            // Assistant turn: reconstructed action JSON (what the LLM "said")
-            messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action(), isFull)));
-
-            // User turn: observation result
-            String obsText = formatObservationForMultiTurn(turn, isFull);
-
-            // Append dynamic context to the LAST observation only —
-            // this keeps it out of the cached prefix while providing current info.
-            if (isLast) {
-                obsText += "\n\n---\n" + buildDynamicContext(context, mode);
-            }
-            messages.add(LlmMessage.user(obsText));
-        }
-
-        if (lastParseFailure != null) {
-            appendParseFailure(messages, context, lastParseFailure, olderParseFailures, mode);
-        }
+        if (!replayed) user.insert(task.length(), CACHE_BOUNDARY_MARKER);
+        user.append("\n\n---\n").append(buildDynamicContext(context, mode));
+        messages.add(LlmMessage.user(user.toString()));
     }
 
-    /**
-     * Replay the most recent parse failure as the exchange it actually was.
-     * <p>
-     * Deliberately NOT routed through {@link #formatActionForMultiTurn}. That would serialise the
-     * fabricated fallback action the parser invented — a perfectly well-formed
-     * {@code {"tool":"respond","params":{"message":"<the prose>"}}} — and present it to the model
-     * as its own previous output, immediately followed by a user turn complaining that the output
-     * could not be parsed. Showing a model a valid action and calling it invalid is worse than
-     * showing it nothing: it teaches exactly the habit being corrected.
-     * <p>
-     * So the assistant turn is the raw text the model really produced, and the user turn is the
-     * correction verbatim. Two messages, because the Messages API expects the roles to alternate.
-     */
-    private void appendParseFailure(List<LlmMessage> messages, AgentContext context,
-                                    AgentTrajectory.Turn failure, int olderFailures,
-                                    StepMode mode) {
-        String raw = null;
-        var params = failure.action() == null ? null : failure.action().params();
-        if (params != null && params.get("message") != null) {
-            raw = String.valueOf(params.get("message"));
-        }
-        messages.add(LlmMessage.assistant(
-                raw == null || raw.isBlank() ? "(no parseable action was produced)" : raw));
-
-        StringBuilder correction = new StringBuilder();
-        if (olderFailures > 0) {
-            correction.append("(plus ").append(olderFailures)
-                    .append(" earlier parse failure").append(olderFailures == 1 ? "" : "s")
-                    .append(" on this task)\n\n");
-        }
-        String obs = failure.observation() == null ? null : failure.observation().output();
-        correction.append(obs == null || obs.isBlank()
-                ? "Your previous output could not be parsed as an action."
-                : obs);
-        correction.append("\n\n---\n").append(buildDynamicContext(context, mode));
-        messages.add(LlmMessage.user(correction.toString()));
-    }
-
-    /** Every skill by name and one line each: what exists, without the ability to call it. */
+    /** Every skill by name with its whole description: what exists, without the ability to call it. */
     private String skillCatalogue() {
         return toolRegistry.all().stream()
                 .filter(t -> t != null && t.name() != null)
                 .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
-                .map(t -> "- " + t.name() + ": " + truncate(t.description(), 110))
+                .map(t -> "- " + t.name() + ": " + t.description())
                 .collect(java.util.stream.Collectors.joining("\n"));
     }
 
@@ -505,8 +427,8 @@ public class ThinkingEngine {
 
         // The cloud cannot CALL the skills, but it still has to know they exist, or it will
         // write a goal that asks for something already built -- or reach for skill_create to
-        // rebuild it. So delegate's description carries a catalogue: names and one line each,
-        // which is knowledge without capability.
+        // rebuild it. So delegate's description carries a catalogue: every skill's name and
+        // description, which is knowledge without capability.
         var specs = new ArrayList<>(ToolSchemas.build(
                 SpecialActionSchemas.ALL, List.of(), context.credentialKeys()));
         String catalogue = skillCatalogue();
@@ -651,18 +573,7 @@ public class ThinkingEngine {
                         + "them: state the goal in full and name the ones it needs in 'tools'.\n");
             }
         } else if (!mode.nativeTools()) {
-            ToolSelector.Selection selection = selectToolsForPrompt(context);
-            sb.append("## Tools\n");
-            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-            sb.append(manifest).append("\n");
-            if (!selection.otherNames().isEmpty()) {
-                sb.append("\nAlso available, names only: ")
-                  .append(formatNamePreview(selection.otherNames(), config.getMentor().getToolNamePreviewLimit()))
-                  .append("\n");
-            }
-            if (manifest.isBlank()) {
-                sb.append("No tools yet — use skill_create.\n");
-            }
+            sb.append(toolsSection(context));
         } else if (toolRegistry.all().isEmpty()) {
             sb.append("No tools yet — use skill_create.\n");
         }
@@ -686,152 +597,24 @@ public class ThinkingEngine {
     }
 
     /**
-     * Select tools for prompt injection.
-     *
-     * <p>Default behavior uses the heuristic {@link ToolSelector}.
-     * When enabled, step-0 selection can be delegated to the local LLM (Ollama)
-     * to reduce prompt size while keeping relevant tools.
+     * Every tool with its whole description, for the text protocol, where the prompt is the only
+     * place the model learns what it can call. Native tools carry the same in the tools array.
      */
-    private ToolSelector.Selection selectToolsForPrompt(AgentContext context) {
-        ToolSelector.Selection heuristic = toolSelector.select(context.originalMessage(), context.trajectory());
-
-        // Only run local selection on step 0 (biggest prompt) and only if enabled.
-        if (!context.trajectory().isEmpty()) return heuristic;
-        if (!config.getMentor().isLocalToolSelection()) return heuristic;
-
-        LlmProvider local = llmRouter.local();
-        if (local == null || !local.isAvailable()) return heuristic;
-
-        int maxTools = Math.max(1, config.getMentor().getLocalToolSelectionMaxTools());
-        int candidateLimit = Math.max(maxTools, config.getMentor().getLocalToolSelectionCandidateLimit());
-
-        try {
-            List<Tool> all = toolRegistry.all().stream()
-                    .sorted(Comparator.comparing(Tool::name))
-                    .toList();
-
-            // Cap candidate list deterministically to keep local prompt bounded.
-            if (all.size() > candidateLimit) {
-                all = all.subList(0, candidateLimit);
-            }
-
-            // The rule here used to read 'prefer task-specific tools over generic ones', which is
-            // exactly backwards for a library that is supposed to be reused. A general tool
-            // invoked with a parameter IS the reuse we want; a narrowly named one is the bloat we
-            // are trying to stop. Ranking specific above general taught the selector to surface
-            // web_search_bikes ahead of a general web search, and to surface one of eight IMAP
-            // variants rather than the one that actually covers the case.
-            String selectorSystem = "You are a tool selection assistant. "
-                    + "Given a task and a list of available tools, choose the smallest useful set of tools. "
-                    + "Return ONLY valid JSON: {\"tools\": [\"name\", ...]}. "
-                    + "Rules: pick at most " + maxTools + " tools; only choose names that appear in the list; "
-                    + "prefer general tools that take the specifics as parameters over narrowly "
-                    + "named ones; if unsure, return an empty list.";
-
-            String selectorUser = buildLocalToolSelectionUserPrompt(context.originalMessage(), all);
-            List<LlmMessage> messages = List.of(
-                    LlmMessage.system(selectorSystem),
-                    LlmMessage.user(selectorUser)
-            );
-
-            // Small, structured response.
-            LlmRequestConfig req = new LlmRequestConfig(
-                    null,
-                    0.0,
-                    true,
-                    null
-            );
-
-            LlmResponse resp = local.chat(messages, req);
-            Set<String> picked = parseSelectedToolNames(resp.content(), maxTools);
-            if (picked.isEmpty()) return heuristic;
-
-            List<Tool> detailed = new ArrayList<>();
-            for (Tool t : toolRegistry.all()) {
-                if (picked.contains(t.name())) {
-                    detailed.add(t);
-                }
-            }
-
-            // Ensure we don't exceed maxTools even if duplicates/extra names slip through.
-            if (detailed.size() > maxTools) {
-                detailed = detailed.subList(0, maxTools);
-            }
-
-            Set<String> detailedNames = detailed.stream().map(Tool::name).collect(java.util.stream.Collectors.toSet());
-            List<String> otherNames = toolRegistry.all().stream()
-                    .map(Tool::name)
-                    .filter(n -> !detailedNames.contains(n))
-                    .sorted()
-                    .toList();
-
-            return new ToolSelector.Selection(detailed, otherNames);
-        } catch (Exception e) {
-            log.debug("Local tool selection failed (non-fatal): {}", e.getMessage());
-            return heuristic;
-        }
-    }
-
-    private String buildLocalToolSelectionUserPrompt(String task, List<Tool> candidates) {
-        var sb = new StringBuilder();
-        sb.append("Task:\n").append(task == null ? "" : task).append("\n\n");
-        sb.append("Available tools (name: short description | params):\n");
-
-        for (Tool t : candidates) {
-            sb.append("- ").append(t.name()).append(": ").append(truncate(t.description(), 160));
-            Map<String, ToolParam> schema = t.inputSchema();
-            if (schema != null && !schema.isEmpty()) {
-                List<String> keys = schema.keySet().stream().sorted().toList();
-                sb.append(" | params: ").append(String.join(", ", keys));
-            }
-            sb.append("\n");
-        }
-        sb.append("\nReturn JSON only.");
-        return sb.toString();
-    }
-
-    private Set<String> parseSelectedToolNames(String raw, int maxTools) {
-        if (raw == null || raw.isBlank()) return Set.of();
-        try {
-            String cleaned = LlmOutputUtils.stripCodeFences(raw.strip());
-            JsonNode root = mapper.readTree(cleaned);
-            JsonNode arr = root.path("tools");
-            if (!arr.isArray()) return Set.of();
-            Set<String> out = new LinkedHashSet<>();
-            for (JsonNode n : arr) {
-                if (n.isTextual()) {
-                    String name = n.asText("").trim();
-                    if (!name.isBlank()) out.add(name);
-                }
-                if (out.size() >= maxTools) break;
-            }
-            return out;
-        } catch (Exception e) {
-            return Set.of();
-        }
-    }
-
-    private String formatNamePreview(List<String> names, int limit) {
-        if (names == null || names.isEmpty()) return "";
-        int capped = Math.max(0, limit);
-        if (capped == 0) return "(" + names.size() + " omitted)";
-        if (names.size() <= capped) return String.join(", ", names);
-        List<String> head = names.subList(0, capped);
-        return String.join(", ", head) + " … (+" + (names.size() - capped) + " more)";
+    private String toolsSection(AgentContext context) {
+        String manifest = toolRegistry.generateManifest(toolRegistry.all(), context.credentialKeys());
+        return "## Tools\n" + (manifest.isBlank() ? "No tools yet — use skill_create." : manifest) + "\n";
     }
 
     /**
-     * Format an agent action as a JSON string for multi-turn conversation.
-     * Reconstructs what the LLM would have generated as its response.
+     * An action as the assistant turn that replays it: what the model chose -- its reasoning, the
+     * tool and the arguments as it wrote them, a reference as {{N}} and never the bytes it
+     * resolves to -- as JSON.
      */
-    private String formatActionForMultiTurn(AgentAction action, boolean fullDetail) {
+    private String formatActionForMultiTurn(AgentAction action) {
         try {
             Map<String, Object> map = new LinkedHashMap<>();
             String reasoning = action.reasoning();
             if (reasoning != null && !reasoning.isBlank()) {
-                if (!fullDetail && reasoning.length() > 200) {
-                    reasoning = reasoning.substring(0, 200) + "...";
-                }
                 map.put("reasoning", reasoning);
             }
             map.put("tool", action.tool());
@@ -844,53 +627,22 @@ public class ThinkingEngine {
         }
     }
 
-    /**
-     * Format a trajectory turn's observation for multi-turn conversation.
-     */
-    private String formatObservationForMultiTurn(AgentTrajectory.Turn turn, boolean fullDetail) {
+    /** A step's result as the user turn after it: which tool, how it went, and its output whole. */
+    private String formatObservationForMultiTurn(AgentTrajectory.Turn turn) {
         var sb = new StringBuilder();
         sb.append("[").append(turn.action().tool()).append("] ");
         sb.append(turn.observation().success() ? "OK" : "FAILED");
         sb.append(" (").append(turn.observation().durationMs()).append("ms)\n");
-
         String output = turn.observation().output();
-        if (output != null && !output.isBlank()) {
-            if (fullDetail && output.length() > FULL_DETAIL_MAX_CHARS) {
-                // fullDetail used to mean "send the whole thing", with no ceiling at all. A tool
-                // that returns a large file, a long page or a verbose command dump therefore went
-                // to the cloud in full, on EVERY step for as long as it stayed in the two-turn
-                // window. At 200 KB that is roughly 50k tokens a step — real money, repeatedly,
-                // for output the model has already read once.
-                //
-                // Head and tail rather than a hard cut: the beginning says what the output is and
-                // the end usually carries the result or the error.
-                int half = FULL_DETAIL_MAX_CHARS / 2;
-                sb.append(output, 0, half)
-                        .append("\n...[").append(output.length())
-                        .append(" chars total, middle omitted]...\n")
-                        .append(output, output.length() - half, output.length());
-            } else if (fullDetail || output.length() <= 300) {
-                sb.append(output);
-            } else {
-                // Smart truncation: keep head + tail to preserve context from both ends
-                int half = 150;
-                sb.append(output, 0, half)
-                        .append("\n...[" ).append(output.length()).append(" chars, middle omitted]...\n")
-                        .append(output, output.length() - half, output.length());
-            }
-        }
+        if (output != null && !output.isBlank()) sb.append(output);
         return sb.toString();
     }
 
     /**
      * Build the system prompt. This defines the agent's behavior, available tools,
-     * and output format. Completely generic — no domain-specific content.
-     */
-    private String buildSystemPrompt(AgentContext context, String providerName) {
-        return buildSystemPrompt(context, providerName, new StepMode(false, false));
-    }
-
-    /**
+     * and output format. Completely generic — no domain-specific content. Sent whole on every
+     * step, never shortened.
+     *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
      *             be false: the parameter was accepted and never read, so every native step also
@@ -901,16 +653,6 @@ public class ThinkingEngine {
     private String buildSystemPrompt(AgentContext context, String providerName,
                                      StepMode mode) {
         boolean nativeTools = mode.nativeTools();
-        // Anthropic: always use the full prompt — the static section is cached by
-        // Anthropic's prompt caching (9200 tokens cached, read at 10% cost = ~920
-        // effective tokens). The compact prompt broke caching: different prefix meant
-        // step 2+ never read the cache created on step 1.
-        // OpenAI: has no prompt caching, so the compact prompt on steps 2+ saves ~700
-        // real tokens per step.
-        if (!context.trajectory().isEmpty() && !"anthropic".equals(providerName)) {
-            return buildCompactSystemPrompt(context, mode);
-        }
-
         var sb = new StringBuilder();
 
         sb.append("You are an autonomous agent. Reason, pick a tool, observe, repeat until done.\n\n");
@@ -954,7 +696,8 @@ public class ThinkingEngine {
 
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check, [key])\n");
-        sb.append("memory_manage(action=store|list|delete, [key], [content])\n\n");
+        sb.append("memory_manage(action=store|list|delete|recall, [key], [content], [query])\n");
+        sb.append("  recall: every past task whose record matches 'query', each in full, most relevant first\n\n");
 
         sb.append("schedule_manage:\n");
         sb.append("  action=schedule_once|schedule_recurring|list|cancel|pause|resume\n");
@@ -991,17 +734,16 @@ public class ThinkingEngine {
         sb.append("- Only mention credentials NOT already in the vault.\n\n");
 
         sb.append("## Memory\n");
-        sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n\n");
+        sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n");
+        sb.append("Past tasks are not shown to you: memory_manage action=recall with a query returns every one that matches, in full.\n\n");
 
         // Output format
         sb.append("## Output\n");
         if (nativeTools) {
-            sb.append("Call exactly one tool per step. Keep any text alongside it to a sentence "
-                    + "or two — it is reasoning, not the answer.\n");
+            sb.append("Call exactly one tool per step. Any text alongside it is reasoning, not the answer.\n");
             sb.append("For respond: put the whole answer in the message argument.\n\n");
         } else {
             sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
-            sb.append("CRITICAL: Keep 'reasoning' to 1-2 sentences. Long reasoning wastes tokens and risks truncation.\n");
             sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
         }
 
@@ -1057,24 +799,7 @@ public class ThinkingEngine {
         // provider -- the default in application.yaml -- when a skill's own short output was
         // recorded PRIVATE and the canary found it here, in a part with no registry allowance.
         if (!mode.nativeTools()) {
-            // Smart tool selection — include only relevant tools in detail
-            ToolSelector.Selection selection = toolSelector.select(
-                    context.originalMessage(), context.trajectory());
-
-            sb.append("## Available Tools\n");
-            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-            sb.append(manifest).append("\n");
-
-            // If some tools were omitted, list them by name so the LLM knows they exist
-            if (!selection.otherNames().isEmpty()) {
-                sb.append("\n## Other Available Tools (use by name if needed)\n");
-                sb.append(String.join(", ", selection.otherNames())).append("\n");
-            }
-
-            if (manifest.isBlank()) {
-                sb.append("\nNo tools yet. Use skill_create as first action.\n");
-            }
-            sb.append("\n");
+            sb.append(toolsSection(context)).append("\n");
         }
 
         // Dynamic vault contents
@@ -1093,94 +818,6 @@ public class ThinkingEngine {
     }
 
     /**
-     * Condensed system prompt for reasoning steps 2+.
-     * Omits verbose behavioral guidelines, detailed parameter descriptions,
-     * and instructional sections that the LLM has already seen on step 1.
-     * Saves ~700 cloud tokens per step.
-     */
-    /**
-     * @param mode honoured the way the full prompt honours it. This one took no mode at all, so
-     *             from step 2 on a non-Anthropic native run got the manifest (the catalogue a
-     *             second time, advertising skills the array withholds), the action list, and the
-     *             "Output: {reasoning, tool, params}" envelope -- the instruction to use the one
-     *             protocol the tools array replaces, which the full prompt stopped sending.
-     */
-    private String buildCompactSystemPrompt(AgentContext context, StepMode mode) {
-        var sb = new StringBuilder(2048);
-
-        sb.append("Autonomous agent. Reason, pick tools, observe, repeat. Never refuse. skill_create for new capabilities.\n\n");
-
-        // ── CACHE BOUNDARY ── static preamble above is cacheable
-        sb.append(CACHE_BOUNDARY_MARKER);
-
-        // Environment (always — dynamic datetime)
-        sb.append("## Environment\n");
-        sb.append("- Platform: ").append(detectPlatform()).append("\n");
-        sb.append("- DateTime: ").append(LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
-                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
-
-        // User preferences (always — dynamic per user)
-        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
-            sb.append("## User Preferences\n");
-            sb.append(context.userPreferences()).append("\n\n");
-        }
-
-        if (!mode.nativeTools()) {
-            // Available Tools (text protocol only — dynamic tool selection based on trajectory)
-            ToolSelector.Selection selection = toolSelector.select(
-                    context.originalMessage(), context.trajectory());
-            sb.append("## Tools\n");
-            String manifest = toolRegistry.generateManifest(selection.detailed(), context.credentialKeys());
-            sb.append(manifest).append("\n");
-            if (!selection.otherNames().isEmpty()) {
-                sb.append("Also: ").append(String.join(", ", selection.otherNames())).append("\n");
-            }
-            if (manifest.isBlank()) {
-                sb.append("No tools yet — use skill_create.\n");
-            }
-            sb.append("\n");
-
-            // Compact special actions — parameter names only, one line each
-            sb.append("## Actions\n");
-            sb.append("respond(message) | ask_user(message)\n");
-            sb.append("skill_create(name, description, parameters[JSON], [requirements], [credentials], [system_packages→container], [timeout])\n");
-            sb.append("Fix skill: reuse SAME name. NEVER _v2/_fixed/_new.\n");
-            sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
-            sb.append("credential_manage(action=list|check, [key])\n");
-            sb.append("memory_manage(action=store|list|delete, [key], [content])\n");
-            sb.append("schedule_manage(action=schedule_once|schedule_recurring|list|cancel|pause|resume, [description], [time], [schedule], [max_runs], [task_id])\n");
-            sb.append("delegate(goal, [tools], [steps], [checkpoints], [max_steps]) — hand a sub-goal to the FREE local model.\n");
-            sb.append("  It runs its own loop with the tools you name and your credentials, on this machine.\n");
-            sb.append("  Best for local/LAN/server work and private data. ~1 min per step, so prefer it when nobody is waiting.\n");
-            sb.append("  Only 'goal' is required — omit steps rather than guess at params you cannot know yet.\n\n");
-        }
-
-        // Problem-solving nudge (compact version of the full prompt's ## Problem Solving)
-        sb.append("Stuck? Think deeper, search the internet, try a fundamentally different approach. Never repeat what failed.\n");
-        sb.append("Need OS tools/binaries? system_packages in skill_create auto-installs any apt package in a container.\n\n");
-
-        // Credential reminder in compact prompt
-        List<String> vaultKeys = context.credentialKeys();
-        if (!vaultKeys.isEmpty()) {
-            sb.append("Vault: ").append(String.join(", ", vaultKeys)).append("\n");
-        }
-        sb.append("Credentials auto-injected. Only ask for missing ones. Declare in 'credentials' param.\n\n");
-
-        // The text-protocol envelope, on the text protocol only.
-        if (!mode.nativeTools()) {
-            sb.append("Output: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
-        }
-
-        // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
-        Object nudge = context.metadata().get("delegationNudge");
-        if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
-            sb.append("\nCOST WARNING: ").append(nudgeMsg).append("\n");
-        }
-
-        return sb.toString();
-    }
-
-    /**
      * Build the user message containing the original request and conversation context.
      */
     private String buildUserMessage(AgentContext context) {
@@ -1190,13 +827,6 @@ public class ThinkingEngine {
         if (context.conversationSummary() != null && !context.conversationSummary().isBlank()) {
             sb.append("## Prior Context\n");
             sb.append(context.conversationSummary()).append("\n\n");
-        }
-
-        // Relevant past experiences from memory
-        Object memories = context.metadata().get("relevantMemories");
-        if (memories instanceof String memStr && !memStr.isBlank()) {
-            sb.append("## Past Experience\n");
-            sb.append(memStr).append("\n\n");
         }
 
         sb.append("## Task\n");
@@ -1288,17 +918,13 @@ public class ThinkingEngine {
     }
 
     /**
-     * Parse the LLM's JSON response into an AgentAction.
-     * Handles common LLM output quirks (code fences, comments, extra text, etc.).
-     */
-    /**
      * Parse text as an action, or return null if it plainly is not one.
      * <p>
-     * {@link #parseAction} can never say "this is not an action" — it falls back to RESPOND with
-     * the raw text, which is the right answer for the text protocol and the wrong one when tools
-     * were offered. There, prose means the model chose to answer, but a JSON envelope means a
-     * local model ignored the tools array, and handing that envelope to the user as their answer
-     * would be worse than either. This distinguishes the two.
+     * {@link #parseAction} reads the text protocol, where a reply that is not an action is a step
+     * that produced nothing to run. When tools were offered that is wrong: there, prose means the
+     * model chose to answer, but a JSON envelope means a local model ignored the tools array, and
+     * handing that envelope to the user as their answer would be worse than either. This
+     * distinguishes the two.
      */
     AgentAction tryParseAction(String raw) {
         if (raw == null || raw.isBlank()) return null;
@@ -1309,23 +935,22 @@ public class ThinkingEngine {
         return parseAction(raw);
     }
 
+    /**
+     * Read a text-protocol reply -- never blank: an empty reply is recognised before this -- as
+     * an action. Handles common LLM output quirks (code fences, comments, extra text, etc.). A
+     * reply that is not an action is a {@link #THINKING} step that quotes it and restates the
+     * format.
+     */
     AgentAction parseAction(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return fallbackResponse("Empty response from reasoning engine.");
-        }
-
         String cleaned = LlmOutputUtils.stripCodeFences(raw.strip());
 
         // Try to parse as JSON. Use Jackson's streaming parser to find the first
         // valid JSON object — handles nested braces, escaped chars, etc. correctly.
-        // If no valid JSON object can be parsed, the LLM produced natural language
-        // which is a direct response, not a parse failure.
         Map<String, Object> parsed = tryParseJsonObject(cleaned);
         if (parsed == null) {
-            log.warn("ThinkingEngine: no valid JSON object in LLM response, treating as direct response");
-            return new AgentAction(AgentAction.RESPOND,
-                    Map.of("message", raw.strip()),
-                    "LLM did not produce structured output; delivering raw response");
+            log.warn("ThinkingEngine: no valid JSON object in LLM response, so no action");
+            return unusable(raw, "Your previous reply is not an action: there is no JSON object "
+                    + "in it, so nothing was run.", ACTION_FORMAT);
         }
 
         try {
@@ -1397,22 +1022,22 @@ public class ThinkingEngine {
                         parsed.keySet());
                 log.warn("ThinkingEngine: raw parsed JSON: {}",
                         truncate(cleaned, 500));
-                return fallbackResponse("I had trouble deciding what to do. Let me try again.");
+                return unusable(raw, "Your previous reply is not an action: its JSON names no "
+                        + "tool, so nothing was run.", ACTION_FORMAT);
             }
 
             return new AgentAction(tool, params, reasoning != null ? reasoning : "");
         } catch (Exception e) {
             log.warn("ThinkingEngine: failed to parse LLM JSON output: {}", e.getMessage());
-            // Last resort: treat it as a direct response
-            return new AgentAction(AgentAction.RESPOND,
-                    Map.of("message", raw.strip()),
-                    "Failed to parse structured output; delivering raw response");
+            return unusable(raw, "Your previous reply could not be read as an action ("
+                    + e.getMessage() + "), so nothing was run.", ACTION_FORMAT);
         }
     }
 
-    private AgentAction fallbackResponse(String message) {
-        return new AgentAction(AgentAction.RESPOND, Map.of("message", message), "Fallback response");
-    }
+    /** The text protocol's action, restated to a model whose reply was not one. */
+    private static final String ACTION_FORMAT = "Reply with one JSON object: {\"reasoning\": "
+            + "\"...\", \"tool\": \"name\", \"params\": {...}}. To answer: {\"tool\": \"respond\", "
+            + "\"params\": {\"message\": \"...\"}, \"reasoning\": \"...\"}.";
 
     private String getStringField(Map<String, Object> map, String key) {
         Object value = map.get(key);

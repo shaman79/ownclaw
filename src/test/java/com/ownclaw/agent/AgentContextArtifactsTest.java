@@ -149,6 +149,20 @@ class AgentContextArtifactsTest {
     }
 
     @Test
+    @DisplayName("text only this machine holds is no excuse: past tasks are not in the prompt")
+    void pastTasksAreNotAnExcuse() {
+        // Past tasks used to be put into the first message as "## Past Experience", so a run of
+        // them was material the cloud had been given. They are recalled on request now, as an
+        // observation, and nothing puts them in the prompt by itself.
+        var ctx = task("send it");
+        String episode = "Task: audit the routers. Response: " + prose(200, 8);
+        ctx.metadata().put("relevantMemories", episode);
+        var priv = add(ctx, "imap_fetch", "Found: " + episode, PRIVATE);
+
+        assertFalse(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));
+    }
+
+    @Test
     @DisplayName("nothing is allowed by default")
     void nothingByDefault() {
         var ctx = task("hello");
@@ -200,17 +214,18 @@ class AgentContextArtifactsTest {
         var ctx = task("summarise this statement");
         ctx.addFile("f1", "date,amount\n2026-09-01,-1200\n", CSV_WHY);
 
+        // A statement parser's result: its key names and booleans are the statement.
+        String parsed = "{\"ok\": true, \"iban_CZ6508000000192000145399\": \"x\", "
+                + "\"closing_balance\": 41200, \"overdrawn\": false}";
+
         // No credentials, no reference: the skill reached the file through _attached_files, or
         // by opening the uploads directory itself. Nothing in the call says so.
-        var d = ctx.decide(List.of(), List.of(), false);
+        var d = ctx.decide(List.of(), List.of(), false, parsed);
         assertEquals(Label.PRIVATE, d.label(),
                 "every skill run in this task is handed the file, so what it returns is the file's");
         assertFalse(d.indexed());
         assertEquals(List.of("given the file {{1}}"), d.why(), "by handle, never by name");
 
-        // A statement parser's result: its key names and booleans are the statement.
-        String parsed = "{\"ok\": true, \"iban_CZ6508000000192000145399\": \"x\", "
-                + "\"closing_balance\": 41200, \"overdrawn\": false}";
         String shown = add(ctx, "statement_parser", parsed, d).describe();
         for (String leaked : List.of("iban", "CZ65", "closing_balance", "overdrawn", "ok=", "use:")) {
             assertFalse(shown.contains(leaked), leaked + " in the descriptor: " + shown);
@@ -225,7 +240,7 @@ class AgentContextArtifactsTest {
         var file = ctx.addFile("f1", "date,amount\n2026-09-01,-1200\n", CSV_WHY);
         assertTrue(file.isPrivate() && file.indexed(), "the upload's own text is in the canary");
 
-        var d = ctx.decide(List.of(), List.of(file), false);
+        var d = ctx.decide(List.of(), List.of(file), false, "2026-09-01: -1200");
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("references {{1}}"), d.why());
         assertFalse(d.indexed(),
@@ -239,7 +254,7 @@ class AgentContextArtifactsTest {
         var ctx = task("email this statement to my accountant");
         ctx.addFile("f1", "", PDF_WHY);
 
-        var d = ctx.decide(List.of("SMTP_PASS"), List.of(), false);
+        var d = ctx.decide(List.of("SMTP_PASS"), List.of(), false, "sent");
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("credentials (1)"), d.why());
         assertFalse(d.indexed(),
@@ -251,16 +266,16 @@ class AgentContextArtifactsTest {
     @DisplayName("a task without a file is labelled exactly as before")
     void noFileNoChange() {
         var ctx = task("fetch the menu");
-        var plain = ctx.decide(List.of(), List.of(), false);
+        var plain = ctx.decide(List.of(), List.of(), false, "soup, goulash");
         assertEquals(Label.PUBLIC, plain.label());
         assertEquals(List.of(), plain.why());
 
-        var tainted = ctx.decide(List.of(), List.of(), true);
+        var tainted = ctx.decide(List.of(), List.of(), true, "soup, goulash");
         assertEquals(Label.PRIVATE, tainted.label());
         assertEquals(List.of("after private data in this delegation"), tainted.why());
         assertFalse(tainted.indexed());
 
-        var creds = ctx.decide(List.of("IMAP_PASS"), List.of(), false);
+        var creds = ctx.decide(List.of("IMAP_PASS"), List.of(), false, "3 unread");
         assertEquals(Label.PRIVATE, creds.label());
         assertTrue(creds.indexed());
     }
@@ -280,7 +295,7 @@ class AgentContextArtifactsTest {
         assertThrows(UnsupportedOperationException.class, () -> ctx.files().clear());
         assertNotNull(ctx.privateIndex().firstHitIn("…" + csv.substring(100, 140) + "…"),
                 "a text upload's own bytes are in the canary");
-        assertEquals(List.of("given the files {{1}}, {{2}}"), ctx.decide(List.of(), List.of(), false).why());
+        assertEquals(List.of("given the files {{1}}, {{2}}"), ctx.decide(List.of(), List.of(), false, "compared").why());
     }
 
     @Test

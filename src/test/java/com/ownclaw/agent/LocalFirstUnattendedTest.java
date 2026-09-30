@@ -51,7 +51,7 @@ class LocalFirstUnattendedTest {
 
     private static ThinkingEngine engine() {
         ToolRegistry registry = new ToolRegistry(REGISTRY);
-        return new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
     }
 
     private static AgentContext unattended() {
@@ -164,13 +164,12 @@ class LocalFirstUnattendedTest {
         var later = unattended();
         later.trajectory().record(new AgentAction("delegate", Map.of("goal", "fetch"), "go"),
                 AgentObservation.success("delegate", "done", Map.of(), 10));
-        String step1 = promptFor(engine, later, mode, "openai");   // the compact prompt
+        String step1 = promptFor(engine, later, mode, "openai");   // a later step, same prompt
 
         for (String text : List.of(step0, step1)) {
             assertFalse(text.contains("Fetch and format a news digest."),
                     "the catalogue lives in delegate's description; a second copy here is what "
                             + "the canary refused a run over: " + text);
-            assertFalse(text.contains("## Available Tools"), text);
             assertFalse(text.contains("## Tools"), text);
             assertFalse(text.contains("## Actions"), text);
             assertFalse(text.contains("Output: {\"reasoning\""),
@@ -185,7 +184,7 @@ class LocalFirstUnattendedTest {
         // Without native tools the prompt is the only place any of it can be.
         String textProtocol = promptFor(engine, unattended(),
                 new ThinkingEngine.StepMode(false, false), "openai");
-        assertTrue(textProtocol.contains("## Available Tools"), textProtocol);
+        assertTrue(textProtocol.contains("## Tools"), textProtocol);
         assertTrue(textProtocol.contains("Fetch and format a news digest."));
     }
 

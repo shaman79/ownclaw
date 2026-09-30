@@ -51,7 +51,7 @@ class LivePathGuardsTest {
         int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
         int run = body.indexOf("tool.execute(");
-        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false)");
+        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false,");
         assertTrue(resolve > 0, "executeTool no longer resolves through References");
         assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
         String refusal = body.substring(refuse, body.indexOf("\n        }\n", refuse));
@@ -61,6 +61,8 @@ class LivePathGuardsTest {
         assertTrue(body.substring(refuse, run).contains("resolved = refs.params()"),
                 "the call runs on the resolver's substituted arguments");
         assertTrue(label > run, "the label must come from the resolver's record, not a re-parse");
+        assertTrue(body.substring(label, body.indexOf(";", label)).contains("result.output()"),
+                "and from what the tool returned, which may repeat a private result");
         assertFalse(body.contains("resolved = LocalExecutor"), "a second resolver is back");
     }
 
@@ -122,10 +124,15 @@ class LivePathGuardsTest {
     void theCanaryIsNotQuadratic() throws IOException {
         // Behaviourally identical, which is why reverting it left the suite green -- the cost is
         // the only difference: 7.8 seconds measured on one 130 KB part, on every step.
-        String s = read("com.ownclaw.llm.CloudGateway");
-        assertTrue(s.contains("firstHitInNormalised(normalised, from)"),
-                "the per-hit loop must reuse the part's normalised text");
-        assertFalse(s.contains("firstHitIn(part.text(), from)"));
+        String s = read("com.ownclaw.privacy.PrivateIndex");
+        int start = s.indexOf("public Hit firstLeakIn(");
+        assertTrue(start > 0, "firstLeakIn was renamed; this test no longer guards it");
+        String body = s.substring(start, s.indexOf("\n    }\n", start));
+        assertEquals(1, body.split("normalise\\(", -1).length - 1, "normalised once: " + body);
+        assertTrue(body.contains("firstHitInNormalised(n, from)"),
+                "each run is looked for in the text normalised once: " + body);
+        assertTrue(read("com.ownclaw.llm.CloudGateway").contains(".firstLeakIn(part.text(), egress.allowed())"),
+                "and the gateway walks a part's runs through it");
     }
 
     /** One branch of runLoop: from its opening line to the next top-level {@code if (action.}. */

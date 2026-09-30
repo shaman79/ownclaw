@@ -488,7 +488,8 @@ public class LocalExecutor {
             // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
             Tool ran = toolRegistry.find(action.tool).orElse(null);
             Artifact.Decision decision = parentContext.decide(
-                    ran == null ? List.of() : ran.requiredCredentials(), refs.used(), tainted);
+                    ran == null ? List.of() : ran.requiredCredentials(), refs.used(), tainted,
+                    toolResult);
             boolean wroteAfterPrivate = tainted;
             Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                     toolResult, toolOk, decision);

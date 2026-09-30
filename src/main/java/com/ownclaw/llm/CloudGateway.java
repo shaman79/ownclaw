@@ -165,41 +165,32 @@ public final class CloudGateway implements LlmProvider {
             }
         }
 
-        boolean leaked = false;
         for (Part part : parts) {
-            if (leaked) break;
             // An assistant part is the model's own earlier output, replayed: the actions it chose
-            // (ThinkingEngine renders them as JSON), a reply of its that could not be parsed, the
-            // code generator's previous answer. The model wrote it in answer to requests that
-            // passed this loop, and it is only ever shown descriptors of PRIVATE results, so
-            // nothing in it is new to the cloud. Scanned, it was refused whenever a private
-            // result repeated the model's own words the way JSON prints them: a task ended on a
-            // skill spec the cloud had written at its first step, because a later private result
-            // quoted the report headings that spec had dictated. The allowance for the cloud's
-            // own words could not excuse it -- it compares each argument as typed, and the replay
-            // is JSON, so a window that starts at a quote or spans an escape never matches.
+            // (ThinkingEngine renders them as JSON) and the code generator's previous answer; a
+            // reply that could not be used is quoted in a user part instead, and scanned there.
+            // The model wrote it in answer to requests that passed this loop, and it is only ever
+            // shown descriptors of PRIVATE results, so nothing in it is new to the cloud.
+            // Scanned, it was refused whenever a private result repeated the model's own words
+            // the way JSON prints them: a task ended on a skill spec the cloud had written at its
+            // first step, because a later private result quoted the report headings that spec
+            // had dictated. The allowance for the cloud's own words could not excuse it -- it
+            // compares each argument as typed, and the replay is JSON, so a window that starts at
+            // a quote or spans an escape never matches.
             //
             // Sound only while nothing but model output goes into an assistant message:
             // AssistantPartsTest pins that the replay carries a reference as the model wrote it,
             // never the bytes it resolves to. The vault check above still covers these parts.
             if ("assistant".equals(part.kind())) continue;
-            String normalised = PrivateIndex.normalise(part.text());
-            int from = 0;
-            PrivateIndex.Hit hit;
-            // Every hit in the part, not only the first. Stopping at the first ALLOWED one left
-            // the rest of that part unscanned: a private confirmation whose opening quotes the
-            // public digest it sent was allowed on that window, and its address, host and
-            // message id -- the part that is actually private -- went unchecked.
-            boolean registry = part.kind().startsWith("tool:") || part.kind().startsWith("schema:");
-            // Normalised ONCE. firstHitIn re-normalises whatever it is handed, and `from`
-            // advances a character at a time, so a part with many allowed hits was quadratic:
-            // 7.8 seconds measured on a single 130 KB part, paid on every step of the run.
-            while ((hit = egress.index().firstHitInNormalised(normalised, from)) != null) {
-                from = hit.offset() + 1;
-                String window = normalised.substring(hit.offset(),
-                        Math.min(hit.offset() + hit.length(), normalised.length()));
-                if (registry || egress.allowed().test(hit.handle(), window)) continue;
-
+            // The registry's own parts: excused, as the allowance at the top of (c) says.
+            if (part.kind().startsWith("tool:") || part.kind().startsWith("schema:")) continue;
+            // Every run in the part is tried, not only the first (PrivateIndex.firstLeakIn). It is
+            // the question AgentContext.decide asks of each result before labelling it, over the
+            // same index and the same excuses: a result whose own facts say PUBLIC but whose
+            // bytes repeat a private one is labelled PRIVATE there and reaches this part as a
+            // description, instead of ending the task here one step later.
+            PrivateIndex.Hit hit = egress.index().firstLeakIn(part.text(), egress.allowed());
+            if (hit != null) {
                 String ref = "{{" + hit.handle() + "}} in part " + part.index() + " (" + part.kind()
                         + ") at " + hit.offset();
                 if (mode() == Mode.ENFORCE) {
@@ -215,7 +206,6 @@ public final class CloudGateway implements LlmProvider {
                 log.warn("Cloud call would have been refused for task {} (canary in OBSERVE): {}",
                         egress.taskId(), ref);
                 observed = ref;
-                leaked = true;
                 break;
             }
         }

@@ -380,7 +380,7 @@ class DelegationBehaviourTest {
                 done("ok")), new Usage(), imap, fetch).execute(plan("mail then menu"), ctx);
         // The cloud forwards the hidden page into a public tool of its own.
         var fetched = ctx.artifacts().get(1);
-        var d = ctx.decide(List.of(), List.of(fetched), false);
+        var d = ctx.decide(List.of(), List.of(fetched), false, page);
 
         assertFalse(fetched.indexed());
         assertFalse(d.indexed(), "one hop on it is still the same public page");

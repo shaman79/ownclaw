@@ -3,6 +3,7 @@ package com.ownclaw.privacy;
 import java.text.Normalizer;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.function.BiPredicate;
 
 /**
  * The canary: can this text contain a run of any PRIVATE artifact's bytes?
@@ -11,7 +12,10 @@ import java.util.Locale;
  * every outbound cloud body is checked against them before the socket opens -- all of it but
  * the model's own replayed turns, which it wrote itself (see CloudGateway). That is what
  * makes privacy a property of the code path rather than of a prompt builder's carefulness: the
- * builders can be wrong about what they rendered and this still refuses the call.
+ * builders can be wrong about what they rendered and this still refuses the call. The task asks
+ * the same question of every result before labelling it ({@link #firstLeakIn}, through
+ * AgentContext), so a result that repeats a private one is labelled PRIVATE instead of being
+ * refused at the door one step later.
  * <p>
  * It holds hashes and integers only — no field of type String, CharSequence, char[] or any
  * collection of them, and a test pins that by reflection. The roadmap's warning was that an
@@ -122,28 +126,36 @@ public final class PrivateIndex {
 
     /** The earliest run in {@code part} that belongs to a registered artifact, or null. */
     public Hit firstHitIn(String part) {
-        return firstHitIn(part, 0);
+        return firstHitInNormalised(normalise(part), 0);
     }
 
     /**
-     * The earliest run at or after {@code from} (an offset into the NORMALISED text).
+     * The earliest run in {@code text} that belongs to a registered artifact and that
+     * {@code excused} does not excuse, or null -- what the canary refuses to send.
      * <p>
-     * The caller needs this because one allowed hit does not clear a part: a private
+     * Every run is tried, not only the first: one excused run does not clear the text. A private
      * confirmation may open with a run of the public thing it was given and continue with an
      * address and a message id that are nobody else's.
+     * <p>
+     * The text is normalised once and each run is looked for from there. Handing the raw text
+     * back in for every run re-normalised the whole of it each time, which is quadratic in the
+     * number of runs: 7.8 seconds was measured on one 130 KB part.
+     *
+     * @param excused whether a run (handle, normalised window) is material the cloud was
+     *                already given
      */
-    public Hit firstHitIn(String part, int from) {
-        return firstHitInNormalised(normalise(part), from);
+    public Hit firstLeakIn(String text, BiPredicate<Integer, String> excused) {
+        String n = normalise(text);
+        Hit hit;
+        for (int from = 0; (hit = firstHitInNormalised(n, from)) != null; from = hit.offset() + 1) {
+            String window = n.substring(hit.offset(), Math.min(hit.offset() + hit.length(), n.length()));
+            if (!excused.test(hit.handle(), window)) return hit;
+        }
+        return null;
     }
 
-    /**
-     * The same scan over text that is ALREADY normalised.
-     * <p>
-     * The caller that walks every hit in a part holds the normalised string anyway; handing the
-     * raw text back in made each hit re-normalise the whole part, which is quadratic in the
-     * number of hits.
-     */
-    public Hit firstHitInNormalised(String normalised, int from) {
+    /** The earliest run at or after {@code from}, in text that is already normalised. */
+    private Hit firstHitInNormalised(String normalised, int from) {
         String n = normalised;
         if (n.length() < MIN_SHORT) return null;
         Hit best = null;

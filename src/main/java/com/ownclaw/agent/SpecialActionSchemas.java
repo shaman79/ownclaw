@@ -106,11 +106,15 @@ public final class SpecialActionSchemas {
                             "key", ToolParam.optional("string", "Vault key name, for check."))),
 
             spec(AgentAction.MEMORY_MANAGE,
-                    "Store, list or delete facts that should survive this conversation.",
+                    "Store, list or delete facts that should survive this conversation, or recall "
+                            + "past tasks. Past tasks are not shown to you otherwise: recall "
+                            + "returns every one whose record matches the query, each in full, the "
+                            + "most relevant first.",
                     params(
-                            "action", ToolParam.required("string", "store | list | delete"),
+                            "action", ToolParam.required("string", "store | list | delete | recall"),
                             "key", ToolParam.optional("string", "Identifier for the fact."),
-                            "content", ToolParam.optional("string", "The fact, for store."))),
+                            "content", ToolParam.optional("string", "The fact, for store."),
+                            "query", ToolParam.optional("string", "What to look for, for recall."))),
 
             spec(AgentAction.SCHEDULE_MANAGE,
                     "Schedule work for later, or manage what is already scheduled.",

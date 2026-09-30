@@ -151,7 +151,7 @@ class AssistantPartsTest {
 
     static List<LlmMessage> render(AgentContext ctx) {
         var registry = new ToolRegistry(List.of());
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         return engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
     }
 
@@ -260,7 +260,7 @@ class AssistantPartsTest {
         var emitter = new ChatStatusEmitter();
         var events = new EventLogService(jdbc);
         var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, config, null);
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), config, router);
+        var engine = new ThinkingEngine(registry, config, router);
         return new AgentLoop(engine, new CriticAgent(registry), registry, emitter, config, router,
                 null, new SkillCuratorService(jdbc, null, null, null), null,
                 new DebugSessionService(), new TaskCancellationService(), null, null,

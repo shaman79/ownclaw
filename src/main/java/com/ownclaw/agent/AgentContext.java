@@ -245,9 +245,19 @@ public class AgentContext {
      * same public page one hop on, and indexing them is what made the cloud's own later fetch of
      * that page trip the canary. In a task holding a file every result is PRIVATE and, unless it
      * needed credentials, unindexed -- so the cloud sees each as a handle, a kind and a size.
+     * <p>
+     * Last, the bytes themselves: a result its own facts call PUBLIC whose {@code output} repeats
+     * a PRIVATE one ({@link #firstLeakIn}) is PRIVATE -- "repeats {{N}}" -- and unindexed, like
+     * every result that is PRIVATE only because of what it carries from another: the run it
+     * repeats is {{N}}'s, and {{N}} is indexed. It is the question the gateway asks of each part
+     * it scans, asked here first. Shown to the cloud, the result would have been refused at the
+     * door on the next step and the task would have ended there; labelled, the cloud reads a
+     * description of it and the task goes on.
+     *
+     * @param output the result's text, as it will be recorded
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
-                                    boolean tainted) {
+                                    boolean tainted, String output) {
         Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
         boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
         if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
@@ -261,6 +271,11 @@ public class AgentContext {
             if (!files.isEmpty()) {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
                         List.of(givenTheFiles()), false);
+            }
+            com.ownclaw.privacy.PrivateIndex.Hit repeated = firstLeakIn(output);
+            if (repeated != null) {
+                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of("repeats {{" + repeated.handle() + "}}"), false);
             }
             return own;
         }
@@ -338,11 +353,22 @@ public class AgentContext {
     }
 
     /**
+     * The first run of an indexed PRIVATE artifact in {@code text} that {@link #isAllowedLeak}
+     * does not excuse, or null -- what the gateway refuses to send. The gateway asks it of each
+     * part it scans, with the index and the predicate {@link #egress} hands it, and
+     * {@link #decide} of every result before it is labelled: one question, so the labeller and
+     * the door cannot disagree about what counts as a private result repeated.
+     */
+    public com.ownclaw.privacy.PrivateIndex.Hit firstLeakIn(String text) {
+        return privateIndex.firstLeakIn(text, this::isAllowedLeak);
+    }
+
+    /**
      * Whether a canary hit is material the cloud was already given, and may go.
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
-     * the preferences, the recalled memories. The output of every PUBLIC artifact recorded
-     * BEFORE the private one that hit; the order matters there. What the CLOUD itself wrote —
+     * the preferences. The output of every PUBLIC artifact recorded BEFORE the private one that
+     * hit; the order matters there. What the CLOUD itself wrote —
      * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
      * scans: a result that echoes an argument it was given (which would otherwise make the next
      * prompt unsendable), the code generator's request, the correction after a reply that could
@@ -360,8 +386,7 @@ public class AgentContext {
     public synchronized boolean isAllowedLeak(int hitHandle, String normalisedWindow) {
         if (normalisedWindow == null || normalisedWindow.isEmpty()) return false;
         Function<String, String> n = com.ownclaw.privacy.PrivateIndex::normalise;
-        for (String given : new String[] {originalMessage, conversationSummary, userPreferences,
-                String.valueOf(metadata.get("relevantMemories"))}) {
+        for (String given : new String[] {originalMessage, conversationSummary, userPreferences}) {
             if (given != null && n.apply(given).contains(normalisedWindow)) return true;
         }
         for (Artifact a : artifacts) {
