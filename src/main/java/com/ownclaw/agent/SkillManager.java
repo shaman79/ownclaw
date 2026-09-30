@@ -78,8 +78,14 @@ public class SkillManager {
     private static final java.util.regex.Pattern SKILL_NAME_SHAPE =
             java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");
 
+    /** {@link #isSkillName}, in words: what a refusal tells whoever gave the name. */
+    public static final String SKILL_NAME_RULE = "a skill's name starts with a lowercase letter, "
+            + "has only lowercase letters, digits and underscores, and is at most 64 characters "
+            + "long: it is the tool's name, and the model providers accept no longer one";
+
     /**
-     * What a skill may be called: the one rule, for creating one and for recording which one.
+     * What a skill may be called: the one rule, for creating one, for recording which one ran,
+     * and for naming one to read through the ops API.
      * <p>
      * The name is a directory, a Python-friendly identifier, and the tool's name on every
      * request -- where the model providers accept at most 64 characters
@@ -105,9 +111,7 @@ public class SkillManager {
         // --- Validate ---
 
         if (!isSkillName(name)) {
-            return "ERROR: Invalid skill name. It must start with a lowercase letter, contain only "
-                    + "lowercase letters, digits and underscores, and be at most 64 characters "
-                    + "long: it is the tool's name, and the model providers accept no longer one.";
+            return "ERROR: Invalid skill name: " + SKILL_NAME_RULE + ".";
         }
 
         // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.

@@ -55,6 +55,26 @@ class OpsServiceTest {
     }
 
     @Test
+    @DisplayName("a skill is read by a name the one skill-name rule allows: no path, no dot, nothing a skill cannot be called")
+    void aSkillIsNamedByTheOneRule(@TempDir Path tmp) throws Exception {
+        var config = new OwnClawConfig();
+        config.getSkills().setGeneratedPath(tmp.resolve("skills").toString());
+        Files.createDirectories(tmp.resolve("skills/net_scan"));
+        Files.writeString(tmp.resolve("skills/net_scan/skill.py"), "def run(params):\n    return {}\n");
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var ops = new OpsService(config, jdbc, null, null, new TaskQueue(null, null, null, config, null),
+                new AuthService(jdbc, null, config), null, new ObjectMapper(), null);
+
+        @SuppressWarnings("unchecked")
+        var skill = (Map<String, Object>) ops.skills("net_scan").get("skill");
+        assertEquals("def run(params):\n    return {}\n", skill.get("code"));
+        for (String name : List.of("../net_scan", "Net-Scan", "net.scan", "a".repeat(65))) {
+            assertEquals("Invalid skill name: " + com.ownclaw.agent.SkillManager.SKILL_NAME_RULE,
+                    ops.skills(name).get("error"), name);
+        }
+    }
+
+    @Test
     @DisplayName("the conversations table is refused whole: no renaming reaches the private text")
     void privateContentNeverLeavesThroughOps(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));

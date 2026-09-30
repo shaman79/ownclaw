@@ -2,6 +2,7 @@ package com.ownclaw.observability;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.SkillManager;
 import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
@@ -85,9 +86,6 @@ public class OpsService {
 
     /** system_settings holds the vault master key and the JWT secret in plaintext. */
     private static final String SETTINGS_TABLE = "system_settings";
-
-    /** A generated skill is a single directory name — no separators, no traversal. */
-    private static final Pattern SKILL_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}");
 
     /** A /logs cursor: which file, by the hash of its first line, and the line to read up to. */
     private static final Pattern LOG_CURSOR = Pattern.compile("([0-9a-f]{16}):(\\d+)");
@@ -921,10 +919,10 @@ public class OpsService {
                         + "and a skill runs with the requesting user's vault credentials.");
 
         if (name != null && !name.isBlank()) {
-            // A skill name is one directory name, never a path. Rejecting separators outright
-            // is stronger than trying to sanitise them.
-            if (!SKILL_NAME.matcher(name).matches()) {
-                return Map.of("error", "Invalid skill name: expected " + SKILL_NAME.pattern());
+            // A skill name is one directory name, never a path: the one rule for what a skill
+            // may be called admits no separator and no dot, which is stronger than sanitising.
+            if (!SkillManager.isSkillName(name)) {
+                return Map.of("error", "Invalid skill name: " + SkillManager.SKILL_NAME_RULE);
             }
             Path dir = root.resolve(name).normalize();
             if (!dir.startsWith(root.normalize())) {
