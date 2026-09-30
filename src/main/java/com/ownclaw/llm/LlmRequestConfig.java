@@ -25,7 +25,10 @@ public record LlmRequestConfig(
      * an unclassified cloud call is refused — a local call ignores it.
      */
     EgressContext egress,
-    /** Told about every event of the streamed reply; never null (see {@link LlmProgress}). */
+    /**
+     * Told about every event of the streamed reply, and handed the call's cancel while it runs;
+     * never null (see {@link LlmProgress}).
+     */
     LlmProgress progress
 ) {
     public LlmRequestConfig {

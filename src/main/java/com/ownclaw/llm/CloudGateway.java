@@ -167,8 +167,8 @@ public final class CloudGateway implements LlmProvider {
 
         for (Part part : parts) {
             // An assistant part is the model's own earlier output, replayed: the actions it chose
-            // (ThinkingEngine renders them as JSON) and the code generator's previous answer; a
-            // reply that could not be used is quoted in a user part instead, and scanned there.
+            // (ThinkingEngine renders them as JSON). A reply that could not be used is quoted in
+            // a user part instead, and scanned there, as is the attempt a code repair quotes.
             // The model wrote it in answer to requests that passed this loop, and it is only ever
             // shown descriptors of PRIVATE results, so nothing in it is new to the cloud.
             // Scanned, it was refused whenever a private result repeated the model's own words
