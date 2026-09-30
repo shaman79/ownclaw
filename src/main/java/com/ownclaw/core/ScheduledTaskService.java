@@ -752,8 +752,6 @@ public class ScheduledTaskService {
     private void onTaskFailed(long taskId, String userId, String taskType,
                               String description, String error, String ownerError,
                               String skillsUsed, String agentTaskId, String status) {
-        int newRunCount = incrementRunCount(taskId);
-
         // A failed scheduled run is worth as much of the user's attention as a successful one —
         // arguably more, since a silent failure is how a job stops working without anyone
         // noticing. The status emissions below say a run failed and where its report is; this
@@ -761,6 +759,19 @@ public class ScheduledTaskService {
         // ending twice, part by part.
         resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
                 "Scheduled task did not finish: " + description, error, agentTaskId, ownerError);
+
+        // Delivered before the bookkeeping, which is guarded as onTaskCompleted guards it: a
+        // schedule the owner deleted while its run was failing has no row to count the run in,
+        // and counting it unguarded threw before the report was delivered -- into the
+        // exceptionally() branch, which came back here and threw again, so the report was lost.
+        int newRunCount;
+        try {
+            newRunCount = incrementRunCount(taskId);
+        } catch (Exception e) {
+            log.warn("Scheduled task #{} failed and its run count could not be updated ({}). "
+                    + "Its report was delivered.", taskId, e.getMessage());
+            return;
+        }
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, status, null, error,

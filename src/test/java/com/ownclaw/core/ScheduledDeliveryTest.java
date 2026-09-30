@@ -266,6 +266,22 @@ class ScheduledDeliveryTest {
     }
 
     @Test
+    @DisplayName("a run that failed while its schedule was deleted still delivers its report, once")
+    void aDeletedScheduleStillReportsItsFailure(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        queue.result = AgentResult.maxSteps("Stopped: the step limit.", new AgentTrajectory(), 30);
+        queue.duringRun = () -> jdbc.update("DELETE FROM scheduled_tasks");
+        due(LONG_TASK);
+
+        scheduler.pollDueTasks();
+
+        assertEquals(List.of("**Scheduled task did not finish: " + LONG_TASK + "**\n\n"
+                        + "MAX_STEPS after 0 steps: Stopped: the step limit."),
+                jdbc.queryForList("SELECT content FROM conversations WHERE role = 'assistant'", String.class));
+        assertEquals(1, lines(StatusMessage.Type.RESULT).size(), "sent once");
+    }
+
+    @Test
     @DisplayName("a run the privacy check stopped is delivered with the owner's private text, and recorded partial")
     void aStoppedRunDeliversThePrivateText(@TempDir Path tmp) throws Exception {
         start(tmp);
