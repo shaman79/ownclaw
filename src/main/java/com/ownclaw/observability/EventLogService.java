@@ -25,6 +25,10 @@ public class EventLogService {
 
     /**
      * Log a structured event.
+     * <p>
+     * The summary is kept whole in the row and not repeated in the application log, which gets
+     * its length: a summary can be the owner's own message (task_completed) or a scheduled run's
+     * whole ending, and the log is read back through the ops API. The row is where to read it.
      */
     public void log(String userId, String taskId, String eventType,
                     String severity, String summary, String detailsJson, int tokensUsed) {
@@ -33,12 +37,13 @@ public class EventLogService {
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """, userId, taskId, eventType, severity, summary, detailsJson, tokensUsed);
 
+        int chars = summary == null ? 0 : summary.length();
         if ("error".equals(severity)) {
-            log.error("[{}] {}: {}", eventType, userId, summary);
+            log.error("[{}] {} task={}: {} chars", eventType, userId, taskId, chars);
         } else if ("warn".equals(severity)) {
-            log.warn("[{}] {}: {}", eventType, userId, summary);
+            log.warn("[{}] {} task={}: {} chars", eventType, userId, taskId, chars);
         } else {
-            log.info("[{}] {}: {}", eventType, userId, summary);
+            log.info("[{}] {} task={}: {} chars", eventType, userId, taskId, chars);
         }
     }
 
@@ -57,12 +62,17 @@ public class EventLogService {
         log(userId, taskId, eventType, "error", summary, null, 0);
     }
 
-    /** Last N events for a user. */
-    public List<Map<String, Object>> recentEvents(String userId, int limit) {
+    /**
+     * A page of a user's events, newest first.
+     *
+     * @param limit  how many; a negative limit is every row from {@code offset} on
+     * @param offset how many of the newest to skip
+     */
+    public List<Map<String, Object>> recentEvents(String userId, long limit, long offset) {
         return jdbc.queryForList("""
             SELECT id, timestamp, task_id, event_type, severity, summary, tokens_used
-            FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?
-            """, userId, limit);
+            FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?
+            """, userId, limit, offset);
     }
 
     /** All events for a specific task. */
@@ -73,12 +83,12 @@ public class EventLogService {
             """, userId, taskId);
     }
 
-    /** Recent errors for a user. */
-    public List<Map<String, Object>> recentErrors(String userId, int limit) {
+    /** A page of a user's errors, newest first; {@code limit} and {@code offset} as in {@link #recentEvents}. */
+    public List<Map<String, Object>> recentErrors(String userId, long limit, long offset) {
         return jdbc.queryForList("""
-            SELECT id, timestamp, task_id, event_type, summary
-            FROM events WHERE user_id = ? AND severity = 'error' ORDER BY id DESC LIMIT ?
-            """, userId, limit);
+            SELECT id, timestamp, task_id, event_type, severity, summary
+            FROM events WHERE user_id = ? AND severity = 'error' ORDER BY id DESC LIMIT ? OFFSET ?
+            """, userId, limit, offset);
     }
 
     /** Token usage summary for a user (today). */

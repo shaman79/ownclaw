@@ -403,6 +403,7 @@ public class SetupWizardService {
     }
 
     private WizardResponse processCloudProvider(String input) {
+        boolean unknown = false;
         if (!isSkip(input)) {
             String choice = input.strip().toLowerCase();
             String provider;
@@ -411,14 +412,23 @@ public class SetupWizardService {
             } else if ("2".equals(choice) || "anthropic".equals(choice) || "claude".equals(choice)) {
                 provider = "anthropic";
             } else {
-                // Unknown — treat as provider name anyway
-                provider = choice;
+                // Not a provider -- Settings accepts these two only -- so the setting is kept, and
+                // the text is not repeated below: it can be the API key pasted one step early, and
+                // this reply is saved into the chat that later prompts are built from.
+                provider = null;
+                unknown = true;
             }
-            saveSetting("cloud_provider", provider);
-            config.getMentor().setProvider(provider);
+            if (provider != null) {
+                saveSetting("cloud_provider", provider);
+                config.getMentor().setProvider(provider);
+            }
         }
         String currentProvider = config.getMentor().getProvider();
         var sb = new StringBuilder();
+        if (unknown) {
+            sb.append("⚠️ That is not one of the providers (`openai`, `anthropic`), so it was not used. ")
+              .append("Run `/setup` again to change it.\n\n");
+        }
         sb.append("☁️ Cloud provider: `").append(currentProvider).append("`\n\n");
 
         sb.append("**Step 2/5 — Cloud API Key**\n");

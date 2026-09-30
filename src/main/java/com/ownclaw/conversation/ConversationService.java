@@ -153,11 +153,42 @@ public class ConversationService {
      * @return the new session ID
      */
     public String createSession(String userId, String title) {
-        String sessionId = UUID.randomUUID().toString().substring(0, 12);
+        String sessionId = newSessionId();
         jdbc.update("""
             INSERT INTO chat_sessions (id, user_id, title) VALUES (?, ?, ?)
             """, sessionId, userId, title);
         setActiveSession(userId, sessionId);
+        return sessionId;
+    }
+
+    private static String newSessionId() {
+        return UUID.randomUUID().toString().substring(0, 12);
+    }
+
+    /** The title of the pinned chat that scheduled results are delivered into. */
+    static final String SCHEDULED_TITLE = "📌 Scheduled";
+
+    /**
+     * The user's pinned chat for the results of scheduled runs, created on first use.
+     * <p>
+     * A scheduled result used to be saved into whichever chat was open when the run finished, so
+     * the morning digest and the lunch menu turned up in the middle of an unrelated conversation
+     * and went into the prompt of its next turn. They are kept here instead, in one chat of their
+     * own. Getting it never makes it the open chat: it opens when the owner opens it. Deleting it
+     * clears the old reports, and the next delivery creates a fresh one. Synchronized, so two
+     * runs finishing together cannot create two.
+     */
+    public synchronized String scheduledSession(String userId) {
+        List<String> pinned = jdbc.queryForList("""
+            SELECT id FROM chat_sessions
+            WHERE user_id = ? AND kind = 'scheduled' AND archived = 0
+            ORDER BY created_at, rowid LIMIT 1
+            """, String.class, userId);
+        if (!pinned.isEmpty()) return pinned.getFirst();
+        String sessionId = newSessionId();
+        jdbc.update("""
+            INSERT INTO chat_sessions (id, user_id, title, kind) VALUES (?, ?, ?, 'scheduled')
+            """, sessionId, userId, SCHEDULED_TITLE);
         return sessionId;
     }
 
@@ -172,17 +203,18 @@ public class ConversationService {
     }
 
     /**
-     * List all sessions for a user, most recent first.
-     * Returns id, title, preview, created_at, updated_at, message_count.
+     * List all sessions for a user: the pinned chat of scheduled results first, then the rest,
+     * most recent first. Returns id, title, preview, created_at, updated_at, archived, kind,
+     * message_count.
      */
     public List<Map<String, Object>> listSessions(String userId, boolean includeArchived) {
         String archiveFilter = includeArchived ? "" : "AND s.archived = 0 ";
         return jdbc.queryForList("""
-            SELECT s.id, s.title, s.preview, s.created_at, s.updated_at, s.archived,
+            SELECT s.id, s.title, s.preview, s.created_at, s.updated_at, s.archived, s.kind,
                    (SELECT COUNT(*) FROM conversations c WHERE c.session_id = s.id AND c.role IN ('user','assistant')) AS message_count
             FROM chat_sessions s
             WHERE s.user_id = ? %s
-            ORDER BY s.updated_at DESC
+            ORDER BY s.kind = 'scheduled' DESC, s.updated_at DESC
             """.formatted(archiveFilter), userId);
     }
 
@@ -224,7 +256,8 @@ public class ConversationService {
 
     /**
      * Permanently delete a session and its messages.
-     * If the deleted session was the active one, switches to the most recent remaining session.
+     * If the deleted session was the active one, switches to the most recent remaining
+     * conversation; the pinned chat of scheduled results is never chosen for it.
      */
     public void deleteSession(String userId, String sessionId) {
         // Remove the active pointer first (references chat_sessions via FK)
@@ -237,13 +270,15 @@ public class ConversationService {
         jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
                 sessionId, userId);
 
-        // If there is no active session now, switch to the most recent remaining session
+        // If there is no active session now, switch to the most recent remaining conversation --
+        // never the pinned chat of scheduled results, which is open only when the owner opens it.
         List<String> active = jdbc.queryForList(
                 "SELECT session_id FROM active_session WHERE user_id = ?",
                 String.class, userId);
         if (active.isEmpty()) {
             List<String> remaining = jdbc.queryForList(
-                    "SELECT id FROM chat_sessions WHERE user_id = ? AND archived = 0 ORDER BY updated_at DESC LIMIT 1",
+                    "SELECT id FROM chat_sessions WHERE user_id = ? AND archived = 0 AND kind = 'chat' "
+                            + "ORDER BY updated_at DESC LIMIT 1",
                     String.class, userId);
             if (!remaining.isEmpty()) {
                 setActiveSession(userId, remaining.getFirst());
@@ -253,23 +288,40 @@ public class ConversationService {
     }
 
     /**
-     * Full-text search across all of a user's conversations.
-     * Returns matching sessions with message snippets.
+     * Full-text search across all of a user's conversations: every session with a match, once,
+     * best match first, each with a snippet of its best-matching message.
+     * <p>
+     * Grouped here rather than in the page. The query used to return the 30 best-matching
+     * MESSAGES and the page kept one per session, so a chat with 30 matches hid every other chat
+     * that matched at all. SQLite runs snippet() only in a plain full-text scan -- not beside a
+     * window function or an aggregate -- so the best message of each session is picked first,
+     * and its snippet made in a second scan of just those rows. 64 tokens is the most snippet()
+     * accepts.
      */
     public List<Map<String, Object>> searchMessages(String userId, String query) {
+        String match = ftsQuery(query);
         return jdbc.queryForList("""
-            SELECT DISTINCT s.id AS session_id, s.title, s.updated_at,
-                   snippet(conversations_fts, 0, '<mark>', '</mark>', '...', 40) AS snippet,
+            WITH best AS (
+                SELECT rid, rank FROM (
+                    SELECT fts.rowid AS rid, fts.rank AS rank,
+                           row_number() OVER (PARTITION BY c.session_id ORDER BY fts.rank) AS n
+                    FROM conversations_fts fts
+                    JOIN conversations c ON c.rowid = fts.rowid
+                    JOIN chat_sessions s ON s.id = c.session_id
+                    WHERE conversations_fts MATCH ?
+                      AND c.user_id = ?
+                      AND s.archived = 0)
+                WHERE n = 1)
+            SELECT s.id AS session_id, s.title, s.updated_at,
+                   snippet(conversations_fts, 0, '<mark>', '</mark>', '...', 64) AS snippet,
                    c.role, c.timestamp AS match_timestamp
-            FROM conversations_fts fts
-            JOIN conversations c ON c.rowid = fts.rowid
+            FROM best
+            JOIN conversations_fts ON conversations_fts.rowid = best.rid
+            JOIN conversations c ON c.rowid = best.rid
             JOIN chat_sessions s ON s.id = c.session_id
             WHERE conversations_fts MATCH ?
-              AND c.user_id = ?
-              AND s.archived = 0
-            ORDER BY fts.rank
-            LIMIT 30
-            """, ftsQuery(query), userId);
+            ORDER BY best.rank
+            """, match, userId, match);
     }
 
     /**

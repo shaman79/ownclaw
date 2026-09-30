@@ -1005,6 +1005,9 @@
             border: 1px solid rgba(91,95,199,.2);
         }
         .session-item:not(.active) { border: 1px solid transparent }
+        /* The pinned chat of scheduled results, listed first, and a chat with a result not yet opened. */
+        .session-item.pinned { margin-bottom: 8px }
+        .session-item.unread .session-title::before { content: '\25CF  '; color: var(--accent-hi) }
 
         .session-title {
             font-size: 13.5px;
@@ -2680,11 +2683,8 @@
             if (results.length === 0) {
                 searchResults.innerHTML = '<div class="search-empty">No results found</div>';
             } else {
-                // Group by session
-                var seen = {};
+                // One row per chat, best match first: the server groups them.
                 results.forEach(function(r) {
-                    if (seen[r.session_id]) return;
-                    seen[r.session_id] = true;
                     var item = document.createElement('div');
                     item.className = 'search-result-item';
                     item.innerHTML =
@@ -2762,9 +2762,22 @@
     /** The conversation whose transcript is actually on screen. */
     var displayedSessionId = null;
 
+    /** Chats a result was delivered into while they were not on screen, in this window. */
+    var unreadSessions = {};
+
+    function markUnread(sessionId) {
+        if (sessionId) unreadSessions[sessionId] = true;
+        // Fetched again, not only re-marked: the result moved its chat up, and the pinned chat
+        // of scheduled results is created by its first delivery.
+        refreshSessionList();
+    }
+
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
         displayedSessionId = sessionId;
+        delete unreadSessions[sessionId];
+        var listed = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+        if (listed) listed.classList.remove('unread');
         // Show loading spinner in messages area
         clearMessages();
         var loader = document.createElement('div');
@@ -2822,13 +2835,18 @@
         sessions.forEach(function(s) {
             var item = document.createElement('div');
             var isActive = (currentView === 'chat' && s.id === activeSessionId);
-            item.className = 'session-item' + (isActive ? ' active' : '');
+            // The server lists the pinned chat of scheduled results first.
+            item.className = 'session-item' + (isActive ? ' active' : '')
+                    + (s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '');
             item.setAttribute('data-session-id', s.id);
             var timeStr = formatTime(s.updated_at);
             var msgCount = s.message_count || 0;
+            // One line each, so the whole title and preview are on the title attribute.
+            var title = escapeHtml(s.title || 'Untitled');
             item.innerHTML =
-                '<div class="session-title">' + escapeHtml(s.title || 'Untitled') + '</div>' +
-                (s.preview ? '<div class="session-preview">' + escapeHtml(s.preview) + '</div>' : '') +
+                '<div class="session-title" title="' + title + '">' + title + '</div>' +
+                (s.preview ? '<div class="session-preview" title="' + escapeHtml(s.preview) + '">'
+                        + escapeHtml(s.preview) + '</div>' : '') +
                 '<div class="session-meta"><span>' + timeStr + '</span><span>' + msgCount + ' msgs</span></div>' +
                 '<div class="session-actions">' +
                     '<button class="session-action-btn rename" title="Rename">&#x270F;</button>' +
@@ -2963,7 +2981,7 @@
         var recorded = !!t.recorded;   // requests are recorded from 24 Sep 2026
         var view = taskDetailShell(from);
         view.firstChild.appendChild(node('h2', null, 'Task ' + t.taskId));
-        view.appendChild(node('div', 'task-detail-request', t.request ? tdClip(String(t.request), 400)
+        view.appendChild(node('div', 'task-detail-request', t.request ? String(t.request)
                 : outcome ? 'The request was not recorded.' : 'The request is recorded when the task ends.'));
 
         var stats = node('div', 'task-stats');
@@ -3019,7 +3037,9 @@
         var runEl = node('div', 'task-run');
         var header = node('div', 'task-run-header');
         header.appendChild(node('div', 'task-run-status ' + (unknown ? 'unknown' : s.ok ? 'completed' : 'failed')));
-        header.appendChild(node('div', 'task-run-desc', s.step + ' · ' + s.tool));
+        var stepDesc = node('div', 'task-run-desc', s.step + ' · ' + s.tool);
+        stepDesc.title = stepDesc.textContent;
+        header.appendChild(stepDesc);
         var meta = node('div', 'task-run-meta');
         meta.appendChild(tdTierBadge(s.tier));
         meta.appendChild(node('span', 'task-run-duration', formatDuration(s.durationMs)));
@@ -3215,10 +3235,6 @@
 
     function isTaskId(s) {
         return typeof s === 'string' && /^[0-9a-f]{8}$/.test(s);
-    }
-
-    function tdClip(s, max) {
-        return s.length > max ? s.slice(0, max) + '…' : s;
     }
 
     /** SQLite's '2026-09-24 05:03:48' is UTC with no zone; the space form fails in Safari. */
@@ -3480,7 +3496,8 @@
         header.innerHTML =
             '<span class="active-task-type ' + typeClass + '">' + escapeHtml(t.task_type) + '</span>' +
             '<span class="task-status-badge ' + escapeHtml(t.status) + '">' + escapeHtml(t.status) + '</span>' +
-            '<span class="active-task-desc">' + escapeHtml(t.description || 'Untitled task') + '</span>' +
+            '<span class="active-task-desc" title="' + escapeHtml(t.description || 'Untitled task') + '">'
+                    + escapeHtml(t.description || 'Untitled task') + '</span>' +
             actionsHtml +
             '<span class="task-card-toggle">\u25BC</span>';
 
@@ -3704,7 +3721,8 @@
         header.className = 'task-run-header';
         header.innerHTML =
             '<div class="task-run-status ' + statusClass + '"></div>' +
-            '<div class="task-run-desc">' + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
+            '<div class="task-run-desc" title="' + escapeHtml(run.description || 'Task #' + run.task_id) + '">'
+                    + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
             '<div class="task-run-meta">' +
                 '<span>' + timeStr + '</span>' +
                 (tokenStr ? '<span class="task-run-tokens">' + tokenStr + '</span>' : '') +
@@ -4327,8 +4345,8 @@
 
                 card.innerHTML =
                     actionsHtml +
-                    '<div class="skill-card-name"><span class="skill-icon">\uD83D\uDC0D</span>' + escapeHtml(skill.name) + '</div>' +
-                    '<div class="skill-card-desc">' + escapeHtml(skill.description || '') + '</div>' +
+                    '<div class="skill-card-name" title="' + escapeHtml(skill.name) + '"><span class="skill-icon">\uD83D\uDC0D</span>' + escapeHtml(skill.name) + '</div>' +
+                    '<div class="skill-card-desc" title="' + escapeHtml(skill.description || '') + '">' + escapeHtml(skill.description || '') + '</div>' +
                     '<div class="skill-card-tags">' + tagsHtml + '</div>' +
                     '<div class="skill-card-stats">' +
                         '<span class="skill-card-stat">\uD83D\uDCE6 ' + paramStr + '</span>' +
@@ -5452,7 +5470,19 @@
                     // 'result' is the output of work nobody was waiting for -- a scheduled run
                     // or /bg. It must read as an assistant message but must NOT end whatever the
                     // user is currently watching, so it is deliberately absent from the list
-                    // below and rendered with the same styling as a response.
+                    // below and rendered with the same styling as a response. It is saved into
+                    // its own chat -- the pinned chat of scheduled results, or the one /bg was
+                    // typed in -- and appended only while that chat is on screen; otherwise that
+                    // chat is marked unread. Appended to whatever was open, a morning digest
+                    // turned up in the middle of an unrelated conversation.
+                    if (type === 'result') {
+                        if (currentView === 'chat' && data.sessionId === displayedSessionId) {
+                            addMsg('response', content, data.taskId);
+                        } else {
+                            markUnread(data.sessionId);
+                        }
+                        return;
+                    }
                     // Do not append a message that belongs to another conversation.
                     //
                     // An answer is saved into the chat it was asked from and pushed to every
@@ -5464,10 +5494,9 @@
                     if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
                         showConnBanner('An answer arrived in another chat — open it to read it.');
                         refreshSessionList();
-                        if (type === 'response' || type === 'result') { setThinking(false); doneActivity(); }
+                        if (type === 'response') { setThinking(false); doneActivity(); }
                         return;
                     }
-                    if (type === 'result') { addMsg('response', content, data.taskId); return; }
                     if (type === 'response' || type === 'system') {
                         setThinking(false);
                         doneActivity();
@@ -5841,7 +5870,9 @@
             var names = pendingFiles.map(function(f) { return '📎 ' + f.name; });
             display = names.join('\n') + '\n' + text;
         }
-        addMsg('user', display);
+        // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
+        // back with the value masked (CommandHandler.displayed). Drawn here it stayed as typed.
+        if (text.charAt(0) !== '/') addMsg('user', display);
 
         var payload = { message: text };
         if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;

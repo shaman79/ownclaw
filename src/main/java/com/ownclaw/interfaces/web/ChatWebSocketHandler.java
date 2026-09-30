@@ -143,9 +143,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // A private answer travels beside the safe text, for the owner's own screens --
                 // this chat and Telegram (see TelegramBotService.telegramText); the text itself is
                 // the note that the answer exists, for everything that stores or forwards it.
+                // With the chat it was saved into, so a page showing another chat marks that one
+                // instead of appending the result to the conversation on screen.
                 Object owner = msg.data() == null ? null : msg.data().get("ownerText");
+                Object chat = msg.data() == null ? null : msg.data().get("sessionId");
                 sendToSession(session, "result", owner != null ? owner.toString() : msg.text(),
-                        null, msg.taskId());
+                        chat == null ? null : chat.toString(), msg.taskId());
             } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT
                     && msg.taskId() == null) {
                 // Only a LIVE prompt becomes a question bubble.
@@ -176,8 +179,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Send the active session info so the frontend can sync
         sendActiveSessionInfo(session, userId);
 
-        // Check if first-run wizard is needed
-        if (setupWizard.isSetupNeeded()) {
+        // Check if first-run wizard is needed -- for the owner only, as /setup is: it sets the
+        // cloud API keys, the local model's address and the bot token.
+        if (setupWizard.isSetupNeeded() && authService.isOwner(userId)) {
             startSetupWizardIfNeeded(userId);
         } else {
             long now = System.currentTimeMillis();
@@ -198,12 +202,34 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * A message arrives in as many fragments as it takes, and is put together in
+     * {@link #handleTextMessage}. Without this Tomcat closed the socket (1009) on any message
+     * whose JSON passed its 8,192-character buffer -- a long paste the page had already drawn
+     * as sent. A bigger buffer would be allocated for every open socket; fragments need none.
+     */
+    @Override
+    public boolean supportsPartialMessages() {
+        return true;
+    }
+
+    /** The fragments received so far of a socket's message, kept in the socket's attributes. */
+    private static final String FRAGMENTS = "fragments";
+
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         String userId = (String) session.getAttributes().get("userId");
         if (userId == null) return;
 
-        String payload = message.getPayload();
+        // A socket's fragments arrive in order, and one message's end before the next begins.
+        StringBuilder received = (StringBuilder) session.getAttributes().get(FRAGMENTS);
+        if (!message.isLast()) {
+            if (received == null) session.getAttributes().put(FRAGMENTS, received = new StringBuilder());
+            received.append(message.getPayload());
+            return;
+        }
+        session.getAttributes().remove(FRAGMENTS);
+        String payload = received == null ? message.getPayload() : received.append(message.getPayload()).toString();
         String userMessage;
 
         // Accept plain text or JSON {"message": "...", "type": "...", "taskId": "...", "attachmentIds": [...]}
@@ -233,7 +259,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        log.debug("WS message from {}: {}", userId, userMessage);
+        // The length only: the text can be "/cred set KEY VALUE" or a setup wizard's API key.
+        log.debug("WS message from {}: {} chars", userId, userMessage.length());
 
         // Handle session switching via WebSocket
         if ("switch_session".equals(messageType)) {
@@ -300,6 +327,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
+            // The page does not draw a slash text itself; this is its bubble. A command's secret
+            // is masked by the grammar that stored it; a command nobody knows shows its first
+            // word only, as nothing can say which part of "/creds set KEY VALUE" is the secret.
+            String typed = userMessage.trim();
+            sendToSession(session, "user", handledAsCommand.isPresent() || waiting
+                    ? CommandHandler.displayed(typed)
+                    : typed.split("(?U)\\s", 2)[0] + (typed.matches("(?U)\\S+") ? "" : " \u2026"));
             if (handledAsCommand.isPresent() || !waiting) {
                 handleCommand(userId, sessionId, userMessage, handledAsCommand, session);
                 return;
@@ -354,7 +388,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 })
                 .exceptionally(ex -> {
                     log.error("Task failed for {}: {}", userId, ex.getMessage());
-                    sendToUser(userId, "response", "Something went wrong: " + ex.getMessage());
+                    String reply = "Something went wrong: " + ex.getMessage();
+                    // Saved and sent with its chat, like any answer: pushed only, it was gone on
+                    // the next reload, and a window showing another chat appended it there.
+                    try {
+                        conversationService.saveMessage(userId, currentSessionId, "assistant", reply);
+                    } catch (Exception e) {
+                        log.warn("Could not save the failure reply for {}: {}", userId, e.getMessage());
+                    }
+                    sendToUser(userId, "response", reply, currentSessionId);
                     return null;
                 });
     }
@@ -401,8 +443,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Web-only commands handled locally
         String response;
         if (cmdLower.equals("/setup")) {
-            startSetupWizardIfNeeded(userId);
-            response = "";
+            // Setup replaces the cloud API keys and provider, the local model's address and the
+            // bot token -- what SettingsController lets the owner alone change.
+            if (authService.isOwner(userId)) {
+                startSetupWizardIfNeeded(userId);
+                response = "";
+            } else {
+                response = "Only the owner can run setup.";
+            }
         } else if (cmdLower.equals("/debug")) {
             boolean enabled = debugService.toggle(userId);
             response = enabled
@@ -414,7 +462,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     + " | Connected sockets: " + sessions.values().stream().mapToInt(java.util.Set::size).sum();
         } else {
             // The shared CommandHandler's answer; empty when it did not know the command
-            response = shared.orElse("Unknown command: " + command + ". Try /help");
+            response = shared.orElse(CommandHandler.UNKNOWN_COMMAND);
         }
 
         if (response != null && !response.isBlank()) {

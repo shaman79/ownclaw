@@ -40,14 +40,46 @@ class TelegramTextTest {
     }
 
     @Test
-    @DisplayName("a long answer goes in parts Telegram accepts, split at a line break, nothing lost")
+    @DisplayName("a long answer goes in parts Telegram accepts, split after a line break, nothing lost")
     void longAnswersAreSplit() {
-        String line = "x".repeat(99) + "\n";
+        String line = "  indented " + "x".repeat(88) + "\n";
         String text = line.repeat(100);                       // 10,000 characters
         var parts = TelegramBotService.telegramParts(text, 4096);
         assertTrue(parts.size() >= 3);
-        for (String part : parts) assertTrue(part.length() <= 4096, "part of " + part.length());
-        assertEquals(text.replace("\n", ""), String.join("", parts).replace("\n", ""));
+        for (String part : parts) {
+            assertTrue(part.length() <= 4096, "part of " + part.length());
+            assertTrue(part.endsWith("\n"), "cut after a line break");
+        }
+        // Exactly the text: the indentation and the line break at each cut are kept.
+        assertEquals(text, String.join("", parts));
         assertEquals(List.of("short"), TelegramBotService.telegramParts("short", 4096));
+    }
+
+    @Test
+    @DisplayName("a cut with no line break near it never splits a character in two")
+    void neverHalfACharacter() {
+        String emoji = "\uD83D\uDE00";                          // one character, two UTF-16 units
+        for (String text : List.of("a" + emoji.repeat(10), emoji.repeat(10), "ab" + emoji.repeat(10))) {
+            var parts = TelegramBotService.telegramParts(text, 5);
+            assertEquals(text, String.join("", parts));
+            for (String part : parts) {
+                assertTrue(part.length() <= 5, part);
+                assertFalse(Character.isHighSurrogate(part.charAt(part.length() - 1)), "half an emoji ends " + part);
+                assertFalse(Character.isLowSurrogate(part.charAt(0)), "half an emoji starts " + part);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Telegram is sent what is meant for the owner, not a task's steps and heartbeats")
+    void onlyWhatIsMeantForTheOwner() {
+        for (var type : StatusMessage.Type.values()) {
+            boolean sent = TelegramBotService.forTelegram(new StatusMessage(type, "x", null, "abcd1234"));
+            boolean meant = switch (type) {
+                case RESULT, NEED_INPUT, WARNING, FAILED -> true;
+                default -> false;
+            };
+            assertEquals(meant, sent, type.name());
+        }
     }
 }
