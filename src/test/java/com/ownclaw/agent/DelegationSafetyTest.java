@@ -253,75 +253,88 @@ class DelegationSafetyTest {
         assertEquals("b", refusedParam(Map.of("b", "{{0}}"), done), "handles start at 1");
     }
 
-    // ── what the model is shown of a result ──
+    // ── a result is passed on by reference, not typed out again ──
 
-    @Test
-    @DisplayName("a small result is shown in full")
-    void smallResultsAreNotTouched() {
-        String small = "Sent, message id 42";
-        assertEquals(small, LocalExecutor.feedback(small, 1),
-                "there is nothing to gain by hiding a short result, and the model reasons "
-                        + "better with it in front of it");
+    /** A digest whose every 32-character run is its own: distinct headlines, distinct numbers. */
+    static String digest() {
+        var sb = new StringBuilder("📰 Digest — 2026-09-22\n");
+        String[] topics = {"tram line", "council budget", "river level", "rail strike",
+                "museum reopening", "bridge repair", "school funding", "heat record"};
+        for (int i = 1; i <= 40; i++) {
+            sb.append(i).append(". Prague ").append(topics[i % topics.length]).append(": item ")
+              .append(1000 + i * 37).append(" reported at ").append(String.format("%02d:%02d", i % 24, i % 60))
+              .append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Text the model wrote itself: nothing in it is a run of {@link #digest()}. */
+    static String composed(int length) {
+        var sb = new StringBuilder("Dobré ráno, Petře!\n");
+        String[] words = {"weather", "stays", "mild", "in", "Brno", "while", "the", "orchard",
+                "harvest", "begins", "early", "this", "autumn", "with", "plums", "and", "pears"};
+        for (int i = 0; sb.length() < length; i++) {
+            sb.append(words[i % words.length]).append(i % 7 == 0 ? ".\n" : " ");
+        }
+        return sb.toString();
     }
 
     @Test
-    @DisplayName("a large result is excerpted and replaced with its reference")
-    void largeResultsBecomeAReference() {
-        String digest = "HEAD-" + "x".repeat(4000) + "-TAIL";
-        String shown = LocalExecutor.feedback(digest, 1);
+    @DisplayName("a partial or altered copy of an earlier result is refused on a tool that changes something")
+    void aRetypedResultIsRefused() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest));
+        var smtp = sideEffecting("smtp_send_email");
 
-        assertTrue(shown.length() < digest.length() / 2,
-                "a real delegation died with done_reason=length because step 1's result was "
-                        + "fed back whole and the model then had to regenerate it");
-        assertTrue(shown.startsWith("HEAD-"), "it still needs to know what it got");
-        assertTrue(shown.endsWith("]"), "and how to move it");
-        assertTrue(shown.contains("-TAIL"), "the tail says whether the result was complete");
-        assertTrue(shown.contains("{{1}}"), "the reference is the whole point");
-        assertTrue(shown.contains(LocalExecutor.OMISSION_MARKER),
-                "the marker is what makes a retyped excerpt detectable rather than silent");
+        String half = digest.substring(0, digest.length() / 2);
+        assertEquals("body", LocalExecutor.retyped(smtp,
+                        Map.of("to", "petr@example.com", "body", half), done),
+                "a copy that stops halfway is the morning email with its end missing");
+        assertEquals("body", LocalExecutor.retyped(smtp,
+                        Map.of("body", digest.replace("2026-09-22", "2025-07-10")), done),
+                "one wrong date in an otherwise perfect copy is still a copy typed out by hand");
+        assertEquals("body", LocalExecutor.retyped(smtp,
+                        Map.of("body", composed(400) + "\n" + half), done),
+                "and so is one wrapped in a greeting");
     }
 
     @Test
-    @DisplayName("a retyped excerpt is caught by its marker")
-    void retypedExcerptIsDetected() {
-        String shown = LocalExecutor.feedback("HEAD" + "x".repeat(4000) + "TAIL", 1);
-        // Exactly what a real delegation did: copied what it was shown into the next call.
-        var params = Map.<String, Object>of("path", "/tmp/out.txt", "content", shown);
+    @DisplayName("an exact copy, a reference, and composed text of any length are not refused")
+    void copiesReferencesAndCompositionPass() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest));
+        var smtp = sideEffecting("smtp_send_email");
 
-        assertEquals("content", LocalExecutor.retypedExcerpt(params),
-                "this reached a file as though it were the digest, and the delegation reported "
-                        + "success — silent truncation is the one failure the cloud cannot see");
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", digest), done),
+                "byte-identical: it paid for the output tokens, but nothing was invented");
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", "{{1}}"), done));
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", composed(5_000)), done),
+                "the local model may write: there is no length at which composing becomes copying");
+        assertNull(LocalExecutor.retyped(smtp,
+                        Map.of("body", "Headline «" + digest.substring(30, 61) + "»"), done),
+                "31 characters of it is a quote, not a copy: shorter than the canary's window");
     }
 
     @Test
-    @DisplayName("ordinary arguments are not mistaken for a retyped excerpt")
-    void normalParamsAreNotFlagged() {
-        assertNull(LocalExecutor.retypedExcerpt(
-                Map.of("body", "Here is the digest, see attached.", "to", "petr@example.com")));
-        assertNull(LocalExecutor.retypedExcerpt(Map.of("body", "{{1}}")));
-        assertNull(LocalExecutor.retypedExcerpt(Map.of()));
-        assertNull(LocalExecutor.retypedExcerpt(null));
-    }
-
-    @Test
-    @DisplayName("the excerpt is too small to be worth copying")
-    void excerptIsSmall() {
-        String shown = LocalExecutor.feedback("z".repeat(9000), 1);
-        assertTrue(shown.length() < 1200,
-                "1,500 characters was small enough to fail on context and large enough to be "
-                        + "retyped — the worst of both");
-        assertTrue(shown.contains("9000 characters"), "it still says how much there really is");
-    }
-
-    @Test
-    @DisplayName("the reference number is the step that produced it")
-    void referenceNumberMatchesTheStep() {
-        String big = "y".repeat(3000);
-        assertTrue(LocalExecutor.feedback(big, 3).contains("{{3}}"));
-        // ...and that is the number the resolver uses against the same list.
-        var done = List.of(step("a", Map.of(), "first"), step("b", Map.of(), "second"),
-                step("c", Map.of(), big));
-        assertEquals(big, sub(Map.of("body", "{{3}}"), done).get("body"));
+    @DisplayName("only where a reference could be written instead: a change, a forwardable result")
+    void retypingIsJudgedOnlyWhereAReferenceWorks() {
+        String digest = digest();
+        String half = digest.substring(0, digest.length() / 2);
+        var read = new com.ownclaw.agent.tools.Tool() {
+            public String name() { return "web_search"; }
+            public String description() { return "read"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
+                    com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
+        };
+        assertNull(LocalExecutor.retyped(read, Map.of("q", half),
+                List.of(step("daily_news_digest", Map.of(), digest))), "a read changes nothing");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", half),
+                        List.of(new Artifact("daily_news_digest", Map.of(), digest, false))),
+                "a failed result cannot be referenced, so quoting it is the only way to pass it on");
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                        Map.of("recipients", List.of(half)), List.of(step("daily_news_digest", Map.of(), digest))),
+                "nor can a reference sit inside a list");
     }
 
     // ── finishing has to work in both protocols ──
@@ -425,105 +438,27 @@ class DelegationSafetyTest {
         assertFalse(outcome.text().startsWith("ALREADY DONE"));
     }
 
-    // ── the local tier forwards results, it does not author them ──
+    // ── what the cloud reads of a delegation: every public output whole ──
 
     @Test
-    @DisplayName("a reference is short, so it is never mistaken for composed prose")
-    void referencesAreBelowTheThreshold() {
-        // The refusal keys on length, and every intended path is far under it: "{{1}}" is five
-        // characters and "{{1.body_text}}" is fifteen.
-        assertTrue("{{1.body_text}}".length() < 600);
-        assertTrue("{{1}}".length() < 600);
-    }
+    @DisplayName("a completed delegation carries each public output whole, and each failure")
+    void delegationOutputsAreWhole() {
+        String big = digest().repeat(20) + "THE LAST LINE OF THE DIGEST";
+        String trace = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 9\n".repeat(900)
+                + "KeyError: 'menu'";
+        var fetched = new Artifact(1, "daily_news_digest", Map.of(), Map.of(), big, true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var broken = new Artifact(2, "web_fetch_and_parse", Map.of(), Map.of(), trace, false,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-    @Test
-    @DisplayName("forwarding a result exactly is not composing")
-    void anExactCopyIsNotComposed() {
-        String digest = "D".repeat(2000);
-        var done = List.of(step("daily_news_digest", Map.of(), digest));
-        // Wasteful -- it paid 2,000 output tokens to move something $1 would have moved -- but
-        // byte-identical, so nothing was invented and nothing is refused.
-        assertTrue(done.stream().anyMatch(r -> digest.equals(r.output())));
-    }
+        var outcome = LocalExecutor.completed("Fetched.", "fetch", List.of(fetched, broken));
 
-    // ── the transcript must not outgrow the window it has to answer in ──
-
-    private static List<com.ownclaw.llm.LlmMessage> conversation(int exchanges) {
-        var m = new java.util.ArrayList<com.ownclaw.llm.LlmMessage>();
-        m.add(com.ownclaw.llm.LlmMessage.system("EXECUTOR PROMPT"));
-        m.add(com.ownclaw.llm.LlmMessage.user("Begin."));
-        for (int i = 0; i < exchanges; i++) {
-            m.add(com.ownclaw.llm.LlmMessage.assistant("call " + i));
-            m.add(com.ownclaw.llm.LlmMessage.user("result " + i));
-        }
-        return m;
-    }
-
-    @Test
-    @DisplayName("a short delegation is left exactly as it is")
-    void shortHistoryIsUntouched() {
-        var m = conversation(3);
-        int before = m.size();
-        LocalExecutor.trimHistory(m, List.of(step("a", Map.of(), "x")));
-        assertEquals(before, m.size(), "there is nothing to gain below the threshold");
-    }
-
-    @Test
-    @DisplayName("a long delegation keeps the system prompt, the goal, a ledger and the tail")
-    void longHistoryIsTrimmed() {
-        // The real shape of the 23 September menu run, which died at step 9 with the prompt
-        // nearly filling the window and 19,326 characters spent on thinking.
-        var m = conversation(8);
-        var done = List.of(step("restaurant_url_finder", Map.of(), "urls"),
-                step("web_fetch_and_parse", Map.of(), "x".repeat(4279)),
-                new Artifact("web_fetch_and_parse", Map.of(), "ERR", false));
-
-        LocalExecutor.trimHistory(m, done);
-
-        assertTrue(m.size() < conversation(8).size(), "it has to shrink, that is the point");
-        assertEquals(com.ownclaw.llm.LlmMessage.Role.SYSTEM, m.get(0).role(),
-                "the executor prompt is not optional");
-        assertTrue(m.get(1).content().startsWith("Begin."), "nor is the goal");
-        assertTrue(m.get(m.size() - 1).content().startsWith("result 7"),
-                "the most recent exchange is what it is answering about");
-
-        for (int i = 1; i < m.size(); i++) {
-            assertNotEquals(m.get(i).role(), m.get(i - 1).role(),
-                    "roles must alternate — two user turns in a row is something Ollama "
-                            + "tolerates and other providers reject");
-        }
-    }
-
-    @Test
-    @DisplayName("the results survive the trim, because they never lived in the transcript")
-    void trimKeepsTheReferences() {
-        var m = conversation(8);
-        // To the local model a handle is a position in its own delegation's list.
-        var done = List.of(numbered(1, "daily_news_digest", "D".repeat(3000)),
-                numbered(2, "smtp_send_email", "sent"));
-
-        LocalExecutor.trimHistory(m, done);
-        String ledger = m.get(1).content();
-
-        assertTrue(ledger.contains("{{1}} = daily_news_digest"), "it must know what {{1}} is");
-        assertTrue(ledger.contains("{{2}} = smtp_send_email"));
-        assertTrue(ledger.contains("3000 chars"), "and how much is behind the reference");
-        assertTrue(ledger.contains("have not"),
-                "a model that believes the results are gone will try to reconstruct them");
-
-        // The point: {{1}} still resolves after the conversation carrying it was dropped.
-        assertEquals("D".repeat(3000),
-                sub(Map.of("body", "{{1}}"), done).get("body"));
-    }
-
-    @Test
-    @DisplayName("a failed earlier step is named as failed in the ledger")
-    void trimLedgerNamesFailures() {
-        var m = conversation(8);
-        LocalExecutor.trimHistory(m, List.of(
-                new Artifact("web_fetch_and_parse", Map.of(), "ERR", false)));
-        assertTrue(m.get(1).content().contains("FAILED"),
-                "otherwise the model retries something it has no idea already broke");
+        assertTrue(big.length() > 20_000 && trace.length() > 20_000);
+        assertTrue(outcome.text().contains(big),
+                "the cloud judges the delegation on this; its end is evidence like its start");
+        assertTrue(LocalExecutor.verbatimFailures(List.of(fetched, broken)).endsWith(trace),
+                "a traceback over 20,000 characters used to lose its exception line");
+        assertTrue(outcome.text().endsWith(LocalExecutor.verbatimFailures(List.of(fetched, broken))));
     }
 
     // ── what the cloud reads of a delegation that touched private data ──
@@ -715,21 +650,19 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("a name the descriptor cut short still resolves, by its visible prefix")
-    void aTruncatedFieldNameResolves() {
-        // The cut is not optional: a field name of 32 characters would itself be a window of the
-        // private text, so the descriptor would leak and then refuse the call carrying it. The
-        // cloud copies what it is shown, so what it is shown has to resolve.
+    @DisplayName("a field named by its position resolves; a shortened name never does")
+    void aFieldResolvesByItsPosition() {
+        // A name of 32 characters or more could be a window of private text, so the descriptor
+        // offers such a field by its position. Its exact name resolves too; a guess never does.
         var done = List.of(step("render", Map.of(),
-                "{\"rendered_html_for_email_body_with_css\":\"<p>Polévka</p>\"}"));
+                "{\"ok\":true,\"rendered_html_for_email_body_with_css\":\"<p>Polévka</p>\"}"));
+        assertEquals(Map.of("body", "<p>Polévka</p>"), sub(Map.of("body", "{{1.#2}}"), done));
         assertEquals(Map.of("body", "<p>Polévka</p>"),
-                sub(Map.of("body", "{{1.rendered_html_for_email…}}"), done));
-
-        // Only when it is unambiguous — a guess here picks somebody's data.
-        var twin = List.of(step("render", Map.of(),
-                "{\"rendered_html_for_email\":\"A\",\"rendered_html_for_export\":\"B\"}"));
-        assertEquals("body", refusedParam(Map.of("body", "{{1.rendered_html_for_e…}}"), twin),
-                "two keys share the prefix, so it is refused");
+                sub(Map.of("body", "{{1.rendered_html_for_email_body_with_css}}"), done));
+        assertEquals("body", refusedParam(Map.of("body", "{{1.rendered_html_for_email…}}"), done),
+                "matching by a visible beginning is gone: two keys sharing it made it a guess");
+        assertEquals("body", refusedParam(Map.of("body", "{{1.#3}}"), done),
+                "a position the result does not have");
     }
 
     @Test

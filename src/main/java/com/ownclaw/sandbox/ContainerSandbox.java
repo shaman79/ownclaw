@@ -79,6 +79,12 @@ public class ContainerSandbox {
         this.config = config;
     }
 
+    /** With the runtime given rather than detected, so a test can stand in for docker. */
+    ContainerSandbox(OwnClawConfig config, String runtime) {
+        this.config = config;
+        this.containerRuntime = runtime;
+    }
+
     @PostConstruct
     public void init() {
         detectRuntime();
@@ -254,8 +260,10 @@ public class ContainerSandbox {
             return imageTag;
         }
 
-        // Try building with each candidate base image in order
-        IOException lastError = null;
+        // Try building with each candidate base image in order. Every candidate's failure is kept,
+        // in order and whole: the preferred image's own error is usually the one that matters,
+        // and keeping only the last candidate's reported a fallback image's instead.
+        var failures = new StringBuilder();
         int candidateIndex = 0;
         for (String baseImage : candidates) {
             candidateIndex++;
@@ -281,11 +289,10 @@ public class ContainerSandbox {
             } catch (IOException e) {
                 log.warn("Base image '{}' failed: {}. Trying next candidate...",
                         baseImage, truncate(e.getMessage(), 200));
-                lastError = e;
+                failures.append("\n\n").append(baseImage).append(": ").append(e.getMessage());
             }
         }
-        throw new IOException("All base image candidates failed. Last error: "
-                + (lastError != null ? lastError.getMessage() : "unknown"));
+        throw new IOException("All base image candidates failed." + failures);
     }
 
     /**
@@ -386,15 +393,15 @@ public class ContainerSandbox {
                 String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx, progressCallback);
                 if (fallbackError != null) {
                     throw new IOException("Container image build failed with both runtimes.\n"
-                            + containerRuntime + ": " + truncate(buildError, 1000) + "\n"
-                            + fallbackRuntime + ": " + truncate(fallbackError, 1000));
+                            + containerRuntime + ": " + buildError + "\n"
+                            + fallbackRuntime + ": " + fallbackError);
                 }
                 // Fallback succeeded — switch runtimes for future calls
                 log.info("Fallback runtime '{}' succeeded. Switching primary runtime.", buildRuntime);
                 containerRuntime = buildRuntime;
             } else if (buildError != null) {
                 throw new IOException("Container image build failed (" + buildRuntime + "):\n"
-                        + truncate(buildError, 2000));
+                        + buildError);
             }
 
             log.info("Successfully built container image '{}' with {}", imageTag, containerRuntime);
@@ -455,8 +462,9 @@ public class ContainerSandbox {
             AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
 
             // Read output line-by-line to stream build progress to the user.
-            // Also feeds lastBuildActivity for stall detection.
-            StringBuilder outputBuf = new StringBuilder();
+            // Also feeds lastBuildActivity for stall detection. Synchronized, because a stalled
+            // build reports what it had printed while this reader may still be appending.
+            StringBuffer outputBuf = new StringBuffer();
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
                 try (var reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
@@ -465,11 +473,10 @@ public class ContainerSandbox {
                         lastBuildActivity.set(System.currentTimeMillis());
                         outputBuf.append(line).append('\n');
                         if (progressCallback != null) {
-                            // Summarize the line for the UI — strip ANSI codes and truncate
+                            // The line for the UI, whole — ANSI colour codes stripped
                             String clean = line.replaceAll("\\x1B\\[[0-9;]*m", "").trim();
                             if (!clean.isEmpty()) {
-                                progressCallback.onProgress(
-                                        "\uD83D\uDCE6 " + truncate(clean, 120), null);
+                                progressCallback.onProgress("\uD83D\uDCE6 " + clean, null);
                             }
                         }
                     }
@@ -485,7 +492,8 @@ public class ContainerSandbox {
                 p.destroyForcibly();
                 try { p.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 outputFuture.cancel(true);
-                return "Build stalled (no output for " + stallSec + "s)";
+                return "Build stalled (no output for " + stallSec + "s). Its output until then:\n"
+                        + outputBuf;
             }
 
             String output = outputFuture.join();

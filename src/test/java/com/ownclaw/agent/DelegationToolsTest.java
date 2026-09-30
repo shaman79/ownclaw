@@ -99,6 +99,17 @@ class DelegationToolsTest {
     }
 
     @Test
+    @DisplayName("every name that is no tool is said back, however many")
+    void everyUnknownNameIsReported() {
+        var names = new ArrayList<String>();
+        for (int i = 1; i <= 25; i++) names.add("no_such_tool_" + i);
+        var outcome = executor(new Native(done("sent")), new Usage(), FETCH, SMTP)
+                .execute(plan(names, List.of()), task());
+        assertTrue(outcome.text().contains("no tool is named " + String.join(", ", names) + ","),
+                "twenty were once the most it would name: " + outcome.text());
+    }
+
+    @Test
     @DisplayName("a list of names none of which exist offers everything rather than nothing, and says so")
     void onlyWrongNamesOffersAll() {
         var llm = new Native(done("sent"));

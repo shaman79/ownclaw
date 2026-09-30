@@ -86,7 +86,7 @@ final class References {
                     return refuse(written, e.getKey(), ref + " is a FAILED result — its output "
                             + "is an error message, not something to pass on.");
                 }
-                String value = ref.field() == null ? a.output() : field(a.output(), ref.field());
+                String value = ref.field() == null ? a.output() : field(a.output(), ref);
                 if (value == null) {
                     return refuse(written, e.getKey(), ref + " names a field that result does "
                             + "not have.");
@@ -115,12 +115,15 @@ final class References {
         if (!m.matches()) return null;
         int n = Integer.parseInt(m.group(1));
         if (n < 1 || n > namespace.size()) return null;
-        String field = m.group(2);
-        return field(namespace.get(n - 1).output(), field) == null ? null
-                : new ArtifactRef(n, field).toString();
+        var ref = new ArtifactRef(n, m.group(2));
+        return field(namespace.get(n - 1).output(), ref) == null ? null : ref.toString();
     }
 
-    /** The results that can be referenced, so a refusal is actionable rather than just a no. */
+    /**
+     * The results that can be referenced, so a refusal is actionable rather than just a no.
+     * Every field of each, named the way the descriptor names it for the cloud, so there is one
+     * way to write a reference to any field.
+     */
     static String available(List<Artifact> namespace) {
         if (namespace.isEmpty()) {
             return "Nothing has produced a result yet, so there is nothing to reference.";
@@ -132,7 +135,8 @@ final class References {
             sb.append(ArtifactRef.handle(i + 1)).append(" = ").append(a.tool())
               .append(a.succeeded() ? " (ok" : " (FAILED — not referenceable");
             if (a.succeeded()) {
-                List<String> fields = Artifact.jsonFieldNames(a.output());
+                List<String> fields = Artifact.fieldRefs(i + 1, a.output()).stream()
+                        .map(ArtifactRef::field).toList();
                 if (!fields.isEmpty()) sb.append("; fields: ").append(String.join(", ", fields));
             }
             sb.append(')');
@@ -143,9 +147,10 @@ final class References {
 
     /**
      * The reason alone. The list of what can be referenced is appended by the caller that may
-     * see it: the local model gets full field names, the cloud does not. A refusal on the cloud
-     * path once listed every field name of every result, PRIVATE ones included and uncut, which
-     * disclosed names under 32 characters and tripped the canary on longer ones.
+     * see it: the local model gets it ({@link #available}), the cloud does not -- it has the
+     * descriptors. A refusal on the cloud path once listed every field name of every result,
+     * PRIVATE ones included and uncut, which disclosed names under 32 characters and tripped the
+     * canary on longer ones.
      */
     private static Resolved refuse(Map<String, Object> written, String param, String why) {
         return new Resolved(written, List.of(), param, why);
@@ -190,16 +195,18 @@ final class References {
         return sb.toString();
     }
 
-    /** One field of a JSON result, or null. A name the descriptor cut short matches by prefix. */
-    private static String field(String output, String field) {
+    /**
+     * One field of a JSON result, or null: the field of exactly that name, or for {@code #k} the
+     * k-th in key order. Never a guess: matching a name by its beginning turned refusals into
+     * silent wrong answers -- "body" matched body_html, "o" matched ok, and the owner got an
+     * email whose whole body was "true".
+     */
+    private static String field(String output, ArtifactRef ref) {
         try {
             JsonNode node = MAPPER.readTree(output);
             if (node == null || !node.isObject()) return null;
-            JsonNode value = node.get(field);
-            // Only for a name the descriptor visibly cut. On every miss it turned a refusal into
-            // a silent wrong answer: "body" matched body_html, "o" matched ok, and the owner got
-            // an email whose whole body was "true".
-            if (value == null && field.endsWith("…")) value = byPrefix(node, field);
+            Integer k = ref.position();
+            JsonNode value = k == null ? node.get(ref.field()) : nth(node, k);
             if (value == null || value.isNull()) return null;
             return value.isTextual() ? value.asText() : value.toString();
         } catch (Exception ex) {
@@ -207,24 +214,14 @@ final class References {
         }
     }
 
-    /**
-     * The field whose name the descriptor abbreviated, matched by its visible prefix — only
-     * when exactly one key matches. Two would be a guess, and a guess here picks somebody's
-     * data. The cut itself cannot go: a 32-character field name would be a window of the
-     * private text, so the descriptor would leak and then refuse the call carrying it.
-     */
-    private static JsonNode byPrefix(JsonNode node, String field) {
-        String prefix = field.substring(0, field.length() - 1);
-        if (prefix.isBlank()) return null;
-        JsonNode found = null;
-        var names = node.fieldNames();
-        while (names.hasNext()) {
-            String name = names.next();
-            if (!name.startsWith(prefix)) continue;
-            if (found != null) return null;
-            found = node.get(name);
+    /** The k-th field of an object, in key order, or null when it has fewer. */
+    private static JsonNode nth(JsonNode node, int k) {
+        var values = node.elements();
+        for (int i = 1; values.hasNext(); i++) {
+            JsonNode value = values.next();
+            if (i == k) return value;
         }
-        return found;
+        return null;
     }
 
     /** The first reference-shaped string anywhere inside a list or an object, or null. */

@@ -384,57 +384,29 @@ public class DynamicSkill implements Tool {
                         context.progressCallback());
             }
 
-            if (result.timedOut()) {
-                return ToolResult.failure("Skill '" + name + "' stalled (no output for " + timeoutSec + "s).");
-            }
+            ToolResult toolResult = interpret(result);
 
-            if (result.isSuccess()) {
-                ToolResult toolResult = parseOutput(result.stdout(), result.stderr());
-
-                // Self-heal: ModuleNotFoundError → install missing package → retry once
-                if (!toolResult.success()) {
-                    String missingModule = extractMissingModule(toolResult.output());
-                    if (missingModule != null) {
-                        String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
-                        log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
-                                name, pkg, missingModule);
-
-                        boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
-                        if (installed) {
-                            SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                    runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
-                            if (retry != null && !retry.timedOut() && retry.isSuccess()) {
-                                log.info("Self-heal succeeded for skill '{}'", name);
-                                return parseOutput(retry.stdout(), retry.stderr());
-                            }
-                        }
+            // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
+            // retry returns is the answer, failure included: the package is in by then, and the
+            // error it hits next is the one that matters.
+            String missingModule = toolResult.success() || result.timedOut()
+                    ? null : extractMissingModule(toolResult.output());
+            if (missingModule != null) {
+                String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
+                log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
+                        name, missingModule, pkg);
+                if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
+                    SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
+                            runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
+                    if (retry != null) {
+                        ToolResult healed = interpret(retry);
+                        log.info("Self-heal retry of skill '{}': {}", name,
+                                healed.success() ? "succeeded" : "failed");
+                        return healed;
                     }
                 }
-
-                return toolResult;
-            } else {
-                String error = result.stderr().isBlank()
-                        ? "Exit code: " + result.exitCode()
-                        : result.stderr();
-
-                // Self-heal stderr-based ModuleNotFoundError too
-                String missingModule = extractMissingModule(error);
-                if (missingModule != null) {
-                    String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
-                    log.info("Self-healing skill '{}' (stderr): installing '{}' for module '{}'",
-                            name, pkg, missingModule);
-                    if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
-                        SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
-                        if (retry != null && !retry.timedOut() && retry.isSuccess()) {
-                            log.info("Self-heal (stderr) succeeded for skill '{}'", name);
-                            return parseOutput(retry.stdout(), retry.stderr());
-                        }
-                    }
-                }
-
-                return ToolResult.failure(error);
             }
+            return toolResult;
         } catch (Exception e) {
             log.error("Dynamic skill '{}' execution failed: {}", name, e.getMessage());
             return ToolResult.failure("Execution error: " + e.getMessage());
@@ -497,12 +469,34 @@ public class DynamicSkill implements Tool {
     }
 
     /**
+     * What a run of the skill returned: a stall with what it wrote before going quiet, a crash
+     * with its stderr and whatever reached stdout, or the harness's result ({@link #parseOutput}).
+     */
+    private ToolResult interpret(SandboxResult result) {
+        if (result.timedOut()) {
+            // What it wrote before it went quiet is the only evidence of where it hung.
+            return ToolResult.failure("Skill '" + name + "' stalled (no output for "
+                    + timeoutSec + "s)." + printed("stdout", result.stdout())
+                    + printed("stderr", result.stderr()));
+        }
+        if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr());
+        // A crash can leave stdout as well as stderr: a subprocess writes to it directly.
+        return ToolResult.failure((result.stderr().isBlank()
+                ? "Exit code: " + result.exitCode()
+                : result.stderr()) + printed("stdout", result.stdout()));
+    }
+
+    /**
      * Parse the Python script's stdout into a ToolResult.
-     * Expected JSON: {"success": true, "output": "text", "data": {}}
-     * Falls back to treating stdout as plain text if not valid JSON.
+     * Expected JSON: {"success": true, "output": "text", "data": {}}, which the runner harness
+     * prints as the last line. Nothing else the process wrote is dropped: stdout printed before
+     * that line (a subprocess writes to it directly) and a {@code data} dict are folded into the
+     * output, and stderr is appended whether the skill succeeded or not -- a failure is exactly
+     * when its warnings and log lines are the evidence. Output that is not JSON at all is shown
+     * whole, as a failure.
      *
      * @param stdout the script's standard output
-     * @param stderr the script's standard error (included in failure messages for diagnostics)
+     * @param stderr the script's standard error
      */
     private ToolResult parseOutput(String stdout, String stderr) {
         if (stdout == null || stdout.isBlank()) {
@@ -513,77 +507,76 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
-        try {
-            Map<String, Object> parsed = mapper.readValue(stdout.strip(), new TypeReference<>() {});
-            boolean success = Boolean.TRUE.equals(parsed.get("success"));
-            String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : stdout;
-
-            // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
-            if (success && output != null && output.startsWith("ERROR:")) {
-                log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
-                success = false;
+        String text = stdout.strip();
+        String line = text;
+        String before = "";
+        Map<String, Object> parsed = jsonObject(line);
+        if (parsed == null) {
+            // Not JSON as a whole: the harness's line is the last one, and whatever a subprocess
+            // wrote to stdout directly comes before it.
+            int cut = text.lastIndexOf('\n');
+            if (cut >= 0) {
+                line = text.substring(cut + 1).strip();
+                parsed = jsonObject(line);
+                before = text.substring(0, cut).strip();
             }
-
-            // Treat empty output content as failure even if success=true
-            if (success && (output == null || output.isBlank() || "null".equals(output))) {
-                String hint = (stderr != null && !stderr.isBlank())
-                        ? " stderr: " + stderr.strip()
-                        : "";
-                return ToolResult.failure(
-                        "Tool returned success but with empty output — this usually means the skill " +
-                        "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
-                        + " Use skill_create with the SAME name '" + name + "' to fix it.");
-            }
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> data = parsed.containsKey("data") && parsed.get("data") instanceof Map
-                    ? (Map<String, Object>) parsed.get("data")
-                    : Map.of();
-
-            // Append stderr as a warning if present on a successful result
-            if (success && stderr != null && !stderr.isBlank()) {
-                output = output + "\n[stderr warning: " + stderr.strip() + "]";
-            }
-
-            return success ? ToolResult.success(output, data) : ToolResult.failure(output, data);
-        } catch (Exception e) {
-            // Full stdout isn't valid JSON — try parsing the last non-empty line
-            // (skills may print debug info on earlier lines, with the JSON result last)
-            String lastLine = lastNonEmptyLine(stdout);
-            if (lastLine != null && lastLine.startsWith("{")) {
-                try {
-                    Map<String, Object> fallback = mapper.readValue(lastLine, new TypeReference<>() {});
-                    boolean ok = Boolean.TRUE.equals(fallback.get("success"));
-                    String out = fallback.containsKey("output") ? String.valueOf(fallback.get("output")) : lastLine;
-                    return ok ? ToolResult.success(out) : ToolResult.failure(out);
-                } catch (Exception ignored) {}
-            }
+        }
+        if (parsed == null) {
             // Non-JSON output from the runner harness means something went wrong.
             // Treat as failure so the agent gets a signal to investigate.
             String detail = (stderr != null && !stderr.isBlank())
                     ? " stderr: " + stderr.strip() : "";
             return ToolResult.failure(
                     "Tool produced non-JSON output (possible runner error): "
-                    + truncateStr(stdout.strip(), 500) + detail
+                    + text + detail
                     + " Use skill_create with the SAME name '" + name + "' to fix.");
         }
-    }
 
-    /** Return the last non-empty line in a multi-line string, or null. */
-    private static String lastNonEmptyLine(String text) {
-        if (text == null) return null;
-        String[] lines = text.split("\n");
-        for (int i = lines.length - 1; i >= 0; i--) {
-            String line = lines[i].strip();
-            if (!line.isEmpty()) return line;
+        boolean success = Boolean.TRUE.equals(parsed.get("success"));
+        String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : line;
+
+        // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
+        if (success && output.startsWith("ERROR:")) {
+            log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
+            success = false;
         }
-        return null;
+
+        // A skill's data dict is part of what it returned. Kept on the side, no record and no
+        // prompt ever showed it; folded in, it is read and referenced with the rest. (Without an
+        // "output" key the whole printed dict is the output, data included.)
+        if (parsed.containsKey("output") && parsed.get("data") instanceof Map<?, ?> data
+                && !data.isEmpty()) {
+            output = output + "\n[data: " + mapper.valueToTree(data) + "]";
+        }
+        output = output + printed("skill stdout", before);
+
+        // Treat empty output content as failure even if success=true
+        if (success && (output.isBlank() || "null".equals(output))) {
+            String hint = (stderr != null && !stderr.isBlank())
+                    ? " stderr: " + stderr.strip()
+                    : "";
+            return ToolResult.failure(
+                    "Tool returned success but with empty output — this usually means the skill " +
+                    "code has a bug (e.g. missing return, wrong variable, unhandled error)." + hint
+                    + " Use skill_create with the SAME name '" + name + "' to fix it.");
+        }
+
+        output = output + printed("stderr", stderr);
+        return success ? ToolResult.success(output) : ToolResult.failure(output);
     }
 
-    /** Truncate a string with ellipsis. */
-    private static String truncateStr(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
+    /** The text as a JSON object, or null when it is not one. */
+    private static Map<String, Object> jsonObject(String text) {
+        try {
+            return mapper.readValue(text, new TypeReference<>() {});
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** {@code text} labelled as what the process wrote to {@code stream}; nothing when blank. */
+    private static String printed(String stream, String text) {
+        return text == null || text.isBlank() ? "" : "\n[" + stream + ": " + text.strip() + "]";
     }
 
     /** Extract the missing module name from a Python error message, or null. */

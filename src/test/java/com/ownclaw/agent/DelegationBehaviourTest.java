@@ -10,6 +10,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.ToolCall;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.privacy.Label;
 import org.junit.jupiter.api.DisplayName;
@@ -105,7 +106,7 @@ class DelegationBehaviourTest {
         } catch (Exception e) { throw new IllegalStateException(e); }
     }
 
-    static LocalExecutor executor(Scripted llm, Usage usage, Tool... tools) {
+    static LocalExecutor executor(LlmProvider llm, Usage usage, Tool... tools) {
         return new LocalExecutor(new LlmRouter(llm, null, null, null),
                 new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage);
     }
@@ -405,11 +406,12 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("the omission marker speaks the grammar the resolver reads")
-    void theOmissionMarkerIsAReference() {
-        // Round 6's other blocking finding: the marker still said "pass it on with $1", which is
-        // no longer a reference, so a model that followed it emailed the owner the text "$1".
-        String menu = "{\"ok\":true,\"body_text\":\"" + "Polévka dne. ".repeat(200) + "\"}";
+    @DisplayName("a large result is shown whole, and forwarded exactly by its reference")
+    void aLargeResultIsShownWholeAndForwarded() {
+        // It used to be shown as 400 characters, a marker and 150 more, so the model forwarded
+        // what it had never read -- and one that copied what it was shown sent half a digest.
+        String text = "Polévka dne. ".repeat(200);
+        String menu = "{\"ok\":true,\"body_text\":\"" + text + "\"}";
         var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(menu));
         var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
         var llm = new Scripted(call("daily_menu_fetcher", Map.of()),
@@ -418,9 +420,204 @@ class DelegationBehaviourTest {
 
         executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
 
-        assertTrue(llm.allSeen().contains("pass it on with {{1}}⟧"), "the marker names {{1}}");
-        assertFalse(llm.allSeen().contains("pass it on with $"), "and never the old $ form");
-        assertTrue(String.valueOf(smtp.calls.get(0).get("body")).startsWith("Polévka dne."));
+        assertTrue(llm.allSeen().contains("Tool result {{1}} [daily_menu_fetcher] SUCCESS:\n" + menu),
+                "the model reads the whole of what it is forwarding");
+        assertEquals(text, smtp.calls.get(0).get("body"));
+    }
+
+    /** A local model that takes tools natively and answers each turn with the reply given. */
+    static final class Replies implements LlmProvider {
+        final Deque<LlmResponse> replies = new ArrayDeque<>();
+        final List<List<LlmMessage>> calls = new ArrayList<>();
+        Replies(LlmResponse... r) { replies.addAll(List.of(r)); }
+        public boolean supportsTools() { return true; }
+        public boolean isAvailable() { return true; }
+        public String name() { return "replies"; }
+        public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+            calls.add(List.copyOf(m));
+            return replies.isEmpty() ? turn(new ToolCall("end", "done", Map.of("summary", "finished")))
+                    : replies.poll();
+        }
+        /** What the model was told after its turn {@code n} (0-based). */
+        String toldAfter(int n) {
+            var m = calls.get(n + 1);
+            return m.get(m.size() - 1).content();
+        }
+    }
+
+    /** One turn of the model: these tool calls, in this order. */
+    static LlmResponse turn(ToolCall... calls) {
+        return new LlmResponse("", 1, 1, 0, 0, "stop", List.of(calls));
+    }
+
+    @Test
+    @DisplayName("every tool call of a turn runs, in its order, through the same guards")
+    void everyCallOfATurnRuns() {
+        // Only the first call of a turn used to run. The others were neither run nor mentioned,
+        // and the transcript showed only the first, so the model never learned.
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var send = Map.<String, Object>of("to", "petr@example.com", "body", "{{1.body_text}}");
+        var llm = new Replies(
+                turn(new ToolCall("a", "daily_menu_fetcher", Map.of()),
+                        new ToolCall("b", "smtp_send_email", send),
+                        new ToolCall("c", "smtp_send_email", send)),
+                turn(new ToolCall("d", "done", Map.of("summary", "menu emailed"))));
+
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+
+        assertEquals(1, fetch.calls.size());
+        assertEquals(1, smtp.calls.size(), "the same send twice in one turn is still twice");
+        assertEquals("Polévka: česneková. Hlavní: guláš.", smtp.calls.get(0).get("body"),
+                "a call can use a result from earlier in the same turn");
+        String told = llm.toldAfter(0);
+        assertTrue(told.contains("[call 1 of 3: daily_menu_fetcher] Tool result {{1}}"), told);
+        assertTrue(told.contains("[call 2 of 3: smtp_send_email] Tool result {{2}}"), told);
+        assertTrue(told.contains("[call 3 of 3: smtp_send_email] Not run: you already made exactly"), told);
+        String replayed = llm.calls.get(1).get(llm.calls.get(1).size() - 2).content();
+        assertEquals(3, replayed.lines().count(), "the model's turn is replayed with all its calls: " + replayed);
+        assertTrue(outcome.ok(), outcome.text());
+    }
+
+    @Test
+    @DisplayName("done beside other calls waits for their results: the model finishes having seen them")
+    void doneBesideOtherCallsIsNotTaken() {
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var llm = new Replies(
+                turn(new ToolCall("a", "daily_menu_fetcher", Map.of()),
+                        new ToolCall("b", "done", Map.of("summary", "fetched, probably"))),
+                turn(new ToolCall("c", "done", Map.of("summary", "Fetched: soup and goulash."))));
+
+        var outcome = executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task());
+
+        assertEquals(1, fetch.calls.size(), "the call beside it ran");
+        assertTrue(llm.toldAfter(0).contains("[call 2 of 2: done] Not taken"), llm.toldAfter(0));
+        assertTrue(outcome.text().startsWith("Fetched: soup and goulash."),
+                "the summary written after the result, not before it: " + outcome.text());
+    }
+
+    @Test
+    @DisplayName("a result typed out again is refused; text the model composes itself goes out")
+    void retypedIsRefusedComposedIsSent() {
+        // A 600-character rule refused both: the local tier could not write an email at all.
+        String digest = DelegationSafetyTest.digest();
+        String composed = DelegationSafetyTest.composed(3_000);
+        var news = new FakeTool("daily_news_digest", false, List.of(), p -> ToolResult.success(digest));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Scripted(call("daily_news_digest", Map.of()),
+                call("smtp_send_email", Map.of("to", "petr@example.com", "body", digest.substring(0, 900))),
+                call("smtp_send_email", Map.of("to", "petr@example.com", "body", composed)),
+                done("sent a note"));
+
+        executor(llm, new Usage(), news, smtp).execute(plan("email a note about the news"), task());
+
+        assertEquals(1, smtp.calls.size());
+        assertEquals(composed, smtp.calls.get(0).get("body"));
+        assertTrue(llm.allSeen().contains("repeats part of an earlier result"), llm.allSeen());
+    }
+
+    @Test
+    @DisplayName("every turn carries the whole conversation: nothing older is dropped")
+    void theWholeConversationIsSent() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong " + p.get("n")));
+        var script = new ArrayList<String>();
+        for (int i = 1; i <= 7; i++) script.add(call("ping", Map.of("n", i)));
+        script.add(done("pinged seven times"));
+        var llm = new Scripted(script.toArray(String[]::new));
+
+        executor(llm, new Usage(), ping).execute(
+                new DelegationPlan("ping seven times", List.of(), List.of(), 10), task());
+
+        List<LlmMessage> last = llm.calls.get(llm.calls.size() - 1);
+        assertEquals(2 + 2 * 7, last.size(), "system, opening, and every call with its result");
+        assertTrue(last.get(3).content().contains("pong 1"), "the first result, at the last turn");
+    }
+
+    @Test
+    @DisplayName("a delegation that does not finish still hands every result on whole")
+    void partialResultsAreWhole() {
+        String big = DelegationSafetyTest.digest().repeat(15) + "END-OF-RESULT";
+        var news = new FakeTool("daily_news_digest", false, List.of(), p -> ToolResult.success(big));
+        var llm = new Scripted(call("daily_news_digest", Map.of()));
+
+        var outcome = executor(llm, new Usage(), news).execute(
+                new DelegationPlan("the digest", List.of(), List.of(), 1), task());
+
+        assertFalse(outcome.ok());
+        assertTrue(outcome.text().startsWith("Delegation incomplete: Delegation reached max steps (1)"));
+        assertTrue(outcome.text().contains(big), "2,000 characters of it used to be all the cloud got");
+    }
+
+    @Test
+    @DisplayName("an empty reply is said to be empty, and the work goes on")
+    void anEmptyReplyIsSaidPlainly() {
+        // A thinking model can spend its turn reasoning and stop with nothing written.
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        var llm = new Replies(new LlmResponse("", 40, 5_947, 0, 0, "stop", List.of()),
+                turn(new ToolCall("a", "ping", Map.of())),
+                turn(new ToolCall("b", "done", Map.of("summary", "pinged"))));
+
+        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), task());
+
+        assertEquals(1, ping.calls.size(), "the delegation did not end on it");
+        assertTrue(outcome.ok(), outcome.text());
+        var second = llm.calls.get(1);
+        assertEquals("", second.get(second.size() - 2).content(),
+                "its turn is in the transcript as the empty turn it was, not an invented sentence");
+        assertEquals("Your previous reply was empty (stop reason: stop): no text and no tool call, "
+                + "so nothing was run. Continue from where the task stands.", llm.toldAfter(0));
+    }
+
+    @Test
+    @DisplayName("every event of a local reply is progress, and Stop ends the call at the next one")
+    void theProgressHookKeepsTheTaskAliveAndStops() throws Exception {
+        var ctx = task();
+        long[] quiet = new long[2];
+        boolean[] carriedOn = {false};
+        LlmProvider llm = new LlmProvider() {
+            int n;
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                if (n++ == 0) {
+                    try { Thread.sleep(30); } catch (InterruptedException e) { throw new IllegalStateException(e); }
+                    quiet[0] = ctx.msSinceLastProgress();
+                    c.progress().onProgress();          // an event of the stream
+                    quiet[1] = ctx.msSinceLastProgress();
+                    return new LlmResponse(call("ping", Map.of()), 1, 1);
+                }
+                ctx.cancel();                           // Stop, while the model is writing
+                c.progress().onProgress();
+                carriedOn[0] = true;
+                return new LlmResponse(done("pinged"), 1, 1);
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "streaming"; }
+        };
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+
+        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), ctx);
+
+        assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0],
+                "a long generation is not a stall: " + quiet[0] + " then " + quiet[1] + " ms");
+        assertFalse(carriedOn[0], "the call ended at the event after Stop");
+        assertTrue(outcome.text().startsWith("Delegation incomplete: Task cancelled during delegation."),
+                outcome.text());
+        assertEquals(1, ping.calls.size(), "and what ran before it is kept");
+    }
+
+    @Test
+    @DisplayName("the owner's status line names the whole goal")
+    void theStatusLineIsWhole() {
+        var emitter = new ChatStatusEmitter();
+        var lines = new ArrayList<String>();
+        emitter.subscribe("u1", "test", m -> lines.add(m.text()));
+        String goal = "Fetch today's lunch menus from the three restaurants on Vinohradská, "
+                + "compare their soups, and email Petr the cheapest vegetarian main course. ".repeat(3);
+        var llm = new Scripted(done("nothing to do"));
+
+        new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
+                new Usage()).execute(plan(goal), task());
+
+        assertTrue(lines.contains("Delegating to local LLM: " + goal), lines.toString());
     }
 
     // ── a task holding the user's file ──
@@ -490,8 +687,8 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("a file task reads 16,000 private characters per delegation and says what it did not read")
-    void privateReadBudgetIsPerDelegationAndFileOnly() {
+    @DisplayName("every result is shown to the local model whole, on a file task and off it")
+    void resultsAreShownWhole() {
         String first = withMarkerAt(10_000, 9_000, "FIRST-MARKER-7731");
         String second = withMarkerAt(10_000, 9_000, "SECOND-MARKER-4410");
         var read = new FakeTool("read_statement", false, List.of(),
@@ -503,17 +700,15 @@ class DelegationBehaviourTest {
 
         executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx);
 
-        assertTrue(llm.allSeen().contains("FIRST-MARKER-7731"), "the first page is read whole");
-        assertFalse(llm.allSeen().contains("SECOND-MARKER-4410"),
-                "the budget is the delegation's, so what it carries stays bounded");
+        // A file task's reader once had 16,000 characters for the whole delegation, and the
+        // answer then covered the first pages only.
+        assertTrue(llm.allSeen().contains(first), "the first page, whole");
+        assertTrue(llm.allSeen().contains(second), "and the second: no allowance runs out");
         Artifact answer = ctx.artifacts().get(3);
         assertEquals("local_answer", answer.tool());
-        assertTrue(answer.output().endsWith("\n\nRead the first 5,850 of 10,000 characters that "
-                        + "read_statement returned; the rest did not fit, so this answer covers only "
-                        + "that part."),
-                "the code says what was cut; the model cannot be relied on to: " + answer.output());
+        assertEquals(SUMMARY, answer.output(), "the model's answer, and nothing cut to note in it");
 
-        // The same text, from a credentialed tool in a task with no file: today's excerpt, and
+        // The same text, from a credentialed tool in a task with no file: shown whole too, and
         // the summary withheld as before, with nothing kept.
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"), p -> ToolResult.success(first));
         var plain = new AgentContext("u1", "t2", "what came in the mail?");
@@ -521,7 +716,7 @@ class DelegationBehaviourTest {
 
         var outcome = executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain);
 
-        assertFalse(llm2.allSeen().contains("FIRST-MARKER-7731"), "without a file, the excerpt");
+        assertTrue(llm2.allSeen().contains(first), "whole, where it was 400 characters and 150 more");
         assertTrue(plain.artifacts().stream().noneMatch(a -> "local_answer".equals(a.tool())));
         assertTrue(outcome.text().contains("(local summary withheld — this delegation touched {{1}})"),
                 outcome.text());

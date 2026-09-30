@@ -133,18 +133,20 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("the field list is bounded")
-    void fieldListIsBounded() {
+    @DisplayName("every field is listed and offered, however many there are")
+    void everyFieldIsListed() {
+        // Twelve listed and 240 characters of references once left an imap envelope's body_text,
+        // past the twelfth key, with no reference at all -- so the cloud wrote the email itself.
         var sb = new StringBuilder("{");
-        for (int i = 0; i < 40; i++) sb.append("\"field_number_").append(i).append("\": 1,");
+        for (int i = 0; i < 70; i++) sb.append("\"field_number_").append(i).append("\": 1,");
         sb.setLength(sb.length() - 1);
         sb.append("}");
         String d = privateResult("t", sb.toString(), true).describe();
-        assertTrue(d.contains("field_number_0"));
-        assertTrue(d.length() < 900,
-                "bounded by characters, which is what 'a descriptor that has become the "
-                        + "content' actually meant: " + d.length() + " chars");
-        assertTrue(d.contains("more"), "and it says how many it did not name: " + d);
+        for (int i = 0; i < 70; i++) {
+            assertTrue(d.contains("field_number_" + i + " (number)"), "listed: " + i);
+            assertTrue(d.contains("{{2.field_number_" + i + "}}"), "offered: " + i);
+        }
+        assertFalse(d.contains(" more"), "nothing is left for a '+N more': " + d);
     }
 
     // ── asObservation: the substitution point ──
@@ -204,7 +206,7 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("field names cannot carry a 32-character run of the output")
+    @DisplayName("field names cannot carry a 32-character run of the output: a long one is a position")
     void fieldNamesAreTooShortToLeak() {
         String key = "a_very_long_field_name_that_would_otherwise_be_a_window";
         String json = "{\"" + key + "\": \"x\"}";
@@ -225,31 +227,31 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("jsonFieldNames: the real keys of a JSON object, none for anything else")
-    void jsonFieldNames() {
-        assertEquals(List.of("ok", "body_text"),
-                Artifact.jsonFieldNames("{\"ok\": true, \"body_text\": \"text\"}"));
-        assertTrue(Artifact.jsonFieldNames("not json").isEmpty());
-        assertTrue(Artifact.jsonFieldNames("[1,2]").isEmpty());
-        assertTrue(Artifact.jsonFieldNames(null).isEmpty());
+    @DisplayName("fieldRefs: a reference to every key of a JSON object, none for anything else")
+    void fieldRefs() {
+        assertEquals(List.of(new ArtifactRef(3, "ok"), new ArtifactRef(3, "body_text")),
+                Artifact.fieldRefs(3, "{\"ok\": true, \"body_text\": \"text\"}"));
+        assertTrue(Artifact.fieldRefs(3, "not json").isEmpty());
+        assertTrue(Artifact.fieldRefs(3, "[1,2]").isEmpty());
+        assertTrue(Artifact.fieldRefs(3, null).isEmpty());
     }
 
     @Test
-    @DisplayName("a name the model is told to reference is never truncated")
-    void referenceNamesAreNeverTruncated() {
-        // The descriptor abbreviates a long key and marks the cut with an ellipsis. Deriving
-        // the reference list from it handed the model "{{1.rendered_html_for_ema…}}", which
-        // resolves to nothing and is not recognised as a reference either, so it reached the
-        // tool as the literal argument.
+    @DisplayName("a long field name is offered by its position, and that reference resolves")
+    void longNamesAreOfferedByPosition() {
+        // A shortened name used to be offered -- "{{1.rendered_html_for_ema…}}" -- and resolved
+        // by its visible beginning, which a second key sharing it turned into a guess.
         String key = "rendered_html_for_email_body_with_inline_css";
-        assertTrue(key.length() > Artifact.MAX_FIELD_NAME, "the case only exists above the cut");
-        String json = "{\"" + key + "\": \"x\"}";
+        String json = "{\"ok\": true, \"" + key + "\": \"<p>Polévka</p>\"}";
+        var a = new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of());
 
-        assertEquals(List.of(key), Artifact.jsonFieldNames(json),
-                "this list is what the model types back; it has to be the real key");
-        assertTrue(new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of())
-                        .describe().contains("…"),
-                "while the descriptor still bounds what it prints — they differ on purpose");
+        assertTrue(a.describe().contains("#2 (string, 14 chars)"), a.describe());
+        assertTrue(a.describe().contains("use: {{1}}, {{1.ok}}, {{1.#2}}"), a.describe());
+        assertFalse(a.describe().contains("rendered_html"), "not the name, not a piece of it");
+        assertEquals("<p>Polévka</p>",
+                References.resolve(Map.of("body", "{{1.#2}}"), List.of(a)).params().get("body"));
+        assertTrue(References.available(List.of(a)).contains("fields: ok, #2"),
+                "the local model is told the same references: " + References.available(List.of(a)));
     }
 
     @Test
@@ -274,32 +276,11 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("the reference list is capped, like the descriptor it sits beside")
-    void referenceNamesAreCapped() {
-        var sb = new StringBuilder("{");
-        for (int i = 0; i < 40; i++) sb.append(i > 0 ? "," : "").append("\"f").append(i).append("\":1");
-        List<String> names = Artifact.jsonFieldNames(sb.append("}").toString());
-
-        assertEquals(40, names.size(),
-                "bounded, but by its own cap. Borrowing the descriptor's MAX_FIELDS hid the "
-                        + "thirteenth key from the local model too, and on an imap envelope "
-                        + "body_text sits past the twelfth — so the one field the task needed "
-                        + "could be named by nobody");
-        var wide = new StringBuilder("{");
-        for (int i = 0; i < Artifact.MAX_REFERENCE_NAMES + 20; i++) {
-            wide.append(i > 0 ? "," : "").append("\"g").append(i).append("\":1");
-        }
-        assertEquals(Artifact.MAX_REFERENCE_NAMES,
-                Artifact.jsonFieldNames(wide.append("}").toString()).size(),
-                "and it is still a cap");
-    }
-
-    @Test
     @DisplayName("the body of an imap envelope is offered even when it is the twentieth key")
-    void theContentIsOfferedFirst() {
-        // The reference list is budgeted, so its ORDER decides what gets named. In key order the
-        // budget went on the envelope and body_text — past the twelfth key — was never offered;
-        // the cloud had nothing to forward and wrote the email from the description instead.
+    void theContentIsOffered() {
+        // When the reference list had a budget, the envelope spent it and body_text -- past the
+        // twelfth key -- was never offered; the cloud had nothing to forward and wrote the email
+        // from the description instead.
         var sb = new StringBuilder("{");
         String[] envelope = {"from", "to", "cc", "subject", "date", "message_id", "uid", "flags",
                 "folder", "size", "seen", "snippet", "has_attachments", "in_reply_to",
@@ -308,20 +289,38 @@ class ArtifactTest {
         sb.append("\"body_text\":\"").append("Polévka dne: česneková. ".repeat(120)).append("\"}");
         String d = privateResult("imap_fetch", sb.toString(), true).describe();
 
-        assertTrue(d.contains("{{2.body_text}}"),
-                "the biggest text in the result is what a task forwards: " + d);
-        assertTrue(d.indexOf("{{2.body_text}}") < d.indexOf("{{2.from}}"),
-                "and it is offered before the envelope, not after it runs the budget out");
+        assertTrue(d.contains("{{2.body_text}}"), "the text a task forwards: " + d);
+        assertTrue(d.contains("{{2.from}}") && d.contains("{{2.charset}}"), "and every other key: " + d);
         assertFalse(d.contains("česneková"), "still never the content");
     }
 
     @Test
-    @DisplayName("a truncated field name can never be long enough to be a canary window")
-    void fieldNamesStayUnderTheCanaryWindow() {
-        assertTrue(Artifact.MAX_FIELD_NAME < com.ownclaw.privacy.PrivateIndex.WINDOW,
-                "the descriptor prints the field names of a PRIVATE result; if one could reach "
-                        + com.ownclaw.privacy.PrivateIndex.WINDOW + " characters it would itself "
-                        + "be a window of the private text — the descriptor would leak, and then "
-                        + "refuse the call carrying it");
+    @DisplayName("a name shorter than a canary window is shown whole; a window's length is not")
+    void namesAreShownBelowTheCanaryWindow() {
+        // The descriptor prints the field names of a PRIVATE result; a name of a whole window
+        // could itself be a window of the private text -- the descriptor would leak, and then
+        // refuse the call carrying it.
+        int window = com.ownclaw.privacy.PrivateIndex.WINDOW;
+        String shortest = "k".repeat(window - 1), longest = "l".repeat(window);
+        String json = "{\"" + shortest + "\": 1, \"" + longest + "\": 2}";
+        String d = privateResult("t", json, true).describe();
+        assertTrue(d.contains("{{2." + shortest + "}}"), d);
+        assertTrue(d.contains("{{2.#2}}"), d);
+        assertFalse(d.contains(longest), d);
+    }
+
+    @Test
+    @DisplayName("a name the grammar would read differently is offered by its position too")
+    void unreadableNamesAreOfferedByPosition() {
+        // Each of these, written after "{{2.", would resolve to some other field or to none.
+        String json = "{\" padded \": 1, \"#1\": 2, \"a{{b\": 3, \"\": 4, \"plain\": 5}";
+        var refs = Artifact.fieldRefs(2, json);
+        assertEquals(List.of("#1", "#2", "#3", "#4", "plain"),
+                refs.stream().map(ArtifactRef::field).toList());
+        var a = new Artifact(2, "t", Map.of(), Map.of(), json, true, Label.PUBLIC, List.of());
+        for (int k = 1; k <= 4; k++) {
+            assertEquals(String.valueOf(k), References.resolve(Map.of("v", "{{1.#" + k + "}}"),
+                    List.of(a)).params().get("v"), "position " + k);
+        }
     }
 }

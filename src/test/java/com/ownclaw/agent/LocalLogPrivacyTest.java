@@ -13,6 +13,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.OutputTruncated;
 import com.ownclaw.observability.ChatStatusEmitter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -118,5 +119,30 @@ class LocalLogPrivacyTest {
         } finally {
             release(appender);
         }
+    }
+
+    @Test
+    @DisplayName("after a private read, a full context window is still said plainly: the code wrote that message")
+    void aFullWindowIsSaidPlainly() {
+        var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
+        LlmProvider llm = new LlmProvider() {
+            int calls;
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                if (calls++ == 0) return new LlmResponse(call("read_statement", Map.of()), 1, 1);
+                throw new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, 262_144,
+                        new LlmResponse("", 250_000, 12_144, 0, 0, "length", List.of()));
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "full"; }
+        };
+        var ctx = fileTask();
+        var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
+                new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
+                .execute(plan("summarise the statement"), ctx);
+
+        assertTrue(outcome.text().contains("Local LLM call failed: [ollama] the conversation is longer "
+                + "than the model's 262,144-token context window"), outcome.text());
+        assertFalse(outcome.ok(), "a failed delegation: the cloud takes the work back");
+        assertEquals(2 + 262_144, ctx.localTokens(), "the cut-off reply was generated, and is counted");
     }
 }
