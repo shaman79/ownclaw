@@ -9,7 +9,8 @@ import java.util.function.ToIntFunction;
  * @param content          the generated text
  * @param toolCalls        the tool calls the model asked for, each with arguments that parsed
  * @param invalidToolCall  why a tool call the model wrote is not among {@code toolCalls} -- its
- *                         arguments are not a JSON object -- or null when every call parsed
+ *                         arguments are not a JSON object -- with those arguments as it wrote
+ *                         them, or null when every call parsed
  * @param stopReason       why the model stopped, as the provider said it ("end_turn",
  *                         "tool_use", "max_tokens", "refusal", "length", "stop", ...), or null
  * @param stopDetail       what the provider adds to that reason -- on Anthropic, the category

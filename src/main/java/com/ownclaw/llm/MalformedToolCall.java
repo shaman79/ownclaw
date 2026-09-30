@@ -12,7 +12,11 @@ package com.ownclaw.llm;
  */
 public final class MalformedToolCall extends LlmException {
 
-    /** @param reply the reply, whose {@link LlmResponse#invalidToolCall()} says which call and why */
+    /**
+     * @param reply the reply, whose {@link LlmResponse#invalidToolCall()} says which call, why,
+     *              and what its arguments were -- the model's own text, so a log line that
+     *              reports this exception gives its length, not its message
+     */
     public MalformedToolCall(String provider, LlmResponse reply) {
         super(provider, reply.invalidToolCall(), 0, null, reply);
     }

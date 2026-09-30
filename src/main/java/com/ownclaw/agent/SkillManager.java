@@ -387,8 +387,9 @@ public class SkillManager {
     /**
      * LLM-powered library analysis.
      */
-    public String analyzeSkills(com.ownclaw.llm.EgressContext egress, com.ownclaw.llm.LlmProgress progress) {
-        return curatorService.analyzeLibrary(egress, progress);
+    public String analyzeSkills(com.ownclaw.llm.EgressContext egress, com.ownclaw.llm.LlmProgress progress,
+                                java.util.function.BiConsumer<com.ownclaw.llm.LlmProvider, com.ownclaw.llm.LlmResponse> billed) {
+        return curatorService.analyzeLibrary(egress, progress, billed);
     }
 
     // ────────────────────── Helpers ──────────────────────

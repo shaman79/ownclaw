@@ -641,21 +641,11 @@ public class AgentLoop {
             }
             context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
-
-            // billedTokens(), not totalTokens(): the latter is prompt + completion as reported,
-            // and Anthropic reports cache reads and writes separately and additionally. With the
-            // static system prompt cached -- which is the whole point of keeping it static -- the
-            // cached prefix is most of the input, so every figure derived from totalTokens was a
-            // fraction of what was actually billed: the live counter, token_usage, and every
-            // budget ceiling that is supposed to stop a runaway task.
-            account(context, local, provider.name(), thinkResult.billedTokens(),
-                    ModelPricing.costUsd(thinkResult.model(),
-                            thinkResult.promptTokens(), thinkResult.completionTokens(),
-                            thinkResult.cacheWriteTokens(), thinkResult.cacheReadTokens()));
+            int billed = account(context, local, provider, thinkResult.reply());
 
             // Emit running token totals so the frontend can update the live counter
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
-                    action.tool() + " (" + String.format("%,d", thinkResult.billedTokens()) + " tok)",
+                    action.tool() + " (" + String.format("%,d", billed) + " tok)",
                     tokenData(context));
 
             // Emit thinking detail: user prompt (skip system — it repeats), reasoning, chosen tool
@@ -1247,7 +1237,8 @@ public class AgentLoop {
             case "read" -> skillManager.readSkill(name);
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
-            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress());
+            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress(),
+                    (provider, reply) -> account(context, llmRouter.isLocal(provider), provider, reply));
             default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
     }
@@ -1931,7 +1922,7 @@ public class AgentLoop {
                 return Codegen.failed("the model declined to write the code for '" + name + "' ("
                         + declined.getMessage() + "), so nothing was created.");
             } catch (OutputTruncated cutOff) {
-                if (cutOff.reply() != null) account(context, local, provider, cutOff.reply());
+                account(context, local, provider, cutOff.reply());
                 return Codegen.failed(cutOff.limit() == OutputTruncated.Limit.MAX_OUTPUT
                         ? "the code for '" + name + "' did not fit in one reply (" + cutOff.getMessage()
                                 + "). It was discarded, not repaired, and nothing was created. A "
@@ -1987,29 +1978,34 @@ public class AgentLoop {
     }
 
     /**
-     * {@link #account(AgentContext, boolean, String, int, double)} for a reply: its billed input
-     * (cache reads and writes included) and its output, priced as the model that wrote it.
+     * What one model call made for this task was billed for, counted once: the think, code and
+     * analysis calls all come here, with their reply or with the one the exception that ended the
+     * call carries ({@code LlmException.reply()}). Billed means input with the prompt cache's
+     * reads and writes -- Anthropic reports those apart from {@code input_tokens}, and with the
+     * static system prompt cached they are most of the input -- plus output. The tokens go to the
+     * counter of the tier that did the work, and a cloud call's to the budget too, priced attempt
+     * by attempt at the rates of the model that ran each ({@link ModelPricing#costUsd(String,
+     * LlmResponse)}): a declined request can be finished by a fallback model, or retried on the
+     * one the refusal names. Local tokens never reach the cloud budget: an outage that forced
+     * everything local used to spend the daily cloud allowance fastest, without a single cloud
+     * call having been made.
+     *
+     * @param reply the reply, or null when none came (nothing was billed)
+     * @return the tokens billed
      */
-    private void account(AgentContext context, boolean local, LlmProvider provider, LlmResponse reply) {
-        String model = reply.model() != null ? reply.model() : provider.model();
-        account(context, local, provider.name(), reply.billedInputTokens() + reply.completionTokens(),
-                ModelPricing.costUsd(model, reply));
-    }
-
-    /**
-     * The tokens one model call made for this task was billed for: to the counter of the tier
-     * that did the work and -- a cloud call only -- to the budget, priced from its components
-     * (cache reads cost about a tenth of base input, cache writes about a quarter more). Local
-     * tokens never reach the cloud budget: an outage that forced everything local used to spend
-     * the daily cloud allowance fastest, without a single cloud call having been made.
-     */
-    private void account(AgentContext context, boolean local, String providerName, int billed, double costUsd) {
+    private int account(AgentContext context, boolean local, LlmProvider provider, LlmResponse reply) {
+        if (reply == null) return 0;
+        int billed = reply.billedInputTokens() + reply.completionTokens();
         if (local) {
             context.addLocalTokens(billed);
-            return;
+            return billed;
         }
         context.addCloudTokens(billed);
-        if (billed > 0) budgetTracker.recordUsage(context.userId(), providerName, billed, costUsd);
+        if (billed > 0) {
+            budgetTracker.recordUsage(context.userId(), provider.name(), billed,
+                    ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply));
+        }
+        return billed;
     }
 
     /**
@@ -2019,7 +2015,7 @@ public class AgentLoop {
      */
     private AgentResult noAnswer(AgentContext context, boolean local, LlmProvider provider,
                                  LlmResponse reply, LlmException why) {
-        if (reply != null) account(context, local, provider, reply);
+        account(context, local, provider, reply);
         log.warn("Task {}: no usable reply from the model — {}", context.taskId(), why.getMessage());
         return AgentResult.error(why.getMessage(), context.trajectory(), context.elapsedMs());
     }

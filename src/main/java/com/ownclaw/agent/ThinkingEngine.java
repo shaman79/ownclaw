@@ -123,9 +123,10 @@ public class ThinkingEngine {
             log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
                     truncate(response.content(), 200));
 
-            // A refused reply, or one cut off by a limit of the model, never gets this far: the
-            // provider path throws ProviderRefused or OutputTruncated for it
-            // (LlmResponse.requireComplete), so everything below reads a whole reply.
+            // A refused reply, one cut off by a limit of the model, and one holding a tool call
+            // that cannot be run never get this far: the provider path throws ProviderRefused,
+            // OutputTruncated or MalformedToolCall for it (LlmResponse.requireComplete), so
+            // everything below reads a whole reply.
             String text = response.content() == null ? "" : response.content();
 
             // No tool call came back, but tools were offered.
@@ -147,10 +148,10 @@ public class ThinkingEngine {
                     log.info("protocol=native — answered directly with no tool call, provider={}",
                             provider.name());
                 }
-                return result(unlessAnsweredBeforeWork(parsed != null ? parsed
+                return new ThinkResult(unlessAnsweredBeforeWork(parsed != null ? parsed
                                 : new AgentAction(AgentAction.RESPOND, Map.of("message", text),
                                         "Answered directly without calling a tool"), context, mode),
-                        messages, text, response, provider);
+                        messages, text, response);
             }
 
             // A native tool call is unambiguous: no parsing, so no parse failure.
@@ -164,8 +165,8 @@ public class ThinkingEngine {
                 log.info("Native tool call: {} ({} args) — protocol=native, provider={}",
                         call.name(), args.size(), provider.name());
                 AgentAction called = new AgentAction(call.name(), args, text);
-                return result(unlessAnsweredBeforeWork(called, context, mode), messages,
-                        renderToolCallForDebug(response), response, provider);
+                return new ThinkResult(unlessAnsweredBeforeWork(called, context, mode), messages,
+                        renderToolCallForDebug(response), response);
             }
 
             // Nothing came back: no text and no tool call. There is nothing to parse, so it is
@@ -173,15 +174,15 @@ public class ThinkingEngine {
             // broken the text envelope -- and no sentence is invented to stand for the reply.
             if (text.isBlank()) {
                 String stop = response.stopDescription();
-                return result(unusable("", "Your previous reply was empty"
+                return new ThinkResult(unusable("", "Your previous reply was empty"
                                 + (stop == null ? "" : " (stop_reason: " + stop + ")")
                                 + ": no text and no tool call, so nothing was run.",
                                 "Continue from where the task stands."),
-                        messages, text, response, provider);
+                        messages, text, response);
             }
 
-            return result(unlessAnsweredBeforeWork(parseAction(text), context, mode), messages, text,
-                    response, provider);
+            return new ThinkResult(unlessAnsweredBeforeWork(parseAction(text), context, mode), messages, text,
+                    response);
         } catch (EgressRefused | ProviderRefused | OutputTruncated notToAskAgain) {
             // Not a step to ask again. The gateway refuses the same prompt again; the provider
             // declined to answer it; the reply or the conversation reached a limit of the model.
@@ -189,23 +190,26 @@ public class ThinkingEngine {
             // same way until the owner was told "3 consecutive reasoning failures". The loop
             // ends the task on each, saying which.
             throw notToAskAgain;
+        } catch (MalformedToolCall malformed) {
+            // The reply came, whole, and was billed; a tool call in it cannot be run, because its
+            // arguments are not a JSON object. Not an ending, and not a reply that "never came":
+            // nothing ran, the model is shown what it wrote, the call as it wrote it included,
+            // and it is asked again, within the loop's limits on steps that produce nothing.
+            LlmResponse reply = malformed.reply();
+            String text = reply.content() == null ? "" : reply.content();
+            String wrote = (text.isBlank() ? "" : text + "\n\n") + reply.invalidToolCall();
+            log.info("Task {}: the reply held a tool call that cannot be run ({} chars); asking again",
+                    context.taskId(), wrote.length());
+            return new ThinkResult(unusable(wrote, "Your previous reply held a tool call that cannot "
+                            + "be run, so nothing was run.",
+                    "Make the call again with its arguments as one JSON object."), messages, wrote, reply);
         } catch (LlmException e) {
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
             return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
                             + "model failed (" + e.getMessage() + "), so nothing was run.",
-                    "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(), 0);
+                    "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),
+                    null);
         }
-    }
-
-    /** A step's result, with the tokens the reply was billed and the model that wrote it. */
-    private static ThinkResult result(AgentAction action, List<LlmMessage> messages, String raw,
-                                      LlmResponse response, LlmProvider provider) {
-        // The model that wrote the reply, when the provider says: a declined request can be
-        // answered by Anthropic's fallback model, and it is priced at that model's rates.
-        return new ThinkResult(action, messages, raw, response.totalTokens(),
-                response.promptTokens(), response.completionTokens(),
-                response.cacheCreationTokens(), response.cacheReadTokens(),
-                response.model() != null ? response.model() : provider.model());
     }
 
     /**

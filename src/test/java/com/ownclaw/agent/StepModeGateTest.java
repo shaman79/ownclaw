@@ -308,7 +308,8 @@ class StepModeGateTest {
             public String model() { return "claude-opus-5"; }
         };
         var result = engine(config(true, false)).decideNextActionFull(context(false, true), fallback);
-        assertEquals("claude-opus-4-8", result.model());
+        assertEquals("claude-opus-4-8", result.reply().model(),
+                "the reply the loop prices, which names the model that wrote it");
     }
 
     // ── the health answer is settled once ──

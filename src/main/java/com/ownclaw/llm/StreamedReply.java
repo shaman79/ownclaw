@@ -30,7 +30,7 @@ final class StreamedReply {
     private final StringBuilder text = new StringBuilder();
     private final Map<Integer, Call> open = new LinkedHashMap<>();
     private final List<ToolCall> calls = new ArrayList<>();
-    /** Why the first call whose arguments did not parse was dropped, or null. */
+    /** Why the first call whose arguments did not parse was dropped, and what they were; or null. */
     private String malformed;
 
     private static final class Call {
@@ -93,8 +93,10 @@ final class StreamedReply {
             problem = e.getOriginalMessage();
         }
         if (malformed == null) {
+            // With the arguments as the model wrote them: what it is shown when it is asked to
+            // make the call again.
             malformed = "the model's arguments for tool '" + c.name + "' are not a JSON object ("
-                    + problem + ")";
+                    + problem + "):\n" + json;
         }
     }
 

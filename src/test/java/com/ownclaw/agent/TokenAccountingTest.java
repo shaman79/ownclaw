@@ -1,57 +1,118 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
+import com.ownclaw.llm.ToolCall;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * What a step is charged for.
+ * What a model call made for a task is charged for, through the real loop: every token it was
+ * billed, the prompt cache included, priced attempt by attempt at the rates of the model that ran
+ * each -- the think, code and analysis calls alike, by one path (AgentLoop.account).
  * <p>
  * Anthropic reports {@code input_tokens} as only the tokens that were neither read from nor
  * written to the prompt cache; reads and writes are separate and additional. Every figure in this
  * system was derived from prompt + completion alone, so with caching working as designed — which
  * is the entire point of keeping the system prompt static — the live counter, the token_usage
- * table and every budget ceiling were reading a small fraction of the real usage.
+ * table and every budget ceiling were reading a small fraction of the real usage. And a reply can
+ * be billed for more than one attempt: a model that declines part-way hands the reply to a
+ * fallback model, and a refusal can be retried on the model it names.
  */
 class TokenAccountingTest {
 
-    private static ThinkResult step(int prompt, int completion, int cacheWrite, int cacheRead) {
-        return new ThinkResult(null, List.of(), "", prompt + completion,
-                prompt, completion, cacheWrite, cacheRead, "claude-opus-5");
+    /** A think reply that calls {@code noop}, billed for these attempts, written by {@code model}. */
+    private static LoopRig.Reply noop(String model, LlmResponse.Usage... attempts) {
+        return c -> new LlmResponse("", List.of(new ToolCall("c1", "noop", Map.of())), null, "tool_use",
+                null, model, null, null, List.of(attempts));
+    }
+
+    /** The answer, billed for nothing, so the step under test is the only row. */
+    private static final LoopRig.Reply DONE = c -> Replies.of("", 0, 0, 0, 0, "tool_use",
+            List.of(new ToolCall("c2", AgentAction.RESPOND, Map.of("message", "done"))));
+
+    /** The task's usage row after one step replied as {@code step}. */
+    private static Map<String, Object> usage(Path tmp, LoopRig.Reply step) throws Exception {
+        var rig = new LoopRig(tmp, List.of(TaskEndToEndTest.NOOP));
+        rig.cloud.think.add(step);
+        rig.cloud.think.add(DONE);
+        rig.turn(TaskEndToEndTest.session(rig), "check the network");
+        return rig.jdbc.queryForMap("SELECT tokens_used, cost_usd FROM token_usage WHERE user_id = 'u1'");
+    }
+
+    private static LlmResponse.Usage attempt(String model, int prompt, int completion, int cacheWrite, int cacheRead) {
+        return new LlmResponse.Usage(model, prompt, completion, cacheWrite, cacheRead);
     }
 
     @Test
     @DisplayName("a cached step counts the cache, not just the uncached remainder")
-    void cachedStepCountsCache() {
+    void cachedStepCountsCache(@TempDir Path tmp) throws Exception {
         // The shape of a real production step: a small uncached delta over a large cached prefix.
-        ThinkResult r = step(400, 250, 0, 11_800);
-        assertEquals(650, r.totalTokens(), "the reported prompt+completion, unchanged");
-        assertEquals(12_450, r.billedTokens(),
+        var row = usage(tmp, noop("claude-opus-5", attempt("claude-opus-5", 400, 250, 0, 11_800)));
+        assertEquals(12_450, row.get("tokens_used"),
                 "what is actually billed — dropping the cache read understates this by ~19x");
+        assertEquals((400 * 5.0 + 250 * 25.0 + 11_800 * 0.5) / 1_000_000,
+                ((Number) row.get("cost_usd")).doubleValue(), 1e-12, "a cache read at a tenth of input");
     }
 
     @Test
     @DisplayName("a cache write is billed too")
-    void cacheWriteCounts() {
-        assertEquals(10_700, step(500, 200, 10_000, 0).billedTokens());
+    void cacheWriteCounts(@TempDir Path tmp) throws Exception {
+        var row = usage(tmp, noop("claude-opus-5", attempt("claude-opus-5", 500, 200, 10_000, 0)));
+        assertEquals(10_700, row.get("tokens_used"));
     }
 
     @Test
-    @DisplayName("a provider reporting only a total is not zeroed out")
-    void totalOnlyFallback() {
-        // The no-breakdown constructor: components are 0 and the total is all there is.
-        ThinkResult r = new ThinkResult(null, List.of(), "", 1234);
-        assertEquals(1234, r.billedTokens(),
-                "falling back to the component sum here would report zero usage");
+    @DisplayName("with no caching the billed tokens are the reported ones, so nothing changes for Ollama or OpenAI")
+    void uncachedIsUnchanged(@TempDir Path tmp) throws Exception {
+        var row = usage(tmp, noop("claude-opus-5", attempt("claude-opus-5", 3_000, 500, 0, 0)));
+        assertEquals(3_500, row.get("tokens_used"));
     }
 
     @Test
-    @DisplayName("with no caching the two agree, so nothing changes for Ollama or OpenAI")
-    void uncachedIsUnchanged() {
-        ThinkResult r = step(3000, 500, 0, 0);
-        assertEquals(r.totalTokens(), r.billedTokens());
+    @DisplayName("a step billed for two attempts is priced attempt by attempt, not as the model asked for or the one that answered")
+    void everyAttemptAtItsOwnRates(@TempDir Path tmp) throws Exception {
+        // Asked of claude-opus-5 (the provider's model); declined part-way, finished by
+        // claude-sonnet-5, which the reply names. A million input tokens each.
+        var row = usage(tmp, noop("claude-sonnet-5",
+                attempt("claude-opus-5", 1_000_000, 0, 0, 0), attempt("claude-sonnet-5", 1_000_000, 0, 0, 0)));
+        assertEquals(2_000_000, row.get("tokens_used"));
+        assertEquals(5.0 + 2.0, ((Number) row.get("cost_usd")).doubleValue(), 1e-9,
+                "$5 for the attempt on the model asked, $2 for the one that finished: not $10, not $4");
+    }
+
+    @Test
+    @DisplayName("an attempt that names no model is priced as the model the reply names, not the one asked")
+    void anUnnamedAttemptIsTheServedModels(@TempDir Path tmp) throws Exception {
+        var row = usage(tmp, noop("claude-sonnet-5", attempt(null, 1_000_000, 0, 0, 0)));
+        assertEquals(2.0, ((Number) row.get("cost_usd")).doubleValue(), 1e-9,
+                "claude-sonnet-5's $2, not the $5 of claude-opus-5, the provider's model");
+    }
+
+    @Test
+    @DisplayName("the library analysis is counted and priced by the same path, a reply that is no answer too")
+    void theAnalysisIsCounted(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.think.add(c -> Replies.of("", 0, 0, 0, 0, "tool_use",
+                List.of(new ToolCall("c1", AgentAction.SKILL_MANAGE, Map.of("action", "analyze")))));
+        rig.cloud.think.add(c -> new LlmResponse("{\"summary\": \"lean\"}", List.of(), null, "end_turn", null,
+                "claude-sonnet-5", null, null, List.of(attempt("claude-sonnet-5", 1_000_000, 0, 0, 0))));
+        rig.cloud.think.add(c -> Replies.of("", 0, 0, 0, 0, "tool_use",
+                List.of(new ToolCall("c2", AgentAction.SKILL_MANAGE, Map.of("action", "analyze")))));
+        rig.cloud.think.add(c -> new LlmResponse("", List.of(), null, "refusal", "cyber", "claude-opus-5",
+                null, null, List.of(attempt("claude-opus-5", 1_000_000, 0, 0, 0))));
+        rig.cloud.think.add(DONE);
+        rig.turn(TaskEndToEndTest.session(rig), "tidy up my skills");
+
+        var row = rig.jdbc.queryForMap("SELECT tokens_used, cost_usd FROM token_usage WHERE user_id = 'u1'");
+        assertEquals(2_000_000, row.get("tokens_used"), "both analyses were billed, the refused one too");
+        assertEquals(2.0 + 5.0, ((Number) row.get("cost_usd")).doubleValue(), 1e-9);
     }
 }

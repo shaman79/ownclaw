@@ -312,7 +312,14 @@ public class LocalExecutor {
                     log.error("Local LLM call failed during delegation step {}: {}", step + 1, kept);
                     return partial("Local LLM call failed: " + kept, mine);
                 }
-                log.error("Local LLM call failed during delegation step {}: {}", step + 1, msg, e);
+                if (e instanceof MalformedToolCall) {
+                    // Its message quotes the model's own arguments: the log gets their length,
+                    // as it does for a reply that could not be parsed.
+                    log.error("Local LLM call failed during delegation step {}: a tool call that "
+                            + "cannot be run ({} chars)", step + 1, msg.length());
+                } else {
+                    log.error("Local LLM call failed during delegation step {}: {}", step + 1, msg, e);
+                }
                 return partial("Local LLM call failed: " + msg, mine);
             }
 

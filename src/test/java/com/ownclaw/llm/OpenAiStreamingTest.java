@@ -145,6 +145,8 @@ class OpenAiStreamingTest {
         assertFalse(r.hasToolCalls(), "not a call with empty arguments");
         var e = assertThrows(MalformedToolCall.class, () -> r.requireComplete("openai"));
         assertTrue(e.getMessage().contains("'shell_exec'"), e.getMessage());
+        assertTrue(e.reply().invalidToolCall().endsWith(":\n{\"command\": ls -la}"),
+                "the arguments as the model wrote them, to show it: " + e.reply().invalidToolCall());
         assertEquals(5, e.reply().completionTokens());
     }
 

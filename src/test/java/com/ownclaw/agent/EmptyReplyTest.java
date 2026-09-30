@@ -272,4 +272,31 @@ class EmptyReplyTest {
         assertEquals("Paris.", r.response());
         assertEquals(2, cloud.requests.size());
     }
+
+    @Test
+    @DisplayName("a tool call that cannot be run is shown to the model as it wrote it, counted, and asked again -- not an ending")
+    void aCallThatCannotBeRunIsAskedAgain(@TempDir Path tmp) throws Exception {
+        // Anthropic does not check a tool input it streams: the arguments can end half-written.
+        String arguments = "{\"to\": \"owner@example.org\", \"body\": \"The capital is";
+        var malformed = new LlmResponse("Sending the answer.", List.of(),
+                "the model's arguments for tool 'send_email' are not a JSON object (Unexpected end-of-input):\n"
+                        + arguments,
+                "tool_use", null, "claude-opus-5", 128_000, 1_000_000,
+                List.of(new LlmResponse.Usage("claude-opus-5", 300, 40, 0, 0)));
+        var cloud = new Script(true, malformed, respond("Paris."));
+        var ctx = new AgentContext("u1", "t-malformed", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Paris.", r.response());
+        assertEquals(ThinkingEngine.THINKING, ctx.trajectory().turns().get(0).action().tool(), "nothing was run");
+        var second = cloud.requests.get(1);
+        String told = second.get(second.size() - 1).content();
+        assertTrue(told.contains("Your previous reply held a tool call that cannot be run, so nothing was run."), told);
+        assertTrue(told.contains(arguments) && told.contains("Sending the answer."),
+                "the model is shown what it wrote, the call as it wrote it included: " + told);
+        assertFalse(told.contains("never came"), "the reply came: " + told);
+        assertEquals(340 + 320, ctx.cloudTokens(), "the reply that could not be run was billed, and is counted");
+    }
 }

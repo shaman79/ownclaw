@@ -149,6 +149,33 @@ class LocalLogPrivacyTest {
     }
 
     @Test
+    @DisplayName("a tool call that cannot be run is logged by its length: its message quotes the model's arguments")
+    void aMalformedCallIsNotLogged() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        LlmProvider llm = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                throw new MalformedToolCall("ollama", new LlmResponse("", List.of(),
+                        "the model's arguments for tool 'ping' are not a JSON object (Unexpected end-of-input):\n"
+                                + "{\"host\": \"nas.example.org", "stop", null, null, null, null, List.of()));
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "malformed"; }
+        };
+        var appender = capture();
+        try {
+            var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
+                    new ToolRegistry(List.of(ping)), new ChatStatusEmitter(), new Usage())
+                    .execute(plan("ping the NAS"), DelegationBehaviourTest.task());
+            assertTrue(outcome.text().contains("nas.example.org"), "the cloud is told what went wrong: " + outcome.text());
+            String log = logged(appender);
+            assertTrue(log.contains("a tool call that cannot be run ("), log);
+            assertFalse(log.contains("nas.example.org"), "the model's arguments are not logged: " + log);
+        } finally {
+            release(appender);
+        }
+    }
+
+    @Test
     @DisplayName("a tool call that cannot be run is counted, and after a private read its text stays out")
     void aMalformedCallIsCountedAndKeptOut() {
         var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
