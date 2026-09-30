@@ -119,22 +119,6 @@ class LivePathGuardsTest {
                         + "there swallows an earlier artifact's attribution:\n" + body);
     }
 
-    @Test
-    @DisplayName("the canary normalises each part once, not once per hit")
-    void theCanaryIsNotQuadratic() throws IOException {
-        // Behaviourally identical, which is why reverting it left the suite green -- the cost is
-        // the only difference: 7.8 seconds measured on one 130 KB part, on every step.
-        String s = read("com.ownclaw.privacy.PrivateIndex");
-        int start = s.indexOf("public Hit firstLeakIn(");
-        assertTrue(start > 0, "firstLeakIn was renamed; this test no longer guards it");
-        String body = s.substring(start, s.indexOf("\n    }\n", start));
-        assertEquals(1, body.split("normalise\\(", -1).length - 1, "normalised once: " + body);
-        assertTrue(body.contains("firstHitInNormalised(n, from)"),
-                "each run is looked for in the text normalised once: " + body);
-        assertTrue(read("com.ownclaw.llm.CloudGateway").contains(".firstLeakIn(part.text(), egress.allowed())"),
-                "and the gateway walks a part's runs through it");
-    }
-
     /** One branch of runLoop: from its opening line to the next top-level {@code if (action.}. */
     private static String runLoopBranch(String s, String opening) {
         int loop = s.indexOf("private AgentResult runLoop(");

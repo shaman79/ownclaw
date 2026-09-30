@@ -152,10 +152,18 @@ class EmptyReplyTest {
 
     /** The real loop, engine and gateway, with the cloud behind the gateway answering from a script. */
     private static AgentResult run(JdbcTemplate jdbc, Script cloud, AgentContext ctx) {
-        var config = new OwnClawConfig();
+        return run(jdbc, cloud, ctx, new ToolRegistry(List.of()), new OwnClawConfig());
+    }
+
+    private static AgentResult run(JdbcTemplate jdbc, Script cloud, AgentContext ctx,
+                                   ToolRegistry registry, OwnClawConfig config) {
         config.getMentor().setProvider("anthropic");
-        return AssistantPartsTest.loop(jdbc, new ToolRegistry(List.of()),
-                AssistantPartsTest.gateway(cloud, new ArrayList<>()), config).executeWithContext(ctx);
+        return AssistantPartsTest.loop(jdbc, registry, AssistantPartsTest.gateway(cloud, new ArrayList<>()),
+                config).executeWithContext(ctx);
+    }
+
+    static LlmResponse call(String tool, Map<String, Object> args) {
+        return new LlmResponse("", 300, 20, 0, 0, "tool_use", List.of(new ToolCall("c-" + tool, tool, args)));
     }
 
     @Test
@@ -192,6 +200,61 @@ class EmptyReplyTest {
                 "there is no reply to replay: " + second);
         assertTrue(second.get(second.size() - 1).content()
                 .contains("Your previous reply was empty (stop_reason: end_turn)"));
+    }
+
+    @Test
+    @DisplayName("five in a task stop it, though never three in a row -- with a warning before the fifth")
+    void fiveInATaskStopIt(@TempDir Path tmp) throws Exception {
+        var registry = new ToolRegistry(List.of(AssistantPartsTest.tool("fetch_page", List.of(),
+                p -> "the page says the service is up")));
+        var cloud = new Script(true, empty(), call("fetch_page", Map.of()), empty(), call("fetch_page", Map.of()),
+                empty(), call("fetch_page", Map.of()), empty(), call("fetch_page", Map.of()), empty());
+        var ctx = new AgentContext("u1", "t-five", "Is the service up?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
+
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+        assertEquals("The model produced nothing that could be run 5 times in this task.", r.response());
+        var told = ctx.trajectory().turns().stream()
+                .filter(t -> ThinkingEngine.THINKING.equals(t.action().tool()))
+                .map(t -> t.observation().output()).toList();
+        assertEquals(5, told.size(), "every one on the record, the one that ended the task too");
+        for (int i = 0; i < 5; i++) {
+            assertEquals(i == 3, told.get(i).contains("WARNING: one more step like this"),
+                    "warned before the fifth, and only then: " + i + " " + told.get(i));
+        }
+    }
+
+    @Test
+    @DisplayName("the last step allowed, producing nothing to run, ends the task as out of steps, saying so")
+    void theLastStepProducingNothing(@TempDir Path tmp) throws Exception {
+        var config = new OwnClawConfig();
+        config.getTasks().setMaxPlanSteps(2);
+        var cloud = new Script(true, empty());
+        var ctx = new AgentContext("u1", "t-last", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, new ToolRegistry(List.of()), config);
+
+        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason(), r.response());
+        assertEquals("The task used all 2 steps it may take; the last produced nothing that could be run.",
+                r.response(), "not an offer to continue a task whose last step did nothing");
+        assertFalse(ctx.trajectory().turns().get(1).observation().output().contains("WARNING"),
+                "the task stopped; a warning about the next step would not be true");
+    }
+
+    @Test
+    @DisplayName("an answer between two empty replies ends the run of them, even one that is not delivered")
+    void anAnswerEndsTheRun(@TempDir Path tmp) throws Exception {
+        // {{7}} names no result, so the answer is refused and the model asked again -- but it was
+        // an answer, not a step that produced nothing.
+        var cloud = new Script(true, empty(), empty(), respond("{{7}}"), empty(), respond("Paris."));
+        var ctx = new AgentContext("u1", "t-between", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Paris.", r.response());
+        assertEquals(5, cloud.requests.size());
     }
 
     @Test

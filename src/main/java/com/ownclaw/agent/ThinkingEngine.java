@@ -131,7 +131,8 @@ public class ThinkingEngine {
             // No tool call came back, but tools were offered.
             //
             // On Anthropic that means the model chose to answer in prose, and treating it as a
-            // final answer is right. On a local model it does NOT: Ollama reports a "tools"
+            // final answer is right (unless it answers unattended work before any of it ran:
+            // unlessAnsweredBeforeWork). On a local model it does NOT: Ollama reports a "tools"
             // capability per model, and a model that advertises it may still ignore the tools
             // array and emit the old JSON envelope as text. Mapping that straight to RESPOND
             // would deliver the raw JSON to the user as the answer. So parse first, and only
@@ -142,45 +143,28 @@ public class ThinkingEngine {
                 if (parsed != null) {
                     log.info("protocol=native-but-text — the model ignored the tools array and "
                             + "emitted a text action; parsed it rather than delivering JSON.");
-                    return result(parsed, messages, text, response, provider);
+                } else {
+                    log.info("protocol=native — answered directly with no tool call, provider={}",
+                            provider.name());
                 }
-                log.info("protocol=native — answered directly with no tool call, provider={}",
-                        provider.name());
-                // ...except when the registry is withheld and nothing has run yet. Then a prose
-                // reply is a plan ("I'll fetch today's news digest first"), not an answer, and
-                // delivering it as the final answer is how this change would quietly break the
-                // owner's morning email: task COMPLETED, nothing done.
-                AgentAction answer = nothingRanYet(context, mode)
-                        ? answeredBeforeWork(text)
-                        : new AgentAction(AgentAction.RESPOND, Map.of("message", text),
-                                "Answered directly without calling a tool");
-                return result(answer, messages, text, response, provider);
+                return result(unlessAnsweredBeforeWork(parsed != null ? parsed
+                                : new AgentAction(AgentAction.RESPOND, Map.of("message", text),
+                                        "Answered directly without calling a tool"), context, mode),
+                        messages, text, response, provider);
             }
 
             // A native tool call is unambiguous: no parsing, so no parse failure.
             if (nativeTools && response.hasToolCalls()) {
                 var call = response.toolCalls().get(0);
                 Map<String, Object> args = call.arguments() == null ? Map.of() : call.arguments();
-                // The same guard, on the channel the prompt actually teaches. Under native
-                // tools the system prompt says "For respond: put the whole answer in the message
-                // argument" -- so a model that cannot run daily_news_digest says so by CALLING
-                // respond, not by writing prose. That took the branch below, kept the model's
-                // text as its reasoning, and AgentLoop returned COMPLETED: a scheduled run
-                // recorded green with no email and nothing run. The prose guard covered the
-                // less likely half.
-                if (AgentAction.RESPOND.equals(call.name()) && nothingRanYet(context, mode)) {
-                    log.info("Unattended task {}: refused to finish — nothing has run yet.",
-                            context.taskId());
-                    return result(answeredBeforeWork(String.valueOf(args.getOrDefault("message", ""))),
-                            messages, renderToolCallForDebug(response), response, provider);
-                }
                 // Logged at INFO because otherwise there is no way to tell from outside which
                 // protocol a step used: a correct answer looks identical either way, and the
                 // token counts do not distinguish them. Without this the flag cannot be
                 // verified in production at all, only assumed.
                 log.info("Native tool call: {} ({} args) — protocol=native, provider={}",
                         call.name(), args.size(), provider.name());
-                return result(new AgentAction(call.name(), args, text), messages,
+                AgentAction called = new AgentAction(call.name(), args, text);
+                return result(unlessAnsweredBeforeWork(called, context, mode), messages,
                         renderToolCallForDebug(response), response, provider);
             }
 
@@ -196,7 +180,8 @@ public class ThinkingEngine {
                         messages, text, response, provider);
             }
 
-            return result(parseAction(text), messages, text, response, provider);
+            return result(unlessAnsweredBeforeWork(parseAction(text), context, mode), messages, text,
+                    response, provider);
         } catch (EgressRefused | ProviderRefused | OutputTruncated notToAskAgain) {
             // Not a step to ask again. The gateway refuses the same prompt again; the provider
             // declined to answer it; the reply or the conversation reached a limit of the model.
@@ -232,6 +217,23 @@ public class ThinkingEngine {
         boolean said = wrote != null && !wrote.isBlank();
         return new AgentAction(THINKING, said ? Map.of("message", wrote) : Map.of(),
                 what + (said ? " It was:\n\n" + wrote + "\n\n" : "\n\n") + next);
+    }
+
+    /**
+     * The action a reply stands for -- unless it answers restricted unattended work before
+     * anything has run ({@link #nothingRanYet}): then it is {@link #answeredBeforeWork}, and the
+     * model is asked again. One check for every channel a reply can finish through: prose, a
+     * respond call, and a respond envelope written as text, which a local model orchestrating in
+     * the cloud's place emits. Guarded one channel at a time, each guard left the others open:
+     * the prose guard let through the respond call the native prompt teaches ("For respond: put
+     * the whole answer in the message argument"), and a scheduled run was recorded green with
+     * nothing run; the two guards together still let the envelope through.
+     */
+    private static AgentAction unlessAnsweredBeforeWork(AgentAction action, AgentContext context,
+                                                        StepMode mode) {
+        if (!action.isResponse() || !nothingRanYet(context, mode)) return action;
+        log.info("Unattended task {}: refused to finish — nothing has run yet.", context.taskId());
+        return answeredBeforeWork(action.responseText());
     }
 
     /**
@@ -273,14 +275,16 @@ public class ThinkingEngine {
 
     /**
      * The task, then every step in the order it happened: the model's action as an assistant
-     * turn, its result as the user turn after it -- each whole, PRIVATE results as the
-     * descriptions they were recorded as.
+     * turn, its result as the user turn after it ({@link AgentTrajectory.Turn#observationText})
+     * -- each whole, PRIVATE results as the descriptions they were recorded as.
      * <p>
      * A step the loop took itself ({@link AgentTrajectory.Turn#byTheLoop}) has no assistant turn:
      * the model did not write it. What the model was told about it -- a reply that could not be
-     * used, a reflection -- joins the user turn it follows, in its place. So an assistant turn
-     * holds nothing but what the model wrote, and the roles alternate as the Messages API
-     * requires.
+     * used, a reflection -- joins the user turn it follows, in its place, and the roles alternate
+     * as the Messages API requires. So an assistant turn holds what the model wrote, with one
+     * exception that byTheLoop names: the skill_create the loop runs at step 1 when
+     * CapabilityResolver finds a missing capability is replayed as an action, and its arguments
+     * and reasoning are the resolver's constants.
      * <p>
      * Every message but the last is the same bytes on every later step, so the conversation is
      * append-only and the provider's sliding cache breakpoints keep hitting. The last user turn
@@ -301,7 +305,7 @@ public class ThinkingEngine {
             }
             messages.add(LlmMessage.user(user.toString()));
             messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action())));
-            user = new StringBuilder(formatObservationForMultiTurn(turn));
+            user = new StringBuilder(turn.observationText());
             replayed = true;
         }
         if (!replayed) user.insert(task.length(), CACHE_BOUNDARY_MARKER);
@@ -450,9 +454,8 @@ public class ThinkingEngine {
      * Restricted unattended work where nothing has actually succeeded yet.
      * <p>
      * In that state an answer is a plan, not an answer — "I'll fetch today's news digest first"
-     * — and delivering it ends the task COMPLETED having done nothing. Shared by both channels
-     * the model can finish through, because covering one and not the other is what let this
-     * through the first time.
+     * — and delivering it ends the task COMPLETED having done nothing. Asked of every channel the
+     * model can finish through, in {@link #unlessAnsweredBeforeWork}.
      */
     private static boolean nothingRanYet(AgentContext context, StepMode mode) {
         return mode.localFirst() && context.trajectory().turns().stream()
@@ -625,17 +628,6 @@ public class ThinkingEngine {
         } catch (Exception e) {
             return "{\"tool\": \"" + action.tool() + "\"}";
         }
-    }
-
-    /** A step's result as the user turn after it: which tool, how it went, and its output whole. */
-    private String formatObservationForMultiTurn(AgentTrajectory.Turn turn) {
-        var sb = new StringBuilder();
-        sb.append("[").append(turn.action().tool()).append("] ");
-        sb.append(turn.observation().success() ? "OK" : "FAILED");
-        sb.append(" (").append(turn.observation().durationMs()).append("ms)\n");
-        String output = turn.observation().output();
-        if (output != null && !output.isBlank()) sb.append(output);
-        return sb.toString();
     }
 
     /**

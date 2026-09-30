@@ -17,9 +17,9 @@ import java.util.function.BiPredicate;
  * @param purpose      think | codegen | analyze — one word, for the ledger row
  * @param index        the task's canary index: every PRIVATE artifact's windows
  * @param secretValues decrypted vault values that must be scrubbed from the body, by key
- * @param allowed      whether a hit (handle, normalised window) is material the cloud was
- *                     already given — the task text, or a PUBLIC artifact recorded before the
- *                     private one — and may go
+ * @param allowed      whether a stretch of hits (handle, normalised text: one window, or several
+ *                     running on) is material the cloud was already given — the task text, or a
+ *                     PUBLIC artifact recorded before the private one — and may go
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,

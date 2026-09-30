@@ -178,9 +178,12 @@ public final class CloudGateway implements LlmProvider {
             // compares each argument as typed, and the replay is JSON, so a window that starts at
             // a quote or spans an escape never matches.
             //
-            // Sound only while nothing but model output goes into an assistant message:
-            // AssistantPartsTest pins that the replay carries a reference as the model wrote it,
-            // never the bytes it resolves to. The vault check above still covers these parts.
+            // Sound only while nothing but model output goes into an assistant message -- and the
+            // one action the loop writes itself under a tool's name, the skill_create
+            // CapabilityResolver builds at step 1 from its own constants, which holds no result
+            // either (AgentTrajectory.Turn#byTheLoop). AssistantPartsTest pins that the replay
+            // carries a reference as the model wrote it, never the bytes it resolves to. The
+            // vault check above still covers these parts.
             if ("assistant".equals(part.kind())) continue;
             // The registry's own parts: excused, as the allowance at the top of (c) says.
             if (part.kind().startsWith("tool:") || part.kind().startsWith("schema:")) continue;
@@ -189,6 +192,7 @@ public final class CloudGateway implements LlmProvider {
             // same index and the same excuses: a result whose own facts say PUBLIC but whose
             // bytes repeat a private one is labelled PRIVATE there and reaches this part as a
             // description, instead of ending the task here one step later.
+            // (AgentContext.firstLeakIn says where the two can still come apart.)
             PrivateIndex.Hit hit = egress.index().firstLeakIn(part.text(), egress.allowed());
             if (hit != null) {
                 String ref = "{{" + hit.handle() + "}} in part " + part.index() + " (" + part.kind()

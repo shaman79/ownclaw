@@ -46,8 +46,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * and the Anthropic renderer replays the cloud's actions as JSON too -- so the same escaped run
  * sat in both, and the canary refused the cloud's own words. The gateway no longer scans
  * assistant parts. That is sound only while an assistant part holds nothing but what the model
- * wrote, which is what these tests pin, through the real renderer, the real gateway, and once
- * through the real loop.
+ * wrote (and, at step 1, the skill_create the loop builds from CapabilityResolver's constants,
+ * which carries no result either). These tests pin the first, through the real renderer, the
+ * real gateway, and once through the real loop.
  */
 class AssistantPartsTest {
 

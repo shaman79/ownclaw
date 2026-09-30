@@ -200,6 +200,22 @@ class StepModeGateTest {
     }
 
     @Test
+    @DisplayName("a respond envelope written as text before any work produces nothing to run either")
+    void aTextEnvelopeBeforeAnyWorkIsRefused() {
+        // The third channel: a local model orchestrating in the cloud's place ignores the tools
+        // array and writes the old JSON envelope as text. It was parsed and returned as the answer
+        // before the guard was asked, so the run ended COMPLETED with nothing run.
+        var result = engine(config(true, true)).decideNextActionFull(context(true, true),
+                answering(true, new LlmResponse("{\"tool\": \"respond\", \"params\": {\"message\": "
+                        + "\"I'll fetch today's news digest first.\"}}", 10, 5)));
+
+        assertEquals(ThinkingEngine.THINKING, result.action().tool(),
+                "as a respond the task ends green having done nothing");
+        assertEquals("I'll fetch today's news digest first.", result.action().params().get("message"));
+        assertTrue(result.action().reasoning().contains("Call 'delegate'"), result.action().reasoning());
+    }
+
+    @Test
     @DisplayName("a native respond call after real work is a real answer")
     void nativeRespondAfterWorkIsAnAnswer() {
         var engine = engine(config(true, true));

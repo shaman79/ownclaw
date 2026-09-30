@@ -8,7 +8,10 @@ import com.ownclaw.llm.CloudGateway;
 import com.ownclaw.llm.EgressLedger;
 import com.ownclaw.llm.EgressRefused;
 import com.ownclaw.llm.LlmMessage;
+import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
+import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.ToolCall;
 import com.ownclaw.privacy.Label;
 import com.ownclaw.privacy.PrivateIndex;
 import org.junit.jupiter.api.DisplayName;
@@ -16,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,8 +35,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * Before, such a result was shown to the cloud whole, and the canary refused the next call over
  * it: the task ended there, as a privacy block, on a result nothing had labelled wrongly by its
  * facts -- a public skill that printed a file a credentialed skill had written. The label and the
- * door now ask one question, {@link AgentContext#firstLeakIn}, so what the door would refuse is
- * already a description when the cloud is shown it.
+ * door now ask one question, {@link AgentContext#firstLeakIn}, so what the door would refuse of a
+ * result is already a description when the cloud is shown it -- but for a coincidence at the
+ * result's edges, which that method's javadoc states.
  */
 class RepeatedPrivateResultTest {
 
@@ -83,25 +88,23 @@ class RepeatedPrivateResultTest {
     // ── one question, asked by the label and by the door ──
 
     @Test
-    @DisplayName("the label is PRIVATE exactly when the gateway would refuse to send the result")
-    void theLabelAndTheDoorCannotDisagree() {
+    @DisplayName("the label is PRIVATE exactly when the gateway would refuse the result as each renderer sends it")
+    void theLabelAndTheDoorAgree() {
         String excusedLine = "Output: a Markdown report that begins exactly with the audit header";
         String secret = REPORT + "\nwireless.default_radio0.key='Qx7-Lm2-Rt9-Wq4z-Pk5-Hn8'";
-        var ctx = new AgentContext("u1", "t1", "Audit the routers. " + excusedLine);
         String spec = "Devices checked, then one section per device with guest isolation OK or BROKEN";
-        ctx.trajectory().record(new AgentAction("plan_report", Map.of("spec", spec), "planning"),
-                AgentObservation.success("plan_report", "noted", Map.of(), 5));
-        ctx.addArtifact("router_audit", Map.of(), Map.of(),
-                excusedLine + "\n" + spec + "\n" + secret, true,
-                Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+        String privateResult = excusedLine + "\n" + spec + "\n" + secret;
 
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var config = new OwnClawConfig();
         config.getMentor().setProvider("anthropic");
         var cloud = new AssistantPartsTest.Scripted(List.of(AssistantPartsTest.call("respond", Map.of("message", "ok"))));
         var gateway = new CloudGateway(cloud, cloud, config, row -> { }, null);
 
         // Texts built from what a result can carry: fresh words, runs of the private result,
-        // text the owner or the cloud wrote that the private result repeats, in any mix.
+        // text the owner or the cloud wrote that the private result repeats, in any mix. (What the
+        // frame's own characters can add at a result's edges is stated on AgentContext.firstLeakIn
+        // and pinned in PrivateIndexTest; none of these texts meets it.)
         var random = new Random(20260930);
         String[] fresh = {"status ok ", "the page says hello world again ", "12 items processed\n",
                 "Weather: sunny, 21 degrees. ", "{\"ok\": true, \"count\": 3} "};
@@ -120,20 +123,227 @@ class RepeatedPrivateResultTest {
                 }
             }
             String output = text.toString();
+
+            // The task as the loop holds it when the result comes back: the owner's message, the
+            // argument the cloud typed, the private result. The label is decided then...
+            var ctx = new AgentContext("u1", "t1", "Audit the routers. " + excusedLine);
+            ctx.trajectory().record(new AgentAction("plan_report", Map.of("spec", spec), "planning"),
+                    AgentObservation.success("plan_report", "noted", Map.of(), 5));
+            var audit = ctx.addArtifact("router_audit", Map.of(), Map.of(), privateResult, true,
+                    Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+            ctx.trajectory().record(new AgentAction("router_audit", Map.of(), "auditing"),
+                    Artifact.asObservation(audit, ToolResult.success(privateResult), 10));
             boolean labelledPrivate = ctx.decide(List.of(), List.of(), false, output).label() == Label.PRIVATE;
-            boolean refused;
-            try {
-                gateway.chat(List.of(LlmMessage.system("S"), LlmMessage.user(output)),
-                        LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think")));
-                refused = false;
-            } catch (EgressRefused e) {
-                refused = true;
+
+            // ...and the door sees the result as each renderer sends a public one: whole, in its
+            // frame, on the next think call.
+            ctx.trajectory().record(new AgentAction("cat_report", Map.of(), ""),
+                    AgentObservation.success("cat_report", output, Map.of(), 7));
+            for (String provider : List.of("anthropic", "openai")) {
+                var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
+                boolean refused;
+                try {
+                    gateway.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think")));
+                    refused = false;
+                } catch (EgressRefused e) {
+                    refused = true;
+                }
+                assertEquals(refused, labelledPrivate, provider + ": the label and the door disagree on: " + output);
             }
-            assertEquals(refused, labelledPrivate, "the label and the door disagree on: " + output);
             if (labelledPrivate) privateSeen++; else publicSeen++;
         }
         assertTrue(privateSeen > 50 && publicSeen > 50,
                 "both answers were exercised: " + privateSeen + " private, " + publicSeen + " public");
+    }
+
+    /** A cloud behind the real gateway, under the name of either renderer's provider. */
+    static final class Named implements LlmProvider {
+        final String name;
+        final List<ToolCall> script;
+        final List<List<LlmMessage>> requests = new ArrayList<>();
+        Named(String name, ToolCall... script) {
+            this.name = name;
+            this.script = List.of(script);
+        }
+        public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+            requests.add(m);
+            return new LlmResponse("", 100, 10, 0, 0, "tool_use",
+                    List.of(script.get(Math.min(requests.size(), script.size()) - 1)));
+        }
+        public boolean isAvailable() { return true; }
+        public boolean supportsTools() { return true; }
+        public String name() { return name; }
+        public String model() { return "claude-opus-5"; }
+    }
+
+    private static AgentResult run(Path db, Named cloud, ToolRegistry registry, List<EgressLedger.Row> rows,
+                                   AgentContext ctx) throws Exception {
+        var config = new OwnClawConfig();
+        config.getMentor().setProvider(cloud.name);
+        var gateway = new CloudGateway(cloud, cloud, config, rows::add, null);
+        return AssistantPartsTest.loop(MigratedDatabase.at(db), registry, gateway, config).executeWithContext(ctx);
+    }
+
+    @Test
+    @DisplayName("through the real loop, on both renderers: a public result repeating the cloud's words is sent, though a private one quotes them too")
+    void anEchoOfTheCloudsWordsIsSent(@TempDir Path tmp) throws Exception {
+        String typed = "Guest SSID must stay isolated from the LAN at all times.";
+        for (String provider : List.of("anthropic", "openai")) {
+            var registry = new ToolRegistry(List.of(
+                    AssistantPartsTest.tool("store_note", List.of("NOTES_TOKEN"), p -> "Stored note: " + p.get("note")),
+                    AssistantPartsTest.tool("print_text", List.of(), p -> String.valueOf(p.get("text")))));
+            var cloud = new Named(provider,
+                    AssistantPartsTest.call("store_note", Map.of("note", typed)),
+                    AssistantPartsTest.call("print_text", Map.of("text", typed)),
+                    AssistantPartsTest.call("respond", Map.of("message", "Noted.")));
+            var rows = new ArrayList<EgressLedger.Row>();
+            var ctx = new AgentContext("u1", "t-echo", "Keep a note about the guest network.");
+
+            AgentResult r = run(tmp.resolve(provider + ".db"), cloud, registry, rows, ctx);
+
+            // The private note quotes the words after a space; rendered, the public result starts
+            // after a line break -- a space too, once normalised.
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), provider + ": " + r.response());
+            assertTrue(rows.stream().allMatch(x -> x.decision() == EgressLedger.Decision.SENT), provider);
+            assertEquals(Label.PUBLIC, ctx.artifacts().get(1).label(), provider + ": every run of it is the cloud's");
+            var last = cloud.requests.get(cloud.requests.size() - 1);
+            assertTrue(last.stream().anyMatch(m -> m.role() == LlmMessage.Role.USER && m.content().contains(typed)),
+                    provider + ": the public result reached the cloud whole");
+        }
+    }
+
+    @Test
+    @DisplayName("through the real loop, on both renderers: the confirmation that quotes the digest it sent does not stop the task")
+    void aConfirmationQuotingTheDigestIsNotADeadEnd(@TempDir Path tmp) throws Exception {
+        String digest = "Daily digest, 30 September: markets calm, rain in Brno at 14 degrees, "
+                + "and the council approved the tram line to the campus.";
+        for (String provider : List.of("anthropic", "openai")) {
+            var registry = new ToolRegistry(List.of(
+                    AssistantPartsTest.tool("daily_news_digest", List.of(), p -> digest),
+                    AssistantPartsTest.tool("smtp_send_email", List.of("SMTP_PASS"),
+                            p -> "Sent to owner@example.org:\n" + p.get("body"))));
+            var cloud = new Named(provider,
+                    AssistantPartsTest.call("daily_news_digest", Map.of()),
+                    AssistantPartsTest.call("smtp_send_email", Map.of("body", "{{1}}")),
+                    AssistantPartsTest.call("respond", Map.of("message", "Sent.")));
+            var rows = new ArrayList<EgressLedger.Row>();
+            var ctx = new AgentContext("u1", "t-digest", "Email me the morning digest.");
+
+            AgentResult r = run(tmp.resolve(provider + ".db"), cloud, registry, rows, ctx);
+
+            // The case the order of the excuses exists to allow: the digest is public and came
+            // first; the confirmation after it quotes it, after a colon and a line break.
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), provider + ": " + r.response());
+            assertTrue(rows.stream().allMatch(x -> x.decision() == EgressLedger.Decision.SENT), provider);
+            assertEquals(3, cloud.requests.size(), provider);
+        }
+    }
+
+    // ── what a label costs ──
+
+    @Test
+    @DisplayName("a 200,000-character digest a private confirmation quoted is labelled and sent in moments")
+    void aQuotedDigestCostsMomentsNotMinutes() {
+        var words = new StringBuilder();
+        var random = new Random(7);
+        String[] w = {"markets", "calm", "rain", "Brno", "tram", "council", "approved", "campus", "degrees"};
+        while (words.length() < 200_000) words.append(w[random.nextInt(w.length)]).append(random.nextInt(1000)).append(' ');
+        String digest = words.toString();
+
+        // Asked window by window, a quarter of this took eleven seconds to label, and the door
+        // paid as much again on every think call that sent the digest.
+        assertTimeoutPreemptively(Duration.ofSeconds(30), () -> {
+            var ctx = new AgentContext("u1", "t1", "Email me the morning digest.");
+            var published = ctx.addArtifact("daily_news_digest", Map.of(), Map.of(), digest, true,
+                    Artifact.labelFor(List.of(), List.of()));
+            ctx.trajectory().record(new AgentAction("daily_news_digest", Map.of(), ""),
+                    Artifact.asObservation(published, ToolResult.success(digest), 10));
+            var sent = ctx.addArtifact("smtp_send_email", Map.of(), Map.of(), "Sent: \"" + digest + "\"", true,
+                    Artifact.labelFor(List.of("SMTP_PASS"), List.of()));
+            ctx.trajectory().record(new AgentAction("smtp_send_email", Map.of("body", "{{1}}"), ""),
+                    Artifact.asObservation(sent, ToolResult.success(sent.output()), 10));
+
+            assertEquals(Label.PUBLIC, ctx.decide(List.of(), List.of(), false, "Again:\n" + digest).label());
+            var cloud = new AssistantPartsTest.Scripted(List.of(AssistantPartsTest.call("respond", Map.of("message", "ok"))));
+            var messages = AssistantPartsTest.render(ctx);
+            assertDoesNotThrow(() -> AssistantPartsTest.gateway(cloud, new ArrayList<>())
+                    .chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+        });
+    }
+
+    @Test
+    @DisplayName("a label, or a call to the cloud, reads each source once, however many runs it asks about")
+    void eachSourceIsReadOncePerQuestion() {
+        // A credentialed skill failed, and its traceback quotes forty lines of its source. The
+        // cloud then reads the source -- a public result in which every quoted line is a run of
+        // the traceback, excused by the source of the skill that failed, the last of the sources
+        // asked. Each of the forty is its own stretch, and each goes past every source before it.
+        var lines = new ArrayList<String>();
+        for (int i = 0; i < 40; i++) {
+            lines.add("    status_" + i + " = fetch_router_status(host_" + i + ", timeout=" + (10 + i) + ")");
+        }
+        String source = "def run(params):\n" + String.join("\n", lines);
+        var traceback = new StringBuilder("Traceback (most recent call last):\n");
+        for (int i = 0; i < lines.size(); i++) {
+            traceback.append("  File \"/skills/router_audit/skill.py\", line ").append(i + 2)
+                    .append(", in run\n").append(lines.get(i)).append('\n');
+        }
+        var ctx = new AgentContext("u1", "t1", "Audit the routers.");
+        int[] reads = {0, 0};
+        ctx.setSkillSource(tool -> {
+            reads[0]++;
+            return "router_audit".equals(tool) ? source : null;
+        });
+        // An argument the cloud typed: a source too, read -- String.valueOf -- each time it is met.
+        Object typed = new Object() {
+            @Override public String toString() {
+                reads[1]++;
+                return "all routers on the LAN";
+            }
+        };
+        ctx.trajectory().record(new AgentAction("plan_audit", Map.of("scope", typed), "planning"),
+                AgentObservation.success("plan_audit", "noted", Map.of(), 5));
+        ctx.addArtifact("router_audit", Map.of(), Map.of(), traceback.toString(), false,
+                Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+
+        var d = ctx.decide(List.of(), List.of(), false, source);
+
+        assertEquals(Label.PUBLIC, d.label(), "every run of it is the skill's own source: " + d.why());
+        assertArrayEquals(new int[] {1, 1}, reads, "each source read once for the label, not once per run");
+
+        // The door, on one call: the same forty stretches in the part that carries the source.
+        reads[0] = reads[1] = 0;
+        var cloud = new AssistantPartsTest.Scripted(List.of(AssistantPartsTest.call("respond", Map.of("message", "ok"))));
+        var egress = ctx.egress("think");
+        AssistantPartsTest.gateway(cloud, new ArrayList<>()).chat(List.of(LlmMessage.system("S"),
+                LlmMessage.user("[skill_manage] OK (3ms)\n" + source), LlmMessage.user("Fix it.")),
+                LlmRequestConfig.DEFAULT.withEgress(egress));
+        assertArrayEquals(new int[] {1, 1}, reads, "each source read once for the call");
+    }
+
+    // ── what a run cannot tell ──
+
+    @Test
+    @DisplayName("boilerplate in a private result withholds a public result that carries it too: a traceback's first line")
+    void boilerplateIsWithheldWhole() {
+        // AgentContext.decide says so: a run is 32 characters, and Python's own header is one.
+        // After a credentialed skill fails with a traceback, a public skill's traceback repeats
+        // it and is withheld whole -- the cloud reads that the call failed, not why. The same
+        // collision ended the task at the door before.
+        var ctx = new AgentContext("u1", "t1", "Check the mailbox, then fetch the status page.");
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Skill error:\nTraceback (most recent call last):\n"
+                        + "  File \"/skills/imap_fetch/skill.py\", line 12, in run\n"
+                        + "    box = imaplib.IMAP4_SSL(params['host'])\nKeyError: 'host'", false,
+                Artifact.labelFor(List.of("IMAP_PASS"), List.of()));
+        String publicError = "Skill error:\nTraceback (most recent call last):\n"
+                + "  File \"/skills/web_fetch/skill.py\", line 5, in run\n"
+                + "    r = requests.get(url, timeout=10)\n"
+                + "requests.exceptions.ConnectionError: [Errno 111] Connection refused";
+
+        var d = ctx.decide(List.of(), List.of(), false, publicError);
+
+        assertEquals(Label.PRIVATE, d.label());
+        assertEquals(List.of("repeats {{1}}"), d.why());
     }
 
     // ── the task goes on ──

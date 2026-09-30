@@ -782,7 +782,6 @@ public class AgentLoop {
                 // that ends the task too -- under their own name, not as a respond that failed.
                 recordAndEmitObservation(context, action,
                         AgentObservation.failure(ThinkingEngine.THINKING, told, 0), step + 1);
-                context.markProgress(); // the model answered, or the call came back
 
                 // failureLimit, not completed: an abort. Recording it as COMPLETED marked the
                 // event log "info" and stored the episode with a [SUCCESS] prefix, so the memory

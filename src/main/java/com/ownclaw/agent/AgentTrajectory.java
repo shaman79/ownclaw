@@ -16,11 +16,34 @@ public class AgentTrajectory {
          * that produced nothing to run ({@code _thinking}) or a reflection the loop injected
          * ({@code _reflection}). The model did not write such a step, so no prompt shows it as
          * the model's -- only what the model was told. No tool the model can run starts with an
-         * underscore (skill names begin with a letter; the special actions are words), so the
-         * loop's steps are the ones whose tool does.
+         * underscore (skill names begin with a letter; the special actions are words), so these
+         * steps are the ones whose tool does.
+         * <p>
+         * One step the loop takes is not among them: the skill_create it runs at step 1 when
+         * CapabilityResolver finds a missing capability. It ran as that tool and is recorded
+         * under its name, so it is replayed like an action of the model's, with the resolver's
+         * spec as its arguments and a sentence about the resolver as its reasoning -- the
+         * resolver's own constants, never a result.
          */
         public boolean byTheLoop() {
             return action != null && action.tool() != null && action.tool().startsWith("_");
+        }
+
+        /**
+         * The step's result as the think prompts show it: a line naming the tool, how it went and
+         * how long it took, then the output whole on the lines after it -- for a PRIVATE result,
+         * the description it was recorded as. One rendering for both renderers, so an output has
+         * the same frame on either: a ')' and a line break before it, the break being whitespace
+         * the canary does not count ({@code PrivateIndex.firstLeakIn}).
+         */
+        public String observationText() {
+            var sb = new StringBuilder();
+            sb.append('[').append(action.tool()).append("] ")
+              .append(observation.success() ? "OK" : "FAILED")
+              .append(" (").append(observation.durationMs()).append("ms)\n");
+            String output = observation.output();
+            if (output != null && !output.isBlank()) sb.append(output);
+            return sb.toString();
         }
     }
 
@@ -101,8 +124,9 @@ public class AgentTrajectory {
 
     /**
      * The trajectory as the prompt of a provider without multi-turn replay reads it: every step
-     * in order, each whole -- the tool, how it went, the model's reasoning and the output. A step
-     * the loop took itself ({@link Turn#byTheLoop}) is what the model was told about it.
+     * in order, each whole -- the tool, the model's reasoning, then the result as
+     * {@link Turn#observationText} renders it. A step the loop took itself
+     * ({@link Turn#byTheLoop}) is what the model was told about it.
      */
     public String toPromptSummary() {
         var sb = new StringBuilder();
@@ -114,19 +138,12 @@ public class AgentTrajectory {
                 sb.append(told == null ? "" : told).append("\n\n");
                 continue;
             }
-            sb.append("Tool: ").append(turn.action().tool());
-            sb.append(" | Status: ").append(turn.observation().success() ? "OK" : "FAILED");
-            sb.append(" | Duration: ").append(turn.observation().durationMs()).append("ms");
-
+            sb.append("Tool: ").append(turn.action().tool()).append('\n');
             String reasoning = turn.action().reasoning();
             if (reasoning != null && !reasoning.isBlank()) {
-                sb.append("\nReasoning: ").append(reasoning);
+                sb.append("Reasoning: ").append(reasoning).append('\n');
             }
-            String output = turn.observation().output();
-            if (output != null && !output.isBlank()) {
-                sb.append("\nOutput: ").append(output);
-            }
-            sb.append("\n\n");
+            sb.append(turn.observationText()).append("\n\n");
         }
         return sb.toString();
     }
