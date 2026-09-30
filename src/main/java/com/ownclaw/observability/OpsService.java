@@ -14,11 +14,16 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Service;
 
+import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.RandomAccessFile;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.io.File;
 import java.net.URI;
@@ -29,7 +34,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Read-only introspection for the ops API, plus a self-test suite.
@@ -79,10 +87,8 @@ public class OpsService {
     /** A generated skill is a single directory name — no separators, no traversal. */
     private static final Pattern SKILL_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}");
 
-    private static final int MAX_ROWS = 500;
-    private static final int MAX_LOG_LINES = 2000;
-    /** Only the tail of the log file is read, so a rotated 20 MB file is never loaded whole. */
-    private static final long LOG_TAIL_BYTES = 4L * 1024 * 1024;
+    /** A /logs cursor: which file, by the hash of its first line, and the line to read up to. */
+    private static final Pattern LOG_CURSOR = Pattern.compile("([0-9a-f]{16}):(\\d+)");
 
     private final OwnClawConfig config;
     private final JdbcTemplate jdbc;
@@ -95,11 +101,28 @@ public class OpsService {
     private final OkHttpClient http;
     private final Instant startedAt = Instant.now();
 
+    @Autowired
     public OpsService(OwnClawConfig config, JdbcTemplate jdbc, ToolRegistry toolRegistry,
                       DynamicSkillRegistry skillRegistry, TaskQueue taskQueue,
                       AuthService authService,
                       com.ownclaw.agent.SkillCuratorService curatorService,
                       ObjectMapper mapper) {
+        // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
+        // longer than a normal call would. A hung Ollama therefore blocks one ops request
+        // for up to this long; that is acceptable for a probe and is stated in the response.
+        this(config, jdbc, toolRegistry, skillRegistry, taskQueue, authService, curatorService, mapper,
+                new OkHttpClient.Builder()
+                        .connectTimeout(5, TimeUnit.SECONDS)
+                        .readTimeout(240, TimeUnit.SECONDS)
+                        .build());
+    }
+
+    /** With the client the local-model probes go through, so a test can answer them. */
+    OpsService(OwnClawConfig config, JdbcTemplate jdbc, ToolRegistry toolRegistry,
+               DynamicSkillRegistry skillRegistry, TaskQueue taskQueue,
+               AuthService authService,
+               com.ownclaw.agent.SkillCuratorService curatorService,
+               ObjectMapper mapper, OkHttpClient http) {
         this.config = config;
         this.jdbc = jdbc;
         this.toolRegistry = toolRegistry;
@@ -108,13 +131,7 @@ public class OpsService {
         this.authService = authService;
         this.curatorService = curatorService;
         this.mapper = mapper;
-        // A cold Ollama load of a 20+ GB model can take minutes, so the diagnostic waits
-        // longer than a normal call would. A hung Ollama therefore blocks one ops request
-        // for up to this long; that is acceptable for a probe and is stated in the response.
-        this.http = new OkHttpClient.Builder()
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(240, TimeUnit.SECONDS)
-                .build();
+        this.http = http;
     }
 
     // ────────────────────────────── health ──────────────────────────────
@@ -319,7 +336,7 @@ public class OpsService {
             m.put("promptEvalCount", promptEval);
             m.put("doneReason", doneReason);
             m.put("latencyMs", System.currentTimeMillis() - t0);
-            m.put("reply", content.length() > 200 ? content.substring(0, 200) + "..." : content);
+            m.put("reply", content);
             m.put("thinkingChars", thinking.length());
 
             if (honoured && content.isBlank() && !thinking.isBlank()) {
@@ -417,58 +434,167 @@ public class OpsService {
 
     // ────────────────────────────── logs ──────────────────────────────
 
-    public Map<String, Object> logs(int lines, String grep, String level) {
-        int want = Math.max(1, Math.min(lines, MAX_LOG_LINES));
+    /**
+     * The log, a page at a time from the newest end: the newest {@code lines} lines that pass
+     * the filters, returned oldest first, read from the current file and then from every file
+     * it was rolled into. A full page carries {@code next}, the cursor for the lines before it
+     * (the page it returns can be empty); a page that is not full was read down to the first
+     * line of the oldest file, and its {@code next} is null. So every line still on disk can be
+     * reached.
+     */
+    public Map<String, Object> logs(int lines, String grep, String level, String cursor) {
+        if (lines < 1) throw new IllegalArgumentException("lines must be 1 or more, not " + lines);
+        // A cursor names the file a previous page stopped in and the line it stopped before.
+        String fromFile = null;
+        long before = Long.MAX_VALUE;
+        if (cursor != null && !cursor.isBlank()) {
+            Matcher c = LOG_CURSOR.matcher(cursor.trim());
+            if (!c.matches()) throw new IllegalArgumentException("Not a cursor /logs returned: " + cursor);
+            fromFile = c.group(1);
+            before = Long.parseLong(c.group(2));
+        }
+
         var out = new LinkedHashMap<String, Object>();
         Path file = logFile();
         out.put("file", file.toString());
-
         if (!Files.isReadable(file)) {
             out.put("error", "Log file not readable. Set OWNCLAW_LOG_FILE, or check that "
                     + "logging.file.name points somewhere the service user can write.");
             return out;
         }
-
-        List<String> tail;
+        List<Path> files;
         try {
-            tail = tailLines(file, want, grep, level);
+            files = logFiles(file);
         } catch (IOException e) {
-            out.put("error", "Could not read log file: " + e.getMessage());
+            out.put("error", "Could not list the log directory: " + e.getMessage());
             return out;
         }
+
+        Predicate<String> keep = logFilter(grep, level);
+        var page = new ArrayDeque<String>();
+        var unreadable = new LinkedHashMap<String, String>();
+        String next = null;
+        for (int i = 0; i < files.size() && page.size() < lines; i++) {
+            Path f = files.get(i);
+            try (BufferedReader r = openLog(f)) {
+                String first = r.readLine();
+                String id = logFileId(first);
+                long bound = Long.MAX_VALUE;
+                if (fromFile != null) {
+                    // A file newer than the cursor's was read by the pages before it.
+                    if (!fromFile.equals(id)) continue;
+                    fromFile = null;
+                    bound = before;
+                }
+                List<LogLine> found = lastLines(first, r, bound, lines - page.size(), keep);
+                for (int k = found.size() - 1; k >= 0; k--) page.addFirst(found.get(k).text());
+                if (page.size() == lines) next = id + ":" + found.getFirst().number();
+            } catch (IOException e) {
+                // Named, not skipped silently: logback writes a rolled file's archive after the
+                // rename, and one caught mid-write cannot be read to its end yet.
+                unreadable.put(f.getFileName().toString(), String.valueOf(e.getMessage()));
+            }
+        }
+        if (fromFile != null) {
+            throw new IllegalArgumentException("The log file this cursor points into is not on disk "
+                    + "any more (log retention removes the oldest) or could not be read"
+                    + (unreadable.isEmpty() ? "" : " " + unreadable) + ". Start again without a cursor.");
+        }
+
         out.put("sizeBytes", fileSize(file));
-        out.put("returned", tail.size());
+        out.put("files", files.stream()
+                .map(f -> Map.<String, Object>of("name", f.getFileName().toString(), "sizeBytes", fileSize(f)))
+                .toList());
+        out.put("returned", page.size());
         out.put("filters", Map.of("grep", grep == null ? "" : grep, "level", level == null ? "" : level));
-        out.put("lines", tail);
+        if (!unreadable.isEmpty()) out.put("unreadable", unreadable);
+        out.put("lines", new ArrayList<>(page));
+        out.put("next", next);
         return out;
     }
 
-    private List<String> tailLines(Path file, int want, String grep, String level) throws IOException {
-        long size = Files.size(file);
-        long from = Math.max(0, size - LOG_TAIL_BYTES);
-        byte[] buf;
-        try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "r")) {
-            raf.seek(from);
-            buf = new byte[(int) Math.min(LOG_TAIL_BYTES, size - from)];
-            raf.readFully(buf);
+    /** One line of a log file, with its number counted from the top of the file. */
+    private record LogLine(long number, String text) {}
+
+    /**
+     * What a cursor names a log file by: the hash of its first line.
+     * <p>
+     * Not the name. A rollover renames the current file, so a cursor that named it would read
+     * the new, nearly empty file after a rollover and page through the wrong lines. The first line
+     * moves with the content, and lines are counted from the top, which appending does not
+     * change -- so a cursor stays exact while the file grows and after it is rolled over.
+     */
+    private static String logFileId(String firstLine) {
+        return sha256Hex((firstLine == null ? "" : firstLine).getBytes(StandardCharsets.UTF_8)).substring(0, 16);
+    }
+
+    /**
+     * The current log file, then the files it was rolled into, newest first.
+     * <p>
+     * Logback rolls the current file into {@code <name>.<date>.<index>.gz} beside it (Spring
+     * Boot's default pattern; application.yaml sets only the sizes and the history), so the
+     * rolled files are every file there whose name extends the current one's. The one
+     * exception is logback's {@code .tmp}: the renamed file while its archive is written, whose
+     * lines are in the {@code .gz} once that finishes.
+     */
+    private static List<Path> logFiles(Path current) throws IOException {
+        String prefix = current.getFileName() + ".";
+        var rolled = new ArrayList<Path>();
+        try (var listing = Files.list(current.toAbsolutePath().getParent())) {
+            listing.filter(p -> p.getFileName().toString().startsWith(prefix)
+                            && !p.getFileName().toString().endsWith(".tmp")
+                            && Files.isRegularFile(p))
+                    .forEach(rolled::add);
         }
-        String[] all = new String(buf, StandardCharsets.UTF_8).split("\n");
+        // Newest first by when each was written; the name settles a tie.
+        var written = new HashMap<Path, Long>();
+        for (Path p : rolled) written.put(p, Files.getLastModifiedTime(p).toMillis());
+        rolled.sort(Comparator.comparing((Path p) -> written.get(p))
+                .thenComparing(p -> p.getFileName().toString()).reversed());
+        var files = new ArrayList<Path>();
+        files.add(current);
+        files.addAll(rolled);
+        return files;
+    }
+
+    /** A log file as text; a rolled one is gzip-compressed, which is logback's default. */
+    private static BufferedReader openLog(Path file) throws IOException {
+        InputStream in = Files.newInputStream(file);
+        try {
+            if (file.getFileName().toString().endsWith(".gz")) in = new GZIPInputStream(in);
+            return new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            in.close();
+            throw e;
+        }
+    }
+
+    /**
+     * The last {@code want} lines that {@code keep} passes among a file's lines numbered below
+     * {@code before}, given its first line and a reader positioned after it. Read front to back
+     * -- a compressed file can be read no other way -- holding only the lines this page can
+     * still return.
+     */
+    private static List<LogLine> lastLines(String first, BufferedReader rest, long before, int want,
+                                           Predicate<String> keep) throws IOException {
+        var found = new ArrayDeque<LogLine>();
+        String line = first;
+        for (long n = 0; line != null && n < before; n++, line = rest.readLine()) {
+            if (!keep.test(line)) continue;
+            if (found.size() == want) found.removeFirst();
+            found.addLast(new LogLine(n, line));
+        }
+        return new ArrayList<>(found);
+    }
+
+    /** Non-blank lines holding the level and, case-insensitively, the grep text. */
+    private static Predicate<String> logFilter(String grep, String level) {
         Pattern needle = (grep == null || grep.isBlank()) ? null
                 : Pattern.compile(Pattern.quote(grep), Pattern.CASE_INSENSITIVE);
         String lvl = (level == null || level.isBlank()) ? null : level.trim().toUpperCase(Locale.ROOT);
-
-        var kept = new ArrayDeque<String>();
-        // Walk backwards so filtering returns the newest matches, not the oldest.
-        for (int i = all.length - 1; i >= 0 && kept.size() < want; i--) {
-            String line = all[i];
-            if (line.isBlank()) continue;
-            if (lvl != null && !line.contains(lvl)) continue;
-            if (needle != null && !needle.matcher(line).find()) continue;
-            kept.addFirst(line);
-        }
-        // The first line of the buffer is usually a partial line; drop it unless we read from 0.
-        if (from > 0 && !kept.isEmpty() && kept.size() == want) kept.pollFirst();
-        return new ArrayList<>(kept);
+        return line -> !line.isBlank()
+                && (lvl == null || line.contains(lvl))
+                && (needle == null || needle.matcher(line).find());
     }
 
     private Path logFile() {
@@ -506,13 +632,64 @@ public class OpsService {
         return Map.of("tables", rows);
     }
 
+    // ────────────────────────────── paging ──────────────────────────────
+
     /**
-     * Run one read-only SELECT. Guards, in order: single statement; must start with SELECT or
-     * WITH; must not name a secret column or a dangerous statement keyword; result capped; and
-     * finally every returned column whose name holds a secret is redacted, which also catches
-     * {@code SELECT * FROM users}.
+     * Which rows of a listing a call returns: {@code limit} of them, from row {@code offset}.
+     * Any limit may be asked for. A listing that goes on past its page says where the next page
+     * starts, so every row stays reachable whatever the page size.
      */
-    public Map<String, Object> query(String sql, Integer limit) {
+    public record Page(long offset, int limit) {
+        public Page {
+            if (offset < 0) throw new IllegalArgumentException("offset must be 0 or more, not " + offset);
+            if (limit < 1) throw new IllegalArgumentException("limit must be 1 or more, not " + limit);
+        }
+    }
+
+    /** One page of rows, and the offset the next page starts at: null when these are the last. */
+    private record Rows(List<Map<String, Object>> rows, Long nextOffset) {
+        /** From the page's rows plus one: that extra row is how a next page is known to exist. */
+        static Rows of(List<Map<String, Object>> fetched, Page page) {
+            return fetched.size() > page.limit()
+                    ? new Rows(fetched.subList(0, page.limit()), page.offset() + page.limit())
+                    : new Rows(fetched, null);
+        }
+    }
+
+    /**
+     * A page of a query written here, whose ORDER BY ends in rowid: that makes the order total,
+     * so the pages of a table that is not changing neither overlap nor skip a row.
+     */
+    private Rows rows(String sql, Page page, Object... args) {
+        Object[] all = Arrays.copyOf(args, args.length + 2);
+        all[args.length] = page.limit() + 1L;
+        all[args.length + 1] = page.offset();
+        return Rows.of(jdbc.queryForList(sql + " LIMIT ? OFFSET ?", all), page);
+    }
+
+    /** One section of a paged report; named in {@code more} when it goes on past this page. */
+    private void section(Map<String, Object> out, List<String> more, String name, String sql,
+                         Page page, Object... args) {
+        Rows r = rows(sql, page, args);
+        out.put(name, r.rows());
+        if (r.nextOffset() != null) more.add(name);
+    }
+
+    /** Which sections go on past this page, and the offset their next page starts at. */
+    private static void putMore(Map<String, Object> out, List<String> more, Page page) {
+        out.put("more", more);
+        out.put("nextOffset", more.isEmpty() ? null : page.offset() + page.limit());
+    }
+
+    /**
+     * Run one read-only SELECT and return a page of its rows. Guards, in order: single
+     * statement; must start with SELECT or WITH; must not name a secret column or a dangerous
+     * statement keyword; and finally every returned column whose name holds a secret is
+     * redacted, which also catches {@code SELECT * FROM users}. The statement runs as written
+     * and the page is taken from its rows in the order it returns them, so the query's own
+     * ORDER BY and LIMIT mean what they say.
+     */
+    public Map<String, Object> query(String sql, Page page) {
         var out = new LinkedHashMap<String, Object>();
         if (sql == null || sql.isBlank()) {
             return Map.of("error", "sql is required");
@@ -532,16 +709,19 @@ public class OpsService {
         }
 
         log.info("Ops SQL: {}", trimmed);
-        int cap = limit == null ? MAX_ROWS : Math.max(1, Math.min(limit, MAX_ROWS));
-        String effective = trimmed.toLowerCase(Locale.ROOT).contains(" limit ")
-                ? trimmed
-                : trimmed + " LIMIT " + cap;
-
+        out.put("sql", trimmed);
         try {
-            List<Map<String, Object>> rows = jdbc.queryForList(effective);
+            Rows result = Rows.of(jdbc.query(trimmed, (ResultSetExtractor<List<Map<String, Object>>>) rs -> {
+                var columns = new ColumnMapRowMapper();
+                var fetched = new ArrayList<Map<String, Object>>();
+                for (long row = 0; fetched.size() <= page.limit() && rs.next(); row++) {
+                    if (row >= page.offset()) fetched.add(columns.mapRow(rs, fetched.size()));
+                }
+                return fetched;
+            }), page);
             boolean redacted = false;
-            var safe = new ArrayList<Map<String, Object>>(rows.size());
-            for (Map<String, Object> row : rows) {
+            var safe = new ArrayList<Map<String, Object>>(result.rows().size());
+            for (Map<String, Object> row : result.rows()) {
                 var clean = new LinkedHashMap<String, Object>();
                 for (Map.Entry<String, Object> e : row.entrySet()) {
                     if (isSecretColumn(e.getKey())) {
@@ -553,13 +733,13 @@ public class OpsService {
                 }
                 safe.add(clean);
             }
-            out.put("sql", effective);
+            out.put("offset", page.offset());
+            out.put("limit", page.limit());
             out.put("rowCount", safe.size());
-            out.put("truncated", safe.size() >= cap);
+            out.put("nextOffset", result.nextOffset());
             if (redacted) out.put("redactedColumns", true);
             out.put("rows", safe);
         } catch (Exception e) {
-            out.put("sql", effective);
             out.put("error", String.valueOf(e.getMessage()));
         }
         return out;
@@ -599,9 +779,11 @@ public class OpsService {
      * Everything this instance recorded about one account: what they asked, which tools ran,
      * what was remembered, whether they left a scheduled task behind, and what they spent.
      * Built for answering "who is this account and what did it do".
+     * <p>
+     * Each dated section is paged, newest first, with the same page: {@code more} names the
+     * sections that go on past it and {@code nextOffset} is where their next page starts.
      */
-    public Map<String, Object> forensics(String userId, int limit) {
-        int cap = Math.max(1, Math.min(limit, MAX_ROWS));
+    public Map<String, Object> forensics(String userId, Page page) {
         log.info("Ops forensics requested for user={}", userId);
         var out = new LinkedHashMap<String, Object>();
         out.put("userId", userId);
@@ -618,46 +800,52 @@ public class OpsService {
         out.put("account", who.getFirst());
         out.put("isOwner", authService.isOwner(userId));
 
-        out.put("conversations", jdbc.queryForList(
-                "SELECT timestamp, session_id, role, substr(content,1,600) AS content, tokens_used "
+        var more = new ArrayList<String>();
+        section(out, more, "conversations",
+                "SELECT timestamp, session_id, role, content, tokens_used "
                         // DESC: this is an incident tool, and ORDER BY timestamp ASC with a LIMIT
                         // returned a user's OLDEST messages -- so the events, tool calls and memory
                         // blocks showed today while the conversation block showed their first ever
                         // exchanges, which reads as a conversation that stopped months ago.
-                        + "FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));
-        out.put("sessions", jdbc.queryForList(
-                "SELECT id, title, substr(preview,1,200) AS preview, created_at, updated_at, archived "
-                        + "FROM chat_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
-        out.put("events", jdbc.queryForList(
+                        + "FROM conversations WHERE user_id = ? ORDER BY timestamp DESC, rowid DESC",
+                page, userId);
+        section(out, more, "sessions",
+                "SELECT id, title, preview, created_at, updated_at, archived "
+                        + "FROM chat_sessions WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "events",
                 "SELECT timestamp, event_type, severity, task_id, summary, details, tokens_used "
-                        + "FROM events WHERE user_id = ? ORDER BY timestamp DESC LIMIT " + cap, userId));
-        out.put("toolCalls", jdbc.queryForList(
-                "SELECT created_at, tool_name, task_id, success, duration_ms, label, "
-                        + "substr(error,1,1000) AS error "
-                        + "FROM skill_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
-        out.put("memory", jdbc.queryForList(
-                "SELECT created_at, memory_type, outcome, tags, substr(content,1,400) AS content "
-                        + "FROM agent_memory WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
-        out.put("scheduledTasks", jdbc.queryForList(
+                        + "FROM events WHERE user_id = ? ORDER BY timestamp DESC, rowid DESC",
+                page, userId);
+        section(out, more, "toolCalls",
+                "SELECT created_at, tool_name, task_id, success, duration_ms, label, error "
+                        + "FROM skill_usage WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "memory",
+                "SELECT created_at, memory_type, outcome, tags, content "
+                        + "FROM agent_memory WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "scheduledTasks",
                 "SELECT id, task_type, status, description, cron_expression, next_run_at, last_run_at, "
-                        + "run_count, substr(last_result,1,300) AS last_result "
-                        + "FROM scheduled_tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT " + cap, userId));
-        out.put("scheduledRuns", jdbc.queryForList(
-                "SELECT task_id, executed_at, status, skills_used, duration_ms, "
-                        + "substr(result,1,300) AS result, substr(error,1,300) AS error "
-                        + "FROM scheduled_task_runs WHERE user_id = ? ORDER BY executed_at DESC LIMIT " + cap,
-                userId));
-        out.put("attachments", jdbc.queryForList(
+                        + "run_count, last_result "
+                        + "FROM scheduled_tasks WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "scheduledRuns",
+                "SELECT task_id, executed_at, status, skills_used, duration_ms, result, error "
+                        + "FROM scheduled_task_runs WHERE user_id = ? ORDER BY executed_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "attachments",
                 "SELECT id, original_name, content_type, size_bytes, uploaded_at "
-                        + "FROM file_attachments WHERE user_id = ? ORDER BY uploaded_at DESC LIMIT " + cap, userId));
-        out.put("longRunningTasks", jdbc.queryForList(
-                "SELECT task_id, description, skill_name, status, started_at, completed_at, "
-                        + "substr(result_summary,1,300) AS result_summary "
-                        + "FROM long_running_tasks WHERE user_id = ? ORDER BY started_at DESC LIMIT " + cap,
-                userId));
-        out.put("tokenUsage", jdbc.queryForList(
+                        + "FROM file_attachments WHERE user_id = ? ORDER BY uploaded_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "longRunningTasks",
+                "SELECT task_id, description, skill_name, status, started_at, completed_at, result_summary "
+                        + "FROM long_running_tasks WHERE user_id = ? ORDER BY started_at DESC, rowid DESC",
+                page, userId);
+        section(out, more, "tokenUsage",
                 "SELECT date, provider, tokens_used, requests, cost_usd "
-                        + "FROM token_usage WHERE user_id = ? ORDER BY date DESC LIMIT " + cap, userId));
+                        + "FROM token_usage WHERE user_id = ? ORDER BY date DESC, rowid DESC",
+                page, userId);
         // Keys only — values stay in the vault.
         out.put("credentialKeys", jdbc.queryForList(
                 "SELECT credential_key, created_at, updated_at FROM credential_vault WHERE user_id = ?",
@@ -665,22 +853,8 @@ public class OpsService {
         out.put("credentialGrants", jdbc.queryForList(
                 "SELECT skill_name, credential, grant_type, granted_at FROM credential_grants WHERE user_id = ?",
                 userId));
+        putMore(out, more, page);
         return out;
-    }
-
-    /**
-     * The task id of the most recent task recorded for a user.
-     * <p>
-     * {@code AgentResult} carries no task id, so after an ops-triggered run this is how the
-     * run is correlated with {@code events}, {@code skill_usage} and the
-     * {@code Task <id> step N} log lines. (The old debug API invented a random id instead,
-     * which matched nothing.)
-     */
-    public String latestTaskId(String userId) {
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT task_id FROM events WHERE user_id = ? AND task_id IS NOT NULL AND task_id <> '' "
-                        + "ORDER BY timestamp DESC, id DESC LIMIT 1", userId);
-        return rows.isEmpty() ? null : String.valueOf(rows.getFirst().get("task_id"));
     }
 
     // ────────────────────────────── skills ──────────────────────────────
@@ -761,20 +935,22 @@ public class OpsService {
 
     // ────────────────────────────── tasks ──────────────────────────────
 
-    public Map<String, Object> tasks(int limit) {
-        int cap = Math.max(1, Math.min(limit, MAX_ROWS));
+    /** The queue, and each listing paged like the forensics sections: {@code more} names those that go on. */
+    public Map<String, Object> tasks(Page page) {
         var out = new LinkedHashMap<String, Object>();
         out.put("queue", Map.of("busy", taskQueue.isBusy(), "queued", taskQueue.getQueueSize()));
-        out.put("recentTasks", jdbc.queryForList(
+        var more = new ArrayList<String>();
+        section(out, more, "recentTasks",
                 "SELECT timestamp, user_id, task_id, event_type, severity, summary, details, tokens_used "
-                        + "FROM events ORDER BY timestamp DESC LIMIT " + cap));
-        out.put("longRunning", jdbc.queryForList(
+                        + "FROM events ORDER BY timestamp DESC, rowid DESC", page);
+        section(out, more, "longRunning",
                 "SELECT task_id, user_id, description, status, progress_pct, progress_msg, "
                         + "heartbeat_at, started_at, completed_at FROM long_running_tasks "
-                        + "ORDER BY started_at DESC LIMIT " + cap));
-        out.put("upcomingScheduled", jdbc.queryForList(
+                        + "ORDER BY started_at DESC, rowid DESC", page);
+        section(out, more, "upcomingScheduled",
                 "SELECT id, user_id, task_type, status, description, next_run_at, run_count "
-                        + "FROM scheduled_tasks WHERE status = 'active' ORDER BY next_run_at LIMIT " + cap));
+                        + "FROM scheduled_tasks WHERE status = 'active' ORDER BY next_run_at, rowid", page);
+        putMore(out, more, page);
         return out;
     }
 
@@ -789,11 +965,10 @@ public class OpsService {
                 // skill_usage row via ops", and this is that row. Without the error column the
                 // pointer named a page that did not show it, leaving the owner no way at all to
                 // read what a private step had actually returned.
-                "SELECT created_at, user_id, tool_name, success, duration_ms, label, "
-                        + "substr(error,1,4000) AS error "
+                "SELECT created_at, user_id, tool_name, success, duration_ms, label, error "
                         + "FROM skill_usage WHERE task_id = ? ORDER BY created_at", taskId));
         out.put("memory", jdbc.queryForList(
-                "SELECT created_at, user_id, memory_type, outcome, substr(content,1,400) AS content "
+                "SELECT created_at, user_id, memory_type, outcome, content "
                         + "FROM agent_memory WHERE task_id = ? ORDER BY created_at", taskId));
         // What left this JVM for a cloud model on this task, from the ledger rows -- and the
         // artifacts the steps recorded. Headed "llmChannel" and not "left the machine": the
@@ -881,18 +1056,18 @@ public class OpsService {
         return out;
     }
 
-    /** The ledger, newest first. */
-    public Map<String, Object> egress(int limit, String decision) {
-        int cap = Math.max(1, Math.min(limit, 500));
+    /** The ledger, newest first, a page at a time: {@code nextOffset} is null on the last page. */
+    public Map<String, Object> egress(Page page, String decision) {
         String sql = "SELECT timestamp, user_id, task_id, summary, details FROM events "
                 + "WHERE event_type = 'egress'"
                 + (decision == null || decision.isBlank() ? "" : " AND summary LIKE ?")
-                + " ORDER BY timestamp DESC LIMIT " + cap;
-        var rows = decision == null || decision.isBlank()
-                ? jdbc.queryForList(sql)
-                : jdbc.queryForList(sql, decision.trim().toUpperCase(java.util.Locale.ROOT) + " %");
+                + " ORDER BY timestamp DESC, rowid DESC";
+        Rows rows = decision == null || decision.isBlank()
+                ? rows(sql, page)
+                : rows(sql, page, decision.trim().toUpperCase(java.util.Locale.ROOT) + " %");
         var out = new LinkedHashMap<String, Object>();
-        out.put("rows", rows);
+        out.put("rows", rows.rows());
+        out.put("nextOffset", rows.nextOffset());
         out.put("note", "Sizes, kinds and hash prefixes of every part; tokens and cost. No content, "
                 + "by construction: the ledger cannot become an audit copy.");
         return out;
@@ -1019,7 +1194,7 @@ public class OpsService {
         Request req = new Request.Builder().url(url).get().build();
         try (Response resp = http.newCall(req).execute()) {
             String body = resp.body() == null ? "" : resp.body().string();
-            if (!resp.isSuccessful()) throw new IOException("HTTP " + resp.code() + ": " + truncate(body, 200));
+            if (!resp.isSuccessful()) throw new IOException("HTTP " + resp.code() + ": " + body);
             return mapper.readTree(body);
         }
     }
@@ -1030,14 +1205,9 @@ public class OpsService {
         Request req = new Request.Builder().url(url).post(body).build();
         try (Response resp = http.newCall(req).execute()) {
             String text = resp.body() == null ? "" : resp.body().string();
-            if (!resp.isSuccessful()) throw new IOException("HTTP " + resp.code() + ": " + truncate(text, 200));
+            if (!resp.isSuccessful()) throw new IOException("HTTP " + resp.code() + ": " + text);
             return mapper.readTree(text);
         }
-    }
-
-    private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     private static String readTextOrNull(Path p) {
@@ -1066,14 +1236,17 @@ public class OpsService {
 
     private static String sha256(Path p) {
         try {
-            if (!Files.isRegularFile(p)) return "";
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(Files.readAllBytes(p));
-            var sb = new StringBuilder();
-            for (byte b : hash) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) {
+            return Files.isRegularFile(p) ? sha256Hex(Files.readAllBytes(p)) : "";
+        } catch (IOException e) {
             return "";
+        }
+    }
+
+    private static String sha256Hex(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required of every Java platform", e);
         }
     }
 
