@@ -149,14 +149,17 @@ class AgentContextArtifactsTest {
     }
 
     @Test
-    @DisplayName("text only this machine holds is no excuse: past tasks are not in the prompt")
+    @DisplayName("text only this machine holds is no excuse: a recalled past task is not one")
     void pastTasksAreNotAnExcuse() {
         // Past tasks used to be put into the first message as "## Past Experience", so a run of
-        // them was material the cloud had been given. They are recalled on request now, as an
-        // observation, and nothing puts them in the prompt by itself.
+        // them was material the cloud had been given. They are recalled on request now, as the
+        // answer of memory_manage -- an observation, which the cloud is shown but did not write.
         var ctx = task("send it");
         String episode = "Task: audit the routers. Response: " + prose(200, 8);
-        ctx.metadata().put("relevantMemories", episode);
+        ctx.trajectory().record(new AgentAction(AgentAction.MEMORY_MANAGE,
+                        Map.of("action", "recall", "query", "routers"), "look it up"),
+                AgentObservation.success(AgentAction.MEMORY_MANAGE, "1 past task matches 'routers':\n\n" + episode,
+                        Map.of(), 1));
         var priv = add(ctx, "imap_fetch", "Found: " + episode, PRIVATE);
 
         assertFalse(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));

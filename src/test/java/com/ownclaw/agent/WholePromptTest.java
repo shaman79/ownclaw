@@ -126,12 +126,10 @@ class WholePromptTest {
 
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "do it like last time");
-        ctx.metadata().put("relevantMemories", "[SUCCESS] Task: something else entirely");
         for (boolean nativeTools : new boolean[] {true, false}) {
             String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false)));
             assertTrue(prompt.contains("memory_manage action=recall"), prompt);
-            assertFalse(prompt.contains("## Past Experience") || prompt.contains("something else entirely"),
-                    "no past task is put into the prompt by itself: " + prompt);
+            assertFalse(prompt.contains("## Past Experience"), "no past task is put into the prompt by itself: " + prompt);
         }
         String text = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(false, false)));
         assertTrue(text.contains("memory_manage(action=store|list|delete|recall, [key], [content], [query])"), text);

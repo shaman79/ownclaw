@@ -1,7 +1,5 @@
 package com.ownclaw.skillrunner;
 
-import com.ownclaw.observability.ChatStatusEmitter;
-import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -10,32 +8,27 @@ import java.util.Map;
 import java.util.concurrent.*;
 
 /**
- * Manages mid-execution user interaction for skills that emit need_input.
- * When a skill requests input, the handler:
- * 1. Emits a NEED_INPUT status message to the user's chat
- * 2. Blocks the skill's execution on a CompletableFuture
- * 3. Receives the user's response from the chat interface
- * 4. Completes the future, allowing the skill process to continue
+ * An answer the chat is waiting for. The setup wizard asks its questions as system messages and
+ * waits here for each reply; the web chat and Telegram hand a message to a waiting question
+ * instead of starting a task with it, and Stop cancels the wait.
+ * <p>
+ * Named for the skills that once asked the user questions while they ran (need_input). No skill
+ * can: a task asks the owner between steps (ask_user), and his answer starts the next task.
  */
 @Service
 public class SkillInteractionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(SkillInteractionHandler.class);
 
-    /** Timeout for waiting for user input (seconds). */
     /**
-     * How long a skill waits for a human answer.
+     * How long a question waits for a human answer.
      *
      * Was 120 seconds, which is a machine timeout applied to a person: the prompt has to be
-     * noticed, read, thought about and typed, and the user may not be looking at the tab. When
-     * it expired the skill failed for no visible reason — the question itself was being
-     * rendered into a collapsed activity strip at the time, so there was often nothing to see
-     * at all. Ten minutes is still bounded, so a forgotten prompt cannot block a worker
-     * forever, but it no longer punishes someone for making a cup of tea.
+     * noticed, read, thought about and typed, and the user may not be looking at the tab. Ten
+     * minutes is still bounded, so a forgotten prompt cannot hold a thread forever, but it no
+     * longer punishes someone for making a cup of tea.
      */
     private static final int INPUT_TIMEOUT_SEC = 600;
-
-    private final ChatStatusEmitter statusEmitter;
 
     /**
      * Pending input requests, keyed by "userId:taskId".
@@ -43,51 +36,24 @@ public class SkillInteractionHandler {
      */
     private final Map<String, CompletableFuture<String>> pendingInputs = new ConcurrentHashMap<>();
 
-    public SkillInteractionHandler(ChatStatusEmitter statusEmitter) {
-        this.statusEmitter = statusEmitter;
-    }
-
     /**
-     * Request input from the user without emitting a NEED_INPUT status message.
-     *
-     * Useful for flows (like /setup) that render their own prompts as system messages.
-     */
-    public String requestInputSilent(String userId, String taskId)
-            throws TimeoutException, InterruptedException, ExecutionException {
-        return requestInputInternal(userId, taskId, null, false);
-    }
-
-    /**
-     * Request input from the user during skill execution.
-     * Emits a NEED_INPUT status message and blocks until the user responds or timeout.
+     * Wait for the user's next message, emitting nothing: the caller -- the setup wizard -- has
+     * shown its own question.
      *
      * @param userId ID of the user who should respond
-     * @param taskId current task ID (for routing)
-     * @param prompt the prompt to show the user
+     * @param taskId what is asking, so the reply is routed to it
      * @return the user's response text
      * @throws TimeoutException if the user doesn't respond within the timeout
      * @throws InterruptedException if the waiting thread is interrupted
+     * @throws ExecutionException if the wait was cancelled ({@link #cancelPending})
      */
-    public String requestInput(String userId, String taskId, String prompt)
+    public String requestInputSilent(String userId, String taskId)
             throws TimeoutException, InterruptedException, ExecutionException {
-
-        return requestInputInternal(userId, taskId, prompt, true);
-    }
-
-    private String requestInputInternal(String userId, String taskId, String prompt, boolean emitStatus)
-            throws TimeoutException, InterruptedException, ExecutionException {
-
         String key = userId + ":" + taskId;
 
         CompletableFuture<String> future = new CompletableFuture<>();
         pendingInputs.put(key, future);
-
-        if (emitStatus && prompt != null && !prompt.isBlank()) {
-            log.info("Skill requesting input from user={}: {}", userId, prompt);
-            statusEmitter.emit(userId, StatusMessage.Type.NEED_INPUT, prompt);
-        } else {
-            log.info("Awaiting user input: user={} taskId={}", userId, taskId);
-        }
+        log.info("Awaiting user input: user={} taskId={}", userId, taskId);
 
         try {
             return future.get(INPUT_TIMEOUT_SEC, TimeUnit.SECONDS);
@@ -101,7 +67,7 @@ public class SkillInteractionHandler {
 
     /**
      * Provide the user's input response.
-     * Called from WebSocket/Telegram handler when the user responds to a need_input prompt.
+     * Called from the WebSocket and Telegram handlers when a message answers a waiting question.
      *
      * @param userId the responding user's ID
      * @param taskId the task ID (must match the pending request)

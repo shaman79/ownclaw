@@ -57,20 +57,4 @@ public interface SandboxManager {
                                   ProgressCallback progressCallback) {
         return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
     }
-
-    /**
-     * Execute a skill interactively — keeps the process alive for stdin/stdout exchanges.
-     * The inputCallback is called when the skill emits a need_input message;
-     * it receives the prompt and should return the user's response.
-     *
-     * @param inputCallback function that receives a prompt and returns user input
-     * @return execution result after the skill completes
-     */
-    default SandboxResult executeInteractive(String pythonPath, Path scriptPath, Path workingDir,
-                                             String stdinJson, Map<String, String> envVars,
-                                             int timeoutSec,
-                                             java.util.function.Function<String, String> inputCallback) {
-        // Default: non-interactive fallback
-        return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec);
-    }
 }

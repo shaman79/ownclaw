@@ -41,7 +41,7 @@ class TelegramSecretTest {
     void setUp() throws Exception {
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
         new UserRepository(jdbc).createUser("petr", ME);
-        bot = botWith(new SkillInteractionHandler(null));
+        bot = botWith(new SkillInteractionHandler());
     }
 
     /** The bot with the real command handler, a vault that records, and this interaction handler. */
@@ -118,7 +118,7 @@ class TelegramSecretTest {
     @DisplayName("a slash text that answers a waiting question is handed to it, not refused as a command")
     void anAnswerThatStartsWithASlash() throws Exception {
         List<String> answers = new ArrayList<>();
-        bot = botWith(new SkillInteractionHandler(null) {
+        bot = botWith(new SkillInteractionHandler() {
             @Override public boolean hasPending(String userId) { return true; }
             @Override public boolean provideInput(String userId, String taskId, String input) {
                 answers.add(input);

@@ -64,8 +64,8 @@ public class TaskQueue {
         // cloud-first, and the cost of keeping it was that a background task running for
         // minutes blocked every interactive message behind it on the same thread.
         //
-        // Ollama really is still serialized, but by OllamaSemaphore rather than by starving
-        // the whole system of workers: two lanes can both reach it, and the second waits.
+        // Nothing here serializes Ollama: two lanes can both call it, and the Ollama server
+        // decides whether the two requests run side by side or one after the other.
         int threads = separateBackgroundLane ? 2 : 1;
         var counter = new AtomicInteger();
         workerPool = Executors.newFixedThreadPool(threads, r -> {

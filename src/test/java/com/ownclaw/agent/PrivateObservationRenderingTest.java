@@ -14,7 +14,6 @@ import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
 import com.ownclaw.llm.Replies;
-import com.ownclaw.privacy.Label;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

@@ -149,25 +149,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 Object chat = msg.data() == null ? null : msg.data().get("sessionId");
                 sendToSession(session, "result", owner != null ? owner.toString() : msg.text(),
                         chat == null ? null : chat.toString(), msg.taskId());
-            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.NEED_INPUT
-                    && msg.taskId() == null) {
-                // Only a LIVE prompt becomes a question bubble.
-                //
-                // Two different things emit NEED_INPUT. A skill blocking on an answer emits it
-                // with no task id, and that genuinely is a question. The agent loop's closing
-                // summary for a task that ended NEEDS_INPUT also emits it, attributed to the
-                // task, and that is telemetry -- so the user was shown a second question-styled
-                // bubble reading "waiting for your answer - 12,483 cloud tokens" underneath the
-                // real question. The id is what tells them apart: a summary always has one, a
-                // live prompt never does.
-
-                // A question is not a status. Routed as a status it became one grey line in the
-                // activity strip — which is collapsed by default and scrolls — while a skill
-                // sat blocked behind a silent two-minute fuse. The client already renders an
-                // "input_request" message type with its own styling; nothing on the server ever
-                // emitted one, so that renderer was dead code and the feature was unusable
-                // despite being marked complete in ARCHITECTURE.md.
-                sendToSession(session, "input_request", msg.text());
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
                 sendStatusToSession(session, msg);
@@ -292,15 +273,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // Handle input_response for skill interaction (need_input)
-        if ("input_response".equals(messageType)) {
-            boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
-            if (!handled) {
-                sendToSession(session, "system", "No pending input request.");
-            }
-            return;
-        }
-
         // Cancel: user requested task interruption
         if ("cancel".equals(messageType)) {
             // Stop with no task named means "whatever is running, stop it".
@@ -310,17 +282,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // Interactive skill input: if a skill is waiting, this is the answer.
+        // A question waiting for an answer -- the setup wizard's -- takes this message.
         //
-        // The old order asked "does it start with /" first, so an answer that happens to be an
-        // absolute path -- /home/shaman/Photos, exactly what a skill asking "which folder?"
-        // expects -- came back as "Unknown command: /home/shaman/Photos. Try /help", every time,
-        // until the skill's two-minute fuse expired and the task failed.
-        //
-        // Telegram already had the right order: try the command, and if it is not a recognised
-        // one and a skill is waiting, treat it as the answer. That keeps real commands working
-        // while a skill waits (the point of the original check) without deciding by punctuation
-        // what the user meant.
+        // Asking "does it start with /" first would turn an answer that happens to begin with a
+        // slash, a path say, into "Unknown command". So, as on Telegram: try the command, and if
+        // it is not a recognised one and a question is waiting, it is the answer. That keeps
+        // real commands working while a question waits, without deciding by punctuation what
+        // the user meant.
         boolean waiting = interactionHandler.hasPending(userId);
         if (userMessage.startsWith("/")) {
             // Asking whether it is a command runs the command, so this answer is handed on and
@@ -494,7 +462,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // Avoid overlapping interactive flows (skill need_input, etc.).
+        // One question waits at a time: a second would take the first one's answer.
         if (interactionHandler.hasPending(userId)) {
             running.set(false);
             sendSystemToUser(userId, "Finish the current input prompt first, then run `/setup` again.");

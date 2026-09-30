@@ -102,7 +102,7 @@ class ChatDeliveryTest {
         var commands = new CommandHandler(null, conversations, null, null, null, null, queue, null, null, null,
                 null, null, new ResultDelivery(conversations, emitter));
         chat = new ChatWebSocketHandler(queue, null, conversations, emitter, commands, wizard, auth,
-                new SkillInteractionHandler(null), null, null, mapper);
+                new SkillInteractionHandler(), null, null, mapper);
         Map<String, Object> attributes = new HashMap<>();
         socket = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (proxy, method, args) -> switch (method.getName()) {

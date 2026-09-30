@@ -84,7 +84,7 @@ class CommandDispatchOnceTest {
         queue = new CountingQueue();
         commands = new CountingCommandHandler(conversations, queue);
         chat = new ChatWebSocketHandler(queue, null, conversations, null, commands, null, null,
-                new SkillInteractionHandler(null), null, null, new ObjectMapper());
+                new SkillInteractionHandler(), null, null, new ObjectMapper());
         Map<String, Object> attributes = new HashMap<>(Map.of("userId", USER));
         socket = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (proxy, method, args) -> switch (method.getName()) {

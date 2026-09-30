@@ -67,7 +67,6 @@ ownclaw:
     api-key: ${OPENAI_API_KEY:}
     anthropic-api-key: ${ANTHROPIC_API_KEY:}
     anthropic-model: ${OWNCLAW_ANTHROPIC_MODEL:claude-sonnet-4-20250514}
-    max-tokens-per-task: 10000
     temperature: 0.4
 
     # Offer tools natively instead of asking for a JSON envelope in the prompt.
@@ -168,18 +167,11 @@ ownclaw:
     cache-skip-threshold: 0.7
 
   observability:
-    event-log-retention-days: 30
     chat-status-messages: true
     status-verbosity: concise
 
   feedback:
     max-rounds: 3
-    teaching-log-max-entries: 30
-
-  plan-cache:
-    enabled: true
-    max-entries: 500
-    ttl-hours: 168
 
 logging:
   file:

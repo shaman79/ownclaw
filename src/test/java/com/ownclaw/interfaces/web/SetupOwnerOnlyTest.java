@@ -64,7 +64,7 @@ class SetupOwnerOnlyTest {
         chat = new ChatWebSocketHandler(new TaskQueue(null, null, null, new OwnClawConfig(), null), null,
                 conversations, new ChatStatusEmitter(),
                 new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null),
-                wizard, auth, new SkillInteractionHandler(null), null, null, new ObjectMapper());
+                wizard, auth, new SkillInteractionHandler(), null, null, new ObjectMapper());
     }
 
     /** A socket for this user, connected. */

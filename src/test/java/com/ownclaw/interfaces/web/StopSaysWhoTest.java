@@ -39,7 +39,7 @@ class StopSaysWhoTest {
         long running = System.currentTimeMillis() - 1;
 
         var chat = new ChatWebSocketHandler(null, null, null, null, null, null, null,
-                new SkillInteractionHandler(null), cancellation, null, new ObjectMapper());
+                new SkillInteractionHandler(), cancellation, null, new ObjectMapper());
         chat.handleTextMessage(socket("u1"), new TextMessage("{\"type\":\"cancel\"}"));
         assertEquals("you pressed Stop", cancellation.why("u1", "t1", running));
 

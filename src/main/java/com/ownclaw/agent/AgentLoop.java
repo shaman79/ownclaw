@@ -16,7 +16,6 @@ import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.observability.TaskTraceService;
-import com.ownclaw.privacy.PrivateIndex;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;

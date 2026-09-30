@@ -65,11 +65,6 @@ public class AgentTrajectory {
         return turns.isEmpty();
     }
 
-    public Turn lastTurn() {
-        if (turns.isEmpty()) return null;
-        return turns.get(turns.size() - 1);
-    }
-
     /**
      * Count how many consecutive failures have occurred at the tail of the trajectory.
      */
@@ -111,15 +106,6 @@ public class AgentTrajectory {
         return turns.stream()
                 .filter(t -> t.action().tool().equals(toolName))
                 .count();
-    }
-
-    /**
-     * Total tokens consumed (estimated from output lengths).
-     */
-    public int estimatedObservationTokens() {
-        return turns.stream()
-                .mapToInt(t -> t.observation().output() != null ? t.observation().output().length() / 4 : 0)
-                .sum();
     }
 
     /**

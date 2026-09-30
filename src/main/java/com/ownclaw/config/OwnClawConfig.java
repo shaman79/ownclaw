@@ -26,7 +26,6 @@ public class OwnClawConfig {
     private Observability observability = new Observability();
     private Budgets budgets = new Budgets();
     private Feedback feedback = new Feedback();
-    private PlanCache planCache = new PlanCache();
 
     // --- Nested classes ---
 
@@ -52,7 +51,6 @@ public class OwnClawConfig {
         private String apiKey;
         private String anthropicApiKey;
         private String anthropicModel = "claude-sonnet-4-20250514";
-        private int maxTokensPerTask = 10000;
         private double temperature = 0.4;
 
         private boolean nativeTools = true;
@@ -88,8 +86,6 @@ public class OwnClawConfig {
         public void setAnthropicApiKey(String anthropicApiKey) { this.anthropicApiKey = anthropicApiKey; }
         public String getAnthropicModel() { return anthropicModel; }
         public void setAnthropicModel(String anthropicModel) { this.anthropicModel = anthropicModel; }
-        public int getMaxTokensPerTask() { return maxTokensPerTask; }
-        public void setMaxTokensPerTask(int maxTokensPerTask) { this.maxTokensPerTask = maxTokensPerTask; }
         public double getTemperature() { return temperature; }
         public void setTemperature(double temperature) { this.temperature = temperature; }
     }
@@ -256,12 +252,9 @@ public class OwnClawConfig {
     }
 
     public static class Observability {
-        private int eventLogRetentionDays = 30;
         private boolean chatStatusMessages = true;
         private String statusVerbosity = "concise";
 
-        public int getEventLogRetentionDays() { return eventLogRetentionDays; }
-        public void setEventLogRetentionDays(int v) { this.eventLogRetentionDays = v; }
         public boolean isChatStatusMessages() { return chatStatusMessages; }
         public void setChatStatusMessages(boolean v) { this.chatStatusMessages = v; }
         public String getStatusVerbosity() { return statusVerbosity; }
@@ -283,25 +276,9 @@ public class OwnClawConfig {
 
     public static class Feedback {
         private int maxRounds = 3;
-        private int teachingLogMaxEntries = 30;
 
         public int getMaxRounds() { return maxRounds; }
         public void setMaxRounds(int v) { this.maxRounds = v; }
-        public int getTeachingLogMaxEntries() { return teachingLogMaxEntries; }
-        public void setTeachingLogMaxEntries(int v) { this.teachingLogMaxEntries = v; }
-    }
-
-    public static class PlanCache {
-        private boolean enabled = true;
-        private int maxEntries = 500;
-        private int ttlHours = 168;
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean v) { this.enabled = v; }
-        public int getMaxEntries() { return maxEntries; }
-        public void setMaxEntries(int v) { this.maxEntries = v; }
-        public int getTtlHours() { return ttlHours; }
-        public void setTtlHours(int v) { this.ttlHours = v; }
     }
 
     // --- Root getters/setters ---
@@ -336,6 +313,4 @@ public class OwnClawConfig {
     public void setBudgets(Budgets v) { this.budgets = v; }
     public Feedback getFeedback() { return feedback; }
     public void setFeedback(Feedback v) { this.feedback = v; }
-    public PlanCache getPlanCache() { return planCache; }
-    public void setPlanCache(PlanCache v) { this.planCache = v; }
 }

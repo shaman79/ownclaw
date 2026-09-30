@@ -44,7 +44,7 @@ class ChatSecretTest {
     @BeforeEach
     void setUp() throws Exception {
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
-        ws = chatWith(new SkillInteractionHandler(null));
+        ws = chatWith(new SkillInteractionHandler());
         Map<String, Object> attrs = new HashMap<>(Map.of("userId", "owner"));
         session = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (p, m, args) -> switch (m.getName()) {
@@ -159,7 +159,7 @@ class ChatSecretTest {
     @DisplayName("a slash text that answers a waiting question is shown as typed and handed to the question")
     void anAnswerThatStartsWithASlash() throws Exception {
         List<String> answers = new ArrayList<>();
-        ws = chatWith(new SkillInteractionHandler(null) {
+        ws = chatWith(new SkillInteractionHandler() {
             @Override public boolean hasPending(String userId) { return true; }
             @Override public boolean provideInput(String userId, String taskId, String input) {
                 answers.add(input);

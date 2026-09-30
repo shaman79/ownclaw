@@ -1,7 +1,6 @@
 package com.ownclaw.agent;
 
 import com.fasterxml.jackson.core.json.JsonReadFeature;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.ownclaw.agent.tools.ToolRegistry;
@@ -69,17 +68,6 @@ public class ThinkingEngine {
         this.toolRegistry = toolRegistry;
         this.config = config;
         this.llmRouter = llmRouter;
-    }
-
-    /**
-     * Decide the next action for the agent based on its current context.
-     *
-     * @param context    the current agent context (includes trajectory, user message, etc.)
-     * @param provider   the LLM provider to use for this reasoning step
-     * @return the next action to take
-     */
-    public AgentAction decideNextAction(AgentContext context, LlmProvider provider) {
-        return decideNextActionFull(context, provider).action();
     }
 
     /**
