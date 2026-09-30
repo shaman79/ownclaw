@@ -12,6 +12,7 @@ import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.observability.OpsService;
 import com.ownclaw.users.AuthService;
+import com.ownclaw.users.UserRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -105,15 +106,17 @@ class OpsControllerTest {
     /** The same, with the conversation store the test gives it. */
     static Setup setup(Path tmp, Function<JdbcTemplate, ConversationService> store) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
         var loop = new ScriptedLoop(jdbc);
         var conversations = store.apply(jdbc);
         var clock = new AtomicLong(T0);
+        var auth = new AuthService(jdbc, new UserRepository(jdbc), new OwnClawConfig());
         // A queue that is never started: tasks() reads only its counters. No local model is probed.
         var service = new OpsService(new OwnClawConfig(), jdbc, null, null,
                 new TaskQueue(null, null, null, new OwnClawConfig(), null),
-                new AuthService(jdbc, null, new OwnClawConfig()), null, new ObjectMapper(), null);
+                auth, null, new ObjectMapper(), null);
         return new Setup(jdbc, loop, conversations, clock,
-                new OpsController(service, loop, null, null, null, null, null, conversations, clock::get));
+                new OpsController(service, loop, auth, null, null, null, null, conversations, clock::get));
     }
 
     @Test
@@ -212,7 +215,8 @@ class OpsControllerTest {
         for (Map<String, Object> request : List.<Map<String, Object>>of(
                 Map.of("message", "hi", "userId", "u1", "sessionId", "new", "unattended", true),
                 Map.of("message", "hi", "userId", "u1", "sessionId", "no-such-chat"),
-                Map.of("message", "hi", "userId", "u1", "sessionId", othersChat))) {
+                Map.of("message", "hi", "userId", "u1", "sessionId", othersChat),
+                Map.of("message", "hi", "userId", "nobody", "sessionId", "new"))) {
             assertEquals(400, s.ops().runAgent(request).getStatusCode().value(), request.toString());
         }
         assertEquals(List.of(), s.loop().currentMessageIds, "nothing ran");
@@ -291,7 +295,6 @@ class OpsControllerTest {
     @DisplayName("db/query, forensics, tasks and egress page through the controller with the offset and limit asked for")
     void listingsPageThroughTheController(@TempDir Path tmp) throws Exception {
         var s = setup(tmp);
-        s.jdbc().update("INSERT INTO users (id, display_name) VALUES ('u1', 'someone')");
         s.jdbc().batchUpdate("INSERT INTO events (user_id, task_id, event_type, severity, summary) "
                         + "VALUES ('u1', 'abcd1234', 'egress', 'info', ?)",
                 IntStream.range(0, 1203).mapToObj(i -> new Object[]{"SENT " + i}).toList());

@@ -107,6 +107,35 @@ class TaskEndToEndTest {
     }
 
     @Test
+    @DisplayName("two ops chat turns in a new chat: the second reads the first, with its record, and nothing of the owner's open chat")
+    void opsChatTurnsAreAChat(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        String owners = rig.chat.createSession("u1", "The owner's chat");
+        rig.chat.saveMessage("u1", owners, "user", "OWNER-CHAT question");
+        rig.chat.saveMessage("u1", owners, "assistant", "OWNER-CHAT answer");
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        var ops = new com.ownclaw.interfaces.web.OpsController(null, rig.loop,
+                new com.ownclaw.users.AuthService(rig.jdbc, new com.ownclaw.users.UserRepository(rig.jdbc), rig.config),
+                null, rig.cancellation, null, rig.config, rig.chat);
+
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("Noted: seven."));
+        @SuppressWarnings("unchecked")
+        var first = (Map<String, Object>) ops.runAgent(
+                Map.of("message", "remember 7", "userId", "u1", "sessionId", "new")).getBody();
+        String chat = (String) first.get("sessionId");
+        assertEquals(owners, rig.chat.getCurrentSession("u1"), "the owner's open chat did not move");
+
+        rig.cloud.think.add(respond("It was seven."));
+        ops.runAgent(Map.of("message", "which number?", "userId", "u1", "sessionId", chat));
+
+        String read = String.join("\n", userParts(rig.cloud.calls("think").get(2)));
+        assertTrue(read.contains("USER: remember 7\nASSISTANT: Noted: seven.\n[OwnClaw's record of task "
+                + first.get("taskId") + ", from its step log:\n1. ✓ noop"), read);
+        assertFalse(read.contains("OWNER-CHAT"), "the owner's open chat is not the ops chat: " + read);
+    }
+
+    @Test
     @DisplayName("Stop ends a model call that has sent nothing yet -- a local model still loading -- at once")
     void stopEndsASilentCall(@TempDir Path tmp) throws Exception {
         var ollama = new com.ownclaw.llm.SilentOllama();

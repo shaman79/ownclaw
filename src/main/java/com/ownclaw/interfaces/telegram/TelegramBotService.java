@@ -303,17 +303,21 @@ public class TelegramBotService {
         // Persist user message for conversation history
         String currentSessionId = conversationService.getCurrentSession(userId);
         conversationService.autoTitleIfNeeded(userId, currentSessionId, text);
-        // The row id, so the loop can skip exactly the turn it is answering. Without it the
-        // message arrives twice: once as the task, once as the last line of "Recent
-        // conversation" -- the websocket path passes it and Telegram did not.
+        // The row id: the task reads the chat this row was saved in, up to it, and not the row
+        // itself, which is its own text (ConversationService#contextOf).
         String currentMessageId =
                 conversationService.saveMessage(userId, currentSessionId, "user", text);
 
-        // Submit to task queue — orchestrator handles conversation persistence
+        // The task runs on the queue; its answer is saved and sent here.
         taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
             // Saved as the web chat saves an answer: the web chat shows it on reload, the private
-            // answer included, and links it to what the task did.
-            conversationService.saveAnswer(userId, currentSessionId, result);
+            // answer included, and links it to what the task did. Saving is one half of
+            // delivering it, and failing it must not also lose the other: it is still sent.
+            try {
+                conversationService.saveAnswer(userId, currentSessionId, result);
+            } catch (Exception e) {
+                log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
+            }
             // The owner's own answer, private text included: he decided Telegram gets it in full
             // -- in his private chat (its id is his own). Asked from a group, the group gets the
             // safe text. What is stored above for later turns is the safe text either way.

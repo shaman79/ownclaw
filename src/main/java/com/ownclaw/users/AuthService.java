@@ -159,6 +159,11 @@ public class AuthService {
         return rows.isEmpty() ? Optional.empty() : Optional.of((String) rows.getFirst().get("id"));
     }
 
+    /** Whether a user with this id exists -- an account, or a profile made for a Telegram chat. */
+    public boolean userExists(String userId) {
+        return userId != null && userRepo.findById(userId).isPresent();
+    }
+
     public boolean isOwner(String userId) {
         return userId != null && ownerId().map(userId::equals).orElse(false);
     }

@@ -463,6 +463,12 @@ public class OpsController {
                 return ResponseEntity.badRequest().body(Map.of("error", "sessionId makes the run a "
                         + "chat turn, and a chat turn is attended: drop unattended, or drop sessionId."));
             }
+            // A chat belongs to a user, so there is none to start for one that does not exist:
+            // said here, before anything is saved, rather than as the database's refusal.
+            if (NEW_CHAT.equals(sessionId) && !authService.userExists(userId)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "There is no user " + userId
+                        + ", so no chat can be started for one."));
+            }
             if (!NEW_CHAT.equals(sessionId) && conversations.listSessions(userId, true).stream()
                     .noneMatch(s -> sessionId.equals(s.get("id")))) {
                 return ResponseEntity.badRequest().body(Map.of("error", "User " + userId

@@ -63,12 +63,17 @@ class TelegramDeliveryTest {
     }
 
     private void start(Path tmp, AgentResult answer) throws Exception {
+        start(tmp, answer, ConversationService::new);
+    }
+
+    private void start(Path tmp, AgentResult answer,
+                       java.util.function.Function<JdbcTemplate, ConversationService> store) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         owner = new UserRepository(jdbc).createUser("petr", ME);
         var config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
         bot = new TelegramBotService(config, new Answering(answer), new UserRepository(jdbc), emitter, JSON,
-                new ConversationService(jdbc), new SkillInteractionHandler(null), null,
+                store.apply(jdbc), new SkillInteractionHandler(null), null,
                 new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null),
                 null, null, jdbc, telegram.client);
     }
@@ -111,6 +116,22 @@ class TelegramDeliveryTest {
         assertEquals("[Private answer]", row.get("content"), "what later prompts read");
         assertEquals("Closing balance 48,213.07 CZK", row.get("private_content"), "what the web chat shows");
         assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "what links it to what the task did");
+    }
+
+    @Test
+    @DisplayName("an answer that cannot be saved is still sent, as the web chat's is")
+    void anUnsavedAnswerIsStillSent(@TempDir Path tmp) throws Exception {
+        start(tmp, AgentResult.completed("The router is up.", new AgentTrajectory(), 1),
+                jdbc -> new ConversationService(jdbc) {
+                    @Override public String saveAnswer(String userId, String sessionId, AgentResult result) {
+                        throw new IllegalStateException("database is locked");
+                    }
+                });
+
+        receive("is the router up?");
+        FakeTelegram.drain(bot);
+
+        assertTrue(sentTexts().contains("The router is up."), "saving failed, and the answer went all the same");
     }
 
     @Test

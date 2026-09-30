@@ -381,6 +381,10 @@ public class AgentLoop {
      * cost, and the morning digest email ended with a reminder about an unrelated server task
      * it could only have known from the chat. Nor for a task with no message row -- it came from
      * no chat. Static, so a test can run it against a database.
+     * <p>
+     * A handle in an earlier message -- the owner's {{1}}, an answer that quoted one -- is written
+     * in words ({@link TaskRecord#inWords}): this task numbers its own results from 1, and a
+     * handle copied from the chat into a call would resolve to one of them.
      *
      * @param recordOf a task id to the record shown under that task's answer, or null for none
      */
@@ -393,7 +397,8 @@ public class AgentLoop {
             StringBuilder sb = new StringBuilder();
             for (Map<String, Object> row : conversationService.contextOf(userId, currentMessageId)) {
                 String role = (String) row.get("role");
-                sb.append(role.toUpperCase()).append(": ").append(row.get("content")).append("\n");
+                sb.append(role.toUpperCase()).append(": ")
+                  .append(TaskRecord.inWords((String) row.get("content"))).append("\n");
                 String record = row.get("task_id") == null ? null : recordOf.apply(String.valueOf(row.get("task_id")));
                 if (record != null) sb.append(record).append("\n");
 

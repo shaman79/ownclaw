@@ -178,4 +178,19 @@ class ChatContextTest {
         assertFalse(summary.contains("SECRET"), "the private answer went into the next prompt: " + summary);
         assertTrue(summary.contains("ASSISTANT: Done."), "a row with no private text is read as it was");
     }
+
+    @Test
+    @DisplayName("a handle in an earlier message is read in words: in this task it would be one of its own results")
+    void noHandleResolvesHere(@TempDir Path tmp) throws Exception {
+        var db = db(tmp);
+        String session = db.conversations().createSession("u1", "Mail");
+        db.conversations().saveMessage("u1", session, "user", "send {{1}} to the team");
+        db.conversations().saveMessage("u1", session, "assistant", "Sent {{2.body}} as asked.");
+        String asked = db.conversations().saveMessage("u1", session, "user", "and to Jana?");
+
+        String shown = contextOf(db, asked);
+        assertTrue(shown.contains("USER: send result 1 to the team"), shown);
+        assertTrue(shown.contains("ASSISTANT: Sent result 2.body as asked."), shown);
+        assertFalse(ArtifactRef.TOKEN.matcher(shown).find(), "a handle this task would resolve: " + shown);
+    }
 }
