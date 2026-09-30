@@ -311,10 +311,9 @@ public class TelegramBotService {
 
         // Submit to task queue — orchestrator handles conversation persistence
         taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
-            // With its task id, so the web chat links this answer to what the task did; and with
-            // the private answer, if there is one, which the web chat shows on reload.
-            conversationService.saveMessage(userId, currentSessionId, "assistant",
-                    result.response(), java.util.List.of(), result.taskId(), result.ownerText());
+            // Saved as the web chat saves an answer: the web chat shows it on reload, the private
+            // answer included, and links it to what the task did.
+            conversationService.saveAnswer(userId, currentSessionId, result);
             // The owner's own answer, private text included: he decided Telegram gets it in full
             // -- in his private chat (its id is his own). Asked from a group, the group gets the
             // safe text. What is stored above for later turns is the safe text either way.

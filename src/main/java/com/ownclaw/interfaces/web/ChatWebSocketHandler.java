@@ -378,9 +378,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     // Saving is one half of delivering it, and failing it must not also lose the
                     // other: the answer is still sent.
                     try {
-                        conversationService.saveMessage(userId, currentSessionId, "assistant",
-                                result.response(), java.util.List.of(), result.taskId(),
-                                result.ownerText());
+                        conversationService.saveAnswer(userId, currentSessionId, result);
                     } catch (Exception e) {
                         log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
                     }

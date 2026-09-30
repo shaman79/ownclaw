@@ -36,7 +36,7 @@ class ChatContextTest {
         jdbc.execute("""
             CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'New Chat',
                 preview TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
-                archived INTEGER DEFAULT 0)""");
+                archived INTEGER DEFAULT 0, kind TEXT NOT NULL DEFAULT 'chat')""");
         jdbc.execute("CREATE TABLE active_session (user_id TEXT PRIMARY KEY, session_id TEXT NOT NULL)");
         jdbc.execute("CREATE TABLE session_summaries (session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, summary TEXT NOT NULL)");
         jdbc.execute("CREATE TABLE file_attachments (id TEXT PRIMARY KEY, user_id TEXT, original_name TEXT, "

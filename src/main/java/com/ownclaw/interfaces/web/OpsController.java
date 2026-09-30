@@ -121,8 +121,8 @@ public class OpsController {
                                 + "ask again from there. Any limit may be asked for. An offset "
                                 + "counts rows, so rows added or deleted between two pages shift it.",
                         "agent/run with sessionId is a chat turn, saved to that chat the way the web "
-                                + "chat saves one (\"new\" opens a chat titled Ops check); the "
-                                + "response names the chat.",
+                                + "chat saves one (\"new\" starts a chat titled Ops check, which does "
+                                + "not become the owner's open chat); the response names the chat.",
                         "Every call is logged, including the SQL text.")));
     }
 
@@ -466,7 +466,7 @@ public class OpsController {
             if (!NEW_CHAT.equals(sessionId) && conversations.listSessions(userId, true).stream()
                     .noneMatch(s -> sessionId.equals(s.get("id")))) {
                 return ResponseEntity.badRequest().body(Map.of("error", "User " + userId
-                        + " has no chat " + sessionId + ". Pass \"new\" to open one."));
+                        + " has no chat " + sessionId + ". Pass \"new\" to start one."));
             }
         }
         ChatTurn turn = sessionId == null ? null : startTurn(userId, sessionId, message);
@@ -488,7 +488,7 @@ public class OpsController {
         }
     }
 
-    /** The {@code sessionId} that opens a fresh chat for the turn. */
+    /** The {@code sessionId} that starts a fresh chat for the turn. */
     private static final String NEW_CHAT = "new";
 
     /** A run that is a chat turn: the chat, and the user row the task answers. */
@@ -500,25 +500,12 @@ public class OpsController {
      * finds it as the message it answers.
      */
     private ChatTurn startTurn(String userId, String sessionId, String message) {
-        String chat = NEW_CHAT.equals(sessionId) ? openOpsCheck(userId) : sessionId;
+        // A fresh chat is never made the open one: the web page files what the owner types next
+        // in the open chat, and an ops check must not move his conversation.
+        String chat = NEW_CHAT.equals(sessionId)
+                ? conversations.createSessionWithoutOpening(userId, "Ops check") : sessionId;
         conversations.autoTitleIfNeeded(userId, chat, message);
         return new ChatTurn(chat, conversations.saveMessage(userId, chat, "user", message, List.of()));
-    }
-
-    /**
-     * A fresh chat titled "Ops check". createSession also makes it the account's active chat,
-     * which is where the web page files what the owner types next, so the chat that was active
-     * is put back straight after: an ops check must not move the owner's conversation. A message
-     * the owner sends between those two statements is still filed in the new chat:
-     * ConversationService cannot yet create a chat without making it the active one. (An
-     * account with no active chat gets one from getCurrentSession, as it would on the owner's
-     * next message.)
-     */
-    private String openOpsCheck(String userId) {
-        String active = conversations.getCurrentSession(userId);
-        String created = conversations.createSession(userId, "Ops check");
-        conversations.setActiveSession(userId, active);
-        return created;
     }
 
     /**
@@ -534,19 +521,13 @@ public class OpsController {
                     turn == null ? null : turn.messageId(), List.of());
         } catch (RuntimeException e) {
             if (turn != null) {
-                saveAnswer(userId, turn, AgentResult.error("Internal error: " + e.getMessage(),
-                        new AgentTrajectory(), 0));
+                conversations.saveAnswer(userId, turn.sessionId(), AgentResult.error(
+                        "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
             }
             throw e;
         }
-        if (turn != null) saveAnswer(userId, turn, result);
+        if (turn != null) conversations.saveAnswer(userId, turn.sessionId(), result);
         return result;
-    }
-
-    /** A chat turn's answer: the response as the content, the owner's text beside it, the task id in the metadata. */
-    private void saveAnswer(String userId, ChatTurn turn, AgentResult result) {
-        conversations.saveMessage(userId, turn.sessionId(), "assistant", result.response(),
-                List.of(), result.taskId(), result.ownerText());
     }
 
     /** Everything the caller is told about a finished run. Shared by the sync and async paths. */

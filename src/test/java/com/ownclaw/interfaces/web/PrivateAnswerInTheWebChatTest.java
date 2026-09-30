@@ -124,9 +124,10 @@ class PrivateAnswerInTheWebChatTest {
 
         assertEquals(List.of(OWNER), frames("response"), "the owner reads the answer, not the note");
         var row = jdbc.queryForMap(
-                "SELECT content, private_content FROM conversations WHERE role = 'assistant'");
+                "SELECT content, private_content, metadata FROM conversations WHERE role = 'assistant'");
         assertEquals(NOTE, row.get("content"), "every later prompt reads this column");
         assertEquals(OWNER, row.get("private_content"));
+        assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "linked to what the task did");
     }
 
     @Test

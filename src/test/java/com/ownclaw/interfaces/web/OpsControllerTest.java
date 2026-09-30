@@ -31,6 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
@@ -98,9 +99,14 @@ class OpsControllerTest {
 
     /** The controller over a migrated database and the real OpsService, on a clock the test moves. */
     static Setup setup(Path tmp) throws Exception {
+        return setup(tmp, jdbc -> new ConversationService(jdbc, null));
+    }
+
+    /** The same, with the conversation store the test gives it. */
+    static Setup setup(Path tmp, Function<JdbcTemplate, ConversationService> store) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         var loop = new ScriptedLoop(jdbc);
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = store.apply(jdbc);
         var clock = new AtomicLong(T0);
         // A queue that is never started: tasks() reads only its counters. No local model is probed.
         var service = new OpsService(new OwnClawConfig(), jdbc, null, null,
@@ -152,6 +158,26 @@ class OpsControllerTest {
         String untitled = s.conversations().createSession("u1", "New Chat");
         body(s.ops().runAgent(Map.of("message", "plan the trip", "userId", "u1", "sessionId", untitled)));
         assertEquals("plan the trip", title(s.jdbc(), untitled));
+    }
+
+    @Test
+    @DisplayName("a \"new\" chat is never made the open one, not even for a moment, and no chat is opened for an account with none open")
+    void aNewChatIsNeverOpened(@TempDir Path tmp) throws Exception {
+        var opened = new CopyOnWriteArrayList<String>();
+        var s = setup(tmp, jdbc -> new ConversationService(jdbc, null) {
+            @Override public void setActiveSession(String userId, String sessionId) {
+                opened.add(sessionId);
+                super.setActiveSession(userId, sessionId);
+            }
+        });
+
+        String chat = (String) body(s.ops().runAgent(
+                Map.of("message", "hi", "userId", "u1", "sessionId", "new"))).get("sessionId");
+
+        assertEquals(List.of(), opened, "the web page files the owner's next message in the open chat");
+        assertEquals(0, s.jdbc().queryForObject("SELECT COUNT(*) FROM active_session", Integer.class));
+        assertEquals(List.of(chat), s.jdbc().queryForList("SELECT id FROM chat_sessions", String.class),
+                "the ops check's chat alone: no empty chat was made to be the open one");
     }
 
     @Test

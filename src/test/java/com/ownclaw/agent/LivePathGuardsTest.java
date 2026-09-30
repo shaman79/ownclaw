@@ -171,18 +171,14 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("Telegram saves the two texts apart and is sent the owner's")
-    void saveSitesKeepTheTwoTexts() throws IOException {
-        // Only Telegram: the web chat and the scheduler are driven by PrivateAnswerInTheWebChatTest
-        // and ScheduledPrivateAnswerTest, and TelegramDeliveryTest drives the bot but does not look
-        // at what it saves. The row's content feeds every later prompt, the compressor and search,
-        // so it must be the safe text.
+    @DisplayName("Telegram is sent the owner's text, in his own chat alone")
+    void telegramIsSentTheOwnersText() throws IOException {
+        // What is sent, pinned here; what is saved is driven: the web chat's by
+        // PrivateAnswerInTheWebChatTest, the scheduler's by ScheduledPrivateAnswerTest and
+        // Telegram's by TelegramDeliveryTest, which reads the row it saves.
         String telegram = read("com.ownclaw.interfaces.telegram.TelegramBotService");
-        assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
-                        + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
-                call(telegram, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
         // Telegram is the owner's own channel and he decided it gets private answers in full;
-        // what it stores for later turns is still the safe text (asserted above).
+        // what it stores for later turns is still the safe text (TelegramDeliveryTest).
         assertEquals("sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response())",
                 call(telegram, "sendMessage(chatId, chatId == telegramUserId"),
                 "his private chat is sent his answer; a group he asked from gets the safe text");

@@ -36,11 +36,11 @@ class TelegramDeliveryTest {
     static final long ME = 4242L;
     static final ObjectMapper JSON = new ObjectMapper();
 
-    /** Answers every message with the given text; runs nothing. */
+    /** Answers every message with the given result; runs nothing. */
     static final class Answering extends TaskQueue {
-        final String answer;
+        final AgentResult answer;
 
-        Answering(String answer) {
+        Answering(AgentResult answer) {
             super(null, null, null, new OwnClawConfig(), null);
             this.answer = answer;
         }
@@ -48,7 +48,7 @@ class TelegramDeliveryTest {
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
                                                      String currentMessageId, List<String> attachmentIds) {
-            return CompletableFuture.completedFuture(AgentResult.completed(answer, new AgentTrajectory(), 1));
+            return CompletableFuture.completedFuture(answer);
         }
     }
 
@@ -59,6 +59,10 @@ class TelegramDeliveryTest {
     TelegramBotService bot;
 
     private void start(Path tmp, String answer) throws Exception {
+        start(tmp, AgentResult.completed(answer, new AgentTrajectory(), 1));
+    }
+
+    private void start(Path tmp, AgentResult answer) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         owner = new UserRepository(jdbc).createUser("petr", ME);
         var config = new OwnClawConfig();
@@ -91,6 +95,22 @@ class TelegramDeliveryTest {
         var texts = new java.util.ArrayList<String>();
         for (String b : telegram.bodies("sendMessage")) texts.add(JSON.readTree(b).path("text").asText());
         return texts;
+    }
+
+    @Test
+    @DisplayName("an answer is saved as every chat turn's is: the safe text, the owner's private text beside it, the task id")
+    void theAnswerIsSavedAsEveryTurnsIs(@TempDir Path tmp) throws Exception {
+        start(tmp, AgentResult.completed("[Private answer]", new AgentTrajectory(), 1)
+                .withOwnerText("Closing balance 48,213.07 CZK").withTaskId("a1b2c3d4"));
+
+        receive("what is my balance?");
+        FakeTelegram.drain(bot);
+
+        var row = jdbc.queryForMap(
+                "SELECT content, private_content, metadata FROM conversations WHERE role = 'assistant'");
+        assertEquals("[Private answer]", row.get("content"), "what later prompts read");
+        assertEquals("Closing balance 48,213.07 CZK", row.get("private_content"), "what the web chat shows");
+        assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "what links it to what the task did");
     }
 
     @Test

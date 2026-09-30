@@ -1,5 +1,6 @@
 package com.ownclaw.conversation;
 
+import com.ownclaw.agent.AgentResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -111,6 +112,19 @@ public class ConversationService {
     }
 
     /**
+     * Save a task's answer as the assistant row of the chat turn it answers: the safe text as the
+     * content, the owner's private text beside it, and the task id, which links the answer to what
+     * the task did. The one rule for what a turn's answer saves: the web chat, Telegram and the
+     * ops API's chat turns all save theirs here.
+     *
+     * @return the new row's id
+     */
+    public String saveAnswer(String userId, String sessionId, AgentResult result) {
+        return saveMessage(userId, sessionId, "assistant", result.response(), List.of(),
+                result.taskId(), result.ownerText());
+    }
+
+    /**
      * Get the last N messages in a session (for LLM context).
      */
     public List<Map<String, Object>> getRecentMessages(String userId, String sessionId, int limit) {
@@ -153,16 +167,29 @@ public class ConversationService {
      * @return the new session ID
      */
     public String createSession(String userId, String title) {
-        String sessionId = newSessionId();
-        jdbc.update("""
-            INSERT INTO chat_sessions (id, user_id, title) VALUES (?, ?, ?)
-            """, sessionId, userId, title);
+        String sessionId = createSessionWithoutOpening(userId, title);
         setActiveSession(userId, sessionId);
         return sessionId;
     }
 
-    private static String newSessionId() {
-        return UUID.randomUUID().toString().substring(0, 12);
+    /**
+     * Create a chat without making it the open one, so what the owner types next is still filed
+     * in the chat he has open: for a chat he did not open himself, such as one an ops check runs
+     * in.
+     *
+     * @return the new session ID
+     */
+    public String createSessionWithoutOpening(String userId, String title) {
+        return insertSession(userId, title, "chat");
+    }
+
+    /** A new chat of this kind; never the open one. Every chat is created here. */
+    private String insertSession(String userId, String title, String kind) {
+        String sessionId = UUID.randomUUID().toString().substring(0, 12);
+        jdbc.update("""
+            INSERT INTO chat_sessions (id, user_id, title, kind) VALUES (?, ?, ?, ?)
+            """, sessionId, userId, title, kind);
+        return sessionId;
     }
 
     /** The title of the pinned chat that scheduled results are delivered into. */
@@ -185,11 +212,7 @@ public class ConversationService {
             ORDER BY created_at, rowid LIMIT 1
             """, String.class, userId);
         if (!pinned.isEmpty()) return pinned.getFirst();
-        String sessionId = newSessionId();
-        jdbc.update("""
-            INSERT INTO chat_sessions (id, user_id, title, kind) VALUES (?, ?, ?, 'scheduled')
-            """, sessionId, userId, SCHEDULED_TITLE);
-        return sessionId;
+        return insertSession(userId, SCHEDULED_TITLE, "scheduled");
     }
 
     /**
