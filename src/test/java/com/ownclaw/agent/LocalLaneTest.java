@@ -28,9 +28,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * The local model's summaries of private results are background work on a local model every task
- * shares, which serves one request at a time: they never hold up a task -- not their own, and
- * not one that runs after their task has ended -- and what they cost, where they land and how a
- * Stop reaches them stay true after their task has ended.
+ * shares, which serves one request at a time: they never hold up a task, they end with their
+ * task -- the one under way is ended, the rest are never asked for -- and what one costs and
+ * where it lands stay true when its reply comes back just as its task ends.
  */
 class LocalLaneTest {
 
@@ -99,136 +99,144 @@ class LocalLaneTest {
     }
 
     @Test
-    @DisplayName("an ended task's summaries wait while a later task -- a scheduled run too -- delegates: none comes between its turns")
-    void anEndedTasksSummariesWaitForALaterDelegation(@TempDir Path tmp) throws Exception {
-        var local = new OneSlot(300, DelegationBehaviourTest.call("ping", Map.of("n", 1)),
+    @DisplayName("an ended task's summaries are not written: a later task's delegation has the local model to itself")
+    void anEndedTasksSummariesAreNotWritten(@TempDir Path tmp) throws Exception {
+        var local = new OneSlot(10_000, DelegationBehaviourTest.call("ping", Map.of("n", 1)),
                 DelegationBehaviourTest.call("ping", Map.of("n", 2)),
                 DelegationBehaviourTest.call("ping", Map.of("n", 3)), DelegationBehaviourTest.done("pinged"));
         var rig = new LoopRig(tmp, List.of(BANK, PING), 600, local);
         String session = rig.chat.createSession("u1", "Bank");
         for (int i = 1; i <= 3; i++) rig.cloud.think.add(call("bank_fetch", Map.of("month", i)));
-        rig.cloud.think.add(respond("Fetched."));
+        rig.cloud.think.add(c -> {
+            assertTrue(local.summaryStarted.await(5, TimeUnit.SECONDS), "the first summary never began");
+            return respond("Fetched.").answer(c);
+        });
         rig.turn(session, "fetch my statements");
 
         rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Ping the router three times.", "tools", "ping")));
         rig.cloud.think.add(respond("It answers."));
-        AgentResult b = rig.loop.executeFull("u1", "ping the router", true);
-        for (int i = 1; i <= 3; i++) awaitRowIn(rig, session, "**Result " + i + " (bank_fetch)**");
+        AgentResult b = assertTimeoutPreemptively(java.time.Duration.ofSeconds(5),
+                () -> rig.loop.executeFull("u1", "ping the router", true));
+        Thread.sleep(300);
 
         assertEquals("It answers.", b.response());
-        var done = List.copyOf(local.finished);
-        var turns = done.subList(done.indexOf("turn"), done.lastIndexOf("turn") + 1);
-        assertTrue(turns.stream().allMatch("turn"::equals), "a summary came between the turns: " + done);
-        assertEquals(4, turns.size(), done.toString());
-        assertEquals(3, done.stream().filter("summary"::equals).count(), "each written after all: " + done);
-        // Mutation: count delegations per task again -> the turns alternate with the summaries.
+        assertEquals(List.of("summary ended", "turn", "turn", "turn", "turn"), local.finished,
+                "the one under way ended with its task, the other two never asked for");
+        assertEquals(3, progress(rig).size(), "the three steps, no result row: " + progress(rig));
+        // Mutation: let a task's end leave its summaries be -> the delegation waits out the
+        // summary under way, and three summaries follow it.
     }
 
     @Test
-    @DisplayName("a summary under way when a delegation starts is ended, and written again after it")
+    @DisplayName("a summary under way when a delegation starts is ended, and written again after it while its task runs")
     void aSummaryMakesWayForADelegation(@TempDir Path tmp) throws Exception {
         var local = new OneSlot(1_500, DelegationBehaviourTest.done("The balance is 48,213.07 CZK."));
         var rig = new LoopRig(tmp, List.of(BANK), 600, local);
+        String session = rig.chat.createSession("u1", "Bank");
         rig.cloud.think.add(call("bank_fetch", Map.of()));
         rig.cloud.think.add(c -> {
             assertTrue(local.summaryStarted.await(5, TimeUnit.SECONDS), "the summary never began");
             return call(AgentAction.DELEGATE, Map.of("goal", "Read {{1}} and say the balance.")).answer(c);
         });
-        rig.cloud.think.add(respond("Done."));
-        String session = rig.chat.createSession("u1", "Bank");
+        rig.cloud.think.add(c -> {
+            awaitRowIn(rig, session, ProgressMessagesTest.LOCAL + " Result 1 · bank_fetch");
+            return respond("Done.").answer(c);
+        });
 
         AgentResult r = rig.turn(session, "what is my balance?");
 
         assertEquals("Done.", r.response());
-        assertEquals(List.of("summary ended", "turn"), local.finished.subList(0, 2),
-                "the delegation did not wait for the summary: " + local.finished);
-        assertNotNull(awaitRowIn(rig, session, "**Result 1 (bank_fetch)**").get("private_content"));
-        assertTrue(local.finished.contains("summary"), "and the summary was written afterwards: " + local.finished);
+        assertEquals(List.of("summary ended", "turn", "summary"), local.finished,
+                "the delegation did not wait for the summary, and the summary was written after it");
+        assertNotNull(awaitRowIn(rig, session, ProgressMessagesTest.LOCAL + " Result 1 · bank_fetch").get("private_content"));
         // Mutation: only hold back summaries not yet begun -> the turn waits behind it.
     }
 
     @Test
-    @DisplayName("the local tokens of a summary written after its task ended are counted: per day, and on the task's page")
-    void aLateSummaryIsCounted(@TempDir Path tmp) throws Exception {
+    @DisplayName("a summary whose reply comes back as its task ends is counted -- per day, and on the task's page -- and not posted")
+    void aLateReplyIsCountedNotPosted(@TempDir Path tmp) throws Exception {
+        var begun = new CountDownLatch(1);
         var release = new CountDownLatch(1);
+        // A model that does not hear the cancel: its reply comes back after the task has ended.
         var local = new Local(c -> {
+            begun.countDown();
             assertTrue(release.await(10, TimeUnit.SECONDS));
             return Replies.of(SUMMARY, 400, 30);
         });
         var rig = new LoopRig(tmp, List.of(BANK), 600, local);
         rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(respond("Fetched."));
+        rig.cloud.think.add(c -> {
+            assertTrue(begun.await(5, TimeUnit.SECONDS), "the summary never began");
+            return respond("Fetched.").answer(c);
+        });
         String session = rig.chat.createSession("u1", "Bank");
 
         AgentResult r = rig.turn(session, "fetch my statement");
         release.countDown();
-        awaitRowIn(rig, session, "**Result 1 (bank_fetch)**");
 
-        var today = rig.events.tokenUsageDetailToday("u1");
+        long until = System.currentTimeMillis() + 10_000;
+        Map<String, Object> today;
+        do {
+            Thread.sleep(20);
+            today = rig.events.tokenUsageDetailToday("u1");
+        } while (((Number) today.get("local_tokens")).longValue() == 0 && System.currentTimeMillis() < until);
         assertEquals(430L, ((Number) today.get("local_tokens")).longValue(), today.toString());
         assertEquals(1L, ((Number) today.get("task_count")).longValue(), "one task, however its tokens are kept");
         var outcome = (Map<?, ?>) new TaskTraceService(rig.events).trace("u1", r.taskId()).orElseThrow().get("outcome");
         assertEquals(430L, ((Number) outcome.get("localTokens")).longValue(), outcome.toString());
+        assertEquals(1, progress(rig).size(), "the step only: nothing below the answer " + progress(rig));
         // Mutation: count it only on the task's counter -> the ending was written: 0 local tokens.
     }
 
     @Test
-    @DisplayName("a Stop ends the summary under way of a task that has already ended")
-    void aStopReachesAnEndedTasksSummary(@TempDir Path tmp) throws Exception {
+    @DisplayName("a task's end ends the summary under way at once, and it says nothing")
+    void theEndEndsTheSummaryUnderWay(@TempDir Path tmp) throws Exception {
         var calling = new CountDownLatch(1);
         var ended = new CountDownLatch(1);
         var local = new Local(c -> {
             c.progress().calling(ended::countDown);    // the call's cancel, as a provider hands it over
             calling.countDown();
-            assertTrue(ended.await(10, TimeUnit.SECONDS), "the stop never ended the call");
+            assertTrue(ended.await(10, TimeUnit.SECONDS), "nothing ended the call");
             c.progress().onProgress();                  // asked once more, as a provider does
             return Replies.of(SUMMARY, 400, 30);
         });
         var rig = new LoopRig(tmp, List.of(BANK), 600, local);
         rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(respond("Fetched."));
+        rig.cloud.think.add(c -> {
+            assertTrue(calling.await(5, TimeUnit.SECONDS), "the summary never began");
+            return respond("Fetched.").answer(c);
+        });
         String session = rig.chat.createSession("u1", "Bank");
 
         AgentResult r = rig.turn(session, "fetch my statement");
-        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason());
-        assertTrue(calling.await(5, TimeUnit.SECONDS), "the summary never began");
-        rig.cancellation.requestAll("u1", "you pressed Stop");
 
-        assertTrue(ended.await(2, TimeUnit.SECONDS), "the Stop did not end it");
-        assertTrue(String.valueOf(awaitRowIn(rig, session, "**Result 1 (bank_fetch)**").get("content"))
-                .endsWith("— the local model could not summarise it: the task was stopped."));
-        // Mutation: end only the calls of tasks still running -> it waits out its call.
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason());
+        assertTrue(ended.await(2, TimeUnit.SECONDS), "the task's end did not end it");
+        Thread.sleep(300);
+        assertEquals(1, progress(rig).size(), "the step only: " + progress(rig));
+        // Mutation: end only the calls of stopped tasks -> it waits out its call, then posts.
     }
 
     @Test
-    @DisplayName("a summary for a chat the owner deleted meanwhile is neither saved nor shown")
+    @DisplayName("a row for a chat the owner deleted while the task ran is neither saved nor shown")
     void noRowForADeletedChat(@TempDir Path tmp) throws Exception {
-        var release = new CountDownLatch(1);
-        var local = new Local(c -> {
-            assertTrue(release.await(10, TimeUnit.SECONDS));
-            return Replies.of(SUMMARY, 400, 30);
-        });
-        var rig = new LoopRig(tmp, List.of(BANK), 600, local);
+        var rig = new LoopRig(tmp, List.of(PING));
         var seen = rig.statuses();
-        String deleted = rig.chat.createSession("u1", "Bank");
-        rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(respond("Fetched."));
-        rig.turn(deleted, "fetch my statement");
-        rig.chat.deleteSession("u1", deleted);
+        String deleted = rig.chat.createSession("u1", "Router");
+        rig.cloud.think.add(call("ping", Map.of("n", 1)));
+        rig.cloud.think.add(c -> {
+            rig.chat.deleteSession("u1", deleted);
+            return call("ping", Map.of("n", 2)).answer(c);
+        });
+        rig.cloud.think.add(respond("It answers."));
+        String row = rig.chat.saveMessage("u1", deleted, "user", "ping the router");
 
-        // A second summary, in a chat that stays: written after the first, in order.
-        String kept = rig.chat.createSession("u1", "Bank again");
-        rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(respond("Fetched again."));
-        rig.turn(kept, "fetch it again");
-        release.countDown();
-        awaitRowIn(rig, kept, "**Result 1 (bank_fetch)**");
-        Thread.sleep(200);
+        rig.loop.executeFull("u1", "ping the router", false, row, List.of(), TaskChat.Channel.WEB);
 
         assertEquals(List.of(), rig.jdbc.queryForList("SELECT role, content FROM conversations WHERE session_id = ?",
                 deleted), "nothing is saved into the deleted chat");
-        assertTrue(seen.stream().noneMatch(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
-                && m.text().startsWith("**Result") && deleted.equals(m.data().get("sessionId"))), "nor shown");
-        // Mutation: save it unconditionally -> a row of no chat holds the bank summary.
+        var shown = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE).toList();
+        assertEquals(1, shown.size(), "the step before the delete, and nothing after it: " + shown);
+        // Mutation: save it unconditionally -> a row of no chat holds step 2.
     }
 }

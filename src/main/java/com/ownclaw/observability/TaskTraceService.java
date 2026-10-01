@@ -160,6 +160,9 @@ public class TaskTraceService {
                     // skill_manage: which action -- read, delete, list, analyze. Absent on rows from
                     // before it was recorded.
                     s.put("skillAction", d.hasNonNull("skillAction") ? d.path("skillAction").asText() : null);
+                    // delegate: what the cloud asked the local model to do. Absent on rows from
+                    // before it was recorded, and where the local model wrote the goal itself.
+                    s.put("goal", d.hasNonNull("goal") ? d.path("goal").asText() : null);
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));
@@ -183,7 +186,7 @@ public class TaskTraceService {
                     artifactIds.add(id);
                 }
                 // Local tokens billed after the ending was recorded: a summary of a private result
-                // still being written when the task ended. Part of what the task used.
+                // whose reply came back just as the task ended. Part of what the task used.
                 case EventLogService.TOKENS_AFTER_END -> {
                     if (d != null) localAfterEnd += d.path("localTokens").asLong();
                 }

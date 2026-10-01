@@ -682,8 +682,9 @@ public class AgentLoop {
                         AgentAction.SKILL_CREATE, skillParams,
                         "CapabilityResolver detected missing " + hint.category()
                                 + " capability — creating skill deterministically");
-                // No model chose this step, so nothing was written beside it.
-                context.chat().step(step + 1, action, null);
+                // No model chose this step, so nothing was written beside it; its code is written
+                // on the cloud, or on the local model when the cloud is not available.
+                context.chat().step(step + 1, action, null, !llmRouter.cloud().isAvailable());
 
                 if (debug) {
                     emitDebug(context.userId(),
@@ -854,7 +855,7 @@ public class AgentLoop {
             // Before the step runs, the owner's chat says which step it is and what the model
             // wrote beside the call: what it found, and what it does now and why. A call the
             // critic blocked, and an answer or a question that was not delivered, get none.
-            context.chat().step(step + 1, action, action.reasoning());
+            context.chat().step(step + 1, action, action.reasoning(), local);
 
             // === SKILL MANAGEMENT (special actions — always available) ===
             if (action.isSkillCreate()) {
@@ -1025,6 +1026,9 @@ public class AgentLoop {
                             "chars", a.output().length(), "why", a.why(),
                             "indexed", a.indexed())).toList());
                 }
+                // The goal, for the step's row (stepDetails), when the cloud wrote it. One the
+                // local model wrote, the cloud not being available, can quote what it has read.
+                if (!local) structured.put("goal", plan.goal());
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, structured, durationMs)
                         : AgentObservation.failure(action.tool(), result, structured, durationMs);
@@ -2199,7 +2203,8 @@ public class AgentLoop {
 
     /**
      * Local tokens billed after the task's ending was recorded -- a summary of one of its private
-     * results, still being written when it ended (TaskChat) -- as a row of their own, which the
+     * results whose reply came back just as the task ended, which ends the one under way
+     * (TaskChat) -- as a row of their own, which the
      * owner's counts of local use read beside the ending's ({@code EventLogService},
      * {@code TaskTraceService}).
      */
@@ -2503,7 +2508,9 @@ public class AgentLoop {
      * seeing what a run did, and later noticing that the same sequence keeps succeeding, which
      * is the signal a capability is worth consolidating. Arguments would put far more of the
      * user's data in the database for no added signal, and where they genuinely are needed —
-     * reproducing a failure — skill_usage already keeps them, redacted.
+     * reproducing a failure — skill_usage already keeps them, redacted. The one exception is a
+     * delegation's goal when the cloud wrote it: its own instructions to the local model, which
+     * the owner reads on the task page and nowhere else.
      * <p>
      * Never allowed to break a task: a task that works but is not recorded is much better than a
      * task that dies because recording failed.
@@ -2543,6 +2550,13 @@ public class AgentLoop {
         if (action.isSkillManage() && action.params().get("action") instanceof String what
                 && SKILL_MANAGE_ACTIONS.contains(what)) {
             details.put("skillAction", what);
+        }
+        // A delegation's goal, without the vault's values: the task page shows it, so the chat
+        // need not (LocalExecutor says only that the local model works). Only one the cloud
+        // wrote, which the loop puts beside the delegation's result.
+        if (action.isDelegate() && obs.structured() != null
+                && obs.structured().get("goal") instanceof String goal) {
+            details.put("goal", com.ownclaw.privacy.Redactor.scrubVault(goal, context.secretValues()).text());
         }
         details.put("success", obs.success());
         details.put("durationMs", obs.durationMs());
@@ -2701,7 +2715,7 @@ public class AgentLoop {
         for (AgentContext ctx : inFlight.values()) {
             if (ctx.isCancelled()) ctx.interruptCall();
         }
-        // And the local model's summary under way, when its task is stopped -- running, or ended.
+        // And the local model's summary under way, when its task is stopped.
         lane.interruptStopped();
     }
 

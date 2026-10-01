@@ -150,7 +150,7 @@ class PrivacyFilterRoundTripTest {
         assertTrue(((Number) totals.get("identifiers")).intValue() >= 5, totals.toString());
         // And the owner's chat says it, after the step whose result it changed.
         assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class)
-                        .contains("For the cloud model: 2 secrets removed, 5 identifiers replaced."),
+                        .contains("🔒 For the cloud model: 2 secrets removed, 5 identifiers replaced."),
                 String.valueOf(rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'")));
         // Mutations: restore nothing in the gateway -> wifi_move runs with "<ssid_1>"; restore
         // the text but not the arguments -> the same; keep "credentials (N)" -> the read is a

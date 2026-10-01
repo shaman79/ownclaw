@@ -85,9 +85,10 @@ public class LocalExecutor {
                     ToolParam.required("string", "The answer for the user, in full."))));
 
     /** What the local model may call: the tools this delegation is given, plus {@code done}. */
-    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan, boolean fileTask) {
+    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan, List<Artifact> given,
+                                         boolean fileTask) {
         return new ArrayList<>(ToolSchemas.build(List.of(fileTask ? DONE_FILE : DONE),
-                offered(plan, context), context.credentialKeys()));
+                offered(plan, given, context), context.credentialKeys()));
     }
 
     /**
@@ -106,7 +107,13 @@ public class LocalExecutor {
      * one the model cannot call. Only unattended: a chat message names tools in passing ("why
      * did smtp_send_email fail?", "do NOT use ..."), and there it would narrow to the wrong one.
      */
-    Collection<Tool> offered(DelegationPlan plan, AgentContext context) {
+    Collection<Tool> offered(DelegationPlan plan, List<Artifact> given, AgentContext context) {
+        // Handed results to read and asked to run nothing: it reads and answers, with done alone.
+        // Offered the whole registry instead -- 35 tools, about 20,000 tokens of definitions -- the
+        // local model spent about four minutes of every turn reading tools it did not need (about
+        // 100 tokens a second on this host), and was drawn into calling them: on 2026-10-01 such
+        // reads took 10 to 14 minutes, and one ended with no answer.
+        if (readsWhatItWasGiven(plan, given)) return List.of();
         var all = toolRegistry.all().stream()
                 .filter(t -> t != null && !"skill_create".equals(t.name()))
                 .collect(Collectors.toList());
@@ -161,7 +168,7 @@ public class LocalExecutor {
         List<String> unknown = unknownTools(plan);
         if (!unknown.isEmpty()) {
             log.warn("Delegation asked for tools that do not exist: {}", unknown);
-            boolean gotAll = offered(plan, parentContext).size() == toolRegistry.all().stream()
+            boolean gotAll = offered(plan, given.results(), parentContext).size() == toolRegistry.all().stream()
                     .filter(t -> t != null && !"skill_create".equals(t.name())).count();
             notes += "NOTE: no tool is named " + String.join(", ", unknown) + (gotAll
                     ? ", so it was given every tool. "
@@ -249,9 +256,9 @@ public class LocalExecutor {
         // model is told so. The user is given it whether or not the cloud places it, and when it
         // quotes the files it stays private (recordAnswer, AgentLoop.withLocalAnswers).
         boolean fileTask = !parentContext.files().isEmpty();
-        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, fileTask) : null;
+        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, given, fileTask) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
-                offered(plan, parentContext).size());
+                offered(plan, given, parentContext).size());
 
         // This delegation's own results, and the only ones the local model can name: {{1}} is
         // its first step, {{2}} its second -- which is what the system prompt tells it, and
@@ -276,13 +283,17 @@ public class LocalExecutor {
                 nativeTools, fileTask)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
-        String opening = plan.steps().isEmpty()
+        String opening = readsWhatItWasGiven(plan, given)
+                ? "Read the results you were given and answer the goal with done."
+                : plan.steps().isEmpty()
                 ? "Begin. Make the first tool call that moves toward the goal."
                 : "Begin executing the plan. Start with step 1.";
         messages.add(LlmMessage.user(opening));
 
-        statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
-                "Delegating to local LLM: " + plan.goal());
+        // A line for the owner, not the goal: that is the cloud's instructions to the local model,
+        // which the task page shows whole, under the step.
+        statusEmitter.emitForTask(parentContext.userId(), parentContext.taskId(), StatusMessage.Type.STEP,
+                "Local model working…");
 
         // No output limit is sent (a request cannot carry one): Ollama generates until the model
         // stops or its context window -- the model's own -- is full. Capping output here used to
@@ -378,12 +389,24 @@ public class LocalExecutor {
             // is then usually empty and that is fine.
             List<ExecutorAction> actions;
             String raw;
+            // What the model wrote beside its native calls: the sentence the owner reads above the
+            // turn's first call ({@link TaskChat#localTurn}). A turn written as text is its calls.
+            String words = null;
             if (response.hasToolCalls()) {
                 actions = response.toolCalls().stream().map(LocalExecutor::actionOf).toList();
                 raw = renderCalls(response.toolCalls());
+                words = response.content();
             } else {
                 raw = response.content();
                 actions = parseExecutorActions(raw);
+                // Offered its tools as structure, a model that writes prose and calls nothing has
+                // finished, and the prose is its answer. Read as "not a tool call", that answer was
+                // thrown away and the turn counted as one that ran nothing; three such turns ended
+                // the delegation with no answer at all. On the text protocol a call has to be
+                // written as JSON, so prose there is still not a call.
+                if (nativeTools && actions.size() == 1 && isNoCall(actions.get(0))) {
+                    actions = List.of(ExecutorAction.done(raw.strip()));
+                }
             }
 
             // Finishing is finishing, whichever shape it arrives in.
@@ -444,8 +467,9 @@ public class LocalExecutor {
                             + "numbering from the results you have now.";
                 } else {
                     int had = mine.size();
-                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn);
+                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn, words);
                     if (mine.size() == had) didNotRun = i + 1;
+                    else words = null;   // said once, above the call that ran
                 }
                 String name = action.done ? "done" : action.tool;
                 replies.add(actions.size() == 1 ? reply : "[call " + (i + 1) + " of "
@@ -455,6 +479,10 @@ public class LocalExecutor {
             // A turn in which no tool ran -- each of its calls was no call, or was refused -- ran
             // nothing, as an empty one did, whatever it named.
             if (mine.size() == before) {
+                // Which calls the turn held, by name only (a refusal's text can quote what was read):
+                // without it, three turns that ran nothing could not be told apart afterwards.
+                log.warn("Delegation turn {} ran nothing: {}", turn, actions.stream()
+                        .map(a -> a.done ? "done" : isNoCall(a) ? "(no call)" : a.tool).toList());
                 if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
             } else {
                 nothingInARow = 0;
@@ -491,7 +519,8 @@ public class LocalExecutor {
      * the model is told about it: the result, or why the call did not run.
      */
     private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
-                       List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn) {
+                       List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn,
+                       String words) {
         if (action.tool == null || action.tool.isBlank()) {
             // Local LLM produced something unparseable — tell it, so it can recover
             return nativeTools
@@ -585,9 +614,9 @@ public class LocalExecutor {
                     + " Text you compose yourself is fine; a partial copy of a result is not.";
         }
 
-        // ACT: execute the tool -- said in the owner's chat first, so the work on the local
-        // tier is seen as it happens.
-        parentContext.chat().localTurn(turn, target.name());
+        // ACT: execute the tool -- said in the owner's chat first, with the model's words and
+        // the call as it wrote it, so the work on the local tier is seen as it happens.
+        parentContext.chat().localTurn(turn, target.name(), words, action.params);
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
@@ -615,10 +644,9 @@ public class LocalExecutor {
         Artifact artifact = parentContext.addArtifact(target.name(), action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);
-        if (artifact.isPrivate()) {
-            parentContext.markLocalTierReadPrivate();
-            parentContext.chat().privateResult(artifact);
-        }
+        // No summary of it for the owner: the local model has just read it itself, and its turn
+        // in the chat says what it is doing with it.
+        if (artifact.isPrivate()) parentContext.markLocalTierReadPrivate();
         // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
         // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
         // error wrapped as "ok": false, so the delegation reported ok and the fallback never
@@ -726,10 +754,19 @@ public class LocalExecutor {
             sb.append("The steps are the order to work in; adapt params to what earlier steps returned.\n\n");
         }
         sb.append("## Output\n");
+        // The owner reads the sentence above each call in the chat (TaskChat#localTurn). On the
+        // text protocol a turn is one JSON object, with nothing beside it to write it in.
+        boolean narrate = nativeTools && context.chat().watched();
         if (nativeTools) {
             sb.append("Call one tool per turn. When the goal is reached, call **done** with the\n");
-            sb.append("full summary. Do not answer in prose — an answer nobody asked for ends\n");
-            sb.append("nothing, and only **done** returns the work.\n\n");
+            sb.append("full summary. Do not answer in prose instead of calling a tool — an answer\n");
+            sb.append("nobody asked for ends nothing, and only **done** returns the work.\n");
+            if (narrate) {
+                sb.append("The owner follows your work in the chat: with each tool call, write one short\n");
+                sb.append("sentence saying what you are doing and why, in the language of his request\n");
+                sb.append("(at the end of this prompt).\n");
+            }
+            sb.append("\n");
         } else {
             sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
             sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
@@ -781,7 +818,7 @@ public class LocalExecutor {
         // repeating it here would cost the context window twice for the same information.
         if (!nativeTools) {
             sb.append("## Available Tools\n");
-            Collection<Tool> availableTools = offered(plan, context);
+            Collection<Tool> availableTools = offered(plan, given, context);
             if (!availableTools.isEmpty()) {
                 String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
                 sb.append(manifest).append("\n");
@@ -828,6 +865,12 @@ public class LocalExecutor {
         }
         sb.append("- No skill_create. Nobody is available to answer questions — decide and proceed.\n");
 
+        if (narrate) {
+            // Whole, for its language: the local model is not otherwise shown it.
+            sb.append("\n## The owner's request\n");
+            sb.append("Only for the language of your sentences; the work is the goal above.\n\n");
+            sb.append(context.originalMessage()).append("\n");
+        }
         return sb.toString();
     }
 
@@ -1281,5 +1324,10 @@ public class LocalExecutor {
         static ExecutorAction invalid() {
             return new ExecutorAction(false, null, null, Map.of());
         }
+    }
+
+    /** Text that held no call: neither a finish nor a tool name. */
+    private static boolean isNoCall(ExecutorAction a) {
+        return !a.done && (a.tool == null || a.tool.isBlank());
     }
 }

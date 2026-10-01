@@ -21,7 +21,7 @@ import java.util.function.Supplier;
  * ({@link TaskChat}) are background work: written one at a time, for every task in the order
  * they were asked for, on one thread, and only while nothing is in the foreground. A summary under
  * way when foreground work begins is ended, and written again once the lane is free, so it never
- * holds up a task -- not its own, and not one that started after its task ended.
+ * holds up a task; and a summary ends with its task ({@link #interruptStopped}).
  */
 final class LocalLane {
 
@@ -29,7 +29,7 @@ final class LocalLane {
     private int foreground;
     /** Ends the background call under way, or null; guarded by this. */
     private Runnable backgroundCall;
-    /** Whether the task of the background call under way has been stopped; guarded by this. */
+    /** Whether the background call under way is over: its task stopped or ended; guarded by this. */
     private BooleanSupplier backgroundStopped;
     /** Whether foreground work ended the background call under way. */
     private volatile boolean preempted;
@@ -79,10 +79,11 @@ final class LocalLane {
 
     /**
      * From background work: the call, made once nothing is in the foreground -- and made again
-     * whenever foreground work ends it. A stop of its task ends the wait, the call itself on its
-     * next event, and at once a call that has sent nothing yet ({@link #interruptStopped}).
+     * whenever foreground work ends it. When {@code stopped} turns true -- its task was stopped,
+     * or has ended -- that ends the wait, the call itself on its next event, and at once a call
+     * that has sent nothing yet ({@link #interruptStopped}).
      *
-     * @throws TaskCancellationService.TaskCancelledException when its task is stopped
+     * @throws TaskCancellationService.TaskCancelledException when {@code stopped} is true
      */
     LlmResponse call(LlmProvider local, List<LlmMessage> prompt, String taskId, BooleanSupplier stopped)
             throws InterruptedException {
@@ -127,8 +128,8 @@ final class LocalLane {
     }
 
     /**
-     * End the background call under way if its task has been stopped -- whether that task is
-     * still running or has ended. Told after every stop.
+     * End the background call under way if its task has been stopped or has ended: told after
+     * every stop, and by a task's chat as the task ends ({@link TaskChat#close}).
      */
     void interruptStopped() {
         Runnable cancel;

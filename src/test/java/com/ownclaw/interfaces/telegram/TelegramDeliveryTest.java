@@ -440,21 +440,26 @@ class TelegramDeliveryTest {
         int before = sentTexts().size();
 
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
-                "**Step 1 · ping · 2.0s · $0.01**\n\nPinging the router.",
+                "☁️ Step 1 · ping · 2.0s · $0.01\n\nPinging the router.",
                 java.util.Map.of("sessionId", "s1", "telegram", true), "abcd1234"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
-                "**Step 1 · ping · 1.0s · $0.01**\n\nAsked from the web chat.",
+                "☁️ Step 1 · ping · 1.0s · $0.01\n\nAsked from the web chat.",
                 java.util.Map.of("sessionId", "s2"), "bcde2345"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
-                "**Result 1 (bank_fetch)** — summarised by your local model; private, shown only to you.",
+                "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nA private summary, shown only to you.",
                 java.util.Map.of("sessionId", "s1", "telegram", true, "ownerText",
-                        "**Result 1 (bank_fetch)** — summarised by your local model, not seen by the cloud:\n\n"
-                                + "Balance 48,213.07 CZK"), "abcd1234"));
+                        "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nBalance 48,213.07 CZK"), "abcd1234"));
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
+                "🏠 Turn 1 · shell_exec · 9.0s · $0.01",
+                java.util.Map.of("sessionId", "s1", "telegram", true, "ownerText",
+                        "🏠 Turn 1 · shell_exec · 9.0s · $0.01\n\nČtu tabulku tras.\n\n```sh\nip route show\n```"),
+                "abcd1234"));
         FakeTelegram.drain(bot);
 
-        assertEquals(List.of("<b>Step 1 · ping · 2.0s · $0.01</b>\n\nPinging the router.",
-                        "<b>Result 1 (bank_fetch)</b> — summarised by your local model, not seen by the cloud:\n\n"
-                                + "Balance 48,213.07 CZK"),
+        // The actor is its emoji in plain text, as the page draws it as a chip.
+        assertEquals(List.of("☁️ Step 1 · ping · 2.0s · $0.01\n\nPinging the router.",
+                        "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nBalance 48,213.07 CZK",
+                        "🏠 Turn 1 · shell_exec · 9.0s · $0.01\n\nČtu tabulku tras.\n\n<pre>ip route show</pre>"),
                 sentTexts().subList(before, sentTexts().size()));
         for (String b : telegram.bodies("sendMessage").subList(before, sentTexts().size())) {
             var body = JSON.readTree(b);

@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ThinkingEngineCacheTest {
 
     @Test
-    @DisplayName("step 0 marks where the task ends; on step 1 the task is the whole first message, unchanged")
+    @DisplayName("every step marks where the task ends; on step 1 the task is the whole first message, unchanged")
     void theTaskIsStableAcrossSteps() {
         var registry = new ToolRegistry(List.of());
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
@@ -34,9 +34,10 @@ class ThinkingEngineCacheTest {
         ctx.trajectory().record(new AgentAction("delegate", Map.of("goal", "read it"), ""),
                 AgentObservation.success("delegate", "done", Map.of(), 5));
         List<LlmMessage> step1 = engine.buildMessages(ctx, "anthropic", mode);
-        assertEquals(first0.substring(0, cut), step1.get(1).content(),
-                "the cached prefix of step 0 is exactly step 1's first message");
-        assertFalse(step1.get(1).content().contains("<!-- CACHE_BOUNDARY -->"));
+        assertEquals(first0.substring(0, cut) + ThinkingEngine.CACHE_BOUNDARY_MARKER, step1.get(1).content(),
+                "the cached prefix of step 0 is exactly step 1's first message, marked again as the stable prefix");
+        assertFalse(step1.get(step1.size() - 1).content().contains("<!-- CACHE_BOUNDARY -->"),
+                "the newest message is no prefix of anything");
     }
 
     @Test

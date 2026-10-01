@@ -148,14 +148,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // With the chat it was saved into, so a page showing another chat marks that one
                 // instead of appending the result to the conversation on screen.
                 // A running task's progress message is a message too, of the same shape: sent as
-                // "progress", it is drawn in its chat, secondary to the answer, and leaves the
-                // activity strip and the working state alone.
+                // "progress", with its header as data for the page to draw, it is shown in its
+                // chat, secondary to the answer, and leaves the activity strip and the working
+                // state alone.
                 Object owner = msg.data() == null ? null : msg.data().get("ownerText");
                 Object chat = msg.data() == null ? null : msg.data().get("sessionId");
-                sendToSession(session,
-                        msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT ? "result" : "progress",
-                        owner != null ? owner.toString() : msg.text(),
-                        chat == null ? null : chat.toString(), msg.taskId());
+                var payload = new LinkedHashMap<String, Object>();
+                payload.put("type", msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT ? "result" : "progress");
+                payload.put("content", owner != null ? owner.toString() : msg.text());
+                if (chat != null) payload.put("sessionId", chat.toString());
+                if (msg.taskId() != null) payload.put("taskId", msg.taskId());
+                if (msg.data() != null && msg.data().get("progress") != null) {
+                    payload.put("progress", msg.data().get("progress"));
+                }
+                send(session, payload);
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
                 sendStatusToSession(session, msg);

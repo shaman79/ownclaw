@@ -323,6 +323,9 @@ class DelegationBehaviourTest {
         assertTrue(system.contains("### result 1 (imap_fetch)\n" + mail), "given whole, in the local model's prompt: " + system);
         assertTrue(outcome.ok(), "no tool ran, and none had to: " + outcome.text());
         assertTrue(llm.configs.get(0).withoutThinking(), "reading what it was handed: it answers straight away");
+        assertTrue(system.contains("No tools available."), "nothing to run, so no tool is read either: " + system);
+        assertTrue(llm.calls.get(0).get(1).content().startsWith("Read the results you were given"),
+                "told to read and answer, not to make a tool call");
         assertTrue(ctx.localTierReadPrivate(), "what it does next is written after reading private data");
         // Question and answer: the answer repeats no run of the mail, so it is the cloud's to
         // read -- through the gateway's filter -- and nothing is kept beside it.
@@ -374,6 +377,7 @@ class DelegationBehaviourTest {
         executor(withTools, new Usage(), ping).execute(
                 new DelegationPlan("Read {{1}}, then ping it", List.of(), List.of(), List.of("ping")), ctx, UNCOUNTED);
         assertFalse(withTools.configs.get(0).withoutThinking(), "a named tool: choosing and ordering calls needs it");
+        assertTrue(withTools.calls.get(0).get(0).content().contains("ping"), "a named tool is offered");
 
         var aStep = new Scripted(call("ping", Map.of()), done("it answers"));
         executor(aStep, new Usage(), ping).execute(new DelegationPlan("Read {{1}}, then check it",
@@ -383,6 +387,13 @@ class DelegationBehaviourTest {
         var nothingHanded = new Scripted(call("ping", Map.of()), done("it answers"));
         executor(nothingHanded, new Usage(), ping).execute(plan("is the router up?"), ctx, UNCOUNTED);
         assertFalse(nothingHanded.configs.get(0).withoutThinking(), "no result handed: it has work to find");
+
+        var probe = new FakeTool("uptime_probe", false, List.of(), p -> ToolResult.success("up"));
+        var reading = new Scripted(done("it has been up for 12 days"));
+        executor(reading, new Usage(), probe).execute(plan("Read {{1}}: how long has the router been up?"), ctx, UNCOUNTED);
+        String readingPrompt = reading.calls.get(0).get(0).content();
+        assertTrue(readingPrompt.contains("No tools available.") && !readingPrompt.contains("uptime_probe"),
+                "a registered tool is not offered to a delegation that only reads: " + readingPrompt);
         // Mutation: answer directly on every delegation -> the first two fail; on none -> the
         // reading case in aGoalIsGivenThePrivateResultItNames fails.
     }
@@ -540,6 +551,21 @@ class DelegationBehaviourTest {
         assertTrue(llm.allSeen().contains("Tool result {{1}} [daily_menu_fetcher] SUCCESS:\n" + menu),
                 "the model reads the whole of what it is forwarding");
         assertEquals(text, smtp.calls.get(0).get("body"));
+    }
+
+    @Test
+    @DisplayName("offered its tools natively, a local model that answers in prose has finished: the prose is the answer")
+    void aProseAnswerIsTheAnswer() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        var llm = new NativeTurns(turn(new ToolCall("c1", "ping", Map.of())),
+                Replies.of("The router answers: pong.", 1, 1));
+
+        var outcome = executor(llm, new Usage(), ping).execute(plan("is the router up?"), task(), UNCOUNTED);
+
+        assertTrue(outcome.ok(), outcome.text());
+        assertTrue(outcome.text().contains("The router answers: pong."), "the prose is the summary: " + outcome.text());
+        assertEquals(2, llm.calls.size(), "no further turn was asked for");
+        // Mutation: read native prose as "not a tool call" again -> three empty turns, no answer.
     }
 
     /** A local model that takes tools natively and answers each turn with the reply given. */
@@ -1002,19 +1028,26 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("the owner's status line names the whole goal")
-    void theStatusLineIsWhole() {
+    @DisplayName("the owner's status line says the local model is working, never the instructions it was given")
+    void theStatusLineHoldsNoInstructions() {
         var emitter = new ChatStatusEmitter();
-        var lines = new ArrayList<String>();
-        emitter.subscribe("u1", "test", m -> lines.add(m.text()));
+        var lines = new ArrayList<ChatStatusEmitter.StatusMessage>();
+        emitter.subscribe("u1", "test", lines::add);
         String goal = "Fetch today's lunch menus from the three restaurants on Vinohradská, "
-                + "compare their soups, and email Petr the cheapest vegetarian main course. ".repeat(3);
+                + "compare their soups, and email the cheapest vegetarian main course. ".repeat(3);
         var llm = new Scripted(done("nothing to do"));
+        var task = task();
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
-                new Usage()).execute(plan(goal), task(), UNCOUNTED);
+                new Usage()).execute(plan(goal), task, UNCOUNTED);
 
-        assertTrue(lines.contains("Delegating to local LLM: " + goal), lines.toString());
+        var step = lines.stream().filter(m -> m.type() == ChatStatusEmitter.StatusMessage.Type.STEP).toList();
+        assertEquals(1, step.size(), lines.toString());
+        assertEquals("Local model working…", step.get(0).text());
+        assertEquals(task.taskId(), step.get(0).taskId(), "the task's own, as every other step line");
+        assertTrue(lines.stream().noneMatch(m -> m.text().contains("Vinohradská")), lines.toString());
+        // Mutation: put the goal back in the line -> the instructions to the local model reach
+        // the activity strip, raw.
     }
 
     // ── a task holding the user's file ──

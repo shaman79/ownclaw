@@ -83,13 +83,65 @@ class ChatPageTest {
         String handler = page.substring(page.indexOf("} else if (type === 'progress') {"));
         handler = handler.substring(0, handler.indexOf("} else if (type === 'pong'"));
         assertTrue(handler.contains("if (currentView === 'chat' && data.sessionId === displayedSessionId) { "
-                + "addMsg('progress', content); }"), "only in the chat it belongs to: " + handler);
+                + "addProgress(content, data.progress); }"), "only in the chat it belongs to: " + handler);
         assertFalse(handler.contains("setThinking(false)") || handler.contains("doneActivity()"),
                 "progress is not the end of the work: " + handler);
-        assertTrue(page.contains("var type = m.role === 'user' || m.role === 'system' || m.role === 'progress' "
-                + "? m.role : 'response';"), "a saved progress row is drawn as one after a reload");
+        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress); return; }"),
+                "a saved progress row is drawn as one after a reload, with the header it was saved with");
         assertTrue(page.contains(".msg.progress {"), "and styled as secondary");
         // Mutation: draw it as a response -> after a reload every step reads as an answer.
+    }
+
+    @Test
+    @DisplayName("the token counters survive a reload: a chat's latest task is read back from the server")
+    void countersAreReadBackOnLoad() {
+        String load = page.substring(page.indexOf("function loadSessionMessages(sessionId) {"));
+        load = load.substring(0, load.indexOf("function clearMessages()"));
+        assertTrue(load.contains("if (m.task_id) lastTask = m.task_id;")
+                && load.contains("if (lastTask) restoreTaskStats(lastTask, sessionId);"),
+                "loading a chat asks for its latest task's totals");
+        String restore = page.substring(page.indexOf("function restoreTaskStats(taskId, sessionId) {"));
+        restore = restore.substring(0, restore.indexOf("/** Update the live token counter"));
+        assertTrue(restore.contains("fetch('/api/tasks/' + taskId"), "from the task API");
+        assertTrue(restore.contains("var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');")
+                && restore.contains("var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');"),
+                "with the task page's own totals");
+        assertTrue(restore.contains("updateStats({") && restore.contains("updateTokens({"), "into both counters");
+        assertTrue(restore.contains("displayedSessionId !== sessionId"), "not into a chat opened since");
+        // Mutation: drop the call -> the counters read zero after a reload, as before.
+    }
+
+    @Test
+    @DisplayName("a progress row's header is the line the server wrote, its emoji drawn as a chip for who acts; a row without one is its text")
+    void progressHeadersAreChips() {
+        String draw = page.substring(page.indexOf("function addProgress(text, header) {"));
+        draw = draw.substring(0, draw.indexOf("// Chat messages are persisted"));
+        assertTrue(draw.contains("if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) { "
+                + "addMsg('progress', text); return; }"), "a row saved before headers were kept: " + draw);
+        assertTrue(draw.contains("var line = lineBreak < 0 ? text : text.slice(0, lineBreak); "
+                + "var space = line.indexOf(' '); "
+                + "var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);"),
+                "the chip: the line's emoji, styled by who acts: " + draw);
+        assertTrue(draw.contains("head.appendChild(node('span', 'progress-what', line.slice(space + 1)));"),
+                "then the rest of the line as the server wrote it, which Telegram shows too: " + draw);
+        for (String field : new String[] {"header.step", "header.turn", "header.result", "header.tool",
+                "header.elapsedMs", "header.costUsd", "formatDuration", "formatUsd"}) {
+            assertFalse(draw.contains(field), "one renderer of the header, the server's: the page does not "
+                    + "write it again from the data (" + field + ")");
+        }
+        assertTrue(draw.contains("var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();"),
+                "the rest of the text is drawn under the header");
+        assertTrue(draw.contains("b.innerHTML = renderMarkdown(body);"), "through the one sanitising renderer");
+        assertTrue(page.contains(".progress-chip.cloud {") && page.contains(".progress-chip.local {"));
+        // Mutation: format the time and cost from the data again -> the page says $0.0075 where
+        // the row and Telegram say $0.01; draw the whole text under the chip -> the header twice.
+    }
+
+    @Test
+    @DisplayName("the task page shows a delegation's goal, which the chat no longer does")
+    void theTaskPageShowsTheGoal() {
+        assertTrue(page.contains("if (s.goal) { d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do')); "
+                + "d.appendChild(node('div', 'task-result-content', s.goal)); }"), "whole, as text");
     }
 
     @Test

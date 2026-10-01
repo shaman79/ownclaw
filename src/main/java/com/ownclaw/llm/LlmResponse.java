@@ -42,10 +42,22 @@ public record LlmResponse(
      * model declines part-way and its fallback model finishes the reply, and this application's
      * own retry on the model a refusal names adds another.
      *
-     * @param promptTokens input tokens as the provider reports them -- see the caching note
+     * @param promptTokens          input tokens as the provider reports them -- see the caching
+     *                              note
+     * @param cacheCreationTokens   every token written to the prompt cache
+     * @param cacheCreation1hTokens of those, the ones written for an hour (Anthropic's
+     *                              {@code cache_creation.ephemeral_1h_input_tokens}), which cost
+     *                              more than the five-minute ones
      */
     public record Usage(String model, int promptTokens, int completionTokens,
-                        int cacheCreationTokens, int cacheReadTokens) {}
+                        int cacheCreationTokens, int cacheReadTokens, int cacheCreation1hTokens) {
+
+        /** An attempt whose cache writes, if any, were all for five minutes. */
+        public Usage(String model, int promptTokens, int completionTokens, int cacheCreationTokens,
+                     int cacheReadTokens) {
+            this(model, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, 0);
+        }
+    }
 
     public LlmResponse {
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);

@@ -438,6 +438,28 @@
         }
         .msg.progress p { margin: 0 }
         .msg.progress p + p { margin-top: 2px }
+        /* Its header: a chip for who acts, then where the task stands. */
+        .progress-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 8px;
+        }
+        .progress-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0 7px;
+            border-radius: 100px;
+            font-size: 11px;
+            line-height: 18px;
+            border: 1px solid var(--border-mid);
+        }
+        .progress-chip.cloud { color: var(--accent-hi); background: var(--accent-glow) }
+        .progress-chip.local { color: var(--green); background: var(--green-dim) }
+        .progress-what { color: var(--text-2) }
+        .progress-body { margin-top: 2px; min-width: 0 }
+        .progress-body pre { max-width: 100%; overflow-x: auto }
 
         /*  Connection banner  */
         #conn-banner {
@@ -2809,10 +2831,14 @@
             if (authToken !== asked) return;
             clearMessages();
             var msgs = data.messages || [];
+            var lastTask = null;
             msgs.forEach(function(m) {
-                var type = m.role === 'user' || m.role === 'system' || m.role === 'progress' ? m.role : 'response';
+                if (m.task_id) lastTask = m.task_id;
+                if (m.role === 'progress') { addProgress(m.content, m.progress); return; }
+                var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
                 addMsg(type, m.content, m.task_id);
             });
+            if (lastTask) restoreTaskStats(lastTask, sessionId);
         })
         .catch(function(e) {
             // Say what happened. clearMessages() alone left a blank pane, which is exactly what
@@ -3072,6 +3098,11 @@
             // window, a parse error, a timeout -- throws before its tokens are counted.
             d.appendChild(tdRow('Carried out by', s.tier === 'local' ? 'the local model'
                     : 'not known: no local tokens were counted'));
+            // What the cloud asked of the local model, whole: here, and not in the chat.
+            if (s.goal) {
+                d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do'));
+                d.appendChild(node('div', 'task-result-content', s.goal));
+            }
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
         // A failed call can have no tokens and no cost on record; if that is all there was, say so.
@@ -5072,6 +5103,34 @@
         }
     }
 
+    /**
+     * The counters of the chat's latest task -- running or finished -- from the server. They were
+     * fed only by live frames, so a reload or a chat switch showed zeros for a task that had
+     * spent a million tokens. The totals are the task page's own (renderTaskDetail), so the two
+     * cannot disagree; live frames that arrive afterwards go on updating them as before.
+     */
+    function restoreTaskStats(taskId, sessionId) {
+        if (!authToken || !isTaskId(taskId)) return;
+        var asked = authToken;
+        fetch('/api/tasks/' + taskId, { headers: { 'Authorization': 'Bearer ' + authToken } })
+        .then(okJson)
+        .then(function(t) {
+            if (authToken !== asked || displayedSessionId !== sessionId) return;
+            var steps = t.steps || [], totals = t.totals || {}, outcome = t.outcome;
+            var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');
+            var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');
+            var ok = steps.filter(function(st) { return st.ok !== false; }).length;
+            if (activityWrap.style.display !== 'block') {
+                activityWrap.style.display = 'block';
+                activityLabel.textContent = outcome ? 'Last task' : 'Working...';
+                if (outcome) doneActivity();
+            }
+            updateStats({ totalSteps: steps.length, successCount: ok, cloudTokens: cloud, localTokens: local });
+            updateTokens({ cloudTokens: cloud, localTokens: local });
+        })
+        .catch(function(e) { console.error('Task ' + taskId + ' totals:', e); });
+    }
+
     /** Update the live token counter in the activity header. */
     function updateTokens(data) {
         // Think/Act detail frames carry no running totals, and treating that as zero blanked
@@ -5503,7 +5562,7 @@
                     // and evidence that the work goes on -- never the end of it.
                     resetThinkingSafetyTimer();
                     if (currentView === 'chat' && data.sessionId === displayedSessionId) {
-                        addMsg('progress', content);
+                        addProgress(content, data.progress);
                     }
                 } else if (type === 'pong' || type === 'ping') {
                     // heartbeat
@@ -5678,6 +5737,41 @@
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
         scrollBottom(type === 'user');
+    }
+
+    /**
+     * A running task's progress row. Its header is the text's first line, as the server wrote it
+     * for Telegram and the stored row alike: who acts as an emoji -- the cloud or the local
+     * model -- then the step, the local model's turn or the result, the tool, the time the task
+     * has run and what it has cost. The page draws the emoji as a chip, styled by who acts from
+     * the data sent with the row, and the rest of the line as it is; the rest of the text under
+     * the header. A row saved before the header was kept comes without the data, and is drawn as
+     * its text.
+     */
+    function addProgress(text, header) {
+        if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) {
+            addMsg('progress', text);
+            return;
+        }
+        var div = node('div', 'msg progress');
+        var head = node('div', 'progress-head');
+        var lineBreak = text.indexOf('\n');
+        var line = lineBreak < 0 ? text : text.slice(0, lineBreak);
+        var space = line.indexOf(' ');
+        var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);
+        chip.title = header.actor === 'local' ? 'The local model, on this machine' : 'The cloud model';
+        head.appendChild(chip);
+        head.appendChild(node('span', 'progress-what', line.slice(space + 1)));
+        div.appendChild(head);
+        var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();
+        if (body) {
+            var b = node('div', 'progress-body md');
+            b.innerHTML = renderMarkdown(body);
+            b.querySelectorAll('pre').forEach(wrapCodeBlock);
+            div.appendChild(b);
+        }
+        messagesEl.insertBefore(div, thinkingEl);
+        scrollBottom(false);
     }
 
     // Chat messages are persisted and re-rendered on every load, so anything unsafe here is
