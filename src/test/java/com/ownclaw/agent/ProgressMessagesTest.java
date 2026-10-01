@@ -28,11 +28,35 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What the owner sees while an attended task works: a message in its chat before each step --
- * which step, which tool, how long, what it has cost, and what the model wrote beside the call --
- * one for each tool call of a delegation, and the local model's summary of each private result,
- * which only he may read. Saved in the task's own chat and shown live; never in a prompt.
+ * who acts, which step, which tool, how long, what it has cost, and what the model wrote beside
+ * the call -- one for each tool call of a delegation, with the local model's words and the call
+ * for him alone, and the local model's summary of each private result of the cloud's calls, which
+ * only he may read. Saved in the task's own chat and shown live; never in a prompt; and nothing
+ * of a task once it has ended.
  */
 class ProgressMessagesTest {
+
+    static final String CLOUD = "\u2601\uFE0F";   // ☁️
+    static final String LOCAL = "\uD83C\uDFE0";    // 🏠
+
+    /** A header line as a pattern: the actor's emoji, what the row is about, the tool, time and cost. */
+    static String head(String actor, String what, String tool) {
+        return java.util.regex.Pattern.quote(actor + " " + what + " · " + tool + " · ") + "[0-9.]+m?s · \\$\\d+\\.\\d\\d";
+    }
+
+    /** The model calls a tool once the row starting {@code head} is in the chat: posted while the task runs. */
+    static Reply once(LoopRig rig, String head, Reply then) {
+        return c -> {
+            awaitRow(rig, head);
+            return then.answer(c);
+        };
+    }
+
+    /** The JSON a row's metadata holds, read. */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> metadata(Map<String, Object> row) throws Exception {
+        return new com.fasterxml.jackson.databind.ObjectMapper().readValue(String.valueOf(row.get("metadata")), Map.class);
+    }
 
     static final String STATEMENT = "Closing balance 48,213.07 CZK on account CZ65 0800 0000 1920 0014 5399, "
             + "statement of 30 September";
@@ -108,16 +132,23 @@ class ProgressMessagesTest {
         assertEquals("Both answer.", r.response(), "the answer is unchanged");
         var rows = progress(rig);
         assertEquals(2, rows.size(), "one per step that ran, none for the answer: " + rows);
-        assertTrue(String.valueOf(rows.get(0).get("content")).matches("\\*\\*Step 1 · ping · [0-9.]+m?s · \\$\\d+\\.\\d\\d\\*\\*"
+        assertTrue(String.valueOf(rows.get(0).get("content")).matches(head(CLOUD, "Step 1", "ping")
                 + "\n\nThe first router answered; now the second\\."), String.valueOf(rows.get(0).get("content")));
-        assertTrue(String.valueOf(rows.get(1).get("content")).matches(
-                "\\*\\*Step 2 · skill_create router_check · [0-9.]+m?s · \\$\\d+\\.\\d\\d\\*\\*"),
+        assertTrue(String.valueOf(rows.get(1).get("content")).matches(head(CLOUD, "Step 2", "skill_create router_check")),
                 "no words beside the call, the header alone: " + rows.get(1).get("content"));
         for (var row : rows) {
             assertEquals(session, row.get("session_id"), "in the chat the task's message was saved in");
-            assertEquals("{\"taskId\":\"" + r.taskId() + "\"}", row.get("metadata"));
+            assertEquals(r.taskId(), metadata(row).get("taskId"));
             assertNull(row.get("private_content"));
         }
+        // The header as data, for the page to draw: who acts, the step, the tool, time and cost.
+        @SuppressWarnings("unchecked")
+        var header = (Map<String, Object>) metadata(rows.get(1)).get("progress");
+        assertEquals("cloud", header.get("actor"));
+        assertEquals(2, header.get("step"));
+        assertEquals("skill_create", header.get("tool"));
+        assertEquals("router_check", header.get("skill"));
+        assertTrue(((Number) header.get("elapsedMs")).longValue() >= 0 && header.get("costUsd") instanceof Number, header.toString());
         var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE).toList();
         assertEquals(2, live.size());
         for (var m : live) {
@@ -126,6 +157,13 @@ class ProgressMessagesTest {
             assertNull(m.data().get("telegram"), "a web chat task's progress is not sent to Telegram");
         }
         assertEquals(rows.get(0).get("content"), live.get(0).text());
+        assertEquals(header.toString(), String.valueOf(live.get(1).data().get("progress")),
+                "the live frame carries the header the row keeps");
+        var reload = rig.chat.getSessionMessages("u1", session).stream()
+                .filter(m -> "progress".equals(m.get("role"))).toList();
+        var reloaded = (com.fasterxml.jackson.databind.JsonNode) reload.get(1).get("progress");
+        assertEquals("cloud", reloaded.path("actor").asText(), "and a reload reads it back: " + reload);
+        assertEquals("router_check", reloaded.path("skill").asText());
         // Mutation: post after the step -> the header's step runs ahead; post for respond -> 3 rows.
     }
 
@@ -165,7 +203,7 @@ class ProgressMessagesTest {
         rig.cloud.think.add(respond("Still."));
         rig.turn(session, "and now?");
         String prompt = String.join("\n", userParts(rig.cloud.calls("think").get(2)));
-        assertFalse(prompt.contains("PROGRESS-NARRATION") || prompt.contains("Step 1 ·"), prompt);
+        assertFalse(prompt.contains("PROGRESS-NARRATION") || prompt.contains("Step 1 ·") || prompt.contains(CLOUD), prompt);
         assertTrue(prompt.contains("ASSISTANT: It answers."), prompt);
     }
 
@@ -176,18 +214,20 @@ class ProgressMessagesTest {
         var rig = new LoopRig(tmp, List.of(BANK), 600, local);
         String session = rig.chat.createSession("u1", "Bank");
         rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(respond("The statement is in."));
+        rig.cloud.think.add(once(rig, LOCAL + " Result 1 · bank_fetch", respond("The statement is in.")));
         var seen = rig.statuses();
 
         AgentResult r = rig.turn(session, "Jaký mám zůstatek?");
-        var row = awaitRow(rig, "**Result 1 (bank_fetch)**");
+        var row = awaitRow(rig, LOCAL + " Result 1 · bank_fetch");
 
         String content = String.valueOf(row.get("content"));
-        assertEquals("**Result 1 (bank_fetch)** — summarised by your local model; private, shown only to you.", content);
+        assertTrue(content.matches(head(LOCAL, "Result 1", "bank_fetch") + "\n\nA private summary, shown only to you\\."),
+                content);
         holdsNoWindowOf(content, STATEMENT);
         holdsNoWindowOf(content, SUMMARY);
-        assertEquals("**Result 1 (bank_fetch)** — summarised by your local model, not seen by the cloud:\n\n" + SUMMARY,
-                row.get("private_content"));
+        String line = content.substring(0, content.indexOf('\n'));
+        assertEquals(line + "\n\n" + SUMMARY, row.get("private_content"), "the chip says who wrote it; no prose about it");
+        assertEquals("local", ((Map<?, ?>) metadata(row).get("progress")).get("actor"));
         assertEquals(session, row.get("session_id"));
         String asked = local.asked.get(0).get(1).content();
         assertTrue(asked.contains("Jaký mám zůstatek?") && asked.contains(STATEMENT),
@@ -195,7 +235,7 @@ class ProgressMessagesTest {
         assertTrue(local.configs.get(0).withoutThinking(),
                 "a summary is written straight away, not after minutes of reasoning at 8 tokens a second");
         var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
-                && m.text().startsWith("**Result 1")).findFirst().orElseThrow();
+                && m.text().startsWith(LOCAL + " Result 1")).findFirst().orElseThrow();
         assertEquals(content, live.text(), "what is stored and forwarded is the note");
         assertEquals(row.get("private_content"), live.data().get("ownerText"), "the owner's screens get the summary");
         assertTrue(r.taskId() != null && String.valueOf(row.get("metadata")).contains(r.taskId()));
@@ -214,47 +254,56 @@ class ProgressMessagesTest {
     void aFailedSummaryIsSaid(@TempDir Path tmp) throws Exception {
         var down = new LoopRig(tmp.resolve("down"), List.of(BANK));
         down.cloud.think.add(call("bank_fetch", Map.of()));
-        down.cloud.think.add(respond("ok"));
+        down.cloud.think.add(once(down, LOCAL + " Result 1", respond("ok")));
         down.turn(down.chat.createSession("u1", "Bank"), "fetch the statement");
-        assertEquals("**Result 1 (bank_fetch)** — the local model could not summarise it: the local model is not "
-                + "answering.", awaitRow(down, "**Result 1").get("content"));
+        assertTrue(String.valueOf(awaitRow(down, LOCAL + " Result 1").get("content")).matches(
+                head(LOCAL, "Result 1", "bank_fetch") + "\n\nNot summarised: the local model is not answering\\."));
 
         var failing = new LoopRig(tmp.resolve("failing"), List.of(BANK), 600,
                 new Local(c -> { throw new LlmException("ollama", "HTTP 500: " + STATEMENT); }));
         failing.cloud.think.add(call("bank_fetch", Map.of()));
-        failing.cloud.think.add(respond("ok"));
+        failing.cloud.think.add(once(failing, LOCAL + " Result 1", respond("ok")));
         failing.turn(failing.chat.createSession("u1", "Bank"), "fetch the statement");
-        var row = awaitRow(failing, "**Result 1");
-        assertEquals("**Result 1 (bank_fetch)** — the local model could not summarise it: it failed (LlmException).",
-                row.get("content"), "its message can quote the result, so only its type");
+        var row = awaitRow(failing, LOCAL + " Result 1");
+        assertTrue(String.valueOf(row.get("content")).matches(head(LOCAL, "Result 1", "bank_fetch")
+                + "\n\nNot summarised: it failed \\(LlmException\\)\\."), "its message can quote the result, so only its type");
         assertNull(row.get("private_content"));
     }
 
     @Test
-    @DisplayName("the summaries are written beside the task: a slow one never holds up a step")
-    void aSummaryNeverDelaysTheTask(@TempDir Path tmp) throws Exception {
-        var release = new CountDownLatch(1);
+    @DisplayName("a slow summary never holds up a step, and ends with its task: nothing is posted after the answer")
+    void aSummaryEndsWithItsTask(@TempDir Path tmp) throws Exception {
+        var begun = new CountDownLatch(1);
+        var ended = new CountDownLatch(1);
         var local = new Local(c -> {
-            assertTrue(release.await(10, TimeUnit.SECONDS));
+            c.progress().calling(ended::countDown);   // the call's cancel, as a provider hands it over
+            begun.countDown();
+            assertTrue(ended.await(10, TimeUnit.SECONDS), "nothing ended the summary");
+            c.progress().onProgress();                 // asked once more, as a provider does
             return Replies.of(SUMMARY, 400, 30);
         });
         var rig = new LoopRig(tmp, List.of(BANK, PING), 600, local);
-        rig.cloud.think.add(call("bank_fetch", Map.of()));
-        rig.cloud.think.add(call("ping", Map.of()));
+        rig.cloud.think.add(call("bank_fetch", Map.of("month", 8)));
+        rig.cloud.think.add(call("bank_fetch", Map.of("month", 9)));
+        rig.cloud.think.add(c -> {
+            assertTrue(begun.await(5, TimeUnit.SECONDS), "the first summary never began");
+            return call("ping", Map.of()).answer(c);
+        });
         rig.cloud.think.add(respond("Fetched and pinged."));
+        var seen = rig.statuses();
 
         AgentResult r = assertTimeoutPreemptively(Duration.ofSeconds(5),
                 () -> rig.turn(rig.chat.createSession("u1", "Bank"), "fetch and ping"));
 
         assertEquals("Fetched and pinged.", r.response(), "the task finished while its summary was being written");
-        assertTrue(progress(rig).stream().noneMatch(row -> String.valueOf(row.get("content")).startsWith("**Result")));
-        release.countDown();
-        // Posted below the task's answer -- and maybe among the next task's rows -- it names its task.
-        var row = awaitRow(rig, "**Result 1 (bank_fetch)** of your message “fetch and ping” — summarised");
-        assertTrue(String.valueOf(row.get("private_content")).startsWith(
-                "**Result 1 (bank_fetch)** of your message “fetch and ping” — summarised by your local model, "
-                        + "not seen by the cloud:\n\n" + SUMMARY), "and it is posted when it is ready");
-        // Mutation: name it alike before and after the task ended -> "Result 1" of which task?
+        assertTrue(ended.await(2, TimeUnit.SECONDS), "the task's end did not end the summary under way");
+        Thread.sleep(300);
+        assertEquals(1, local.asked.size(), "the second summary, not yet begun, is never asked for: " + local.asked.size());
+        assertEquals(3, progress(rig).size(), "the three steps, and nothing after them: " + progress(rig));
+        assertTrue(seen.stream().noneMatch(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
+                && m.text().startsWith(LOCAL)), "nor shown");
+        // Mutation: let close() leave the summaries be -> the second one is asked for, and both
+        // land below the answer, among the next task's rows.
     }
 
     @Test
@@ -281,7 +330,6 @@ class ProgressMessagesTest {
         String session = rig.chat.createSession("u1", "Bank");
 
         rig.turn(session, "what is my balance?");
-        awaitRow(rig, "**Result 1 (bank_fetch)**");
 
         assertTrue(told.get(1).contains("Not run: there is no tool named"), told.toString());
         for (var row : progress(rig)) assertFalse(String.valueOf(row.get("content")).contains(iban), row.toString());
@@ -294,7 +342,7 @@ class ProgressMessagesTest {
     }
 
     @Test
-    @DisplayName("a stopped task stops its summaries: the one being written ends, and says why")
+    @DisplayName("a stopped task stops its summaries: the one being written ends, and posts nothing")
     void aStopEndsTheSummary(@TempDir Path tmp) throws Exception {
         var calling = new CountDownLatch(1);
         var ended = new CountDownLatch(1);
@@ -329,10 +377,10 @@ class ProgressMessagesTest {
         stop.join();
 
         assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
-        var row = awaitRow(rig, "**Result 1");
-        assertEquals("**Result 1 (bank_fetch)** — the local model could not summarise it: the task was stopped.",
-                row.get("content"));
-        assertNull(row.get("private_content"));
+        assertTrue(ended.await(2, TimeUnit.SECONDS), "the stop did not end the summary");
+        Thread.sleep(300);
+        assertTrue(progress(rig).stream().noneMatch(row -> String.valueOf(row.get("content")).startsWith(LOCAL)),
+                "the owner stopped it: no row says so again " + progress(rig));
     }
 
     @Test
@@ -344,13 +392,117 @@ class ProgressMessagesTest {
         rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Ping the router twice.", "tools", "ping")));
         rig.cloud.think.add(respond("It answered twice."));
 
-        rig.turn(rig.chat.createSession("u1", "Router"), "ping the router twice");
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Router"), "ping the router twice");
 
-        var contents = progress(rig).stream().map(row -> String.valueOf(row.get("content"))).toList();
+        var rows = progress(rig);
+        var contents = rows.stream().map(row -> String.valueOf(row.get("content"))).toList();
         assertEquals(3, contents.size(), contents.toString());
-        assertTrue(contents.get(0).startsWith("**Step 1 · delegate · "), contents.get(0));
-        assertEquals("**Local model · turn 1 · ping**", contents.get(1));
-        assertEquals("**Local model · turn 2 · ping**", contents.get(2));
+        assertTrue(contents.get(0).matches(head(CLOUD, "Step 1", "delegate")), contents.get(0));
+        assertTrue(contents.get(1).matches(head(LOCAL, "Turn 1", "ping")), "a chip, not a label: " + contents.get(1));
+        assertTrue(contents.get(2).matches(head(LOCAL, "Turn 2", "ping")), contents.get(2));
+        assertNull(rows.get(1).get("private_content"), "a call with no arguments has nothing more to show");
+        assertEquals(contents.get(2) + "\n\n- n: `2`", rows.get(2).get("private_content"), "the call, for the owner");
+        @SuppressWarnings("unchecked")
+        var header = (Map<String, Object>) metadata(rows.get(2)).get("progress");
+        assertEquals("local", header.get("actor"));
+        assertEquals(2, header.get("turn"));
+        assertEquals("ping", header.get("tool"));
+        // The cloud's instructions to the local model are not in the chat; the task page has them.
+        assertTrue(contents.stream().noneMatch(c -> c.contains("Ping the router twice")), contents.toString());
+        var steps = (List<?>) new com.ownclaw.observability.TaskTraceService(rig.events).trace("u1", r.taskId())
+                .orElseThrow().get("steps");
+        assertEquals("Ping the router twice.", ((Map<?, ?>) steps.get(0)).get("goal"), steps.toString());
+    }
+
+    /** A shell skill, as the owner's router work runs it. */
+    static final Tool SHELL = tool("shell_exec", List.of(), p -> "default via 192.0.2.1 dev wan");
+
+    /** A local model on the native protocol: each turn's words beside its call, then done. */
+    static final class Native implements LlmProvider {
+        final List<List<LlmMessage>> asked = new CopyOnWriteArrayList<>();
+        final java.util.Deque<LlmResponse> turns = new java.util.concurrent.ConcurrentLinkedDeque<>();
+        Native(LlmResponse... turns) { this.turns.addAll(List.of(turns)); }
+        public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+            asked.add(List.copyOf(m));
+            if (m.get(0).content().startsWith("You summarise")) return Replies.of("a summary", 1, 1);
+            LlmResponse next = turns.poll();
+            return next != null ? next : turn("", "done", Map.of("summary", "done"));
+        }
+        public boolean isAvailable() { return true; }
+        public boolean supportsTools() { return true; }
+        public String name() { return "ollama"; }
+
+        static LlmResponse turn(String words, String tool, Map<String, Object> args) {
+            return Replies.of(words, 100, 20, 0, 0, "stop", List.of(new ToolCall("c-" + tool, tool, args)));
+        }
+    }
+
+    @Test
+    @DisplayName("a local turn shows the owner what the model says it is doing and the call it makes -- for him alone")
+    void aLocalTurnSaysWhatItDoes(@TempDir Path tmp) throws Exception {
+        String words = "Zjišťuji výchozí bránu routeru.";
+        var local = new Native(Native.turn(words, "shell_exec", Map.of("command", "ip route show default")),
+                Native.turn("", "done", Map.of("summary", "The default route goes via the WAN.")));
+        var rig = new LoopRig(tmp, List.of(SHELL), 600, local);
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Find the router's default route.",
+                "tools", "shell_exec")));
+        rig.cloud.think.add(respond("It goes via the WAN."));
+        var seen = rig.statuses();
+
+        rig.turn(rig.chat.createSession("u1", "Router"), "Kudy vede výchozí cesta?");
+
+        var row = progress(rig).get(1);
+        String content = String.valueOf(row.get("content"));
+        assertTrue(content.matches(head(LOCAL, "Turn 1", "shell_exec")), "the header alone: " + content);
+        assertEquals(content + "\n\n" + words + "\n\n```sh\nip route show default\n```", row.get("private_content"),
+                "its words, then the command as a shell block");
+        var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
+                && m.text().startsWith(LOCAL)).findFirst().orElseThrow();
+        assertEquals(content, live.text(), "what is stored and forwarded is the header");
+        assertEquals(row.get("private_content"), live.data().get("ownerText"), "the owner's screens get the rest");
+        String prompt = local.asked.get(0).get(0).content();
+        assertTrue(prompt.contains("with each tool call, write one short") && prompt.contains("Kudy vede výchozí cesta?"),
+                "asked for the sentence, in the language of the owner's request: " + prompt);
+        for (var call : rig.cloud.calls) {
+            for (var m : call.messages()) {
+                assertFalse(m.content().contains("výchozí bránu") || m.content().contains("ip route show"), m.content());
+            }
+        }
+        // Mutation: put the words in the content -> the content check fails; leave out the
+        // instruction -> the prompt check fails.
+    }
+
+    @Test
+    @DisplayName("an unattended delegation is not asked to narrate: nobody reads it")
+    void anUnattendedDelegationIsNotAskedToNarrate() {
+        var local = new Native(Native.turn("", "done", Map.of("summary", "nothing to do")));
+        var executor = DelegationBehaviourTest.executor(local, new DelegationBehaviourTest.Usage());
+        executor.execute(DelegationBehaviourTest.plan("Fetch the menu."), DelegationBehaviourTest.task(),
+                DelegationBehaviourTest.UNCOUNTED);
+        String prompt = local.asked.get(0).get(0).content();
+        assertFalse(prompt.contains("write one short") || prompt.contains("the morning menu"), prompt);
+    }
+
+    @Test
+    @DisplayName("a delegation's own private results get no summary: the local model read them itself")
+    void noSummaryOfADelegationsResults(@TempDir Path tmp) throws Exception {
+        var local = new Native(Native.turn("Stahuji výpis.", "bank_fetch", Map.of()),
+                Native.turn("", "done", Map.of("summary", "Fetched.")));
+        var rig = new LoopRig(tmp, List.of(BANK), 600, local);
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Fetch the statement.", "tools", "bank_fetch")));
+        rig.cloud.think.add(c -> {
+            Thread.sleep(300);   // a summary queued by the delegation would have been posted by now
+            return respond("Fetched.").answer(c);
+        });
+
+        rig.turn(rig.chat.createSession("u1", "Bank"), "stáhni výpis");
+
+        assertTrue(local.asked.stream().noneMatch(m -> m.get(0).content().startsWith("You summarise")),
+                "the local model is never asked to summarise its own result");
+        var contents = progress(rig).stream().map(row -> String.valueOf(row.get("content"))).toList();
+        assertEquals(2, contents.size(), "the step and the turn, no result row: " + contents);
+        assertTrue(contents.get(1).matches(head(LOCAL, "Turn 1", "bank_fetch")), contents.get(1));
+        // Mutation: summarise every private result again -> a third row, "Result 1".
     }
 
     @Test

@@ -83,13 +83,38 @@ class ChatPageTest {
         String handler = page.substring(page.indexOf("} else if (type === 'progress') {"));
         handler = handler.substring(0, handler.indexOf("} else if (type === 'pong'"));
         assertTrue(handler.contains("if (currentView === 'chat' && data.sessionId === displayedSessionId) { "
-                + "addMsg('progress', content); }"), "only in the chat it belongs to: " + handler);
+                + "addProgress(content, data.progress); }"), "only in the chat it belongs to: " + handler);
         assertFalse(handler.contains("setThinking(false)") || handler.contains("doneActivity()"),
                 "progress is not the end of the work: " + handler);
-        assertTrue(page.contains("var type = m.role === 'user' || m.role === 'system' || m.role === 'progress' "
-                + "? m.role : 'response';"), "a saved progress row is drawn as one after a reload");
+        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress); return; }"),
+                "a saved progress row is drawn as one after a reload, with the header it was saved with");
         assertTrue(page.contains(".msg.progress {"), "and styled as secondary");
         // Mutation: draw it as a response -> after a reload every step reads as an answer.
+    }
+
+    @Test
+    @DisplayName("a progress row's header is a chip for who acts, then step, tool, time and cost; a row without one is its text")
+    void progressHeadersAreChips() {
+        String draw = page.substring(page.indexOf("function addProgress(text, header) {"));
+        draw = draw.substring(0, draw.indexOf("// Chat messages are persisted"));
+        assertTrue(draw.contains("if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) { "
+                + "addMsg('progress', text); return; }"), "a row saved before headers were kept: " + draw);
+        assertTrue(draw.contains("node('span', 'progress-chip ' + header.actor,"), "the chip, styled by who acts");
+        assertTrue(draw.contains("var what = header.step != null ? 'Step ' + header.step "
+                + ": header.turn != null ? 'Turn ' + header.turn : 'Result ' + header.result;"), draw);
+        assertTrue(draw.contains("formatDuration(header.elapsedMs) + ' · ' + formatUsd(header.costUsd)"), draw);
+        assertTrue(draw.contains("var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();"),
+                "the text's first line is the header in plain text; the page draws the rest under its own");
+        assertTrue(draw.contains("b.innerHTML = renderMarkdown(body);"), "through the one sanitising renderer");
+        assertTrue(page.contains(".progress-chip.cloud {") && page.contains(".progress-chip.local {"));
+        // Mutation: draw the whole text under the chip -> the header twice, emoji and all.
+    }
+
+    @Test
+    @DisplayName("the task page shows a delegation's goal, which the chat no longer does")
+    void theTaskPageShowsTheGoal() {
+        assertTrue(page.contains("if (s.goal) { d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do')); "
+                + "d.appendChild(node('div', 'task-result-content', s.goal)); }"), "whole, as text");
     }
 
     @Test

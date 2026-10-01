@@ -13,10 +13,15 @@ class ModelPricingTest {
 
     private static final int M = 1_000_000;
 
-    private static double input(String model) { return ModelPricing.costUsd(model, M, 0, 0, 0); }
-    private static double output(String model) { return ModelPricing.costUsd(model, 0, M, 0, 0); }
-    private static double cacheWrite(String model) { return ModelPricing.costUsd(model, 0, 0, M, 0); }
-    private static double cacheRead(String model) { return ModelPricing.costUsd(model, 0, 0, 0, M); }
+    private static double cost(String model, int in, int out, int write, int read, int writeHour) {
+        return ModelPricing.costUsd(model, new LlmResponse.Usage(null, in, out, write, read, writeHour));
+    }
+    private static double input(String model) { return cost(model, M, 0, 0, 0, 0); }
+    private static double output(String model) { return cost(model, 0, M, 0, 0, 0); }
+    private static double cacheWrite(String model) { return cost(model, 0, 0, M, 0, 0); }
+    /** A million tokens written to the cache, every one of them for an hour. */
+    private static double cacheWriteHour(String model) { return cost(model, 0, 0, M, 0, M); }
+    private static double cacheRead(String model) { return cost(model, 0, 0, 0, M, 0); }
 
     @Test
     @DisplayName("claude-opus-5 is $5 in and $25 out, with the usual cache prices")
@@ -86,8 +91,23 @@ class ModelPricingTest {
     @DisplayName("an unknown Claude keeps the mid-tier fallback; an unknown model costs nothing")
     void unknown() {
         assertEquals(3.00, input("claude-opus-4-1"), 1e-9);
-        assertEquals(0.0, ModelPricing.costUsd("local-model:q4", 1000, 1000, 0, 0), 1e-12);
-        assertEquals(0.0, ModelPricing.costUsd(null, 1000, 1000, 0, 0), 1e-12);
+        assertEquals(0.0, cost("local-model:q4", 1000, 1000, 0, 0, 0), 1e-12);
+        assertEquals(0.0, cost(null, 1000, 1000, 0, 0, 0), 1e-12);
+    }
+
+    @Test
+    @DisplayName("a cache write for an hour costs 2x the input rate, one for five minutes 1.25x -- on every model")
+    void hourLongCacheWrites() {
+        assertEquals(10.00, cacheWriteHour("claude-opus-5"), 1e-9, "2x of $5");
+        assertEquals(6.25, cacheWrite("claude-opus-5"), 1e-9, "1.25x of $5");
+        assertEquals(8.00, cacheWriteHour("claude-opus-5-5"), 1e-9, "2x of $4, its own entry");
+        assertEquals(20.00, cacheWriteHour("claude-fable-5-1"), 1e-9, "2x of $10, its own entry");
+        assertEquals(4.00, cacheWriteHour("claude-sonnet-5"), 1e-9);
+        assertEquals(2.00, cacheWriteHour("claude-haiku-4-5"), 1e-9);
+        // 300k written, 200k of them for an hour: 100k at $6.25 and 200k at $10 per million.
+        assertEquals(0.625 + 2.00, cost("claude-opus-5", 0, 0, 300_000, 0, 200_000), 1e-9,
+                "the hour-long part of the writes at its rate, the rest at the five-minute one");
+        // Mutation: price every write at 1.25x -> 1.875; every write at 2x -> 3.00.
     }
 
     @Test

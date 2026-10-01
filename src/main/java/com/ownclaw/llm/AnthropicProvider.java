@@ -221,7 +221,9 @@ class AnthropicProvider implements LlmProvider {
         String stopReason = null;
         String stopDetail = null;
         String recommendedModel = null;
-        int input = 0, output = 0, cacheWrite = 0, cacheRead = 0;
+        // cacheWrite is every token written to the cache; cacheWriteHour the part of it written
+        // for an hour, which the usage breaks out under cache_creation and which costs more.
+        int input = 0, output = 0, cacheWrite = 0, cacheWriteHour = 0, cacheRead = 0;
         JsonNode iterations = null;
         boolean stopped = false;
 
@@ -243,6 +245,7 @@ class AnthropicProvider implements LlmProvider {
                         input = count(usage, "input_tokens", input);
                         output = count(usage, "output_tokens", output);
                         cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                        cacheWriteHour = count(usage.path("cache_creation"), "ephemeral_1h_input_tokens", cacheWriteHour);
                         cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
                         if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
                     }
@@ -286,6 +289,7 @@ class AnthropicProvider implements LlmProvider {
                         input = count(usage, "input_tokens", input);
                         output = count(usage, "output_tokens", output);
                         cacheWrite = count(usage, "cache_creation_input_tokens", cacheWrite);
+                        cacheWriteHour = count(usage.path("cache_creation"), "ephemeral_1h_input_tokens", cacheWriteHour);
                         cacheRead = count(usage, "cache_read_input_tokens", cacheRead);
                         if (usage.path("iterations").isArray()) iterations = usage.path("iterations");
                     }
@@ -302,14 +306,15 @@ class AnthropicProvider implements LlmProvider {
             // The prompt the stream said was read was billed, and whatever output it had counted:
             // the call's caller would otherwise never hear of those tokens.
             if (input + output + cacheWrite + cacheRead > 0) {
-                progress.billed(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead));
+                progress.billed(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead,
+                        cacheWriteHour));
             }
             throw noReply;
         }
 
         if (cacheRead > 0 || cacheWrite > 0) {
-            log.info("Anthropic [{}]: {} input + {} output tokens (cache: {} created, {} read)",
-                    servedModel, input, output, cacheWrite, cacheRead);
+            log.info("Anthropic [{}]: {} input + {} output tokens (cache: {} created, {} of them for "
+                    + "an hour, {} read)", servedModel, input, output, cacheWrite, cacheWriteHour, cacheRead);
         } else {
             log.debug("Anthropic [{}]: {} input + {} output tokens", servedModel, input, output);
         }
@@ -332,11 +337,12 @@ class AnthropicProvider implements LlmProvider {
                     billed.add(new LlmResponse.Usage(attempt.path("model").asText(servedModel),
                             count(attempt, "input_tokens", 0), attemptOutput,
                             count(attempt, "cache_creation_input_tokens", 0),
-                            count(attempt, "cache_read_input_tokens", 0)));
+                            count(attempt, "cache_read_input_tokens", 0),
+                            count(attempt.path("cache_creation"), "ephemeral_1h_input_tokens", 0)));
                 }
             }
         } else if (billed(refused, output, stopDetail)) {
-            billed.add(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead));
+            billed.add(new LlmResponse.Usage(servedModel, input, output, cacheWrite, cacheRead, cacheWriteHour));
         }
         LlmResponse response = reply.response(billed, stopReason, stopDetail, servedModel,
                 modelLimits.maxOutputTokens(), modelLimits.contextWindow());
@@ -448,9 +454,20 @@ class AnthropicProvider implements LlmProvider {
 
         // Claude: system prompt is a top-level field, not in messages.
         // We use structured content blocks with cache_control to enable prompt caching.
+        //
+        // A task's think call is a stable prefix -- the tools, the system prompt and the task,
+        // which the engine ends with its marker in the first message on every step -- then the
+        // steps so far. The prefix is the same bytes for the whole task and, but for the task, for
+        // the next turns of the chat, so it is cached for an hour (TTL "1h", writes at 2x the
+        // input rate, reads at the usual rate): a delegation that keeps the cloud waiting for
+        // twenty minutes, or the owner's next message ten minutes on, used to find it expired
+        // after the default five and pay for writing all of it again. The steps after it slide
+        // on the five-minute cache. The API takes the longer-lived marks before the shorter ones,
+        // which this order is. A request without the marker -- code generation, a summary -- has
+        // no prefix worth an hour: its marks are all five-minute ones.
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
-        boolean firstCall = messages.stream().filter(m -> m.role() != LlmMessage.Role.SYSTEM).count() == 1;
+        boolean stable = false;
         for (LlmMessage msg : messages) {
             if (msg.role() == LlmMessage.Role.SYSTEM) {
                 systemPrompt = (systemPrompt == null)
@@ -460,23 +477,27 @@ class AnthropicProvider implements LlmProvider {
                 ObjectNode m = msgs.addObject();
                 m.put("role", msg.role().apiValue());
                 String content = msg.content();
-                // Only on a task's first call -- the one message the engine marks -- and at the
-                // last marker: the same text inside a fetched page or the chat would otherwise earn
-                // a fifth cache mark, and the API refuses a request with more than four.
-                int cut = firstCall && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
-                if (cut > 0 && !content.substring(cut + LlmMessage.CACHE_BOUNDARY.length()).isBlank()) {
-                    // The task, then what changes on every step, as two blocks with the cache
-                    // mark on the first. On the next step the task is the whole first message,
-                    // byte for byte, so it is read from the cache instead of paid for again --
+                // Only in the first message -- the one the engine marks -- and at the last marker:
+                // the same text inside a fetched page or the chat would otherwise earn a fifth
+                // cache mark, and the API refuses a request with more than four.
+                int cut = msgs.size() == 1 && content != null ? content.lastIndexOf(LlmMessage.CACHE_BOUNDARY) : -1;
+                if (cut > 0) {
+                    // The task, then -- on the first step -- what changes on every step, as two
+                    // blocks with the cache mark on the first. On every later step the task is
+                    // the same bytes, so it is read from the cache instead of paid for again --
                     // as one block it was re-sent in full, and then written to the cache as well.
+                    stable = true;
                     ArrayNode blocks = m.putArray("content");
-                    ObjectNode stable = blocks.addObject();
-                    stable.put("type", "text");
-                    stable.put("text", content.substring(0, cut));
-                    stable.putObject("cache_control").put("type", "ephemeral");
-                    ObjectNode rest = blocks.addObject();
-                    rest.put("type", "text");
-                    rest.put("text", content.substring(cut + LlmMessage.CACHE_BOUNDARY.length()));
+                    ObjectNode task = blocks.addObject();
+                    task.put("type", "text");
+                    task.put("text", content.substring(0, cut));
+                    task.set("cache_control", cacheControl(true));
+                    String rest = content.substring(cut + LlmMessage.CACHE_BOUNDARY.length());
+                    if (!rest.isBlank()) {
+                        ObjectNode after = blocks.addObject();
+                        after.put("type", "text");
+                        after.put("text", rest);
+                    }
                 } else {
                     m.put("content", content);
                 }
@@ -490,20 +511,17 @@ class AnthropicProvider implements LlmProvider {
             ObjectNode sysBlock = systemArray.addObject();
             sysBlock.put("type", "text");
             sysBlock.put("text", systemPrompt);
-            sysBlock.putObject("cache_control").put("type", "ephemeral");
+            sysBlock.set("cache_control", cacheControl(stable));
         }
 
-        // Sliding-window conversation cache breakpoints.
-        // Two breakpoints create a sliding window for multi-turn prefix caching:
-        //   msgs[size-4]: hits the cache created in the PREVIOUS step
-        //   msgs[size-2]: creates a cache for the NEXT step to hit
-        // Together with the system breakpoint, this uses 3 of 4 allowed breakpoints.
-        // Each step pays full price only for the latest turn + dynamic context;
-        // all older turns are served from cache at 10% cost.
-        if (msgs.size() >= 6) {
-            setMessageCacheBreakpoint(msgs, msgs.size() - 4);
-        }
-        if (msgs.size() >= 2) {
+        // The sliding conversation breakpoint, from the second step on: on the message before
+        // the newest, so the next step -- two messages longer -- finds this step's entry two
+        // positions back, well inside the 20 positions each breakpoint looks back over. Each step
+        // pays full price only for its newest turn and the context that changes with it; when
+        // this entry has expired, the next step reads the task's hour-long one and writes only
+        // the steps after it. With the tools, the system prompt and the task, that is four
+        // marks, the most the API takes.
+        if (msgs.size() >= 3) {
             setMessageCacheBreakpoint(msgs, msgs.size() - 2);
         }
 
@@ -513,7 +531,8 @@ class AnthropicProvider implements LlmProvider {
         // than dearer: the manifest currently lives in the dynamic block attached to the newest
         // message, deliberately outside the cache breakpoints, so several thousand tokens are
         // re-billed at full rate on every step. As a tools array with cache_control on the last
-        // entry it is billed once and then read at a tenth.
+        // entry it is billed once and then read at a tenth -- for an hour on a think call, with
+        // the rest of the stable prefix (above).
         //
         // eager_input_streaming: the reply is streamed, and without it Anthropic holds each tool
         // input back until the whole of it is generated -- a skill's full source, say, arriving
@@ -535,8 +554,7 @@ class AnthropicProvider implements LlmProvider {
                 t.put("eager_input_streaming", true);
             }
             if (toolsArray.size() > 0) {
-                ((ObjectNode) toolsArray.get(toolsArray.size() - 1))
-                        .putObject("cache_control").put("type", "ephemeral");
+                ((ObjectNode) toolsArray.get(toolsArray.size() - 1)).set("cache_control", cacheControl(stable));
             }
             ObjectNode choice = body.putObject("tool_choice");
             choice.put("type", "auto");
@@ -551,7 +569,7 @@ class AnthropicProvider implements LlmProvider {
     }
 
     /**
-     * Set a cache breakpoint on a message by converting its plain-text content
+     * Set a five-minute cache breakpoint on a message by converting its plain-text content
      * to a content-block array with cache_control.
      */
     private void setMessageCacheBreakpoint(ArrayNode msgs, int index) {
@@ -562,7 +580,18 @@ class AnthropicProvider implements LlmProvider {
         ObjectNode block = contentArray.addObject();
         block.put("type", "text");
         block.put("text", rawContent);
-        block.putObject("cache_control").put("type", "ephemeral");
+        block.set("cache_control", cacheControl(false));
+    }
+
+    /**
+     * A cache mark: {@code {"type": "ephemeral"}} lives five minutes, and with {@code "ttl": "1h"}
+     * an hour. No beta header is needed for either.
+     */
+    private ObjectNode cacheControl(boolean hour) {
+        ObjectNode mark = mapper.createObjectNode();
+        mark.put("type", "ephemeral");
+        if (hour) mark.put("ttl", "1h");
+        return mark;
     }
 
     /**

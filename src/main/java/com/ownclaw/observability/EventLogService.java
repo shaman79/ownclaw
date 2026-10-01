@@ -93,7 +93,7 @@ public class EventLogService {
 
     /**
      * The event type of the local tokens billed to a task after its ending was recorded: a
-     * summary of one of its private results, still being written when it ended. Its details hold
+     * summary of one of its private results whose reply came back just as it ended. Its details hold
      * {@code localTokens}, as an ending's do.
      */
     public static final String TOKENS_AFTER_END = "tokens_after_end";

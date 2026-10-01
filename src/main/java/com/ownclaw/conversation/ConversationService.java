@@ -1,11 +1,15 @@
 package com.ownclaw.conversation;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.AgentResult;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -16,6 +20,8 @@ import java.util.UUID;
  */
 @Service
 public class ConversationService {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final JdbcTemplate jdbc;
 
@@ -81,19 +87,30 @@ public class ConversationService {
 
     /**
      * Save a running task's progress row ({@code TaskChat}), as {@link #saveMessage} saves a row
-     * of role {@code progress} -- but only while its chat exists. A summary of a private result
-     * can be written minutes after its task ended; saved into a chat the owner had deleted in the
-     * meantime, it was a row of no chat, which no page showed and no delete reached.
+     * of role {@code progress} -- but only while its chat exists. A task can work for many
+     * minutes after its message was saved; a row saved into a chat the owner had deleted in the
+     * meantime was a row of no chat, which no page showed and no delete reached.
      *
+     * @param header what the row is about, as data ({@code TaskChat.Header}): kept in the row's
+     *               metadata beside its task, so the page draws it again after a reload
      * @return whether it was saved: false when the chat is gone
      */
     public boolean saveProgress(String userId, String sessionId, String content, String taskId,
-                                String privateContent) {
+                                String privateContent, Map<String, Object> header) {
+        var metadata = new LinkedHashMap<String, Object>();
+        if (isTaskId(taskId)) metadata.put("taskId", taskId);
+        metadata.put("progress", header);
+        String json;
+        try {
+            json = JSON.writeValueAsString(metadata);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("a progress row's metadata is not JSON: " + e.getOriginalMessage(), e);
+        }
         int saved = jdbc.update("""
             INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
             SELECT ?, ?, ?, 'progress', ?, ?, ?
             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?)
-            """, UUID.randomUUID().toString(), userId, sessionId, content, metadataOf(taskId),
+            """, UUID.randomUUID().toString(), userId, sessionId, content, json,
                 privateContent, sessionId, userId);
         if (saved == 0) return false;
         touch(sessionId, "progress", content);
@@ -102,7 +119,11 @@ public class ConversationService {
 
     /** A row's metadata (JSON): its task, when it has a well-formed 8-character task id. */
     private static String metadataOf(String taskId) {
-        return taskId != null && taskId.matches("[0-9a-f]{8}") ? "{\"taskId\":\"" + taskId + "\"}" : null;
+        return isTaskId(taskId) ? "{\"taskId\":\"" + taskId + "\"}" : null;
+    }
+
+    private static boolean isTaskId(String taskId) {
+        return taskId != null && taskId.matches("[0-9a-f]{8}");
     }
 
     /**
@@ -273,16 +294,32 @@ public class ConversationService {
      * <p>
      * The one reader of private_content: a private answer shows here as it did live, and
      * nowhere else. A row without one, including every row from before the column, shows its
-     * content.
+     * content. A progress row comes with its header as data ({@link #saveProgress}), as it came
+     * live; one from before the header was kept has none, and shows its content as it is.
      */
     public List<Map<String, Object>> getSessionMessages(String userId, String sessionId) {
-        return jdbc.queryForList("""
+        List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT role, COALESCE(private_content, content) AS content, timestamp,
-                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id,
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.progress') END AS progress
             FROM conversations
             WHERE user_id = ? AND session_id = ? AND role != 'status'
             ORDER BY timestamp ASC
             """, userId, sessionId);
+        for (var row : rows) {
+            if (row.get("progress") instanceof String header) row.put("progress", headerOf(header));
+        }
+        return rows;
+    }
+
+    /** A progress row's header, as the JSON it was saved as; null when it does not read as one. */
+    private static JsonNode headerOf(String json) {
+        try {
+            JsonNode header = JSON.readTree(json);
+            return header.isObject() ? header : null;
+        } catch (JsonProcessingException e) {
+            return null;
+        }
     }
 
     /**

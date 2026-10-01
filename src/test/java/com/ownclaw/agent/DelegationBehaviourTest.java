@@ -966,19 +966,26 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("the owner's status line names the whole goal")
-    void theStatusLineIsWhole() {
+    @DisplayName("the owner's status line says the local model is working, never the instructions it was given")
+    void theStatusLineHoldsNoInstructions() {
         var emitter = new ChatStatusEmitter();
-        var lines = new ArrayList<String>();
-        emitter.subscribe("u1", "test", m -> lines.add(m.text()));
+        var lines = new ArrayList<ChatStatusEmitter.StatusMessage>();
+        emitter.subscribe("u1", "test", lines::add);
         String goal = "Fetch today's lunch menus from the three restaurants on Vinohradská, "
-                + "compare their soups, and email Petr the cheapest vegetarian main course. ".repeat(3);
+                + "compare their soups, and email the cheapest vegetarian main course. ".repeat(3);
         var llm = new Scripted(done("nothing to do"));
+        var task = task();
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
-                new Usage()).execute(plan(goal), task(), UNCOUNTED);
+                new Usage()).execute(plan(goal), task, UNCOUNTED);
 
-        assertTrue(lines.contains("Delegating to local LLM: " + goal), lines.toString());
+        var step = lines.stream().filter(m -> m.type() == ChatStatusEmitter.StatusMessage.Type.STEP).toList();
+        assertEquals(1, step.size(), lines.toString());
+        assertEquals("Local model working…", step.get(0).text());
+        assertEquals(task.taskId(), step.get(0).taskId(), "the task's own, as every other step line");
+        assertTrue(lines.stream().noneMatch(m -> m.text().contains("Vinohradská")), lines.toString());
+        // Mutation: put the goal back in the line -> the instructions to the local model reach
+        // the activity strip, raw.
     }
 
     // ── a task holding the user's file ──

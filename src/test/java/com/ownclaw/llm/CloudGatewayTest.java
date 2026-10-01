@@ -497,7 +497,8 @@ class CloudGatewayTest {
         assertEquals(120_000, row.promptTokens());
         assertEquals(80_000, row.cacheReadTokens());
         assertEquals(1, row.completionTokens());
-        assertEquals(ModelPricing.costUsd("claude-opus-5", 120_000, 1, 0, 80_000), row.costUsd(), 1e-9);
+        assertEquals(ModelPricing.costUsd("claude-opus-5", new LlmResponse.Usage(null, 120_000, 1, 0, 80_000)),
+                row.costUsd(), 1e-9);
         assertTrue(row.costUsd() > 0.6, "priced as claude-opus-5 input: " + row.costUsd());
         assertEquals(List.of(partWay), billed, "and the task is told, so it counts them");
         // Mutation: record the ERROR row with no tokens -> 0 and $0, as before.

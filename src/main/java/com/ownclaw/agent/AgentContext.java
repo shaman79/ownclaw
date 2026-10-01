@@ -285,8 +285,8 @@ public class AgentContext {
 
     /**
      * The task is ending: from now on its counters stay as its ending reads and records them. A
-     * summary of a private result can still be written after it (TaskChat), and its tokens are
-     * then not added here ({@link #addLocalTokens}).
+     * summary of a private result whose reply came back just as the task ended is billed after
+     * it (TaskChat), and its tokens are then not added here ({@link #addLocalTokens}).
      */
     public synchronized void closeCounters() { countersClosed = true; }
 

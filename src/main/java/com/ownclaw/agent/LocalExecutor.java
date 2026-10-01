@@ -277,8 +277,10 @@ public class LocalExecutor {
                 : "Begin executing the plan. Start with step 1.";
         messages.add(LlmMessage.user(opening));
 
-        statusEmitter.emit(parentContext.userId(), StatusMessage.Type.STEP,
-                "Delegating to local LLM: " + plan.goal());
+        // A line for the owner, not the goal: that is the cloud's instructions to the local model,
+        // which the task page shows whole, under the step.
+        statusEmitter.emitForTask(parentContext.userId(), parentContext.taskId(), StatusMessage.Type.STEP,
+                "Local model working…");
 
         // No output limit is sent (a request cannot carry one): Ollama generates until the model
         // stops or its context window -- the model's own -- is full. Capping output here used to
@@ -374,9 +376,13 @@ public class LocalExecutor {
             // is then usually empty and that is fine.
             List<ExecutorAction> actions;
             String raw;
+            // What the model wrote beside its native calls: the sentence the owner reads above the
+            // turn's first call ({@link TaskChat#localTurn}). A turn written as text is its calls.
+            String words = null;
             if (response.hasToolCalls()) {
                 actions = response.toolCalls().stream().map(LocalExecutor::actionOf).toList();
                 raw = renderCalls(response.toolCalls());
+                words = response.content();
             } else {
                 raw = response.content();
                 actions = parseExecutorActions(raw);
@@ -440,8 +446,9 @@ public class LocalExecutor {
                             + "numbering from the results you have now.";
                 } else {
                     int had = mine.size();
-                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn);
+                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn, words);
                     if (mine.size() == had) didNotRun = i + 1;
+                    else words = null;   // said once, above the call that ran
                 }
                 String name = action.done ? "done" : action.tool;
                 replies.add(actions.size() == 1 ? reply : "[call " + (i + 1) + " of "
@@ -487,7 +494,8 @@ public class LocalExecutor {
      * the model is told about it: the result, or why the call did not run.
      */
     private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
-                       List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn) {
+                       List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn,
+                       String words) {
         if (action.tool == null || action.tool.isBlank()) {
             // Local LLM produced something unparseable — tell it, so it can recover
             return nativeTools
@@ -575,9 +583,9 @@ public class LocalExecutor {
                     + " Text you compose yourself is fine; a partial copy of a result is not.";
         }
 
-        // ACT: execute the tool -- said in the owner's chat first, so the work on the local
-        // tier is seen as it happens.
-        parentContext.chat().localTurn(turn, target.name());
+        // ACT: execute the tool -- said in the owner's chat first, with the model's words and
+        // the call as it wrote it, so the work on the local tier is seen as it happens.
+        parentContext.chat().localTurn(turn, target.name(), words, action.params);
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
@@ -605,10 +613,9 @@ public class LocalExecutor {
         Artifact artifact = parentContext.addArtifact(target.name(), action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);
-        if (artifact.isPrivate()) {
-            parentContext.markLocalTierReadPrivate();
-            parentContext.chat().privateResult(artifact);
-        }
+        // No summary of it for the owner: the local model has just read it itself, and its turn
+        // in the chat says what it is doing with it.
+        if (artifact.isPrivate()) parentContext.markLocalTierReadPrivate();
         // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
         // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
         // error wrapped as "ok": false, so the delegation reported ok and the fallback never
@@ -716,10 +723,19 @@ public class LocalExecutor {
             sb.append("The steps are the order to work in; adapt params to what earlier steps returned.\n\n");
         }
         sb.append("## Output\n");
+        // The owner reads the sentence above each call in the chat (TaskChat#localTurn). On the
+        // text protocol a turn is one JSON object, with nothing beside it to write it in.
+        boolean narrate = nativeTools && context.chat().watched();
         if (nativeTools) {
             sb.append("Call one tool per turn. When the goal is reached, call **done** with the\n");
-            sb.append("full summary. Do not answer in prose — an answer nobody asked for ends\n");
-            sb.append("nothing, and only **done** returns the work.\n\n");
+            sb.append("full summary. Do not answer in prose instead of calling a tool — an answer\n");
+            sb.append("nobody asked for ends nothing, and only **done** returns the work.\n");
+            if (narrate) {
+                sb.append("The owner follows your work in the chat: with each tool call, write one short\n");
+                sb.append("sentence saying what you are doing and why, in the language of his request\n");
+                sb.append("(at the end of this prompt).\n");
+            }
+            sb.append("\n");
         } else {
             sb.append("Tool call: {\"tool\": \"name\", \"params\": {...}}\n");
             sb.append("All done: {\"done\": true, \"summary\": \"consolidated results\"}\n");
@@ -818,6 +834,12 @@ public class LocalExecutor {
         }
         sb.append("- No skill_create. Nobody is available to answer questions — decide and proceed.\n");
 
+        if (narrate) {
+            // Whole, for its language: the local model is not otherwise shown it.
+            sb.append("\n## The owner's request\n");
+            sb.append("Only for the language of your sentences; the work is the goal above.\n\n");
+            sb.append(context.originalMessage()).append("\n");
+        }
         return sb.toString();
     }
 

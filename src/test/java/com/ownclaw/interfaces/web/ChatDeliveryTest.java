@@ -296,19 +296,23 @@ class ChatDeliveryTest {
         type("check the router");
         assertEquals(List.of(com.ownclaw.agent.TaskChat.Channel.WEB), queue.channels, "the task knows it came from here");
 
+        var header = Map.<String, Object>of("actor", "cloud", "step", 1, "tool", "ping", "elapsedMs", 2000, "costUsd", 0.01);
         emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
-                "**Step 1 · ping · 2.0s · $0.01**\n\nPinging it.", Map.of("sessionId", "s1"));
+                "☁️ Step 1 · ping · 2.0s · $0.01\n\nPinging it.", Map.of("sessionId", "s1", "progress", header));
         emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
-                "**Result 1 (bank_fetch)** — private, shown only to you.",
-                Map.of("sessionId", "s1", "ownerText", "**Result 1 (bank_fetch)** — Balance 48,213.07 CZK"));
+                "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nA private summary, shown only to you.",
+                Map.of("sessionId", "s1", "ownerText", "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nBalance 48,213.07 CZK"));
 
         var progress = frames("progress");
-        assertEquals(List.of("**Step 1 · ping · 2.0s · $0.01**\n\nPinging it.", "**Result 1 (bank_fetch)** — Balance 48,213.07 CZK"),
+        assertEquals(List.of("☁️ Step 1 · ping · 2.0s · $0.01\n\nPinging it.", "🏠 Result 1 · bank_fetch · 2.1s · $0.01\n\nBalance 48,213.07 CZK"),
                 progress.stream().map(f -> f.path("content").asText()).toList());
         for (var f : progress) {
             assertEquals("s1", f.path("sessionId").asText());
             assertEquals("abcd1234", f.path("taskId").asText());
         }
+        assertEquals("cloud", progress.get(0).path("progress").path("actor").asText(), "the header, for the page to draw");
+        assertEquals(1, progress.get(0).path("progress").path("step").asInt());
+        assertTrue(progress.get(1).path("progress").isMissingNode(), "none when the message carries none");
         assertTrue(frames("status").stream().noneMatch(f -> f.path("content").asText().contains("Step 1 · ping")),
                 "not an entry of the activity strip");
     }

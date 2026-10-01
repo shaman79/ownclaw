@@ -287,16 +287,14 @@ public class ThinkingEngine {
      * and reasoning are the resolver's constants.
      * <p>
      * Every message but the last is the same bytes on every later step, so the conversation is
-     * append-only and the provider's sliding cache breakpoints keep hitting. The last user turn
+     * append-only and the provider's sliding cache breakpoint keeps hitting. The last user turn
      * carries what changes on every step (the date, the tools on the text protocol, the vault),
-     * behind the cache breakpoints. While no action has been replayed the task is the only
-     * message, and the cache boundary marks where the task ends, so the task is cached on the
-     * first call and read back on the next.
+     * behind the cache breakpoints. The cache boundary marks where the task ends in the first
+     * message, on every step: the task -- with the tools and the system prompt before it -- is
+     * the stable prefix, which the provider caches for longer than the steps after it.
      */
     void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context, StepMode mode) {
-        String task = buildUserMessage(context);
-        var user = new StringBuilder(task);
-        boolean replayed = false;
+        var user = new StringBuilder(buildUserMessage(context)).append(CACHE_BOUNDARY_MARKER);
         for (var turn : context.trajectory().turns()) {
             if (turn.byTheLoop()) {
                 String told = turn.observation().output();
@@ -306,9 +304,7 @@ public class ThinkingEngine {
             messages.add(LlmMessage.user(user.toString()));
             messages.add(LlmMessage.assistant(turn.actionText()));
             user = new StringBuilder(turn.observationText());
-            replayed = true;
         }
-        if (!replayed) user.insert(task.length(), CACHE_BOUNDARY_MARKER);
         user.append("\n\n---\n").append(buildDynamicContext(context, mode));
         messages.add(LlmMessage.user(user.toString()));
     }
