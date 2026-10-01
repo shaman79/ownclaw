@@ -487,11 +487,12 @@ public class AgentLoop {
      * Through the same resolver as every tool argument, so the rules are the same ones: a
      * reference counts only as the whole message, and one that cannot resolve is refused rather
      * than sent as literal text. A whole PRIVATE handle is how the cloud gives the owner an
-     * answer it was never shown -- the local model's, from a file -- so its text is filled in
-     * here, on this machine, and kept apart as the owner's text; the response is a note that it
-     * exists. An answer or a question with nothing in it is refused, written or placed: a
-     * {@code respond("")} delivered an empty bubble -- on Telegram an error notice -- and the
-     * text the model had written beside the call was lost; a PDF's {{1}} is empty in the same way.
+     * answer it was never shown -- the local model's, written after it read a file or another
+     * private result -- so its text is filled in here, on this machine, and kept apart as the
+     * owner's text; the response is a note that it exists. An answer or a question with nothing
+     * in it is refused, written or placed: a {@code respond("")} delivered an empty bubble -- on
+     * Telegram an error notice -- and the text the model had written beside the call was lost; a
+     * PDF's {{1}} is empty in the same way.
      * <p>
      * On a task holding a file, the local model's answer reaches the owner even when the cloud
      * does not place its handle -- "Done, see above" is a likely reply from a model that never

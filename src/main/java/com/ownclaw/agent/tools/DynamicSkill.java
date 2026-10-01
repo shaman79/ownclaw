@@ -166,12 +166,20 @@ public class DynamicSkill implements Tool {
      * <ol>
      *   <li>Reads JSON parameters from stdin</li>
      *   <li>Imports skill.py and calls its {@code run(params)} function</li>
-     *   <li>Prints the returned dict as JSON to stdout</li>
+     *   <li>Prints the returned dict as JSON to stdout, as the last line</li>
      *   <li>Catches and reports any exception as a structured failure</li>
      * </ol>
      *
      * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
      * from the process-level stdin/stdout contract.
+     *
+     * <p>What the skill prints goes to stdout as it prints it, a line at a time, before the
+     * result line ({@link #parseOutput}): on every path -- a result, an exception, sys.exit, a
+     * hang the sandbox ends -- and counted as output by the sandbox's stall check, which ends a
+     * run only after no output for its timeout. The prints were once held back and added to the
+     * result's {@code output} on success alone: a skill that printed and then raised, or called
+     * sys.exit, lost them, and one that printed and returned a dict or a number as its output had
+     * that output broken by the addition -- a failure, for a send that had gone.
      *
      * <p>Skills can call {@code report_progress(message, percent=None)} to emit
      * structured progress updates for long-running tasks.  These are intercepted
@@ -180,13 +188,18 @@ public class DynamicSkill implements Tool {
      * ({@link #parseOutput}).
      */
     private static final String RUNNER_HARNESS = String.join("\n",
-        "import sys, json, os, io, importlib.util, traceback, inspect",
+        "import sys, json, os, importlib.util, traceback, inspect",
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
-        "# The message is emitted as a JSON line on the real stdout, before the",
-        "# result line, and intercepted by the sandbox when the caller listens for it.",
+        "# The message is emitted as a JSON line on stdout, before the result line,",
+        "# and intercepted by the sandbox when the caller listens for it.",
         "_real_stdout = sys.__stdout__",
+        "# What the skill prints reaches stdout a line at a time, as it prints it.",
+        "try:",
+        "    _real_stdout.reconfigure(line_buffering=True)",
+        "except Exception:",
+        "    pass",
         "",
         "def report_progress(message, percent=None):",
         "    \"\"\"Report progress for a long-running task.",
@@ -199,6 +212,11 @@ public class DynamicSkill implements Tool {
         "    if percent is not None:",
         "        progress['percent'] = int(percent)",
         "    _real_stdout.write(json.dumps(progress) + '\\n')",
+        "    _real_stdout.flush()",
+        "",
+        "def _result(result):",
+        "    \"\"\"The result: the last line, on a line of its own whatever was printed before it.\"\"\"",
+        "    _real_stdout.write('\\n' + json.dumps(result, default=str, ensure_ascii=False) + '\\n')",
         "    _real_stdout.flush()",
         "",
         "def _dispatch_run(run_fn, params):",
@@ -247,30 +265,18 @@ public class DynamicSkill implements Tool {
         "    mod.report_progress = report_progress",
         "    import builtins",
         "    builtins.report_progress = report_progress",
-        "    _capture = io.StringIO()",
-        "    sys.stdout = _capture",
         "    spec.loader.exec_module(mod)",
         "    if not hasattr(mod, 'run'):",
-        "        sys.stdout = _real_stdout",
-        "        print(json.dumps({'success': False, 'output': 'skill.py does not define a run(params) function'}))",
+        "        _result({'success': False, 'output': 'skill.py does not define a run(params) function'})",
         "        sys.exit(0)",
         "    result = _dispatch_run(mod.run, params)",
-        "    sys.stdout = _real_stdout",
-        "    captured = _capture.getvalue()",
         "    if not isinstance(result, dict):",
         "        result = {'output': str(result) if result is not None else ''}",
         "    if 'success' not in result:",
         "        result['success'] = True",
-        "    if captured and captured.strip():",
-        "        result.setdefault('output', '')",
-        "        if result['output']:",
-        "            result['output'] += '\\n[skill stdout: ' + captured.strip() + ']'",
-        "        else:",
-        "            result['output'] = captured.strip()",
-        "    print(json.dumps(result, default=str, ensure_ascii=False))",
+        "    _result(result)",
         "except Exception as e:",
-        "    sys.stdout = sys.__stdout__",
-        "    print(json.dumps({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}, ensure_ascii=False))",
+        "    _result({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'})",
         ""
     );
 
@@ -393,25 +399,33 @@ public class DynamicSkill implements Tool {
 
             // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
             // retry returns is the answer, failure included: the package is in by then, and the
-            // error it hits next is the one that matters.
+            // error it hits next is the one that matters. A package that cannot be installed
+            // fails with pip's own account of why, beside the error that asked for it.
             String missingModule = toolResult.success() || result.timedOut()
                     ? null : extractMissingModule(toolResult.output());
             if (missingModule != null) {
                 String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
                 log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
                         name, missingModule, pkg);
-                if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
+                try {
+                    pythonEnv.installPackages(skillDir, name, List.of(pkg));
                     SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
                             runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
                     if (retry != null) {
-                        ToolResult healed = interpret(retry);
+                        toolResult = interpret(retry);
                         log.info("Self-heal retry of skill '{}': {}", name,
-                                healed.success() ? "succeeded" : "failed");
-                        return healed;
+                                toolResult.success() ? "succeeded" : "failed");
                     }
+                } catch (IOException notInstalled) {
+                    toolResult = failedWith(toolResult, "installing " + pkg + " failed",
+                            notInstalled.getMessage());
                 }
             }
-            return toolResult;
+            // Why the skill's own requirements are not installed, when they are not: the run
+            // went on without them, and its error names only the module it then missed -- a
+            // wrong package name, a wheel that needs a system library and an index out of reach
+            // all read "No module named" there, and only pip says which.
+            return failedWith(toolResult, "requirements not installed", resolution.installError());
         } catch (Exception e) {
             String message = String.valueOf(e.getMessage());
             log.error("Dynamic skill '{}' execution failed: {}", name, firstLineOf(message));
@@ -511,10 +525,12 @@ public class DynamicSkill implements Tool {
      * that is the output: {@code output} alone when nothing else it returned holds anything -- as
      * text, or as JSON when it is not a string -- and otherwise the whole object as printed, so
      * that no key is dropped and an {@code "ok": false} stays where Artifact.succeeded reads it.
+     * When the skill returned nothing, what was printed before that line is the output.
      * Nothing else the process wrote is dropped either ({@link #withStream}): stdout printed before
-     * that line -- by a subprocess, or a progress report nobody intercepted -- and stderr, whether
-     * the skill succeeded or not: a failure is exactly when its warnings are the evidence. Output
-     * whose last line is not a JSON object is shown whole, as a failure.
+     * that line -- by the skill's own print(), by a subprocess, or a progress report nobody
+     * intercepted -- and stderr, whether the skill succeeded or not: a failure is exactly when its
+     * warnings are the evidence. Output whose last line is not a JSON object is shown whole, as a
+     * failure.
      *
      * @param stdout the script's standard output
      * @param stderr the script's standard error
@@ -550,23 +566,30 @@ public class DynamicSkill implements Tool {
         boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
         JsonNode returned = parsed.get("output");
         // Everything the skill returned. Taking "output" alone dropped every other key -- a
-        // message id, a data list, and an "ok": false that the harness had put the skill's
-        // print()s beside, so a failed send read as a success. A key that holds nothing (a
-        // data dict left empty) does not make the object the output.
-        boolean outputAlone = returned != null && parsed.properties().stream()
+        // message id, a data list, and an "ok": false beside it, so a failed send read as a
+        // success. A key that holds nothing (a data dict left empty) does not make the object
+        // the output.
+        boolean onlyOutput = parsed.properties().stream()
                 .allMatch(e -> "output".equals(e.getKey()) || "success".equals(e.getKey())
                         || holdsNothing(e.getValue()));
-        String output = !outputAlone ? line
+        // A skill that returned nothing and printed: what it printed is its output, as printed.
+        // That is how a skill that print()s its result instead of returning it answers -- JSON
+        // printed so stays JSON for the descriptor, the field references and an "ok": false.
+        boolean printedIt = onlyOutput && (returned == null || holdsNothing(returned))
+                && !before.isEmpty();
+        String output = printedIt ? before
+                : !onlyOutput || returned == null ? line
                 : returned.isTextual() ? returned.asText() : returned.toString();
 
         // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
-        if (success && returned != null && returned.isTextual()
-                && returned.asText().startsWith("ERROR:")) {
+        String said = printedIt ? before
+                : returned != null && returned.isTextual() ? returned.asText() : null;
+        if (success && said != null && said.startsWith("ERROR:")) {
             log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
             success = false;
         }
 
-        output = withStream(output, "skill stdout", before);
+        if (!printedIt) output = withStream(output, "skill stdout", before);
 
         // Treat empty output content as failure even if success=true
         if (success && (output.isBlank() || "null".equals(output))) {
@@ -590,22 +613,32 @@ public class DynamicSkill implements Tool {
     }
 
     /**
-     * {@code output} with what the process also wrote to {@code stream}; as it was when that is
-     * blank. An output that is a JSON object ({@link ToolResult#jsonObject}) gets it as one more
-     * key, before the closing brace of the skill's own text and never one the skill returned
-     * itself: text after the object hid an {@code "ok": false} from Artifact.succeeded and every
-     * field from the descriptor. Any other output gets it as a labelled block after the text.
+     * {@code output} with {@code text} beside it under {@code label} -- what the process also wrote
+     * to a stream, or why packages it needed are not installed; as it was when the text is blank.
+     * An output that is a JSON object ({@link ToolResult#jsonObject}) gets it as one more key,
+     * before the closing brace of the skill's own text and never one the skill returned itself:
+     * text after the object hid an {@code "ok": false} from Artifact.succeeded and every field
+     * from the descriptor. Any other output gets it as a labelled block after the text.
      */
-    private static String withStream(String output, String stream, String text) {
+    private static String withStream(String output, String label, String text) {
         if (text == null || text.isBlank()) return output;
         ObjectNode object = ToolResult.jsonObject(output);
-        if (object == null) return output + printed(stream, text);
-        String key = stream;
+        if (object == null) return output + printed(label, text);
+        String key = label;
         while (object.has(key)) key = "_" + key;
         String t = output.strip();
         int close = t.lastIndexOf('}');
         return t.substring(0, close) + (object.isEmpty() ? "" : ", ") + TextNode.valueOf(key) + ": "
                 + TextNode.valueOf(text.strip()) + "}";
+    }
+
+    /**
+     * A failed result with {@code text} beside it, as {@link #withStream} puts it; a success, or a
+     * blank text, as it is.
+     */
+    private static ToolResult failedWith(ToolResult result, String label, String text) {
+        return result.success() || text == null || text.isBlank() ? result
+                : ToolResult.failure(withStream(result.output(), label, text));
     }
 
     /** {@code text} labelled as what the process wrote to {@code stream}; nothing when blank. */

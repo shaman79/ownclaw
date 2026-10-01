@@ -3129,8 +3129,9 @@
         if (!priv.length) panel.appendChild(node('div', 'task-trace-note', 'No private result was recorded for this task.'));
         priv.forEach(function(a) {
             var item = node('div', 'task-trace-item');
-            // A file the owner sent, and the local model's answer from it, are said in words;
-            // the file's name is shown here only, the cloud was never told it.
+            // A file the owner sent, and an answer the local model wrote after reading something
+            // private, are said in words; the file's name is shown here only, the cloud was never
+            // told it.
             var file = a.tool === 'attachment', answer = a.tool === 'local_answer';
             item.appendChild(node('div', 'task-trace-line', file
                     ? a.handle + ' your file' + (a.name != null ? ' "' + a.name + '"' : '') + ' · '

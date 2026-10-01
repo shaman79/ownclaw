@@ -308,9 +308,12 @@ class DelegationBehaviourTest {
                 call("archive_text", Map.of("text", "{{1.body_text}}")), done("ok"));
         executor(llm, new Usage(), imap, archive).execute(plan("archive the mail"), ctx);
 
-        assertEquals(Label.PRIVATE, ctx.artifacts().get(2).label());
-        assertTrue(ctx.artifacts().get(2).why().contains("references {{2}}"),
-                "named by its task handle: " + ctx.artifacts().get(2).why());
+        // {{1}} the first fetch, {{2}} the first delegation's kept answer, {{3}} this fetch.
+        Artifact archived = ctx.artifacts().get(3);
+        assertEquals("archive_text", archived.tool());
+        assertEquals(Label.PRIVATE, archived.label());
+        assertTrue(archived.why().contains("references {{3}}"),
+                "named by its task handle: " + archived.why());
     }
 
     @Test
@@ -533,6 +536,120 @@ class DelegationBehaviourTest {
         assertEquals(1, smtp.calls.size(), "taking the done would have dropped the send unrun and unsaid");
         assertTrue(llm.toldAfter(1).contains("[call 1 of 2: done] Not taken"), llm.toldAfter(1));
         assertTrue(outcome.text().startsWith("Menu emailed to Petr."), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a turn written as text runs every call in it, not only the first")
+    void everyCallWrittenAsTextRuns() {
+        // A tools-capable model can answer in text -- the production model wrote its done that
+        // way on the first day of native tools. With the fetch and the send on two lines, the
+        // fetch ran; the send was neither run nor mentioned, and the delegation reported success
+        // with no email sent.
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new NativeTurns(Replies.of(call("daily_menu_fetcher", Map.of()) + "\n"
+                        + call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}")),
+                        1, 1),
+                turn(new ToolCall("d", "done", Map.of("summary", "menu emailed"))));
+
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+
+        assertEquals(1, fetch.calls.size());
+        assertEquals(List.of(Map.of("to", "petr@example.com", "body", "Polévka: česneková. Hlavní: guláš.")),
+                smtp.calls, "the send written after the fetch");
+        assertTrue(llm.toldAfter(0).contains("[call 2 of 2: smtp_send_email] Tool result {{2}}"),
+                llm.toldAfter(0));
+        assertTrue(outcome.ok(), outcome.text());
+    }
+
+    @Test
+    @DisplayName("a call written as {name, arguments} runs with its arguments, as the cloud's reader reads it")
+    void aCallsArgumentsAreReadUnderEveryName() {
+        // The shape Qwen models write a call in, {"name", "arguments"}, here as text: the tool
+        // was read from "name" and the arguments beside it were dropped, so each fetch ran with
+        // none.
+        var fetch = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success("PAGE " + p.get("url")));
+        String text = "<tool_call>\n{\"name\": \"web_fetch\", \"arguments\": {\"url\": \"https://example.org/a\"}}\n"
+                + "</tool_call>\n<tool_call>\n{\"name\": \"web_fetch\", \"arguments\": "
+                + "{\"url\": \"https://example.org/b\"}}\n</tool_call>";
+        var llm = new NativeTurns(Replies.of(text, 1, 1),
+                turn(new ToolCall("c", "done", Map.of("summary", "fetched both"))));
+
+        executor(llm, new Usage(), fetch).execute(plan("fetch both pages"), task());
+
+        assertEquals(List.of(Map.of("url", "https://example.org/a"), Map.of("url", "https://example.org/b")),
+                fetch.calls);
+    }
+
+    @Test
+    @DisplayName("text with an object that names no tool, beside a call: the call is the turn")
+    void anObjectThatNamesNoToolIsNotACall() {
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var llm = new NativeTurns(Replies.of("The last menu was {} -- empty. Fetching again: "
+                        + call("daily_menu_fetcher", Map.of()), 1, 1),
+                turn(new ToolCall("c", "done", Map.of("summary", "fetched"))));
+
+        executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task());
+
+        assertEquals(1, fetch.calls.size(), llm.toldAfter(0));
+        assertTrue(llm.toldAfter(0).startsWith("Tool result {{1}} [daily_menu_fetcher] SUCCESS"),
+                "one call, said as one: " + llm.toldAfter(0));
+    }
+
+    @Test
+    @DisplayName("after a call of a turn did not run, the calls after it do not run: their numbers would be off")
+    void aRefusedCallStopsTheRestOfItsTurn() {
+        // The model numbers a turn's results when it writes the turn. A refused call leaves no
+        // result, so every later one was numbered one lower than counted: x was mailed the page
+        // meant for y, and y the "Sent" of x's mail -- both recorded as sent.
+        String found = "{\"ok\":true,\"url_a\":\"https://example.org/a\",\"url_b\":\"https://example.org/b\"}";
+        var search = new FakeTool("web_search", false, List.of(), p -> ToolResult.success(found));
+        var fetch = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success("PAGE " + p.get("url")));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var mailX = Map.<String, Object>of("to", "x@example.org", "body", "{{2}}");
+        var mailY = Map.<String, Object>of("to", "y@example.org", "body", "{{3}}");
+        var llm = new NativeTurns(
+                turn(new ToolCall("a", "web_search", Map.of("q", "reports"))),
+                turn(new ToolCall("b", "web_fetch", Map.of("url", "{{1.link_a}}")),
+                        new ToolCall("c", "web_fetch", Map.of("url", "{{1.url_b}}")),
+                        new ToolCall("d", "smtp_send_email", mailX),
+                        new ToolCall("e", "smtp_send_email", mailY)),
+                turn(new ToolCall("f", "web_fetch", Map.of("url", "{{1.url_a}}")),
+                        new ToolCall("g", "web_fetch", Map.of("url", "{{1.url_b}}")),
+                        new ToolCall("h", "smtp_send_email", mailX),
+                        new ToolCall("i", "smtp_send_email", mailY)),
+                turn(new ToolCall("j", "done", Map.of("summary", "sent both pages"))));
+
+        var outcome = executor(llm, new Usage(), search, fetch, smtp).execute(plan("mail both pages"), task());
+
+        String told = llm.toldAfter(1);
+        assertTrue(told.contains("[call 1 of 4: web_fetch] Not run: the value of 'url'"), told);
+        for (String later : List.of("[call 2 of 4: web_fetch] ", "[call 3 of 4: smtp_send_email] ",
+                "[call 4 of 4: smtp_send_email] ")) {
+            assertTrue(told.contains(later + "Not run: call 1 of this turn did not run"), told);
+        }
+        assertEquals(List.of(Map.of("to", "x@example.org", "body", "PAGE https://example.org/a"),
+                        Map.of("to", "y@example.org", "body", "PAGE https://example.org/b")), smtp.calls,
+                "each recipient gets the page the model named, once the turn is made again");
+        assertTrue(outcome.ok(), outcome.text());
+    }
+
+    @Test
+    @DisplayName("text the model wrote is its own to send again, whichever result echoed it")
+    void anEchoOfTheModelsOwnWordsIsNotACopy() {
+        // The send echoes the subject it was given, and the same subject to a second recipient
+        // was refused as a copy of that echo typed out by hand.
+        String subject = "Daily digest - Wednesday 30 September 2026";
+        var smtp = new FakeTool("smtp_send_email", true, List.of(),
+                p -> ToolResult.success("Sent to " + p.get("to") + ", subject: " + p.get("subject")));
+        var llm = new Scripted(
+                call("smtp_send_email", Map.of("to", "petr@example.com", "subject", subject, "body", "Good morning.")),
+                call("smtp_send_email", Map.of("to", "jana@example.com", "subject", subject, "body", "Good morning.")),
+                done("sent the digest to both"));
+
+        executor(llm, new Usage(), smtp).execute(plan("email the digest to Petr and Jana"), task());
+
+        assertEquals(2, smtp.calls.size(), llm.allSeen());
     }
 
     @Test
@@ -869,18 +986,69 @@ class DelegationBehaviourTest {
         assertEquals("local_answer", answer.tool());
         assertEquals(SUMMARY, answer.output(), "the model's answer, and nothing cut to note in it");
 
-        // The same text, from a credentialed tool in a task with no file: shown whole too, and
-        // the summary withheld as before, with nothing kept.
+        // The same text, from a credentialed tool in a task with no file: shown whole too.
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"), p -> ToolResult.success(first));
         var plain = new AgentContext("u1", "t2", "what came in the mail?");
         var llm2 = new Scripted(call("imap_fetch", Map.of()), done(SUMMARY));
 
-        var outcome = executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain);
+        executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain);
 
         assertTrue(llm2.allSeen().contains(first), "whole, where it was 400 characters and 150 more");
-        assertTrue(plain.artifacts().stream().noneMatch(a -> "local_answer".equals(a.tool())));
-        assertTrue(outcome.text().contains("(local summary withheld — this delegation touched {{1}})"),
-                outcome.text());
+    }
+
+    @Test
+    @DisplayName("off a file task too, a summary written after a private read is kept as a handle")
+    void aSummaryOfPrivateDataIsKept() {
+        // A scheduled "summarise my new mail": the local model wrote the digest as its summary,
+        // and it was withheld from the cloud and then dropped -- nobody could ever read it.
+        String mail = "{\"ok\":true,\"mails\":[{\"from\":\"boss@example.org\",\"subject\":"
+                + "\"Budget\",\"body\":\"I need the Q3 budget overview by Friday, please.\"}]}";
+        String digest = "One new mail: your boss wants the Q3 budget overview by Friday.";
+        var imap = new FakeTool("imap_unread_summarizer", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success(mail));
+        var ctx = task();
+        var llm = new Scripted(call("imap_unread_summarizer", Map.of()), done(digest));
+
+        var outcome = executor(llm, new Usage(), imap).execute(plan("summarise my new mail"), ctx);
+
+        Artifact answer = ctx.artifacts().get(1);
+        assertEquals("local_answer", answer.tool());
+        assertEquals(Label.PRIVATE, answer.label());
+        assertEquals(digest, answer.output(), "the digest, kept whole");
+        assertTrue(outcome.produced().contains(answer), "the step and the task page show it");
+        assertTrue(outcome.text().contains("The local model's answer is {{2}}"),
+                "the cloud is told the handle: " + outcome.text());
+        assertNull(windowOf(digest, outcome.text()), "and never the text: " + outcome.text());
+
+        // The cloud gives it to the owner by its handle; its text is filled in on this machine.
+        var delivered = AgentLoop.answerFor("{{2}}", ctx);
+        assertEquals(AgentLoop.PRIVATE_NOTE, delivered.response(), "the cloud-safe text is a note");
+        assertTrue(delivered.ownerText().endsWith(digest), delivered.ownerText());
+    }
+
+    @Test
+    @DisplayName("a kept summary is not one the canary looks for: the report it quotes stays sendable")
+    void aKeptSummaryDoesNotBlockTheReport() {
+        // The model wrote a URL into a call that failed before it read anything private, and
+        // then quoted it in its summary. The report prints the failed call's arguments; with the
+        // summary indexed, the request carrying that report would be refused.
+        String url = "https://example.org/reports/2026/q3/budget-overview.html";
+        var fetch = new FakeTool("web_fetch", false, List.of(),
+                p -> ToolResult.failure("HTTP 404 Not Found"));
+        var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
+                p -> ToolResult.success("{\"ok\":true,\"body_text\":\"the budget is attached\"}"));
+        var ctx = task();
+        var llm = new Scripted(call("web_fetch", Map.of("url", url)), call("imap_fetch", Map.of()),
+                done("The page " + url + " was not there; the mail says the budget is attached."));
+
+        var outcome = executor(llm, new Usage(), fetch, imap).execute(plan("find the budget"), ctx);
+
+        Artifact answer = ctx.artifacts().get(2);
+        assertEquals("local_answer", answer.tool());
+        assertFalse(answer.indexed(), "like every result the local model makes after a private read");
+        assertTrue(outcome.text().contains(url), "the failed call's arguments, as the report prints them");
+        assertNull(ctx.privateIndex().firstLeakIn(outcome.text(), ctx::isAllowedLeak),
+                "the door would refuse the report: " + outcome.text());
     }
 
     @Test

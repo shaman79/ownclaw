@@ -1,8 +1,5 @@
 package com.ownclaw.agent;
 
-import com.fasterxml.jackson.core.json.JsonReadFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
@@ -43,21 +40,6 @@ public class ThinkingEngine {
      * this name, and asks again.
      */
     static final String THINKING = "_thinking";
-
-    // Lenient mapper: tolerates common LLM JSON quirks.
-    // - ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: \' and other non-standard escapes
-    // - ALLOW_UNQUOTED_FIELD_NAMES: {tool: "x"} instead of {"tool": "x"}
-    // - ALLOW_SINGLE_QUOTES: {'tool': 'x'} instead of {"tool": "x"}
-    // - ALLOW_TRAILING_COMMA: {"x": 1,} trailing commas in objects/arrays
-    // These features are CRITICAL for the local LLM (qwen2.5:14b) which frequently
-    // produces non-standard JSON.
-    private static final ObjectMapper mapper = JsonMapper.builder()
-            .enable(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER)
-            .enable(JsonReadFeature.ALLOW_UNQUOTED_FIELD_NAMES)
-            .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
-            .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
-            .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
-            .build();
 
     private final ToolRegistry toolRegistry;
     private final OwnClawConfig config;
@@ -490,7 +472,7 @@ public class ThinkingEngine {
                         "params", c.arguments() == null ? Map.of() : c.arguments()));
             }
             out.put("toolCalls", calls);
-            return mapper.writeValueAsString(out);
+            return TextCalls.MAPPER.writeValueAsString(out);
         } catch (Exception e) {
             return String.valueOf(response.content());
         }
@@ -792,43 +774,6 @@ public class ThinkingEngine {
         return sb.toString();
     }
 
-    // Regex that matches multi-line block comments in JSON
-    private static final java.util.regex.Pattern BLOCK_COMMENT =
-            java.util.regex.Pattern.compile("/\\*.*?\\*/", java.util.regex.Pattern.DOTALL);
-
-    /**
-     * Strip JavaScript-style comments from an LLM-produced JSON string.
-     * LLMs sometimes add // annotations in JSON which Jackson rejects.
-     */
-    private String stripJsonComments(String json) {
-        if (json == null) return json;
-        // Remove block comments first, then line comments
-        json = BLOCK_COMMENT.matcher(json).replaceAll("");
-        // Only strip // comments that are NOT inside a quoted string.
-        // Simple heuristic: split by lines and strip trailing // that aren't inside quotes.
-        var sb = new StringBuilder();
-        for (String line : json.split("\n", -1)) {
-            sb.append(stripLineComment(line)).append('\n');
-        }
-        return sb.toString();
-    }
-
-    /** Remove trailing // comment from a single line, being careful not to strip inside string values. */
-    private String stripLineComment(String line) {
-        boolean inString = false;
-        char prev = 0;
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (c == '"' && prev != '\\') {
-                inString = !inString;
-            } else if (!inString && c == '/' && prev == '/') {
-                return line.substring(0, i - 1);
-            }
-            prev = c;
-        }
-        return line;
-    }
-
     /**
      * Parse text as an action when the whole of it is one, or return null.
      * <p>
@@ -853,9 +798,9 @@ public class ThinkingEngine {
     /** The text as one JSON object, when that object is all of it but a code fence; else null. */
     @SuppressWarnings("unchecked")
     private Map<String, Object> wholeJsonObject(String text) {
-        String json = stripJsonComments(LlmOutputUtils.stripCodeFences(text.strip())).strip();
-        try (var parser = mapper.getFactory().createParser(json)) {
-            Object value = mapper.readValue(parser, Object.class);
+        String json = LlmOutputUtils.stripCodeFences(text.strip());
+        try (var parser = TextCalls.MAPPER.getFactory().createParser(json)) {
+            Object value = TextCalls.MAPPER.readValue(parser, Object.class);
             return value instanceof Map && parser.nextToken() == null ? (Map<String, Object>) value : null;
         } catch (Exception notOneObject) {
             return null;
@@ -871,9 +816,8 @@ public class ThinkingEngine {
     AgentAction parseAction(String raw) {
         String cleaned = LlmOutputUtils.stripCodeFences(raw.strip());
 
-        // Try to parse as JSON. Use Jackson's streaming parser to find the first
-        // valid JSON object — handles nested braces, escaped chars, etc. correctly.
-        Map<String, Object> parsed = tryParseJsonObject(cleaned);
+        // The first JSON object in it, read as the local tier reads a call (TextCalls).
+        Map<String, Object> parsed = TextCalls.firstObject(cleaned);
         if (parsed == null) {
             log.warn("ThinkingEngine: no valid JSON object in LLM response, so no action");
             return unusable(raw, "Your previous reply is not an action: there is no JSON object "
@@ -882,34 +826,15 @@ public class ThinkingEngine {
 
         try {
 
-            // Try multiple field names that LLMs commonly use for tool selection
-            String tool = getStringField(parsed, "tool");
-            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "action");
-            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "name");
-            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "function");
-            if (tool == null || tool.isBlank()) tool = getStringField(parsed, "command");
-
-            // Try nested structures: {"action": {"tool": "..."}}
-            if ((tool == null || tool.isBlank()) && parsed.get("action") instanceof Map) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> actionMap = (Map<String, Object>) parsed.get("action");
-                tool = getStringField(actionMap, "tool");
-                if (tool == null || tool.isBlank()) tool = getStringField(actionMap, "name");
-            }
+            // The tool and its arguments, under whichever names the model used for them.
+            String tool = TextCalls.tool(parsed);
 
             String reasoning = getStringField(parsed, "reasoning");
             if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thought");
             if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thoughts");
             if (reasoning == null || reasoning.isBlank()) reasoning = getStringField(parsed, "thinking");
 
-            @SuppressWarnings("unchecked")
-            Map<String, Object> params = parsed.containsKey("params") && parsed.get("params") instanceof Map
-                    ? (Map<String, Object>) parsed.get("params")
-                    : parsed.containsKey("parameters") && parsed.get("parameters") instanceof Map
-                        ? (Map<String, Object>) parsed.get("parameters")
-                        : parsed.containsKey("arguments") && parsed.get("arguments") instanceof Map
-                            ? (Map<String, Object>) parsed.get("arguments")
-                            : Map.of();
+            Map<String, Object> params = TextCalls.params(parsed);
 
             if (tool == null || tool.isBlank()) {
                 // If there's a "message" field at root level, treat as response
@@ -977,51 +902,6 @@ public class ThinkingEngine {
         if (os.contains("mac")) return "macOS";
         if (os.contains("linux")) return "Linux";
         return os;
-    }
-
-    /**
-     * Try to parse the first valid JSON object from a string that may contain
-     * surrounding natural language text. Uses Jackson's streaming parser to
-     * correctly handle nested braces, escaped characters, and strings containing
-     * braces — avoiding false matches on things like {CURRENT_YEAR}.
-     *
-     * Strategy:
-     *   1. Try parsing the whole string as JSON (common case — LLM followed instructions).
-     *   2. Try each '{' position as a potential JSON start; use Jackson's streaming
-     *      parser which reads exactly one value and stops (tolerates trailing text).
-     *   3. If nothing parses, return null (not a failure — LLM wrote prose).
-     */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> tryParseJsonObject(String text) {
-        if (text == null || text.isBlank()) return null;
-
-        // Strip JS-style comments before any parsing attempt
-        String stripped = stripJsonComments(text);
-
-        // Fast path: entire string is valid JSON
-        try {
-            Object result = mapper.readValue(stripped, Object.class);
-            if (result instanceof Map) return (Map<String, Object>) result;
-        } catch (Exception ignored) {}
-
-        // Scan for '{' and try parsing from each candidate position.
-        // Jackson's streaming parser reads exactly one JSON value and stops,
-        // so trailing text (natural language after the JSON) is not a problem.
-        var factory = mapper.getFactory();
-        int searchFrom = 0;
-        while (searchFrom < stripped.length()) {
-            int bracePos = stripped.indexOf('{', searchFrom);
-            if (bracePos < 0) break;
-
-            try (var parser = factory.createParser(stripped.substring(bracePos))) {
-                Object result = mapper.readValue(parser, Object.class);
-                if (result instanceof Map) return (Map<String, Object>) result;
-            } catch (Exception ignored) {}
-
-            searchFrom = bracePos + 1;
-        }
-
-        return null;
     }
 
     private String truncate(String s, int maxLen) {

@@ -74,7 +74,7 @@ class LocalLogPrivacyTest {
             var llm = new Scripted(call("read_statement", Map.of()), "Your " + SECRET + ".", done("Your " + SECRET));
             DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask());
             String log = logged(appender);
-            assertTrue(log.contains("no JSON found"), "the prose reply was seen: " + log);
+            assertTrue(log.contains("no tool call in the local LLM's text"), "the prose reply was seen: " + log);
             assertFalse(log.contains("48,213.07"), log);
         } finally {
             release(appender);
@@ -82,7 +82,7 @@ class LocalLogPrivacyTest {
     }
 
     @Test
-    @DisplayName("a reply that is not valid JSON is logged by type and length: a parser quotes the token")
+    @DisplayName("a reply that is not valid JSON is logged by its length: a parser quotes the token")
     void unparseableJsonIsNotQuoted() {
         var appender = capture();
         try {
@@ -90,7 +90,7 @@ class LocalLogPrivacyTest {
             var llm = new Scripted(call("read_statement", Map.of()), "{\"tool\": CZ6508000000192000145399}", done("done"));
             DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask());
             String log = logged(appender);
-            assertTrue(log.contains("failed to parse local LLM JSON"), "the bad reply was seen: " + log);
+            assertTrue(log.contains("no tool call in the local LLM's text"), "the bad reply was seen: " + log);
             assertFalse(log.contains("CZ6508000000192000145399"), log);
         } finally {
             release(appender);

@@ -288,13 +288,13 @@ class DelegationSafetyTest {
 
         String half = digest.substring(0, digest.length() / 2);
         assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("to", "petr@example.com", "body", half), done),
+                        Map.of("to", "petr@example.com", "body", half), done, List.of()),
                 "a copy that stops halfway is the morning email with its end missing");
         assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("body", digest.replace("2026-09-22", "2025-07-10")), done),
+                        Map.of("body", digest.replace("2026-09-22", "2025-07-10")), done, List.of()),
                 "one wrong date in an otherwise perfect copy is still a copy typed out by hand");
         assertEquals("body", LocalExecutor.retyped(smtp,
-                        Map.of("body", composed(400) + "\n" + half), done),
+                        Map.of("body", composed(400) + "\n" + half), done, List.of()),
                 "and so is one wrapped in a greeting");
     }
 
@@ -305,13 +305,13 @@ class DelegationSafetyTest {
         var done = List.of(step("daily_news_digest", Map.of(), digest));
         var smtp = sideEffecting("smtp_send_email");
 
-        assertNull(LocalExecutor.retyped(smtp, Map.of("body", digest), done),
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", digest), done, List.of()),
                 "byte-identical: it paid for the output tokens, but nothing was invented");
-        assertNull(LocalExecutor.retyped(smtp, Map.of("body", "{{1}}"), done));
-        assertNull(LocalExecutor.retyped(smtp, Map.of("body", composed(5_000)), done),
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", "{{1}}"), done, List.of()));
+        assertNull(LocalExecutor.retyped(smtp, Map.of("body", composed(5_000)), done, List.of()),
                 "the local model may write: there is no length at which composing becomes copying");
         assertNull(LocalExecutor.retyped(smtp,
-                        Map.of("body", "Headline «" + digest.substring(30, 61) + "»"), done),
+                        Map.of("body", "Headline «" + digest.substring(30, 61) + "»"), done, List.of()),
                 "31 characters of it is a quote, not a copy: shorter than the canary's window");
     }
 
@@ -320,7 +320,7 @@ class DelegationSafetyTest {
     void aShortResultMayBeQuoted() {
         var done = List.of(step("net_scan", Map.of(), "3 hosts up at 192.0.2.10"));
         assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
-                        Map.of("body", "Good morning. The scan found 3 hosts up at 192.0.2.10 today."), done),
+                        Map.of("body", "Good morning. The scan found 3 hosts up at 192.0.2.10 today."), done, List.of()),
                 "a 24-character result is a fact to mention, not a text to forward");
     }
 
@@ -330,8 +330,42 @@ class DelegationSafetyTest {
         String digest = digest();
         var done = List.of(step("daily_news_digest", Map.of(), digest),
                 step("weather", Map.of(), "Brno: 14 °C, light rain until noon, then clearing"));
-        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", digest), done),
+        assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", digest), done, List.of()),
                 "byte for byte the first result: nothing was retyped wrong");
+    }
+
+    @Test
+    @DisplayName("a run the model wrote itself, or was given in the plan, is not a copy of the result echoing it")
+    void theModelsOwnWordsAreNotACopy() {
+        var smtp = sideEffecting("smtp_send_email");
+        // The write echoes the path the model chose for it; attaching that file is not retyping.
+        String report = "/srv/reports/2026-09-30-network-audit.md";
+        var wrote = List.of(new Artifact(1, "write_file", Map.of("path", report, "content", "# Audit"),
+                Map.of(), "Wrote 7 bytes to " + report, true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        assertNull(LocalExecutor.retyped(smtp, Map.of("attachment", report), wrote, List.of()));
+
+        // A path the plan named, which a listing then showed: the model had it from the plan.
+        String forwarded = "/tmp/ownclaw_forward_45243a4.txt";
+        var listed = List.of(new Artifact(1, "list_dir", Map.of("dir", "/tmp"), Map.of(),
+                "files:\n" + forwarded + "\n/tmp/other.txt", true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        assertNull(LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
+                LocalExecutor.planText(new DelegationPlan("Send " + forwarded + " to Petr", List.of(),
+                        List.of(), 6))));
+        assertEquals("attachment", LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
+                        List.of()),
+                "from nowhere but the listing, it is a copy out of a result -- as before");
+    }
+
+    @Test
+    @DisplayName("an earlier argument that is a whole result typed out is that result, not the model's words")
+    void aTypedOutResultExcusesNothing() {
+        String digest = digest();
+        var done = List.of(step("daily_news_digest", Map.of(), digest),
+                step("smtp_send_email", Map.of("to", "petr@example.com", "body", digest), "Sent"));
+        assertEquals("body", LocalExecutor.retyped(sideEffecting("smtp_send_email"),
+                        Map.of("to", "jana@example.com", "body", digest.substring(0, digest.length() / 2)),
+                        done, List.of()),
+                "half of it, after one whole copy, is still half of it");
     }
 
     @Test
@@ -347,12 +381,12 @@ class DelegationSafetyTest {
                     com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
         };
         assertNull(LocalExecutor.retyped(read, Map.of("q", half),
-                List.of(step("daily_news_digest", Map.of(), digest))), "a read changes nothing");
+                List.of(step("daily_news_digest", Map.of(), digest)), List.of()), "a read changes nothing");
         assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"), Map.of("body", half),
-                        List.of(new Artifact("daily_news_digest", Map.of(), digest, false))),
+                        List.of(new Artifact("daily_news_digest", Map.of(), digest, false)), List.of()),
                 "a failed result cannot be referenced, so quoting it is the only way to pass it on");
         assertNull(LocalExecutor.retyped(sideEffecting("smtp_send_email"),
-                        Map.of("recipients", List.of(half)), List.of(step("daily_news_digest", Map.of(), digest))),
+                        Map.of("recipients", List.of(half)), List.of(step("daily_news_digest", Map.of(), digest)), List.of()),
                 "nor can a reference sit inside a list");
     }
 

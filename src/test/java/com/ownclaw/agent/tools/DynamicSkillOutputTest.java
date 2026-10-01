@@ -154,7 +154,7 @@ class DynamicSkillOutputTest {
     void stdoutBesideAnEmptyOutputIsTheOutput() throws Exception {
         var r = run(exited(0, "3 hosts up\n{\"success\": true, \"output\": \"\"}", ""));
         assertTrue(r.success(), r.output());
-        assertEquals("\n[skill stdout: 3 hosts up]", r.output());
+        assertEquals("3 hosts up", r.output());
     }
 
     @Test
@@ -192,9 +192,8 @@ class DynamicSkillOutputTest {
     void aStallIsNotSelfHealed() throws Exception {
         var installs = new ArrayList<List<String>>();
         var env = new PythonEnvironmentService(new OwnClawConfig()) {
-            @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages) {
                 installs.add(packages);
-                return true;
             }
         };
         var r = run(env, new SandboxResult(-1, "", "ModuleNotFoundError: No module named 'scapy'\n",
@@ -207,12 +206,17 @@ class DynamicSkillOutputTest {
 
     /** {@code code} as skill.py, run through the runner harness by the process sandbox. */
     private ToolResult runPython(String code) throws Exception {
+        return runPython(code, 30);
+    }
+
+    /** ...stalled after {@code timeoutSec} without output. */
+    private ToolResult runPython(String code, int timeoutSec) throws Exception {
         Path dir = Files.createDirectories(tmp.resolve("skills/smtp_send_email"));
         Files.writeString(dir.resolve("skill.py"), code);
         var cfg = new OwnClawConfig();
         cfg.getSandbox().setPythonPath("python3");
         var env = new PythonEnvironmentService(cfg);
-        var skill = new DynamicSkill("smtp_send_email", "sends mail", Map.of(), dir, false, true, 30,
+        var skill = new DynamicSkill("smtp_send_email", "sends mail", Map.of(), dir, false, true, timeoutSec,
                 new ProcessSandbox(env, new ObjectMapper()), env, List.of(), null, List.of(), null,
                 null, null);
         // No progress callback, as on a self-heal retry: nobody intercepts a progress report.
@@ -229,6 +233,71 @@ class DynamicSkillOutputTest {
         assertTrue(r.output().contains("connecting to 192.0.2.25"), r.output());
         assertFalse(succeeded(r), "the print()s became the output and the failed send a success: "
                 + r.output());
+    }
+
+    @Test
+    @DisplayName("what a skill printed before it raised is kept with the error")
+    void printsBeforeAnExceptionAreKept() throws Exception {
+        var r = runPython("def run(params):\n    print('HTTP 200 body: quota exceeded for key K-77')\n"
+                + "    return params['items']\n");
+        assertFalse(r.success());
+        assertTrue(r.output().startsWith("Skill error: 'items'"), r.output());
+        assertTrue(r.output().contains("[skill stdout: HTTP 200 body: quota exceeded for key K-77]"),
+                "the response the skill printed is the evidence its repair needs: " + r.output());
+    }
+
+    @Test
+    @DisplayName("what a skill printed before sys.exit is kept with its exit code")
+    void printsBeforeAnExitAreKept() throws Exception {
+        var r = runPython("import sys\ndef run(params):\n"
+                + "    print('login refused by 192.0.2.25: 535 auth failed')\n    sys.exit(3)\n");
+        assertFalse(r.success());
+        assertEquals("Exit code: 3\n[stdout: login refused by 192.0.2.25: 535 auth failed]", r.output());
+    }
+
+    @Test
+    @DisplayName("a dict returned as the output after a print is the output: the send that went reads as sent")
+    void aDictOutputAfterAPrintIsKept() throws Exception {
+        var r = runPython("def run(params):\n    print('connecting to 192.0.2.25')\n"
+                + "    return {'success': True, 'output': {'message_id': '<m1@example.org>', 'sent': True}}\n");
+        assertTrue(r.success(), "the print was added to the dict, and the send became a failure: "
+                + r.output());
+        assertTrue(succeeded(r), r.output());
+        assertTrue(r.output().startsWith("{\"message_id\":\"<m1@example.org>\",\"sent\":true"), r.output());
+        assertTrue(r.output().contains("\"skill stdout\": \"connecting to 192.0.2.25\""), r.output());
+    }
+
+    @Test
+    @DisplayName("a list or a number returned after a print is kept as it was returned")
+    void aListOrANumberAfterAPrintIsKept() throws Exception {
+        var list = runPython("def run(params):\n    print('querying')\n"
+                + "    return {'output': ['192.0.2.1', '192.0.2.7']}\n");
+        assertEquals("[\"192.0.2.1\",\"192.0.2.7\"]\n[skill stdout: querying]", list.output(),
+                "the print was spliced into the list a character at a time");
+        var zero = runPython("def run(params):\n    print('counting unread mails')\n"
+                + "    return {'output': 0}\n");
+        assertEquals("0\n[skill stdout: counting unread mails]", zero.output(), "the 0 became the print");
+    }
+
+    @Test
+    @DisplayName("what a skill printed before it hung is in the stall report")
+    void printsBeforeAStallAreKept() throws Exception {
+        var r = runPython("import time\ndef run(params):\n    print('connecting to 192.0.2.25:993')\n"
+                + "    time.sleep(30)\n    return {'output': 'never'}\n", 2);
+        assertFalse(r.success());
+        assertTrue(r.output().startsWith("Skill 'smtp_send_email' stalled (no output for 2s)."), r.output());
+        assertTrue(r.output().contains("[stdout: connecting to 192.0.2.25:993]"),
+                "where it hung is the only evidence: " + r.output());
+    }
+
+    @Test
+    @DisplayName("a skill that prints its result and returns nothing answers with what it printed")
+    void aPrintedResultIsTheOutput() throws Exception {
+        var r = runPython("import json\ndef run(params):\n"
+                + "    print(json.dumps({'ok': False, 'error': 'SMTP 550 mailbox unavailable'}))\n");
+        assertEquals("{\"ok\": false, \"error\": \"SMTP 550 mailbox unavailable\"}", r.output(),
+                "as printed: JSON stays JSON, its fields and its ok:false readable");
+        assertFalse(succeeded(r));
     }
 
     @Test
@@ -261,8 +330,7 @@ class DynamicSkillOutputTest {
     @DisplayName("after a self-heal, the retry's own failure is what is reported")
     void theRetrysFailureIsReported() throws Exception {
         var installs = new PythonEnvironmentService(new OwnClawConfig()) {
-            @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
-                return true;
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages) {
             }
         };
         var r = run(installs,

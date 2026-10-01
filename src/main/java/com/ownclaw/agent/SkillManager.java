@@ -460,7 +460,11 @@ public class SkillManager {
                         + "do real work; put it inside run().";
             }
             String detail = result.stderr().isBlank() ? result.stdout() : result.stderr();
-            return detail.isBlank() ? "Import failed with exit code " + result.exitCode() : detail;
+            if (detail.isBlank()) detail = "Import failed with exit code " + result.exitCode();
+            // The import error names the module it missed; why the requirements that declare it
+            // are not installed is pip's to say, and the next attempt needs it as much.
+            return resolution.installError() == null ? detail
+                    : detail.strip() + "\n[requirements not installed: " + resolution.installError().strip() + "]";
         } catch (Exception e) {
             // A failure of the CHECK must not block a skill. Better to register something
             // unverified than to lose a capability because the sandbox hiccuped.

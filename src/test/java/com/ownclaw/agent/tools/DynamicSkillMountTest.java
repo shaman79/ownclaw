@@ -119,8 +119,7 @@ class DynamicSkillMountTest {
             }
         };
         var installs = new PythonEnvironmentService(new OwnClawConfig()) {
-            @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
-                return true;
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages) {
             }
         };
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));
