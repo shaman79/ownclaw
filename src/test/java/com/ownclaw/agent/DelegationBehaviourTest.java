@@ -352,6 +352,13 @@ class DelegationBehaviourTest {
         var nothingHanded = new Scripted(call("ping", Map.of()), done("it answers"));
         executor(nothingHanded, new Usage(), ping).execute(plan("is the router up?"), ctx, UNCOUNTED);
         assertFalse(nothingHanded.configs.get(0).withoutThinking(), "no result handed: it has work to find");
+
+        var probe = new FakeTool("uptime_probe", false, List.of(), p -> ToolResult.success("up"));
+        var reading = new Scripted(done("it has been up for 12 days"));
+        executor(reading, new Usage(), probe).execute(plan("Read {{1}}: how long has the router been up?"), ctx, UNCOUNTED);
+        String readingPrompt = reading.calls.get(0).get(0).content();
+        assertTrue(readingPrompt.contains("No tools available.") && !readingPrompt.contains("uptime_probe"),
+                "a registered tool is not offered to a delegation that only reads: " + readingPrompt);
         // Mutation: answer directly on every delegation -> the first two fail; on none -> the
         // reading case in aGoalIsGivenThePrivateResultItNames fails.
     }
