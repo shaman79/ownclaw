@@ -517,6 +517,21 @@ class DelegationBehaviourTest {
         assertEquals(text, smtp.calls.get(0).get("body"));
     }
 
+    @Test
+    @DisplayName("offered its tools natively, a local model that answers in prose has finished: the prose is the answer")
+    void aProseAnswerIsTheAnswer() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        var llm = new NativeTurns(turn(new ToolCall("c1", "ping", Map.of())),
+                Replies.of("The router answers: pong.", 1, 1));
+
+        var outcome = executor(llm, new Usage(), ping).execute(plan("is the router up?"), task(), UNCOUNTED);
+
+        assertTrue(outcome.ok(), outcome.text());
+        assertTrue(outcome.text().contains("The router answers: pong."), "the prose is the summary: " + outcome.text());
+        assertEquals(2, llm.calls.size(), "no further turn was asked for");
+        // Mutation: read native prose as "not a tool call" again -> three empty turns, no answer.
+    }
+
     /** A local model that takes tools natively and answers each turn with the reply given. */
     static final class NativeTurns implements LlmProvider {
         final Deque<LlmResponse> replies = new ArrayDeque<>();

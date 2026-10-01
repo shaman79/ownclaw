@@ -395,6 +395,14 @@ public class LocalExecutor {
             } else {
                 raw = response.content();
                 actions = parseExecutorActions(raw);
+                // Offered its tools as structure, a model that writes prose and calls nothing has
+                // finished, and the prose is its answer. Read as "not a tool call", that answer was
+                // thrown away and the turn counted as one that ran nothing; three such turns ended
+                // the delegation with no answer at all. On the text protocol a call has to be
+                // written as JSON, so prose there is still not a call.
+                if (nativeTools && actions.size() == 1 && isNoCall(actions.get(0))) {
+                    actions = List.of(ExecutorAction.done(raw.strip()));
+                }
             }
 
             // Finishing is finishing, whichever shape it arrives in.
@@ -467,6 +475,10 @@ public class LocalExecutor {
             // A turn in which no tool ran -- each of its calls was no call, or was refused -- ran
             // nothing, as an empty one did, whatever it named.
             if (mine.size() == before) {
+                // Which calls the turn held, by name only (a refusal's text can quote what was read):
+                // without it, three turns that ran nothing could not be told apart afterwards.
+                log.warn("Delegation turn {} ran nothing: {}", turn, actions.stream()
+                        .map(a -> a.done ? "done" : isNoCall(a) ? "(no call)" : a.tool).toList());
                 if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
             } else {
                 nothingInARow = 0;
@@ -1304,5 +1316,10 @@ public class LocalExecutor {
         static ExecutorAction invalid() {
             return new ExecutorAction(false, null, null, Map.of());
         }
+    }
+
+    /** Text that held no call: neither a finish nor a tool name. */
+    private static boolean isNoCall(ExecutorAction a) {
+        return !a.done && (a.tool == null || a.tool.isBlank());
     }
 }
