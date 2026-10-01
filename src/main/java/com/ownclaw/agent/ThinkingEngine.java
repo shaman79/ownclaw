@@ -25,9 +25,11 @@ public class ThinkingEngine {
     private static final Logger log = LoggerFactory.getLogger(ThinkingEngine.class);
 
     /**
-     * Where the task ends in the first message of a task's first call, before the per-step block
-     * (datetime, tools, user prefs): AnthropicProvider splits there and puts the cache mark on the
-     * task alone, so the next step reads it from the cache ({@link #buildAnthropicMessages}).
+     * Where the task ends in the first message of a think call, on every step, before what follows
+     * it there -- on the first step, the per-step block (datetime, tools, user prefs):
+     * AnthropicProvider splits there and puts an hour-long cache mark on the task, so later steps
+     * read the tools, the system prompt and the task from the cache while they are unchanged
+     * ({@link #buildAnthropicMessages}).
      */
     static final String CACHE_BOUNDARY_MARKER = com.ownclaw.llm.LlmMessage.CACHE_BOUNDARY;
 

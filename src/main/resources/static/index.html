@@ -5708,12 +5708,13 @@
     }
 
     /**
-     * A running task's progress row. Its header is drawn from the data the server sends with it:
-     * a chip for who acts -- the cloud or the local model -- then the step, the local model's
-     * turn or the result, the tool, the time the task has run and what it has cost. The text's
-     * first line is the same header as plain text, for Telegram and anything else without this
-     * page; the rest of the text is drawn under the header. A row saved before the header was
-     * kept comes without the data, and is drawn as its text.
+     * A running task's progress row. Its header is the text's first line, as the server wrote it
+     * for Telegram and the stored row alike: who acts as an emoji -- the cloud or the local
+     * model -- then the step, the local model's turn or the result, the tool, the time the task
+     * has run and what it has cost. The page draws the emoji as a chip, styled by who acts from
+     * the data sent with the row, and the rest of the line as it is; the rest of the text under
+     * the header. A row saved before the header was kept comes without the data, and is drawn as
+     * its text.
      */
     function addProgress(text, header) {
         if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) {
@@ -5722,18 +5723,14 @@
         }
         var div = node('div', 'msg progress');
         var head = node('div', 'progress-head');
-        var local = header.actor === 'local';
-        var chip = node('span', 'progress-chip ' + header.actor,
-                (local ? '\uD83C\uDFE0' : '\u2601\uFE0F') + ' ' + header.actor);
-        chip.title = local ? 'The local model, on this machine' : 'The cloud model';
-        head.appendChild(chip);
-        var what = header.step != null ? 'Step ' + header.step
-                : header.turn != null ? 'Turn ' + header.turn : 'Result ' + header.result;
-        head.appendChild(node('span', 'progress-what',
-                what + ' · ' + header.tool + (header.skill ? ' ' + header.skill : '')));
-        head.appendChild(node('span', null, formatDuration(header.elapsedMs) + ' · ' + formatUsd(header.costUsd)));
-        div.appendChild(head);
         var lineBreak = text.indexOf('\n');
+        var line = lineBreak < 0 ? text : text.slice(0, lineBreak);
+        var space = line.indexOf(' ');
+        var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);
+        chip.title = header.actor === 'local' ? 'The local model, on this machine' : 'The cloud model';
+        head.appendChild(chip);
+        head.appendChild(node('span', 'progress-what', line.slice(space + 1)));
+        div.appendChild(head);
         var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();
         if (body) {
             var b = node('div', 'progress-body md');

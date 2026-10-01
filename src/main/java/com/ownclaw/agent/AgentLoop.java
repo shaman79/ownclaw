@@ -1000,6 +1000,9 @@ public class AgentLoop {
                             "chars", a.output().length(), "why", a.why(),
                             "indexed", a.indexed())).toList());
                 }
+                // The goal, for the step's row (stepDetails), when the cloud wrote it. One the
+                // local model wrote, the cloud not being available, can quote what it has read.
+                if (!local) structured.put("goal", plan.goal());
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, structured, durationMs)
                         : AgentObservation.failure(action.tool(), result, structured, durationMs);
@@ -2450,8 +2453,8 @@ public class AgentLoop {
      * is the signal a capability is worth consolidating. Arguments would put far more of the
      * user's data in the database for no added signal, and where they genuinely are needed —
      * reproducing a failure — skill_usage already keeps them, redacted. The one exception is a
-     * delegation's goal: the cloud's own instructions to the local model, which the owner reads
-     * on the task page and nowhere else.
+     * delegation's goal when the cloud wrote it: its own instructions to the local model, which
+     * the owner reads on the task page and nowhere else.
      * <p>
      * Never allowed to break a task: a task that works but is not recorded is much better than a
      * task that dies because recording failed.
@@ -2492,9 +2495,11 @@ public class AgentLoop {
                 && SKILL_MANAGE_ACTIONS.contains(what)) {
             details.put("skillAction", what);
         }
-        // A delegation's goal, written by the cloud, without the vault's values: the task page
-        // shows it, so the chat need not (LocalExecutor says only that the local model works).
-        if (action.isDelegate() && action.params().get("goal") instanceof String goal) {
+        // A delegation's goal, without the vault's values: the task page shows it, so the chat
+        // need not (LocalExecutor says only that the local model works). Only one the cloud
+        // wrote, which the loop puts beside the delegation's result.
+        if (action.isDelegate() && obs.structured() != null
+                && obs.structured().get("goal") instanceof String goal) {
             details.put("goal", com.ownclaw.llm.CloudGateway.scrub(goal, context.secretValues()).text());
         }
         details.put("success", obs.success());

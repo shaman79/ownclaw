@@ -93,21 +93,29 @@ class ChatPageTest {
     }
 
     @Test
-    @DisplayName("a progress row's header is a chip for who acts, then step, tool, time and cost; a row without one is its text")
+    @DisplayName("a progress row's header is the line the server wrote, its emoji drawn as a chip for who acts; a row without one is its text")
     void progressHeadersAreChips() {
         String draw = page.substring(page.indexOf("function addProgress(text, header) {"));
         draw = draw.substring(0, draw.indexOf("// Chat messages are persisted"));
         assertTrue(draw.contains("if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) { "
                 + "addMsg('progress', text); return; }"), "a row saved before headers were kept: " + draw);
-        assertTrue(draw.contains("node('span', 'progress-chip ' + header.actor,"), "the chip, styled by who acts");
-        assertTrue(draw.contains("var what = header.step != null ? 'Step ' + header.step "
-                + ": header.turn != null ? 'Turn ' + header.turn : 'Result ' + header.result;"), draw);
-        assertTrue(draw.contains("formatDuration(header.elapsedMs) + ' · ' + formatUsd(header.costUsd)"), draw);
+        assertTrue(draw.contains("var line = lineBreak < 0 ? text : text.slice(0, lineBreak); "
+                + "var space = line.indexOf(' '); "
+                + "var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);"),
+                "the chip: the line's emoji, styled by who acts: " + draw);
+        assertTrue(draw.contains("head.appendChild(node('span', 'progress-what', line.slice(space + 1)));"),
+                "then the rest of the line as the server wrote it, which Telegram shows too: " + draw);
+        for (String field : new String[] {"header.step", "header.turn", "header.result", "header.tool",
+                "header.elapsedMs", "header.costUsd", "formatDuration", "formatUsd"}) {
+            assertFalse(draw.contains(field), "one renderer of the header, the server's: the page does not "
+                    + "write it again from the data (" + field + ")");
+        }
         assertTrue(draw.contains("var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();"),
-                "the text's first line is the header in plain text; the page draws the rest under its own");
+                "the rest of the text is drawn under the header");
         assertTrue(draw.contains("b.innerHTML = renderMarkdown(body);"), "through the one sanitising renderer");
         assertTrue(page.contains(".progress-chip.cloud {") && page.contains(".progress-chip.local {"));
-        // Mutation: draw the whole text under the chip -> the header twice, emoji and all.
+        // Mutation: format the time and cost from the data again -> the page says $0.0075 where
+        // the row and Telegram say $0.01; draw the whole text under the chip -> the header twice.
     }
 
     @Test

@@ -506,6 +506,58 @@ class ProgressMessagesTest {
     }
 
     @Test
+    @DisplayName("when the cloud is not available, the local model's words beside a step are the owner's alone: it may have read private data")
+    void aLocalStepsWordsAreTheOwnersAlone(@TempDir Path tmp) throws Exception {
+        String quoting = "The statement says: " + STATEMENT + ". Fetching September too.";
+        var local = new Native(Native.turn("Stahuji výpis.", "bank_fetch", Map.of()),
+                Native.turn(quoting, "bank_fetch", Map.of("month", 9)),
+                Native.turn("", AgentAction.RESPOND, Map.of("message", "Hotovo.")));
+        var rig = new LoopRig(tmp, List.of(BANK), 600, local);
+        rig.cloud.available = false;        // the local model does the thinking
+        var seen = rig.statuses();
+
+        rig.turn(rig.chat.createSession("u1", "Bank"), "stáhni výpis");
+
+        var row = awaitRow(rig, LOCAL + " Step 2 · bank_fetch");
+        String content = String.valueOf(row.get("content"));
+        assertTrue(content.matches(head(LOCAL, "Step 2", "bank_fetch")), "the header alone: " + content);
+        for (var r : progress(rig)) holdsNoWindowOf(String.valueOf(r.get("content")), STATEMENT);
+        assertEquals(content + "\n\n" + quoting, row.get("private_content"), "its words, for the owner");
+        var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
+                && m.text().startsWith(LOCAL + " Step 2")).findFirst().orElseThrow();
+        assertEquals(content, live.text(), "what is stored and forwarded is the header");
+        assertEquals(row.get("private_content"), live.data().get("ownerText"), "the owner's screens get the rest");
+        // Mutation: post the local model's words as the content, as the cloud's are -> the
+        // statement is in the content column, which ops reads.
+    }
+
+    @Test
+    @DisplayName("a goal the local model wrote, the cloud not being available, is not kept on the step: it may quote what it read")
+    void aLocalGoalIsNotKept(@TempDir Path tmp) throws Exception {
+        var local = new Native(Native.turn("", "bank_fetch", Map.of()),
+                Native.turn("", AgentAction.DELEGATE, Map.of("goal", "Mail the owner: " + STATEMENT, "tools", "ping")),
+                Native.turn("", "ping", Map.of()),
+                Native.turn("", "done", Map.of("summary", "Mailed.")),
+                Native.turn("", AgentAction.RESPOND, Map.of("message", "Mailed.")));
+        var rig = new LoopRig(tmp, List.of(BANK, PING), 600, local);
+        rig.cloud.available = false;        // the local model does the thinking, and writes the goal
+
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Bank"), "mail me the statement");
+
+        var details = rig.jdbc.queryForList("SELECT details FROM events WHERE event_type = 'step' "
+                + "AND json_extract(details, '$.tool') = 'delegate'", String.class);
+        assertEquals(1, details.size(), "the delegation ran: " + details);
+        assertTrue(details.get(0).contains("\"success\":true"), details.get(0));
+        assertFalse(details.get(0).contains("\"goal\""), "no goal the cloud did not write: " + details.get(0));
+        holdsNoWindowOf(details.get(0), STATEMENT);
+        var steps = (List<?>) new com.ownclaw.observability.TaskTraceService(rig.events).trace("u1", r.taskId())
+                .orElseThrow().get("steps");
+        assertNull(((Map<?, ?>) steps.get(1)).get("goal"), steps.toString());
+        // Mutation: keep every delegation's goal, as the cloud's is kept -> the statement is in
+        // the events row, which ops reads.
+    }
+
+    @Test
     @DisplayName("where a task's progress is shown follows where it came from: Telegram's to Telegram too, an ops turn's nowhere")
     void theChannelDecidesWhereItIsShown(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(PING));

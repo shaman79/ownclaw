@@ -79,8 +79,9 @@ public final class TaskChat {
     /**
      * What a row is about: who acts, the step of the loop, the local model's turn or the result,
      * the tool -- with the skill's name for a skill_create -- how long the task has run and what
-     * its cloud calls have cost so far. Stored and forwarded as one line ({@link #line}), and as
-     * data ({@link #data}) in the row's metadata and its live frame, which the page draws.
+     * its cloud calls have cost so far. Stored and forwarded as one line ({@link #line}), which
+     * the page shows too, and as data ({@link #data}) in the row's metadata and its live frame,
+     * whose actor styles the chip the page draws in place of the line's emoji.
      *
      * @param kind  "step", "turn" or "result"
      * @param skill the skill a skill_create writes, or null
@@ -153,7 +154,9 @@ public final class TaskChat {
     /**
      * Before a step of the loop runs: its header, and what the model wrote beside the call -- its
      * reasoning, on either protocol -- when it wrote anything. Nothing else: no parameters, no
-     * results.
+     * results. The cloud's words are the row's content; the local model's, written when the cloud
+     * is not available and after it may have read private data, are its private content, as a
+     * delegation's turns are, and its content is the header.
      *
      * @param narration the model's words, or null for a step no model chose
      * @param local     whether the local model does the step: it chose it, the cloud not being
@@ -163,8 +166,10 @@ public final class TaskChat {
         if (sessionId == null) return;
         String words = narration == null ? "" : TaskRecord.inWords(
                 CloudGateway.scrub(narration, task.secretValues()).text()).strip();
-        post(header(local ? Actor.LOCAL : Actor.CLOUD, "step", step, action.tool(),
-                action.isSkillCreate() ? AgentLoop.skillOf(action) : null), words, null);
+        Header header = header(local ? Actor.LOCAL : Actor.CLOUD, "step", step, action.tool(),
+                action.isSkillCreate() ? AgentLoop.skillOf(action) : null);
+        if (local) post(header, "", words.isEmpty() ? null : words);
+        else post(header, words, null);
     }
 
     /**

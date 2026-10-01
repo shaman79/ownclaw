@@ -157,7 +157,7 @@ public class TaskTraceService {
                     // before it was recorded.
                     s.put("skillAction", d.hasNonNull("skillAction") ? d.path("skillAction").asText() : null);
                     // delegate: what the cloud asked the local model to do. Absent on rows from
-                    // before it was recorded.
+                    // before it was recorded, and where the local model wrote the goal itself.
                     s.put("goal", d.hasNonNull("goal") ? d.path("goal").asText() : null);
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
