@@ -82,9 +82,10 @@ public class LocalExecutor {
                     ToolParam.required("string", "The answer for the user, in full."))));
 
     /** What the local model may call: the tools this delegation is given, plus {@code done}. */
-    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan, boolean fileTask) {
+    private List<ToolSpec> executorTools(AgentContext context, DelegationPlan plan, List<Artifact> given,
+                                         boolean fileTask) {
         return new ArrayList<>(ToolSchemas.build(List.of(fileTask ? DONE_FILE : DONE),
-                offered(plan, context), context.credentialKeys()));
+                offered(plan, given, context), context.credentialKeys()));
     }
 
     /**
@@ -103,7 +104,13 @@ public class LocalExecutor {
      * one the model cannot call. Only unattended: a chat message names tools in passing ("why
      * did smtp_send_email fail?", "do NOT use ..."), and there it would narrow to the wrong one.
      */
-    Collection<Tool> offered(DelegationPlan plan, AgentContext context) {
+    Collection<Tool> offered(DelegationPlan plan, List<Artifact> given, AgentContext context) {
+        // Handed results to read and asked to run nothing: it reads and answers, with done alone.
+        // Offered the whole registry instead -- 35 tools, about 20,000 tokens of definitions -- the
+        // local model spent about four minutes of every turn reading tools it did not need (about
+        // 100 tokens a second on this host), and was drawn into calling them: on 2026-10-01 such
+        // reads took 10 to 14 minutes, and one ended with no answer.
+        if (readsWhatItWasGiven(plan, given)) return List.of();
         var all = toolRegistry.all().stream()
                 .filter(t -> t != null && !"skill_create".equals(t.name()))
                 .collect(Collectors.toList());
@@ -158,7 +165,7 @@ public class LocalExecutor {
         List<String> unknown = unknownTools(plan);
         if (!unknown.isEmpty()) {
             log.warn("Delegation asked for tools that do not exist: {}", unknown);
-            boolean gotAll = offered(plan, parentContext).size() == toolRegistry.all().stream()
+            boolean gotAll = offered(plan, given.results(), parentContext).size() == toolRegistry.all().stream()
                     .filter(t -> t != null && !"skill_create".equals(t.name())).count();
             notes += "NOTE: no tool is named " + String.join(", ", unknown) + (gotAll
                     ? ", so it was given every tool. "
@@ -245,9 +252,9 @@ public class LocalExecutor {
         // cloud cannot answer from them, and the local model's summary is the user's answer -- the
         // model is told so, and the user is given it whether or not the cloud places it.
         boolean fileTask = !parentContext.files().isEmpty();
-        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, fileTask) : null;
+        List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, given, fileTask) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
-                offered(plan, parentContext).size());
+                offered(plan, given, parentContext).size());
 
         // This delegation's own results, and the only ones the local model can name: {{1}} is
         // its first step, {{2}} its second -- which is what the system prompt tells it, and
@@ -272,7 +279,9 @@ public class LocalExecutor {
                 nativeTools, fileTask)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
-        String opening = plan.steps().isEmpty()
+        String opening = readsWhatItWasGiven(plan, given)
+                ? "Read the results you were given and answer the goal with done."
+                : plan.steps().isEmpty()
                 ? "Begin. Make the first tool call that moves toward the goal."
                 : "Begin executing the plan. Start with step 1.";
         messages.add(LlmMessage.user(opening));
@@ -787,7 +796,7 @@ public class LocalExecutor {
         // repeating it here would cost the context window twice for the same information.
         if (!nativeTools) {
             sb.append("## Available Tools\n");
-            Collection<Tool> availableTools = offered(plan, context);
+            Collection<Tool> availableTools = offered(plan, given, context);
             if (!availableTools.isEmpty()) {
                 String manifest = toolRegistry.generateManifest(availableTools, context.credentialKeys());
                 sb.append(manifest).append("\n");

@@ -316,6 +316,9 @@ class DelegationBehaviourTest {
                 "given whole, in the local model's prompt: " + system);
         assertTrue(outcome.ok(), "no tool ran, and none had to: " + outcome.text());
         assertTrue(llm.configs.get(0).withoutThinking(), "reading what it was handed: it answers straight away");
+        assertTrue(system.contains("No tools available."), "nothing to run, so no tool is read either: " + system);
+        assertTrue(llm.calls.get(0).get(1).content().startsWith("Read the results you were given"),
+                "told to read and answer, not to make a tool call");
         assertFalse(outcome.text().contains("48,213.07"), "the cloud is not shown what was read: " + outcome.text());
         assertTrue(ctx.localTierReadPrivate(), "what it does next is written after reading private data");
         Artifact answer = ctx.artifacts().get(1);
@@ -339,6 +342,7 @@ class DelegationBehaviourTest {
         executor(withTools, new Usage(), ping).execute(
                 new DelegationPlan("Read {{1}}, then ping it", List.of(), List.of(), List.of("ping")), ctx, UNCOUNTED);
         assertFalse(withTools.configs.get(0).withoutThinking(), "a named tool: choosing and ordering calls needs it");
+        assertTrue(withTools.calls.get(0).get(0).content().contains("ping"), "a named tool is offered");
 
         var aStep = new Scripted(call("ping", Map.of()), done("it answers"));
         executor(aStep, new Usage(), ping).execute(new DelegationPlan("Read {{1}}, then check it",
