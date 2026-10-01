@@ -746,9 +746,26 @@ public class AgentLoop {
                         refused.getMessage());
                 return AgentResult.privacyBlocked(TaskEnding.blocked(refused, context),
                         context.trajectory(), context.elapsedMs());
+            } catch (ProviderRefused declined) {
+                // Declined as reasoning extraction: the provider judged the step to be giving away
+                // the model's hidden reasoning, most likely because of the words the prompt asks
+                // for beside each call, which ended the owner's task on 2026-10-01. The step is
+                // asked again, once, with no such words asked for or shown back; declined again,
+                // it ends like any refusal.
+                if (!declined.asReasoningExtraction() || context.declinedAsReasoning()) {
+                    return noAnswer(context, local, provider, declined.reply(), declined);
+                }
+                account(context, local, provider, declined.reply());
+                context.markProgress(); // the model replied
+                log.warn("Task {} step {}: declined as reasoning extraction; asking again with no "
+                        + "words beside the call", context.taskId(), step + 1);
+                context.markDeclinedAsReasoning();
+                context.chat().askedAgainQuietly(step + 1);
+                step--; // the same step, asked again
+                continue;
             } catch (LlmException noReply) {
-                // What the engine does not ask again (ThinkingEngine): a refusal, a limit of the
-                // model, a request the provider refused as it stands.
+                // What the engine does not ask again (ThinkingEngine): a limit of the model, a
+                // request the provider refused as it stands.
                 return noAnswer(context, local, provider, noReply.reply(), noReply);
             } finally {
                 stopHeartbeat(thinkHeartbeat);
@@ -2274,7 +2291,8 @@ public class AgentLoop {
     /**
      * A think call the provider declined, whose reply or request did not fit a limit of the
      * model, or whose request the provider refused as it stands: the same request would end the
-     * same way, so the task ends saying which. A reply's tokens were billed all the same. A
+     * same way, so the task ends saying which -- a refusal in words ({@link TaskEnding#declined}).
+     * A reply's tokens were billed all the same. A
      * request longer than the context window ends as that ({@link TaskEnding}), because the
      * next message in the chat is read with all of it.
      */
@@ -2282,9 +2300,14 @@ public class AgentLoop {
                                  LlmResponse reply, LlmException why) {
         account(context, local, provider, reply);
         log.warn("Task {}: no usable reply from the model — {}", context.taskId(), why.getMessage());
-        // A provider's own error can quote the request it refused.
-        String said = quotable(why.getMessage(), context);
-        String clause = said.equals(why.getMessage()) ? said : "the call to the model failed (" + said + ")";
+        String clause;
+        if (why instanceof ProviderRefused declined) {
+            clause = TaskEnding.declined(declined);
+        } else {
+            // A provider's own error can quote the request it refused.
+            String said = quotable(why.getMessage(), context);
+            clause = said.equals(why.getMessage()) ? said : "the call to the model failed (" + said + ")";
+        }
         return why instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
                 ? AgentResult.contextWindow(clause, context.trajectory(), context.elapsedMs())
                 : AgentResult.error(clause, context.trajectory(), context.elapsedMs());

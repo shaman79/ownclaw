@@ -25,12 +25,13 @@ import java.util.function.BiConsumer;
 /**
  * The chat an attended task reports its progress in while it works: a message before each step
  * of the loop, one before each tool call of a delegation, a note after a step whose result the
- * privacy filter changes before the cloud model reads it, the local model's summary of each
+ * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
+ * as reasoning extraction is asked again, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
  * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
  * <p>
- * Every row but the filter's note opens with its {@link Header}: who acts -- the cloud or the
+ * Every row but the two notes opens with its {@link Header}: who acts -- the cloud or the
  * local model -- and where the task stands. The row's content is that header as one line, with
  * what the cloud could be shown under it: the cloud's own words beside its call, or a note that a
  * summary exists or why there is none. What only the owner may read -- a summary of a private
@@ -200,6 +201,18 @@ public final class TaskChat {
     void filtered(Redactor.Tally taken) {
         if (sessionId == null || !taken.any()) return;
         note("🔒 For the cloud model: " + described(taken) + ".");
+    }
+
+    /**
+     * The provider stopped step {@code step} as reasoning extraction, and the step is asked again
+     * ({@code AgentLoop}). Said, because from here on the steps come with no words beside them,
+     * and the owner would otherwise see the progress updates simply stop.
+     */
+    void askedAgainQuietly(int step) {
+        if (sessionId == null) return;
+        note("⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a "
+                + "safety check against giving away the model's hidden reasoning, most likely set off by "
+                + "the progress updates. Asking again; the steps from here on come without them.");
     }
 
     /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
@@ -387,16 +400,9 @@ public final class TaskChat {
     }
 
     /**
-     * Save the row in the task's chat, then show it: in the page, with its chat, task and header,
-     * and in Telegram for a task that came from there. Its content is the header's line with
-     * {@code body} under it; {@code ownerBody}, when there is one, goes under the header in the
-     * row's private content instead. A row for a chat the owner has deleted is neither saved nor
-     * shown; one that cannot be saved for another reason is still shown; and none is either once
-     * the task has ended.
-     */
-    /**
-     * A line about the task that is no step of it -- the filter's counts -- posted without a
-     * header, so it is not read as one more step. The page draws a row without one as its text.
+     * A line about the task that is no step of it -- the filter's counts, a step asked again --
+     * posted without a header, so it is not read as one more step. The page draws a row without
+     * one as its text.
      */
     private void note(String content) {
         synchronized (this) {
@@ -420,7 +426,16 @@ public final class TaskChat {
         post(header, body, ownerBody, null);
     }
 
-    /** @param read the owner's rows the task has just read ({@link #read}), named in the live frame; or null */
+    /**
+     * Save the row in the task's chat, then show it: in the page, with its chat, task and header,
+     * and in Telegram for a task that came from there. Its content is the header's line with
+     * {@code body} under it; {@code ownerBody}, when there is one, goes under the header in the
+     * row's private content instead. A row for a chat the owner has deleted is neither saved nor
+     * shown; one that cannot be saved for another reason is still shown; and none is either once
+     * the task has ended.
+     *
+     * @param read the owner's rows the task has just read ({@link #read}), named in the live frame; or null
+     */
     private void post(Header header, String body, String ownerBody, List<String> read) {
         String content = header.line() + (body.isEmpty() ? "" : "\n\n" + body);
         String ownerText = ownerBody == null ? null : header.line() + "\n\n" + ownerBody;

@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.AgentResult.TerminationReason;
 import com.ownclaw.privacy.Redactor;
 import com.ownclaw.llm.EgressRefused;
+import com.ownclaw.llm.ProviderRefused;
 import com.ownclaw.privacy.PrivateIndex;
 
 import java.util.Locale;
@@ -59,6 +60,24 @@ final class TaskEnding {
         String ownerText = question && r.ownerText() != null ? words(r.ownerText(), ctx) + "\n\n" + ending : null;
         if (privateResults.length() > 0) ownerText = (ownerText != null ? ownerText : response) + privateResults;
         return texts(r, response, ownerText);
+    }
+
+    /**
+     * Why the model's provider gave no answer, in words, by the category it named. The refusal's
+     * own message -- "stop reason: refusal (reasoning_extraction)" -- used to be all the owner
+     * was shown, and the owner had to ask what it meant.
+     */
+    static String declined(ProviderRefused declined) {
+        String who = "the cloud model's provider (" + declined.getProvider() + ")";
+        if (declined.asReasoningExtraction()) {
+            return who + " stopped the step as reasoning extraction -- a safety check against giving "
+                    + "away the model's hidden reasoning -- and did so again after the model was asked for "
+                    + "no progress updates beside its calls";
+        }
+        String category = declined.category();
+        return who + " declined to answer this request" + (category == null
+                ? " (" + declined.stopReason() + ")"
+                : ": its safety check placed it in the category \"" + category + "\"");
     }
 
     /**

@@ -510,6 +510,21 @@ public class AgentContext {
     }
 
     /**
+     * Whether the provider has declined a step of this task as reasoning extraction. From then on
+     * the model is asked for no words beside its calls, nor shown those it wrote before
+     * ({@code ThinkingEngine}): the progress update it is asked for is the likely cause.
+     */
+    private volatile boolean declinedAsReasoning;
+
+    public boolean declinedAsReasoning() {
+        return declinedAsReasoning;
+    }
+
+    public void markDeclinedAsReasoning() {
+        declinedAsReasoning = true;
+    }
+
+    /**
      * Every artifact so far, in handle order — a read-only VIEW, not a copy, so a delegation
      * that records results sees them in the same list it resolves references against.
      */

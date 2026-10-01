@@ -114,6 +114,22 @@ class WholePromptTest {
     }
 
     @Test
+    @DisplayName("once the provider declined a step as reasoning extraction, no protocol asks for words beside a call")
+    void aDeclinedTaskIsAskedForNoWords() {
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "check the network");
+        ctx.trajectory().record(new AgentAction("noop", Map.of(), "Checking the network first."),
+                AgentObservation.success("noop", "nothing to report", Map.of(), 5));
+        ctx.markDeclinedAsReasoning();
+        for (String provider : List.of("anthropic", "openai")) {
+            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false)));
+            assertTrue(prompt.contains("Single JSON: {\"tool\": \"name\", \"params\": {...}}"), prompt);
+            assertFalse(prompt.contains("\"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION)
+                    || prompt.contains("Checking the network first."), prompt);
+        }
+    }
+
+    @Test
     @DisplayName("past tasks are recalled on request, and the request is documented where the model reads it")
     void recallIsDocumented() {
         ToolSpec memory = SpecialActionSchemas.ALL.stream()

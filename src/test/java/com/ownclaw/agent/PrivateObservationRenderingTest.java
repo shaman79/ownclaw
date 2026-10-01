@@ -80,7 +80,7 @@ class PrivateObservationRenderingTest {
                 out.add(m.content());
             }
         }
-        out.add(ctx.trajectory().toPromptSummary());
+        out.add(ctx.trajectory().toPromptSummary(true));
         return out;
     }
 

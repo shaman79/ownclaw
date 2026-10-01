@@ -464,8 +464,9 @@ class TaskEndToEndTest {
                 });
         AgentResult r = rig.turn(session(rig), "scan my network for open ports");
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
-        assertTrue(r.response().startsWith("**Stopped:** [anthropic] the model declined this request (stop reason: "
-                + "refusal (cyber)).\n\n**What it did** — 0 steps, 2,300 cloud tokens, "), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** the cloud model's provider (anthropic) declined to answer "
+                + "this request: its safety check placed it in the category \"cyber\".\n\n**What it did** — 0 steps, "
+                + "2,300 cloud tokens, "), r.response());
         assertEquals(2_300, rig.jdbc.queryForObject("SELECT tokens_used FROM token_usage WHERE user_id = 'u1'", Integer.class),
                 "the declined reply was billed, so it is counted");
 
@@ -562,6 +563,77 @@ class TaskEndToEndTest {
                 observed);
         assertTrue(observed.contains("/cred set OPENWRT_PASS <value>"), observed);
         assertFalse(observed.contains("Use ask_user to request it"), observed);
+    }
+
+    /** A reply the provider stopped as {@code category}: billed, and no answer. */
+    static Reply declined(String category) {
+        return c -> new com.ownclaw.llm.LlmResponse("", List.of(), null, "refusal", category,
+                "claude-opus-5", 128_000, 1_000_000,
+                List.of(new com.ownclaw.llm.LlmResponse.Usage("claude-opus-5", 2_000, 300, 0, 0)));
+    }
+
+    static int cloudTokens(LoopRig rig) {
+        return rig.jdbc.queryForObject("SELECT sum(tokens_used) FROM token_usage WHERE user_id = 'u1'", Integer.class);
+    }
+
+    @Test
+    @DisplayName("a step declined as reasoning extraction is asked again, with no words asked for beside the call")
+    void aStepDeclinedAsReasoningIsAskedAgainQuietly(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        String beside = "Checking the network first.";
+        rig.cloud.think.add(c -> com.ownclaw.llm.Replies.of(beside, 1_000, 100, 0, 0, "tool_use",
+                List.of(new com.ownclaw.llm.ToolCall("c-noop", "noop", Map.of()))));
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("all quiet"));
+        AgentResult r = rig.turn(session(rig), "check the network");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        var thinks = rig.cloud.calls("think");
+        assertEquals(4, thinks.size());
+        String invited = "reads what you write beside each call";
+        List<LlmMessage> asked = thinks.get(1).messages();
+        assertTrue(asked.get(0).content().contains(ThinkingEngine.NARRATION), asked.get(0).content());
+        assertTrue(asked.get(asked.size() - 1).content().contains(invited), "the premise: the per-step block invites them");
+        assertTrue(asked.stream().anyMatch(m -> m.content().contains(beside)), "the premise: step 1's words are replayed");
+        for (var again : thinks.subList(2, 4)) {
+            var quiet = again.messages();
+            assertFalse(quiet.get(0).content().contains(ThinkingEngine.NARRATION), quiet.get(0).content());
+            assertTrue(quiet.get(0).content().contains("Call exactly one tool per step, and write nothing beside it."),
+                    quiet.get(0).content());
+            String last = quiet.get(quiet.size() - 1).content();
+            assertTrue(last.contains("THE USER IS WAITING") && !last.contains(invited), last);
+            assertTrue(quiet.stream().noneMatch(m -> m.content().contains(beside)),
+                    "the words beside an earlier call are not shown again: " + quiet);
+        }
+        assertEquals(2, r.trajectory().steps().size(), "the declined step is not one of them");
+        assertEquals(3 * 1_100 + 2_300, cloudTokens(rig), "the declined reply was billed, so it is counted");
+        List<String> rows = rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class);
+        assertTrue(rows.stream().anyMatch(c -> c.startsWith("⚠️ The cloud model's provider stopped step 2 as "
+                + "reasoning extraction")), String.valueOf(rows));
+        assertTrue(rows.stream().anyMatch(c -> c.startsWith("☁️ Step 2 · noop")), "the step asked again keeps its "
+                + "number: " + rows);
+    }
+
+    @Test
+    @DisplayName("declined as reasoning extraction again when asked quietly, the task ends saying so in words")
+    void declinedTwiceEndsInWords(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        rig.cloud.think.add(declined("reasoning_extraction"));
+        AgentResult r = rig.turn(session(rig), "check the network");
+
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
+        var thinks = rig.cloud.calls("think");
+        assertEquals(2, thinks.size(), "asked again once, not until it answers");
+        assertFalse(thinks.get(1).messages().get(0).content().contains(ThinkingEngine.NARRATION), "asked quietly");
+        assertTrue(r.response().startsWith("**Stopped:** the cloud model's provider (anthropic) stopped the step as "
+                + "reasoning extraction -- a safety check against giving away the model's hidden reasoning -- and "
+                + "did so again after the model was asked for no progress updates beside its calls.\n\n"
+                + "**What it did** — 0 steps, 4,600 cloud tokens, "), r.response());
+        assertTrue(r.response().contains("**Next:** Your next message starts a new task"), r.response());
     }
 
     @Test

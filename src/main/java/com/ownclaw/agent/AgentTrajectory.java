@@ -42,11 +42,15 @@ public class AgentTrajectory {
          * rendering for both renderers: the Anthropic replay's assistant turn, and the history
          * every other provider reads, which named only the tool, so a model there could not tell
          * whom it had written to or which page it had fetched.
+         *
+         * @param withReasoning false once the provider has declined a step of the task as
+         *                      reasoning extraction ({@link AgentContext#declinedAsReasoning}): the
+         *                      words the model wrote beside its earlier calls are not shown to it again
          */
-        public String actionText() {
+        public String actionText(boolean withReasoning) {
             Map<String, Object> map = new LinkedHashMap<>();
             String reasoning = action.reasoning();
-            if (reasoning != null && !reasoning.isBlank()) map.put("reasoning", reasoning);
+            if (withReasoning && reasoning != null && !reasoning.isBlank()) map.put("reasoning", reasoning);
             map.put("tool", action.tool());
             if (action.params() != null && !action.params().isEmpty()) map.put("params", action.params());
             try {
@@ -154,8 +158,10 @@ public class AgentTrajectory {
      * in order, each whole -- the action as the Anthropic replay shows it ({@link Turn#actionText}),
      * then the result as {@link Turn#observationText} renders it. A step the loop took itself
      * ({@link Turn#byTheLoop}) is what the model was told about it.
+     *
+     * @param withReasoning as {@link Turn#actionText}
      */
-    public String toPromptSummary() {
+    public String toPromptSummary(boolean withReasoning) {
         var sb = new StringBuilder();
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
@@ -165,7 +171,7 @@ public class AgentTrajectory {
                 sb.append(told == null ? "" : told).append("\n\n");
                 continue;
             }
-            sb.append(turn.actionText()).append('\n').append(turn.observationText()).append("\n\n");
+            sb.append(turn.actionText(withReasoning)).append('\n').append(turn.observationText()).append("\n\n");
         }
         return sb.toString();
     }

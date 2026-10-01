@@ -146,7 +146,7 @@ class ParseFailureFeedbackTest {
         t.record(new AgentAction("fetch", Map.of(), "now fetching"),
                 AgentObservation.success("fetch", "PAGE", Map.of(), 5));
 
-        String summary = t.toPromptSummary();
+        String summary = t.toPromptSummary(true);
         for (int i = 1; i <= 4; i++) {
             assertTrue(summary.contains("[Step " + i + "] TOLD-" + i), summary);
         }

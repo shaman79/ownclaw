@@ -156,7 +156,8 @@ public class ThinkingEngine {
             // declined to answer it; the reply or the conversation reached a limit of the model.
             // Asked again as steps that had gone wrong, a refusal and a cut-off came back the
             // same way until the owner was told "3 consecutive reasoning failures". The loop
-            // ends the task on each, saying which.
+            // ends the task on each, saying which -- but for a first refusal as reasoning
+            // extraction, whose step it asks again with no words asked for beside the call.
             throw notToAskAgain;
         } catch (MalformedToolCall malformed) {
             // The reply came, whole, and was billed; a tool call in it cannot be run, because its
@@ -254,7 +255,7 @@ public class ThinkingEngine {
     List<LlmMessage> buildMessages(AgentContext context, String providerName,
                                    StepMode mode) {
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(mode)));
+        messages.add(LlmMessage.system(buildSystemPrompt(mode, context.declinedAsReasoning())));
 
         if ("anthropic".equals(providerName)) {
             // Anthropic: the steps replayed turn by turn, append-only for prefix caching.
@@ -268,7 +269,8 @@ public class ThinkingEngine {
                 messages.add(LlmMessage.user(task + step));
             } else {
                 messages.add(LlmMessage.user(task));
-                messages.add(LlmMessage.user("## History\n" + trajectory.toPromptSummary() + step));
+                messages.add(LlmMessage.user("## History\n"
+                        + trajectory.toPromptSummary(!context.declinedAsReasoning()) + step));
             }
         }
 
@@ -305,7 +307,7 @@ public class ThinkingEngine {
                 continue;
             }
             messages.add(LlmMessage.user(user.toString()));
-            messages.add(LlmMessage.assistant(turn.actionText()));
+            messages.add(LlmMessage.assistant(turn.actionText(!context.declinedAsReasoning())));
             user = new StringBuilder(turn.observationText());
         }
         user.append("\n\n---\n").append(buildDynamicContext(context, mode));
@@ -490,7 +492,8 @@ public class ThinkingEngine {
     /**
      * The per-step block (datetime, attendance, preferences, tools, vault, what next): what
      * changes from one step to the next, at the end of the last user message for every provider
-     * ({@link #buildMessages}), so the system prompt stays the same bytes and is cached.
+     * ({@link #buildMessages}), so the system prompt stays the same bytes and is cached. It
+     * changes once at most, in a task the provider has stopped ({@link #buildSystemPrompt}).
      */
     private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
@@ -521,8 +524,10 @@ public class ThinkingEngine {
                     + "and never stop to ask a question -- decide, and say which assumption you "
                     + "made.\n\n");
         } else {
-            sb.append("- Attendance: THE USER IS WAITING in the chat right now, and reads what "
-                    + "you write beside each call as you go. Delegate where the local model is "
+            sb.append("- Attendance: THE USER IS WAITING in the chat right now"
+                    + (context.declinedAsReasoning() ? ". "
+                            : ", and reads what you write beside each call as you go. ")
+                    + "Delegate where the local model is "
                     + "the right tool -- private data, and tool calls on this machine, the LAN "
                     + "and its servers -- knowing its speed: it reads about 100 tokens a second "
                     + "and writes about 8, so a delegation that reads a long result or writes a "
@@ -604,7 +609,8 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content. Sent whole on every
      * step, never shortened, and the same for every provider, task and step: what changes goes in
      * the per-step block at the end of the last user message ({@link #buildDynamicContext}), so
-     * the provider's prompt cache holds all of this.
+     * the provider's prompt cache holds all of this. The one exception is {@code quiet}, which
+     * changes it once in a task, and only in a task the provider has already stopped.
      *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
@@ -612,8 +618,10 @@ public class ThinkingEngine {
      *             carried "Single JSON: {reasoning, tool, params}" -- an instruction to use the
      *             one protocol the tools array exists to replace, which is the mechanism by
      *             which a model talks its way back onto the text path.
+     * @param quiet ask for no words beside a call: the provider has declined a step of this task
+     *              as reasoning extraction ({@link AgentContext#declinedAsReasoning})
      */
-    private String buildSystemPrompt(StepMode mode) {
+    private String buildSystemPrompt(StepMode mode, boolean quiet) {
         boolean nativeTools = mode.nativeTools();
         var sb = new StringBuilder();
 
@@ -704,12 +712,14 @@ public class ThinkingEngine {
         // Output format
         sb.append("## Output\n");
         if (nativeTools) {
-            sb.append("Call exactly one tool per step. When the user is waiting, the text you write "
+            sb.append(quiet ? "Call exactly one tool per step, and write nothing beside it.\n"
+                    : "Call exactly one tool per step. When the user is waiting, the text you write "
                     + "beside a tool call is shown to them live in the chat: " + NARRATION + "\n");
             sb.append("For respond: put the whole answer in the message argument.\n\n");
         } else {
-            sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
-            sb.append("When the user is waiting, 'reasoning' is shown to them live in the chat: "
+            sb.append(quiet ? "Single JSON: {\"tool\": \"name\", \"params\": {...}}\n"
+                    : "Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n"
+                    + "When the user is waiting, 'reasoning' is shown to them live in the chat: "
                     + NARRATION + "\n");
             sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
         }
@@ -909,16 +919,20 @@ public class ThinkingEngine {
      * now and why", with no length given, claude-opus-5 wrote out its reasoning beside the call,
      * and Anthropic declined the reply part-way as reasoning extraction
      * ({@code stop_details.category} "reasoning_extraction"), which ended the owner's task on
-     * 2026-10-01. No length is asked for either way: a sentence count is a cap.
+     * 2026-10-01. No length is asked for either way: a sentence count is a cap. A step declined so
+     * all the same is asked again with nothing asked for beside the call ({@code AgentLoop}).
      */
     static final String NARRATION = "write it for them, in their language, as a progress update on "
             + "the work -- what the last result showed and what you are doing next -- not your "
             + "reasoning.";
 
-    /** The text protocol's action, restated to a model whose reply was not one. */
-    private static final String ACTION_FORMAT = "Reply with one JSON object: {\"reasoning\": "
-            + "\"...\", \"tool\": \"name\", \"params\": {...}}. To answer: {\"tool\": \"respond\", "
-            + "\"params\": {\"message\": \"...\"}, \"reasoning\": \"...\"}.";
+    /**
+     * The text protocol's action, restated to a model whose reply was not one: what makes it an
+     * action, without the 'reasoning' the system prompt asks for -- or, in a task the provider
+     * declined as reasoning extraction, does not.
+     */
+    private static final String ACTION_FORMAT = "Reply with one JSON object: {\"tool\": \"name\", "
+            + "\"params\": {...}}. To answer: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}}.";
 
     private String getStringField(Map<String, Object> map, String key) {
         Object value = map.get(key);

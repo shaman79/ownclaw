@@ -29,4 +29,11 @@ public final class ProviderRefused extends LlmException {
 
     /** The refusal's category ("cyber", "bio", ...), or null when the provider named none. */
     public String category() { return reply().stopDetail(); }
+
+    /**
+     * Declined as reasoning extraction: Anthropic judged the step to be giving away the model's
+     * hidden reasoning. The words a model is asked to write beside a tool call can set that off,
+     * so the loop asks such a step again with none asked for ({@code AgentLoop}).
+     */
+    public boolean asReasoningExtraction() { return "reasoning_extraction".equals(category()); }
 }
