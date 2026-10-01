@@ -59,6 +59,3 @@ databaseChangeLog:
   - include:
       file: db/changelog/020-chat-session-kind.sql
       relativeToChangelogFile: false
-  - include:
-      file: db/changelog/021-attachment-rows-without-name.sql
-      relativeToChangelogFile: false

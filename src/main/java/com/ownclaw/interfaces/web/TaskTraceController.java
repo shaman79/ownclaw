@@ -48,9 +48,10 @@ public class TaskTraceController {
 
     /**
      * The trace, with each file the task was sent named as it was uploaded: this page is the
-     * owner's. No row of the task holds the name -- the ops API reads those rows, and a name can
-     * say what the file holds -- so it is looked up here, by the file's id. A file since deleted,
-     * or not this user's, is shown without one.
+     * owner's. A task's row holds the file's id, not its name -- the ops API reads those rows, and
+     * a name can say what the file holds -- so it is looked up here, by that id. A file since
+     * deleted, or not this user's, is shown without one, and so is a file of a row written before
+     * rows held the id: such a row still holds the name, which is not read from it.
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> withFileNames(Map<String, Object> trace, String userId) {

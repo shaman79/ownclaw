@@ -23,8 +23,9 @@ import java.util.Optional;
  * What it does not contain, on purpose: the text of any request (never stored), the per-part list
  * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), any
  * tool's output beyond how a failed step failed, which its row carries (none for a private step),
- * and the name a file was uploaded with, which no row holds: the page's endpoint looks it up by
- * the file's id ({@code TaskTraceController}). The same parse is the record of the task that its
+ * and the name a file was uploaded with: a row written now holds the file's id instead, and the
+ * page's endpoint looks the name up by it ({@code TaskTraceController}). Rows written before that
+ * still hold the name; nothing here reads it. The same parse is the record of the task that its
  * ending and later tasks of its chat read ({@code TaskRecord}).
  */
 @Service

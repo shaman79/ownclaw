@@ -2,7 +2,6 @@ package com.ownclaw.agent;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
-import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.interfaces.web.TaskTraceController;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.observability.TaskTraceService;
@@ -120,23 +119,5 @@ class AttachmentRegistrationTest {
         assertEquals("", a.output(), "the bytes are read by a skill, not carried here");
         assertEquals(List.of("uploaded file", "application/pdf, 15 bytes, no text read (not text, or not UTF-8)"), a.why());
         assertEquals(Map.of("fileId", pdf), a.written());
-    }
-
-    @Test
-    @DisplayName("an attachment's row written before keeps all it held but the file's name")
-    void anEarlierRowLosesTheName(@TempDir Path tmp) throws Exception {
-        Path file = tmp.resolve("t.db");
-        var jdbc = MigratedDatabase.at(file);
-        jdbc.update("INSERT INTO events (user_id, task_id, event_type, severity, summary, details) "
-                        + "VALUES ('u1', 'a1b2c3d4', 'attachment', 'info', 'attachment PRIVATE', ?)",
-                "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"" + NAME + "\",\"label\":\"PRIVATE\","
-                        + "\"chars\":64,\"indexed\":true,\"why\":[\"uploaded file\",\"text/csv, 64 bytes\"]}");
-        // A database the change has not reached yet: Liquibase runs it at the next start.
-        jdbc.update("DELETE FROM DATABASECHANGELOG WHERE ID = '021-attachment-rows-without-name'");
-        MigratedDatabase.at(file);
-
-        assertEquals("{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"label\":\"PRIVATE\","
-                        + "\"chars\":64,\"indexed\":true,\"why\":[\"uploaded file\",\"text/csv, 64 bytes\"]}",
-                jdbc.queryForObject("SELECT details FROM events WHERE task_id = 'a1b2c3d4'", String.class));
     }
 }
