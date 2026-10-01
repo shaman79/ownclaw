@@ -47,6 +47,12 @@ public record AgentResult(
         STALLED,
         /** Unrecoverable error. */
         ERROR,
+        /**
+         * The model was given more than its context window holds -- the chat, or the task's own
+         * work -- and refused it. Not an ERROR like any other: the task's chat is read whole by
+         * every later message in it, so its ending says to carry on in a new chat.
+         */
+        CONTEXT_WINDOW,
         /** Too many consecutive failures. */
         FAILURE_LIMIT,
         /** The cloud request contained bytes of a PRIVATE artifact; nothing was sent. */
@@ -83,6 +89,11 @@ public record AgentResult(
 
     public static AgentResult error(String response, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.ERROR);
+    }
+
+    /** The model refused what it was given as longer than its context window. */
+    public static AgentResult contextWindow(String response, AgentTrajectory trajectory, long durationMs) {
+        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.CONTEXT_WINDOW);
     }
 
     /**

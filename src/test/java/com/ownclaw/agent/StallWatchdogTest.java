@@ -63,4 +63,20 @@ class StallWatchdogTest {
         assertTrue(ctx.msSinceLastProgress() < 20,
                 "a step finishing must clear the stall clock");
     }
+
+    @Test
+    @DisplayName("a model call under way -- a request, or a wait to send one again -- is not silence, and its end is progress")
+    void aCallUnderWayIsNotSilence() throws Exception {
+        // Ollama sends nothing while it loads the model and reads the prompt, and a call that was
+        // overloaded waits before it tries again: each is bounded by its own timeout or schedule.
+        AgentContext ctx = new AgentContext("u1", "t1", "audit the routers");
+        var hook = ctx.progress();
+        Thread.sleep(30);
+        hook.calling(() -> { });              // the call is under way, and nothing has arrived
+        Thread.sleep(30);
+        assertEquals(0, ctx.msSinceLastProgress(), "the watchdog counted the call as silence");
+        hook.calling(null);                   // it returned
+        assertTrue(ctx.msSinceLastProgress() < 20,
+                "the end of the call is progress, not the 60 ms before it: " + ctx.msSinceLastProgress());
+    }
 }

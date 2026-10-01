@@ -1,14 +1,20 @@
 package com.ownclaw.agent;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The trajectory of an agent execution — an ordered sequence of (action, observation) pairs.
  * This is the agent's "working memory" for the current task.
  */
 public class AgentTrajectory {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     public record Turn(AgentAction action, AgentObservation observation) {
         /**
@@ -27,6 +33,26 @@ public class AgentTrajectory {
          */
         public boolean byTheLoop() {
             return action != null && action.tool() != null && action.tool().startsWith("_");
+        }
+
+        /**
+         * The step's action as the model wrote it: its reasoning, the tool, and the arguments as
+         * written -- a reference as {{N}}, never the bytes it resolves to -- as JSON. One
+         * rendering for both renderers: the Anthropic replay's assistant turn, and the history
+         * every other provider reads, which named only the tool, so a model there could not tell
+         * whom it had written to or which page it had fetched.
+         */
+        public String actionText() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            String reasoning = action.reasoning();
+            if (reasoning != null && !reasoning.isBlank()) map.put("reasoning", reasoning);
+            map.put("tool", action.tool());
+            if (action.params() != null && !action.params().isEmpty()) map.put("params", action.params());
+            try {
+                return JSON.writeValueAsString(map);
+            } catch (Exception e) {
+                return "{\"tool\": \"" + action.tool() + "\"}";
+            }
         }
 
         /**
@@ -110,8 +136,8 @@ public class AgentTrajectory {
 
     /**
      * The trajectory as the prompt of a provider without multi-turn replay reads it: every step
-     * in order, each whole -- the tool, the model's reasoning, then the result as
-     * {@link Turn#observationText} renders it. A step the loop took itself
+     * in order, each whole -- the action as the Anthropic replay shows it ({@link Turn#actionText}),
+     * then the result as {@link Turn#observationText} renders it. A step the loop took itself
      * ({@link Turn#byTheLoop}) is what the model was told about it.
      */
     public String toPromptSummary() {
@@ -124,12 +150,7 @@ public class AgentTrajectory {
                 sb.append(told == null ? "" : told).append("\n\n");
                 continue;
             }
-            sb.append("Tool: ").append(turn.action().tool()).append('\n');
-            String reasoning = turn.action().reasoning();
-            if (reasoning != null && !reasoning.isBlank()) {
-                sb.append("Reasoning: ").append(reasoning).append('\n');
-            }
-            sb.append(turn.observationText()).append("\n\n");
+            sb.append(turn.actionText()).append('\n').append(turn.observationText()).append("\n\n");
         }
         return sb.toString();
     }

@@ -117,8 +117,7 @@ public class AgentLoop {
         this.scheduledTaskService = scheduledTaskService;
         this.localExecutor = localExecutor;
         this.fileStorage = fileStorage;
-        // A Stop ends the model call a stopped task is waiting on at once, as the stall
-        // watchdog's stop does (AgentContext#stall): see interruptStopped.
+        // A Stop ends the model call a stopped task is waiting on at once: see interruptStopped.
         if (cancellationService != null) cancellationService.onRequest(this::interruptStopped);
     }
 
@@ -166,7 +165,9 @@ public class AgentLoop {
         }
 
         // Past episodes are not put into the prompt: the agent asks for them when it needs them
-        // (memory_manage action=recall). The facts the owner asked it to keep always go in.
+        // (memory_manage action=recall). The facts the owner asked it to keep always go in -- or,
+        // when they cannot be read, that they could not: run without them and not told, a task
+        // acts as if the owner had asked for nothing.
         try {
             List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
             if (!facts.isEmpty()) {
@@ -176,7 +177,9 @@ public class AgentLoop {
                 context.setUserPreferences(factContext);
             }
         } catch (Exception e) {
-            log.debug("Failed to load facts for user {}: {}", userId, e.getMessage());
+            log.warn("Could not read the facts of user {}: {}", userId, e.getMessage());
+            context.setUserPreferences("(The facts the user asked you to keep could not be read ("
+                    + e.getMessage() + "), so none are here. Do not take that to mean there are none.)");
         }
 
         // Load credential keys so the LLM knows what's in the vault without calling credential_manage list
@@ -298,8 +301,19 @@ public class AgentLoop {
         String message = e.getMessage();
         boolean quotesPrivate = context.firstLeakIn(message) != null;
         return "an internal error: " + e.getClass().getSimpleName()
-                + (message == null ? "" : quotesPrivate ? " (its message quotes a private result; it is in the log)"
-                        : ": " + message);
+                + (message == null ? "" : quotesPrivate ? " (" + QUOTES_PRIVATE + ")" : ": " + message);
+    }
+
+    /**
+     * What an ending says in place of a failure's message that holds a private result's text the
+     * gateway would not send ({@link AgentContext#firstLeakIn}): the ending is read by later
+     * prompts, where no canary knows this task's results. The log has the message.
+     */
+    static final String QUOTES_PRIVATE = "its message quotes a private result; it is in the log";
+
+    /** A failure's message as an ending may quote it: whole, or {@link #QUOTES_PRIVATE}. */
+    static String quotable(String message, AgentContext context) {
+        return context.firstLeakIn(message) == null ? message : QUOTES_PRIVATE;
     }
 
     /**
@@ -388,9 +402,12 @@ public class AgentLoop {
      * it could only have known from the chat. Nor for a task with no message row -- it came from
      * no chat. Static, so a test can run it against a database.
      * <p>
-     * A handle in an earlier message -- the owner's {{1}}, an answer that quoted one -- is written
-     * in words ({@link TaskRecord#inWords}): this task numbers its own results from 1, and a
-     * handle copied from the chat into a call would resolve to one of them.
+     * Each message as it was written. A message that is nothing but a handle is written in words
+     * ({@link TaskRecord#inWords}): this task numbers its own results from 1, and as a call's
+     * whole value that message would resolve to one of them. A handle inside other text is left
+     * alone, as the resolver leaves it: it resolves only as a whole value, and a template's {{1}}
+     * is the owner's text -- rewritten, the template he was working on came back with "result 1"
+     * in it from the second turn on. The records under the answers name results in words.
      *
      * @param recordOf a task id to the record shown under that task's answer, or null for none
      */
@@ -403,8 +420,9 @@ public class AgentLoop {
             StringBuilder sb = new StringBuilder();
             for (Map<String, Object> row : conversationService.contextOf(userId, currentMessageId)) {
                 String role = (String) row.get("role");
+                String content = (String) row.get("content");
                 sb.append(role.toUpperCase()).append(": ")
-                  .append(TaskRecord.inWords((String) row.get("content"))).append("\n");
+                  .append(ArtifactRef.parse(content) != null ? TaskRecord.inWords(content) : content).append("\n");
                 String record = row.get("task_id") == null ? null : recordOf.apply(String.valueOf(row.get("task_id")));
                 if (record != null) sb.append(record).append("\n");
 
@@ -471,8 +489,9 @@ public class AgentLoop {
      * than sent as literal text. A whole PRIVATE handle is how the cloud gives the owner an
      * answer it was never shown -- the local model's, from a file -- so its text is filled in
      * here, on this machine, and kept apart as the owner's text; the response is a note that it
-     * exists. A handle with nothing in it is refused: a PDF's {{1}} is empty, and delivering it
-     * would be an empty answer.
+     * exists. An answer or a question with nothing in it is refused, written or placed: a
+     * {@code respond("")} delivered an empty bubble -- on Telegram an error notice -- and the
+     * text the model had written beside the call was lost; a PDF's {{1}} is empty in the same way.
      * <p>
      * On a task holding a file, the local model's answer reaches the owner even when the cloud
      * does not place its handle -- "Done, see above" is a likely reply from a model that never
@@ -484,6 +503,10 @@ public class AgentLoop {
      */
     static Answer answerFor(String written, AgentContext ctx) {
         String text = written == null ? "" : written;
+        if (text.isBlank()) {
+            return new Answer(null, null, "the message is empty. Put the whole of it in the "
+                    + "message argument.");
+        }
         References.Resolved r = References.resolve(Map.of("message", text), ctx.artifacts());
         if (!r.ok()) return new Answer(null, null, r.reason());
 
@@ -554,6 +577,9 @@ public class AgentLoop {
         int maxSteps = config.getTasks().getMaxPlanSteps();
         int consecutiveFallbacks = 0; // Track consecutive LLM failures to cap retries
         int totalThinkingFailures = 0; // Track total thinking failures across entire task
+        int failedCallsInARow = 0;     // of the steps consecutiveFallbacks counts, the calls that failed
+        int failedCallsInTask = 0;     // of those totalThinkingFailures counts
+        String lastFailure = null;     // how the last of those calls failed
         int unansweredQuestions = 0;   // ask_user calls on a task with nobody to answer them
 
         for (int step = 0; step < maxSteps; step++) {
@@ -646,10 +672,10 @@ public class AgentLoop {
                         refused.getMessage());
                 return AgentResult.privacyBlocked(TaskEnding.blocked(refused, context),
                         context.trajectory(), context.elapsedMs());
-            } catch (ProviderRefused declined) {
-                return noAnswer(context, local, provider, declined.reply(), declined);
-            } catch (OutputTruncated cutOff) {
-                return noAnswer(context, local, provider, cutOff.reply(), cutOff);
+            } catch (LlmException noReply) {
+                // What the engine does not ask again (ThinkingEngine): a refusal, a limit of the
+                // model, a request the provider refused as it stands.
+                return noAnswer(context, local, provider, noReply.reply(), noReply);
             } finally {
                 stopHeartbeat(thinkHeartbeat);
             }
@@ -682,6 +708,13 @@ public class AgentLoop {
             if (ThinkingEngine.THINKING.equals(action.tool())) {
                 consecutiveFallbacks++;
                 totalThinkingFailures++;
+                // A new run of them starts wherever an answer or a step that ran reset the count.
+                if (consecutiveFallbacks == 1) failedCallsInARow = 0;
+                if (thinkResult.callFailed() != null) {
+                    failedCallsInARow++;
+                    failedCallsInTask++;
+                    lastFailure = thinkResult.callFailed();
+                }
                 boolean stop = consecutiveFallbacks >= 3 || totalThinkingFailures >= 5
                         || step >= maxSteps - 1;
                 String told = action.reasoning();
@@ -699,22 +732,24 @@ public class AgentLoop {
                 if (consecutiveFallbacks >= 3) {
                     log.error("Task {} step {}: {} steps in a row produced nothing to run — aborting task",
                             context.taskId(), step + 1, consecutiveFallbacks);
-                    return AgentResult.failureLimit("The model produced nothing that could be run "
-                                    + consecutiveFallbacks + " times in a row.",
+                    return AgentResult.failureLimit(ranNothing(consecutiveFallbacks, failedCallsInARow,
+                                    lastFailure, "in a row", context),
                             context.trajectory(), context.elapsedMs());
                 }
                 if (totalThinkingFailures >= 5) {
                     log.error("Task {} step {}: {} steps in this task produced nothing to run — aborting task",
                             context.taskId(), step + 1, totalThinkingFailures);
-                    return AgentResult.failureLimit("The model produced nothing that could be run "
-                                    + totalThinkingFailures + " times in this task.",
+                    return AgentResult.failureLimit(ranNothing(totalThinkingFailures, failedCallsInTask,
+                                    lastFailure, "in this task", context),
                             context.trajectory(), context.elapsedMs());
                 }
                 // Out of steps on the very same kind of failure: not an answer either.
                 if (step >= maxSteps - 1) {
                     log.error("Task {} step {}: the last step produced nothing to run", context.taskId(), step + 1);
-                    return AgentResult.maxSteps("The task used all " + maxSteps + " steps it may "
-                                    + "take; the last produced nothing that could be run.",
+                    return AgentResult.maxSteps("The task used all " + maxSteps + " steps it may take; "
+                                    + (thinkResult.callFailed() == null ? "the last produced nothing that could be run."
+                                            : "in the last, the call to the model failed ("
+                                                    + quotable(thinkResult.callFailed(), context) + ")."),
                             context.trajectory(), context.elapsedMs());
                 }
                 log.warn("Task {} step {}: nothing to run, asking the model again (in a row {}/3, in this task {}/5)",
@@ -1121,6 +1156,28 @@ public class AgentLoop {
     }
 
     /**
+     * Why steps that ran nothing ended the task, as facts. A reply the model gave that could not
+     * be run and a call to the model that failed are different stops: the ending used to say "the
+     * model produced nothing that could be run" of a model the call had never reached -- a
+     * network that could not be reached, a Models API lookup that timed out.
+     *
+     * @param failedCalls how many of the {@code steps} were calls that failed
+     * @param lastFailure how the last of those failed, the provider's message
+     * @param span        "in a row" or "in this task"
+     */
+    static String ranNothing(int steps, int failedCalls, String lastFailure, String span, AgentContext context) {
+        if (failedCalls == 0) return "The model produced nothing that could be run " + steps + " times " + span + ".";
+        String last = " (the last: " + quotable(lastFailure, context) + ")";
+        if (failedCalls == steps) return "The call to the model failed " + steps + " times " + span + last + ".";
+        return steps + " steps " + span + " ran nothing: the model's reply could not be run "
+                + times(steps - failedCalls) + ", and the call to it failed " + times(failedCalls) + last + ".";
+    }
+
+    private static String times(int n) {
+        return n + (n == 1 ? " time" : " times");
+    }
+
+    /**
      * Execute a tool and wrap the result in an AgentObservation.
      */
     private AgentObservation executeTool(AgentAction action, AgentContext context) {
@@ -1152,10 +1209,10 @@ public class AgentLoop {
 
         Tool tool = toolOpt.get();
 
-        // Build a progress callback that routes through LongRunningTaskManager.
-        // The callback is available to every skill; only skills that call
-        // report_progress() will actually use it.  On the first progress report
-        // the task is auto-registered as long-running.
+        // Where a skill's progress reports are shown: through LongRunningTaskManager. The
+        // callback is available to every skill; only skills that call report_progress() will
+        // actually use it. On the first progress report the task is auto-registered as
+        // long-running. Each report is also progress for the stall watchdog (toolContext).
         SandboxManager.ProgressCallback progressCallback = new SandboxManager.ProgressCallback() {
             private volatile boolean registered = false;
 
@@ -1170,14 +1227,7 @@ public class AgentLoop {
             }
         };
 
-        ToolExecutionContext execCtx = new ToolExecutionContext(
-                context.userId(),
-                context.taskId(),
-                null, // workDir — can be extended later
-                context::isCancelled,
-                progressCallback,
-                context.attachmentIds()
-        );
+        ToolExecutionContext execCtx = context.toolContext(progressCallback);
 
         // The same resolver the delegation uses, against the task's results -- the cloud sees
         // task-wide handles in every descriptor, so {{3}} here is the task's third result. One
@@ -1334,7 +1384,12 @@ public class AgentLoop {
         return switch (action) {
             case "recall" -> recall(context, params.get("query") == null ? null : params.get("query").toString());
             case "list" -> {
-                List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
+                List<AgentMemory.MemoryEntry> facts;
+                try {
+                    facts = memory.getFacts(userId);
+                } catch (Exception e) {
+                    yield "ERROR: could not read the stored facts: " + e.getMessage();
+                }
                 if (facts.isEmpty()) {
                     yield "No facts stored. Use action='store' to save user preferences and instructions.";
                 }
@@ -1679,7 +1734,7 @@ public class AgentLoop {
                     tags
             );
         } catch (Exception e) {
-            log.debug("Failed to store episode for task {}: {}", context.taskId(), e.getMessage());
+            log.warn("Could not store the episode of task {}: {}", context.taskId(), e.getMessage());
         }
     }
 
@@ -1836,14 +1891,19 @@ public class AgentLoop {
     }
 
     /**
-     * skill_create: the code, written by a model, then the skill made from it. Timed from the
-     * first code call, so the step's duration is the code generation as much as the write -- a
-     * step that took four calls of two minutes each used to say 0ms.
+     * skill_create: the name checked, the code written by a model, then the skill made from it.
+     * The name first ({@link SkillManager#nameRefusal}): the code cannot change it, and a name
+     * refused after the code was written cost a whole code generation for nothing. Timed from
+     * the first code call, so the step's duration is the code generation as much as the write --
+     * a step that took four calls of two minutes each used to say 0ms.
      */
     private AgentObservation createSkill(AgentAction action, AgentContext context) {
         long startMs = System.currentTimeMillis();
-        Codegen code = generateSkillCodeWithCloud(action.params(), context);
-        String result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
+        String result = skillManager.nameRefusal(str(action.params(), "name"));
+        if (result == null) {
+            Codegen code = generateSkillCodeWithCloud(action.params(), context);
+            result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
+        }
         long durationMs = System.currentTimeMillis() - startMs;
         return result.startsWith("ERROR")
                 ? AgentObservation.failure(action.tool(), result, durationMs)
@@ -2035,15 +2095,22 @@ public class AgentLoop {
     }
 
     /**
-     * A think call the provider declined, or whose reply or request did not fit a limit of the
-     * model: the same request would end the same way, so the task ends saying which. The reply's
-     * tokens were billed all the same.
+     * A think call the provider declined, whose reply or request did not fit a limit of the
+     * model, or whose request the provider refused as it stands: the same request would end the
+     * same way, so the task ends saying which. A reply's tokens were billed all the same. A
+     * request longer than the context window ends as that ({@link TaskEnding}), because the
+     * next message in the chat is read with all of it.
      */
     private AgentResult noAnswer(AgentContext context, boolean local, LlmProvider provider,
                                  LlmResponse reply, LlmException why) {
         account(context, local, provider, reply);
         log.warn("Task {}: no usable reply from the model — {}", context.taskId(), why.getMessage());
-        return AgentResult.error(why.getMessage(), context.trajectory(), context.elapsedMs());
+        // A provider's own error can quote the request it refused.
+        String said = quotable(why.getMessage(), context);
+        String clause = said.equals(why.getMessage()) ? said : "the call to the model failed (" + said + ")";
+        return why instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
+                ? AgentResult.contextWindow(clause, context.trajectory(), context.elapsedMs())
+                : AgentResult.error(clause, context.trajectory(), context.elapsedMs());
     }
 
     /**
@@ -2512,17 +2579,16 @@ public class AgentLoop {
      * Stop tasks that have stopped making progress.
      *
      * <p>Runs on the scheduler, not on the task's own thread, which is the whole point. Progress
-     * is a step finishing, a model's reply, or any event of a reply as it streams in -- the
-     * progress hook every model call made for the task carries -- so a long call that is still
-     * answering is alive. A task idle past the stall timeout is marked stalled with the facts
-     * ({@link AgentContext#stall}): it then reads as stopped wherever it checks -- the top of the
-     * next step, the next event of a streamed reply, the supplier a tool polls -- unwinds like a
-     * task the owner stopped, and ends STALLED saying why. A model call it is waiting on is ended
-     * too, silent or not: the hook holds the call's cancel.
+     * is a step finishing, a skill's progress report, any event of a model's reply as it streams
+     * in, or a model call ending -- and the time a model call is under way is not counted at all
+     * ({@link AgentContext#msSinceLastProgress}): its own timeouts bound it, and a local model
+     * reading a long prompt sends nothing for many minutes while it works. A task idle past the
+     * stall timeout is marked stalled with the facts ({@link AgentContext#stall}): it then reads
+     * as stopped wherever it checks -- the top of the next step, the supplier a tool polls, the
+     * next model call -- unwinds like a task the owner stopped, and ends STALLED saying why.
      *
-     * <p>Cooperative for everything else: a tool that does not poll runs until it returns.
-     * Interrupting threads mid-call instead would risk a half-written skill directory or a
-     * dangling sandbox process.
+     * <p>Cooperative: a tool that does not poll runs until it returns. Interrupting threads
+     * mid-call instead would risk a half-written skill directory or a dangling sandbox process.
      */
     @Scheduled(fixedDelay = 30_000L)
     public void cancelStalledTasks() {
@@ -2533,8 +2599,9 @@ public class AgentLoop {
             if (!shouldCancelForStall(idle, stallTimeoutMs, ctx.isCancelled())) continue;
             log.warn("Task {} has made no progress for {}s (limit {}s): the stall watchdog is stopping it.",
                     entry.getKey(), idle / 1000, stallTimeoutMs / 1000);
-            ctx.stall("no progress for " + TaskRecord.duration(idle) + " — no step finished and no "
-                    + "model reply streamed in — and the limit is " + TaskRecord.duration(stallTimeoutMs));
+            ctx.stall("no progress for " + TaskRecord.duration(idle) + " — no step finished, no model "
+                    + "call was under way and no skill reported progress — and the limit is "
+                    + TaskRecord.duration(stallTimeoutMs));
             statusEmitter.emitForTask(ctx.userId(), entry.getKey(), StatusMessage.Type.WARNING,
                     "No progress for " + (idle / 1000) + "s — stopping this task.");
         }

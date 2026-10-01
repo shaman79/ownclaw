@@ -20,8 +20,8 @@ import java.util.function.Supplier;
  * clear the window.
  *
  * <p>A wait is part of the call. Its cancel is handed to the call's progress hook
- * ({@link LlmProgress#calling}), as a request's is, so Stop and the stall watchdog end a call
- * that is waiting to try again at once, as they end one that is waiting for its reply.
+ * ({@link LlmProgress#calling}), as a request's is, so a Stop ends a call that is waiting to try
+ * again at once, as it ends one that is waiting for its reply.
  */
 public final class RateLimitBackoff {
 

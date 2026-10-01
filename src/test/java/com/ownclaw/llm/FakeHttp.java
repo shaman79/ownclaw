@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * nothing touches the network. The last reply scripted for a path repeats; earlier ones are
  * used once each, in order. Counts the reply bodies handed out and the ones closed, so a test
  * can see that a stream was closed however the call ended. A path made {@link #silent} answers
- * nothing at all until the call is cancelled.
+ * nothing at all until the call is cancelled; one made {@link #slow}, nothing for a while.
  */
 final class FakeHttp implements Interceptor {
 
@@ -43,6 +43,7 @@ final class FakeHttp implements Interceptor {
     final AtomicInteger closed = new AtomicInteger();
     private final Map<String, Deque<Reply>> replies = new HashMap<>();
     private final Set<String> silent = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> slow = new ConcurrentHashMap<>();
     /** Counted down when a request to a silent path is under way. */
     final CountDownLatch silenced = new CountDownLatch(1);
 
@@ -62,6 +63,16 @@ final class FakeHttp implements Interceptor {
      */
     FakeHttp silent(String path) {
         silent.add(path);
+        return this;
+    }
+
+    /**
+     * This path sends nothing, not even its headers, for {@code ms} -- as Ollama sends nothing
+     * while it loads the model and reads a long prompt -- and then answers as scripted. A call
+     * cancelled meanwhile fails as a cancelled OkHttp call does.
+     */
+    FakeHttp slow(String path, long ms) {
+        slow.put(path, ms);
         return this;
     }
 
@@ -96,6 +107,18 @@ final class FakeHttp implements Interceptor {
                 }
             }
             throw new IOException("Canceled");
+        }
+        Long quiet = slow.get(request.url().encodedPath());
+        if (quiet != null) {
+            long until = System.currentTimeMillis() + quiet;
+            while (System.currentTimeMillis() < until) {
+                if (chain.call().isCanceled()) throw new IOException("Canceled");
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException e) {
+                    throw new IOException(e);
+                }
+            }
         }
         Deque<Reply> queue = replies.get(request.url().encodedPath());
         if (queue == null || queue.isEmpty()) {

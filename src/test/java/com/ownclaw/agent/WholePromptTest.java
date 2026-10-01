@@ -134,4 +134,78 @@ class WholePromptTest {
         String text = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(false, false)));
         assertTrue(text.contains("memory_manage(action=store|list|delete|recall, [key], [content], [query])"), text);
     }
+
+    @Test
+    @DisplayName("what the model is told about past tasks is true in a chat follow-up: this chat's are shown, recall finds the rest")
+    void pastTasksAreDescribedTruly() {
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "why did that fail?");
+        ctx.setConversationSummary("### The conversation so far\nUSER: audit the routers\nASSISTANT: Done.\n"
+                + "[OwnClaw's record of task 4b22f2c5, from its step log:\n1. ✓ router_audit]");
+        ToolSpec memory = SpecialActionSchemas.ALL.stream()
+                .filter(t -> AgentAction.MEMORY_MANAGE.equals(t.name())).findFirst().orElseThrow();
+        for (boolean nativeTools : new boolean[] {true, false}) {
+            String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false)));
+            assertTrue(prompt.contains("## Prior Context") && prompt.contains("record of task 4b22f2c5"),
+                    "the premise: the request shows this chat's earlier task");
+            for (String told : List.of(prompt, memory.description())) {
+                assertFalse(told.contains("Past tasks are not shown to you"),
+                        "said in the same request that shows one: " + told);
+                assertTrue(told.contains("Of past tasks you are shown only this chat's, under Prior Context"), told);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("every provider is told whether anyone is waiting, by the one per-step block, after the same static system prompt")
+    void everyProviderGetsTheSameStepBlock() {
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        for (boolean unattended : new boolean[] {false, true}) {
+            var ctx = new AgentContext("u1", "t1", "check the routers");
+            ctx.setUnattended(unattended);
+            ctx.setUserPreferences("Reports in Czech.");
+            String attendance = unattended ? "- Attendance: NOBODY IS WAITING." : "- Attendance: THE USER IS WAITING";
+            for (int steps = 0; steps < 2; steps++) {
+                if (steps == 1) {
+                    ctx.trajectory().record(new AgentAction("ping", Map.of("host", "192.0.2.1"), ""),
+                            AgentObservation.success("ping", "up", Map.of(), 5));
+                }
+                for (boolean nativeTools : new boolean[] {true, false}) {
+                    var mode = new ThinkingEngine.StepMode(nativeTools, false);
+                    String system = engine.buildMessages(ctx, "anthropic", mode).get(0).content();
+                    for (String provider : List.of("anthropic", "openai", "ollama")) {
+                        List<LlmMessage> messages = engine.buildMessages(ctx, provider, mode);
+                        assertEquals(system, messages.get(0).content(), provider + " gets another system prompt");
+                        String last = messages.get(messages.size() - 1).content();
+                        assertTrue(last.contains(attendance), provider + " is not told who is waiting: " + last);
+                        assertTrue(last.contains("## Preferences\nReports in Czech."), provider + ": " + last);
+                        assertEquals(steps == 1, last.contains("Next action? If done, use 'respond'."),
+                                provider + ", " + steps + " steps: " + last);
+                    }
+                }
+            }
+        }
+        // Mutation: give the other providers their own dynamic section again -> no attendance.
+    }
+
+    @Test
+    @DisplayName("every provider's history shows what each step was called with, as the Anthropic replay does")
+    void everyHistoryShowsTheArguments() {
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "send the report to the team");
+        ctx.trajectory().record(new AgentAction("smtp_send_email",
+                        Map.of("to", "team@example.org", "subject", "Weekly report", "body", "{{1}}"), ""),
+                AgentObservation.success("smtp_send_email", "Sent", Map.of(), 12));
+        var mode = new ThinkingEngine.StepMode(true, false);
+        String replayed = engine.buildMessages(ctx, "anthropic", mode).stream()
+                .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).findFirst().orElseThrow().content();
+        for (String provider : List.of("openai", "ollama")) {
+            String history = all(engine.buildMessages(ctx, provider, mode));
+            assertTrue(history.contains("[Step 1] " + replayed + "\n[smtp_send_email] OK (12ms)\nSent"),
+                    provider + " is not shown the step as written: " + history);
+            assertTrue(history.contains("team@example.org") && history.contains("{{1}}"), history);
+        }
+        // Mutation: render the history line as the tool's name alone -> the model cannot tell
+        // whom it wrote to.
+    }
 }

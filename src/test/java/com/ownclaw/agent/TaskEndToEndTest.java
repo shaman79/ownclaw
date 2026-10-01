@@ -89,23 +89,69 @@ class TaskEndToEndTest {
         // Mutation: the hook does not mark progress -> STALLED after the 2.5 s call.
     }
 
+    /** A skill that takes {@code ms} and says nothing while it runs. */
+    static Tool hanging(String name, long ms) {
+        return tool(name, List.of(), p -> {
+            try {
+                Thread.sleep(ms);
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            return "done at last";
+        });
+    }
+
     @Test
-    @DisplayName("a call that goes silent is stopped by the watchdog: STALLED, with its facts and the steps")
-    void aSilentCallIsStalled(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of(NOOP), 1);
+    @DisplayName("a step that shows no progress -- a skill that hangs, reporting nothing -- is stopped by the watchdog: STALLED, with its facts and the steps")
+    void aStepWithNoProgressIsStalled(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP, hanging("router_audit", 1_800)), 1);
         rig.cloud.think.add(call("noop", Map.of()));
-        rig.cloud.think.add(silent(1_800, call("noop", Map.of())));
+        rig.cloud.think.add(call("router_audit", Map.of()));
         AgentResult r;
         try (var ticking = rig.watchdog()) {
             r = rig.turn(session(rig), "check the network");
         }
         assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
         assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
-        assertTrue(r.response().contains("— no step finished and no model reply streamed in — and the limit is 1.0s."),
-                r.response());
+        assertTrue(r.response().contains("— no step finished, no model call was under way and no skill "
+                + "reported progress — and the limit is 1.0s."), r.response());
         assertTrue(r.response().contains("1. ✓ noop"), r.response());
         assertEquals(2, rig.cloud.calls("think").size(), "no step after the stop");
         // Mutation: the watchdog asks through the cancellation service with no mark -> CANCELLED.
+    }
+
+    @Test
+    @DisplayName("a skill that keeps reporting its progress is alive: the watchdog leaves the cloud's call of it alone, as it leaves a delegation's")
+    void aSkillReportingProgressIsAlive(@TempDir Path tmp) throws Exception {
+        // A LAN scan of ten minutes, reporting every few seconds: scaled to 2.5 s against a 1 s limit.
+        Tool scan = new Tool() {
+            public String name() { return "net_scan"; }
+            public String description() { return "scans the LAN"; }
+            public Map<String, com.ownclaw.agent.tools.ToolParam> inputSchema() { return Map.of(); }
+            public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
+                                                             com.ownclaw.agent.tools.ToolExecutionContext c) {
+                for (int i = 1; i <= 25; i++) {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        throw new IllegalStateException(e);
+                    }
+                    c.progressCallback().onProgress("Scanned " + i + " of 25 hosts", i * 4);
+                }
+                return com.ownclaw.agent.tools.ToolResult.success("3 hosts up");
+            }
+        };
+        var rig = new LoopRig(tmp, List.of(scan), 1);
+        rig.cloud.think.add(call("net_scan", Map.of()));
+        rig.cloud.think.add(respond("Three hosts are up."));
+        AgentResult r;
+        try (var ticking = rig.watchdog()) {
+            r = rig.turn(session(rig), "scan the LAN");
+        }
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Three hosts are up.", r.response());
+        // Mutation: the cloud path's progress callback does not mark progress -> STALLED after
+        // the scan returns, "no progress for 1.0s", though it reported every 100 ms.
     }
 
     @Test
@@ -163,18 +209,27 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("the stall watchdog ends a model call that has sent nothing: STALLED at once, not at the read timeout")
-    void theWatchdogEndsASilentCall(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of(), 1, new com.ownclaw.llm.SilentOllama().provider());
-        rig.cloud.available = false;
-        long t0 = System.currentTimeMillis();
+    @DisplayName("a local model that sends nothing past the stall limit while it reads a long prompt, then answers, finishes the task: a call under way is not silence")
+    void aLocalModelReadingIsNotAStall(@TempDir Path tmp) throws Exception {
+        // Ollama sends nothing, not even its headers, until it has read the whole prompt, and the
+        // production host reads about 100 tokens a second: a delegated result of 60,000 tokens
+        // is ten minutes of silence, the stall limit. Scaled: a 1 s limit, 2.5 s of reading.
+        var ollama = new com.ownclaw.llm.SilentOllama(2_500, com.ownclaw.llm.SilentOllama.says(
+                "{\"done\": true, \"summary\": \"Both routers answer.\"}"));
+        var rig = new LoopRig(tmp, List.of(NOOP), 1, ollama.provider());
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "audit both routers")));
+        rig.cloud.think.add(respond("Both routers answer."));
         AgentResult r;
         try (var ticking = rig.watchdog()) {
-            r = rig.turn(session(rig), "check the network");
+            r = rig.turn(session(rig), "audit the routers");
         }
-        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
-        assertTrue(System.currentTimeMillis() - t0 < 6_000, "ended past the 1 s limit, not at a timeout");
-        assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Both routers answer.", r.response());
+        assertEquals(1, ollama.chats(), "the local call that read for 2.5 s was the one that answered");
+        assertTrue(userParts(rig.cloud.calls("think").get(1)).stream().anyMatch(u -> u.contains("Both routers answer.")),
+                "and its answer reached the cloud");
+        // Mutation: count the time a call is under way as silence -> the watchdog ends the local
+        // call at 1 s and the task ends STALLED, the cloud never asked again.
     }
 
     /** The think call goes to the real Anthropic provider, as scripted, carrying the task's hook. */
@@ -208,22 +263,6 @@ class TaskEndToEndTest {
         assertEquals(1, api.requests(), "and nothing was sent again");
         // Mutation: a wait that hands the hook no cancel -> the Stop is heard at the next
         // attempt, 24 s or more later, and the preemptive timeout fails the test.
-    }
-
-    @Test
-    @DisplayName("the stall watchdog ends a model call that is waiting to try again: STALLED at once, not after the wait")
-    void theWatchdogEndsTheWaitBeforeARetry(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of(NOOP), 1);
-        rig.cloud.think.add(anthropic(com.ownclaw.llm.ScriptedAnthropic.overloaded()));
-        long t0 = System.currentTimeMillis();
-        AgentResult r;
-        try (var ticking = rig.watchdog()) {
-            r = assertTimeoutPreemptively(Duration.ofSeconds(20), () -> rig.turn(session(rig), "audit the routers"),
-                    "the watchdog's stop was heard only when the wait was over");
-        }
-        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
-        assertTrue(System.currentTimeMillis() - t0 < 6_000, "ended past the 1 s limit, not after the wait");
-        assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
     }
 
     @Test
@@ -439,9 +478,33 @@ class TaskEndToEndTest {
                     }
                 });
         AgentResult cut = tooLong.turn(session(tooLong), "and now?");
-        assertEquals(AgentResult.TerminationReason.ERROR, cut.terminationReason());
+        assertEquals(AgentResult.TerminationReason.CONTEXT_WINDOW, cut.terminationReason());
         assertTrue(cut.response().startsWith("**Stopped:** [anthropic] the conversation is longer than the model's "
                 + "1,000,000-token context window.\n\n"), cut.response());
+    }
+
+    @Test
+    @DisplayName("an ending on the context window says to carry on in a new chat: every message in this one is read with all of it")
+    void aChatTooLongForTheModelSaysToStartANewOne(@TempDir Path tmp) throws Exception {
+        // Two public results that fit one at a time and not together: the model refuses the
+        // third call as the provider does a prompt over its window.
+        String log = "203.0.113.7 GET /index.html 200\n".repeat(1_800);
+        var rig = new LoopRig(tmp, List.of(tool("read_access_log", List.of(), p -> log)));
+        rig.cloud.think.add(call("read_access_log", Map.of("day", "1")));
+        rig.cloud.think.add(call("read_access_log", Map.of("day", "2")));
+        rig.cloud.think.add(c -> {
+            throw new com.ownclaw.llm.OutputTruncated("anthropic",
+                    com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
+        });
+        AgentResult r = rig.turn(session(rig), "which IP hits my site most?");
+
+        assertEquals(AgentResult.TerminationReason.CONTEXT_WINDOW, r.terminationReason(), r.response());
+        assertTrue(r.response().contains("**Next:** A message sent in this chat is read with the whole chat, "
+                + "this ending included, so it is likely to be too long as well: start a new chat (/new) to "
+                + "carry on, and say there what it needs from this one."), r.response());
+        assertFalse(r.response().contains("Your next message starts a new task, which reads this message"),
+                "the owner was sent back into the chat that could no longer be read: " + r.response());
+        // Mutation: noAnswer ends every refused think as ERROR -> the generic Next line.
     }
 
     @Test
@@ -776,5 +839,98 @@ class TaskEndToEndTest {
                 && m.text().endsWith("ms)\n" + big)), "the result in debug mode");
         // Mutations: put back the 100-character status cut, the 1,000 and 800-character detail
         // cuts, or the 50,000-character debug cut.
+    }
+
+    /** A mail skill that keeps what it was asked to send. */
+    static Tool mailer(List<Map<String, Object>> sent) {
+        return tool("smtp_send_email", List.of(), p -> {
+            sent.add(p);
+            return "Sent";
+        });
+    }
+
+    /** The model writes {@code text} and calls no tool. */
+    static Reply says(String text) {
+        return c -> com.ownclaw.llm.Replies.of(text, 1_000, 100, 0, 0, "end_turn");
+    }
+
+    @Test
+    @DisplayName("an answer that quotes an example call is the answer: the example is not run")
+    void anAnswerQuotingACallIsTheAnswer(@TempDir Path tmp) throws Exception {
+        var sent = new java.util.ArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(mailer(sent)));
+        String answer = "You can send a test mail yourself. The call looks like this:\n\n```json\n"
+                + "{\"tool\": \"smtp_send_email\", \"params\": {\"to\": \"someone@example.org\", \"body\": \"test\"}}\n"
+                + "```\n\nIt goes out from the account in your vault.";
+        rig.cloud.think.add(says(answer));
+        AgentResult r = rig.turn(session(rig), "how would I send a test mail with you?");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals(answer, r.response(), "the answer the owner asked for, whole");
+        assertTrue(sent.isEmpty(), "the example was sent: " + sent);
+        assertEquals(1, rig.cloud.calls("think").size());
+        // Mutation: read the first object with a "tool" key anywhere in the text -> the example
+        // email is sent and the answer is never delivered.
+    }
+
+    @Test
+    @DisplayName("a reply that is an action envelope and nothing else is still the action, fenced or not")
+    void aWholeEnvelopeIsStillAnAction(@TempDir Path tmp) throws Exception {
+        // What a local model orchestrating in the cloud's place writes when it ignores the tools.
+        var sent = new java.util.ArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(mailer(sent)));
+        rig.cloud.think.add(says("```json\n{\"tool\": \"smtp_send_email\", \"params\": "
+                + "{\"to\": \"owner@example.org\", \"body\": \"hi\"}}\n```"));
+        rig.cloud.think.add(says("{\"tool\": \"respond\", \"params\": {\"message\": \"Sent.\"}}"));
+        AgentResult r = rig.turn(session(rig), "mail me hi");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Sent.", r.response());
+        assertEquals(List.of(Map.of("to", "owner@example.org", "body", "hi")), sent);
+    }
+
+    @Test
+    @DisplayName("an empty answer or question is not delivered: the model is told, and asked again")
+    void anEmptyAnswerIsNotDelivered(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        // The answer written beside the call, and the call's message left empty.
+        rig.cloud.think.add(c -> com.ownclaw.llm.Replies.of(
+                "Both routers answer; guest isolation is broken on the access point.", 1_000, 100, 0, 0,
+                "tool_use", List.of(new com.ownclaw.llm.ToolCall("c1", AgentAction.RESPOND, Map.of("message", "")))));
+        rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "  ")));
+        rig.cloud.think.add(respond("Guest isolation is broken on the access point."));
+        AgentResult r = rig.turn(session(rig), "audit the routers");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("Guest isolation is broken on the access point.", r.response());
+        assertEquals(3, rig.cloud.calls("think").size());
+        for (int call : new int[] {1, 2}) {
+            assertTrue(sentTo(rig, call).contains("Not delivered: the message is empty."), sentTo(rig, call));
+        }
+        // Mutation: refuse only a placed handle that is empty -> the empty respond is delivered:
+        // an empty bubble, and on Telegram an error.
+    }
+
+    @Test
+    @DisplayName("a skill name that cannot be one is refused before any code is written for it")
+    void aRefusedNameCostsNoCode(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        Map<String, Object> spec = Map.of("description", "audits the routers", "parameters", "{}");
+        var tooLong = new java.util.HashMap<>(spec);
+        tooLong.put("name", "fetch_all_openwrt_routers_on_the_lan_and_audit_firmware_and_wifi_x");
+        var variant = new java.util.HashMap<>(spec);
+        variant.put("name", "noop_v2");
+        rig.cloud.think.add(call(AgentAction.SKILL_CREATE, tooLong));
+        rig.cloud.think.add(call(AgentAction.SKILL_CREATE, variant));
+        rig.cloud.think.add(respond("done"));
+        rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("")));
+        rig.cloud.codegen.add(SkillCodegenTest.finished(SkillCodegenTest.module("")));
+        rig.turn(session(rig), "build me a router audit");
+
+        assertEquals(0, rig.cloud.calls("codegen").size(), "code was written for a name that was then refused");
+        String told = sentTo(rig, 2);
+        assertTrue(told.contains("ERROR: Invalid skill name: " + SkillManager.SKILL_NAME_RULE), told);
+        assertTrue(told.contains("ERROR: Skill 'noop' already exists. Do NOT create 'noop_v2'."), told);
+        // Mutation: check the name only in createSkill, after the code -> two code calls billed.
     }
 }

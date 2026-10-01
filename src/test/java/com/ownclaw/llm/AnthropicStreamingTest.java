@@ -330,6 +330,20 @@ class AnthropicStreamingTest {
     }
 
     @Test
+    @DisplayName("a request larger than the API takes is the same plain context-window message, not a failure to try again")
+    void requestTooLarge() {
+        var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MESSAGES, 413,
+                "{\"type\":\"error\",\"error\":{\"type\":\"request_too_large\","
+                        + "\"message\":\"Request exceeds the maximum allowed number of bytes.\"}}");
+        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
+        assertEquals("[anthropic] the conversation is longer than the model's 1,000,000-token context window",
+                e.getMessage());
+        assertEquals(1, http.to(MESSAGES).size(), "sent once");
+        // Mutation: map only the 400 -> an LlmException with status 413, asked again by the loop.
+    }
+
+    @Test
     @DisplayName("a fallback block is passed over: the declined model's tool call is dropped, its text continued")
     void fallbackMidReply() {
         ObjectNode fallback = node("fallback");

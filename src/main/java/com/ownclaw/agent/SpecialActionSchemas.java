@@ -107,9 +107,9 @@ public final class SpecialActionSchemas {
 
             spec(AgentAction.MEMORY_MANAGE,
                     "Store, list or delete facts that should survive this conversation, or recall "
-                            + "past tasks. Past tasks are not shown to you otherwise: recall "
-                            + "returns every one whose record matches the query, each in full, the "
-                            + "most relevant first.",
+                            + "past tasks. Of past tasks you are shown only this chat's, under Prior "
+                            + "Context: recall returns every past task whose record matches the "
+                            + "query, each in full, the most relevant first.",
                     params(
                             "action", ToolParam.required("string", "store | list | delete | recall"),
                             "key", ToolParam.optional("string", "Identifier for the fact."),

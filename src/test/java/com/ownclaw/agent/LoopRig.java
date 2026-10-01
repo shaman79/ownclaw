@@ -40,9 +40,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
- * The real loop, the real thinking engine and the real gateway, over a real database, with a
- * scripted model where the cloud provider stands. What the loop does with a task -- how it ends,
- * what it records, what the next turn is given -- can then be driven end to end.
+ * The real loop, the real thinking engine, the real gateway and the real delegation, over a real
+ * database, with a scripted model where the cloud provider stands. What the loop does with a
+ * task -- how it ends, what it records, what the next turn is given -- can then be driven end to
+ * end.
  */
 final class LoopRig {
 
@@ -125,7 +126,7 @@ final class LoopRig {
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
 
-        Skills(SkillCuratorService curator) { super(null, null, null, null, null, curator); }
+        Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator); }
 
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
@@ -184,12 +185,13 @@ final class LoopRig {
         vault.init();
         var curator = new SkillCuratorService(jdbc, router, registry,
                 new DynamicSkillRegistry(null, null, null, null, null, null, null));
-        skills = new Skills(curator);
+        skills = new Skills(curator, registry);
         loop = new AgentLoop(engine.make(registry, config, router),
                 new CriticAgent(registry), registry, emitter, config, router, new SqliteAgentMemory(jdbc),
                 curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
-                new TokenBudgetTracker(jdbc, config, emitter), events, null, null, files);
+                new TokenBudgetTracker(jdbc, config, emitter), events, null,
+                new LocalExecutor(router, registry, emitter, curator), files);
     }
 
     /** A chat turn, saved the way the web chat saves one; the session is created on first use. */

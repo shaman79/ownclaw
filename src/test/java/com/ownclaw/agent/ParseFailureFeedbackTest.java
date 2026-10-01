@@ -151,8 +151,8 @@ class ParseFailureFeedbackTest {
             assertTrue(summary.contains("[Step " + i + "] TOLD-" + i), summary);
         }
         assertFalse(summary.contains("skipped") || summary.contains("thinking failures"), summary);
-        assertTrue(summary.contains("[Step 5] Tool: fetch"), summary);
-        assertFalse(summary.contains("Tool: " + ThinkingEngine.THINKING),
+        assertTrue(summary.contains("[Step 5] {\"reasoning\":\"now fetching\",\"tool\":\"fetch\"}"), summary);
+        assertFalse(summary.contains("\"tool\":\"" + ThinkingEngine.THINKING),
                 "a step the loop recorded is what the model was told, not a tool it ran: " + summary);
     }
 }

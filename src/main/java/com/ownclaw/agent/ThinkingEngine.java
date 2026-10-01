@@ -28,10 +28,9 @@ public class ThinkingEngine {
     private static final Logger log = LoggerFactory.getLogger(ThinkingEngine.class);
 
     /**
-     * Marker inserted into system prompts to separate the static (cacheable) prefix
-     * from the dynamic suffix (datetime, tools, user prefs). AnthropicProvider splits
-     * on this marker to create two system content blocks — only the static prefix gets
-     * cache_control, so the Anthropic prompt cache actually hits across requests.
+     * Where the task ends in the first message of a task's first call, before the per-step block
+     * (datetime, tools, user prefs): AnthropicProvider splits there and puts the cache mark on the
+     * task alone, so the next step reads it from the cache ({@link #buildAnthropicMessages}).
      */
     static final String CACHE_BOUNDARY_MARKER = com.ownclaw.llm.LlmMessage.CACHE_BOUNDARY;
 
@@ -92,7 +91,7 @@ public class ThinkingEngine {
         );
         // On whose behalf. Without this the gateway refuses the call -- which is the point:
         // a call site that forgets is stopped, not silently unscanned. The task's progress hook
-        // lets its stall watchdog see a long reply streaming in, and its Stop end the call.
+        // keeps its stall watchdog from taking a long call for silence, and lets its Stop end it.
         requestConfig = requestConfig.withEgress(context.egress("think")).withProgress(context.progress());
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
@@ -124,9 +123,9 @@ public class ThinkingEngine {
             // unlessAnsweredBeforeWork). On a local model it does NOT: Ollama reports a "tools"
             // capability per model, and a model that advertises it may still ignore the tools
             // array and emit the old JSON envelope as text. Mapping that straight to RESPOND
-            // would deliver the raw JSON to the user as the answer. So parse first, and only
-            // treat it as prose when it genuinely is not an action -- which costs one cheap
-            // parse attempt and removes a whole class of local-tier regression.
+            // would deliver the raw JSON to the user as the answer. So a reply that is an
+            // envelope and nothing else is read as the action it is; anything else is prose
+            // (tryParseAction).
             if (nativeTools && !response.hasToolCalls() && !text.isBlank()) {
                 AgentAction parsed = tryParseAction(text);
                 if (parsed != null) {
@@ -192,11 +191,17 @@ public class ThinkingEngine {
                             + "be run, so nothing was run.",
                     "Make the call again with its arguments as one JSON object."), messages, wrote, reply);
         } catch (LlmException e) {
+            // A request the provider answered by refusing it as it stands -- a key it does not
+            // take, a model it does not have, a request it cannot read -- is refused the same way
+            // however often it is sent (LlmException#isRetryable), so it is not a step to ask
+            // again either: the loop ends the task with the provider's own message. Sent twice
+            // more, it ended "the model produced nothing" about a model that was never reached.
+            if (e.getHttpStatus() != 0 && !e.isRetryable()) throw e;
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
             return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
                             + "model failed (" + e.getMessage() + "), so nothing was run.",
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),
-                    null);
+                    null, e.getMessage());
         }
     }
 
@@ -242,23 +247,34 @@ public class ThinkingEngine {
                         + "result to report.");
     }
 
-    /** Package-private: the whole prompt, so a test can assert what the model is actually told. */
+    /**
+     * Package-private: the whole prompt, so a test can assert what the model is actually told.
+     * <p>
+     * The system prompt is the same static text for every provider, and every provider's last
+     * user message ends with the same per-step block ({@link #buildDynamicContext}): the date, who
+     * is waiting, the preferences, the tools where the prompt is where they are learnt, the
+     * vault. The providers differ only in how the steps so far are sent. That block used to be
+     * written twice, and the copy every provider but Anthropic got had drifted: it never said
+     * whether anyone was waiting, which the static prompt tells the model to decide by.
+     */
     List<LlmMessage> buildMessages(AgentContext context, String providerName,
                                    StepMode mode) {
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(context, providerName, mode)));
+        messages.add(LlmMessage.system(buildSystemPrompt(mode)));
 
         if ("anthropic".equals(providerName)) {
-            // Anthropic: multi-turn trajectory for prefix caching.
-            // System prompt is static-only; dynamic context (datetime, tools) goes
-            // in conversation messages so the system prompt never changes.
+            // Anthropic: the steps replayed turn by turn, append-only for prefix caching.
             buildAnthropicMessages(messages, context, mode);
         } else {
-            // OpenAI / other: single trajectory message, dynamic content in system prompt
-            messages.add(LlmMessage.user(buildUserMessage(context)));
+            // Every other provider: the task, then every step in one history message.
+            String task = buildUserMessage(context);
+            String step = "\n\n---\n" + buildDynamicContext(context, mode);
             AgentTrajectory trajectory = context.trajectory();
-            if (!trajectory.isEmpty()) {
-                messages.add(LlmMessage.user(buildTrajectoryMessage(trajectory)));
+            if (trajectory.isEmpty()) {
+                messages.add(LlmMessage.user(task + step));
+            } else {
+                messages.add(LlmMessage.user(task));
+                messages.add(LlmMessage.user("## History\n" + trajectory.toPromptSummary() + step));
             }
         }
 
@@ -296,7 +312,7 @@ public class ThinkingEngine {
                 continue;
             }
             messages.add(LlmMessage.user(user.toString()));
-            messages.add(LlmMessage.assistant(formatActionForMultiTurn(turn.action())));
+            messages.add(LlmMessage.assistant(turn.actionText()));
             user = new StringBuilder(turn.observationText());
             replayed = true;
         }
@@ -481,9 +497,9 @@ public class ThinkingEngine {
     }
 
     /**
-     * Build dynamic context string (datetime, tools, user preferences, vault).
-     * For Anthropic, this goes in conversation messages instead of the system prompt
-     * to keep the system prompt 100% static for caching.
+     * The per-step block (datetime, attendance, preferences, tools, vault, what next): what
+     * changes from one step to the next, at the end of the last user message for every provider
+     * ({@link #buildMessages}), so the system prompt stays the same bytes and is cached.
      */
     private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
@@ -601,31 +617,11 @@ public class ThinkingEngine {
     }
 
     /**
-     * An action as the assistant turn that replays it: what the model chose -- its reasoning, the
-     * tool and the arguments as it wrote them, a reference as {{N}} and never the bytes it
-     * resolves to -- as JSON.
-     */
-    private String formatActionForMultiTurn(AgentAction action) {
-        try {
-            Map<String, Object> map = new LinkedHashMap<>();
-            String reasoning = action.reasoning();
-            if (reasoning != null && !reasoning.isBlank()) {
-                map.put("reasoning", reasoning);
-            }
-            map.put("tool", action.tool());
-            if (action.params() != null && !action.params().isEmpty()) {
-                map.put("params", action.params());
-            }
-            return mapper.writeValueAsString(map);
-        } catch (Exception e) {
-            return "{\"tool\": \"" + action.tool() + "\"}";
-        }
-    }
-
-    /**
      * Build the system prompt. This defines the agent's behavior, available tools,
      * and output format. Completely generic — no domain-specific content. Sent whole on every
-     * step, never shortened.
+     * step, never shortened, and the same for every provider, task and step: what changes goes in
+     * the per-step block at the end of the last user message ({@link #buildDynamicContext}), so
+     * the provider's prompt cache holds all of this.
      *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
@@ -634,17 +630,11 @@ public class ThinkingEngine {
      *             one protocol the tools array exists to replace, which is the mechanism by
      *             which a model talks its way back onto the text path.
      */
-    private String buildSystemPrompt(AgentContext context, String providerName,
-                                     StepMode mode) {
+    private String buildSystemPrompt(StepMode mode) {
         boolean nativeTools = mode.nativeTools();
         var sb = new StringBuilder();
 
         sb.append("You are an autonomous agent. Reason, pick a tool, observe, repeat until done.\n\n");
-
-        // ═══════════════════════════════════════════════════════════════════
-        // STATIC SECTION — identical across all requests/tasks/steps.
-        // AnthropicProvider caches everything up to CACHE_BOUNDARY_MARKER.
-        // ═══════════════════════════════════════════════════════════════════
 
         // Identity
         sb.append("## Identity\n");
@@ -720,7 +710,7 @@ public class ThinkingEngine {
 
         sb.append("## Memory\n");
         sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n");
-        sb.append("Past tasks are not shown to you: memory_manage action=recall with a query returns every one that matches, in full.\n\n");
+        sb.append("Of past tasks you are shown only this chat's, under Prior Context: memory_manage action=recall with a query returns every past task that matches, in full.\n\n");
 
         // Output format
         sb.append("## Output\n");
@@ -746,58 +736,6 @@ public class ThinkingEngine {
         sb.append("- Partial USEFUL result beats empty failure. Each step must make new progress.\n");
         sb.append("- NEVER write multi-line code via shell_exec/python3 -c. Use skill_create.\n");
         sb.append("- Need an OS binary or system library? Add it to system_packages in skill_create. NEVER say a package is unavailable.\n");
-
-        // Anthropic: return static-only system prompt. Dynamic content (datetime,
-        // tools, user prefs) goes in conversation messages via buildAnthropicMessages()
-        // to keep the system prompt identical across all steps — enabling both
-        // system-level AND conversation-prefix caching.
-        if ("anthropic".equals(providerName)) {
-            return sb.toString();
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        // DYNAMIC SECTION — changes per request/task/step.
-        // Everything below this marker is NOT cached by Anthropic.
-        // ═══════════════════════════════════════════════════════════════════
-        sb.append(CACHE_BOUNDARY_MARKER);
-
-        // Environment context (dynamic — changes every request)
-        sb.append("## Environment\n");
-        sb.append("- Platform: ").append(detectPlatform()).append("\n");
-        // Truncate to minute precision — seconds change between agent steps (which
-        // happen seconds apart) and would invalidate the Anthropic conversation history
-        // cache. Minute precision is stable enough for the LLM while maximizing cache hits.
-        sb.append("- DateTime: ").append(LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
-                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n\n");
-
-        // User preferences (if any)
-        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
-            sb.append("## User Preferences\n");
-            sb.append(context.userPreferences()).append("\n\n");
-        }
-
-        // The manifest only on the text protocol -- the same rule the Anthropic path follows in
-        // buildDynamicContext, which this branch never got. With native tools the array already
-        // carries every tool (and, local-first, delegate's description carries the catalogue),
-        // so this was the catalogue a second time; and local-first it advertised as callable the
-        // very skills the array withholds. The duplicate is what deadlocked a run on this
-        // provider -- the default in application.yaml -- when a skill's own short output was
-        // recorded PRIVATE and the canary found it here, in a part with no registry allowance.
-        if (!mode.nativeTools()) {
-            sb.append(toolsSection(context)).append("\n");
-        }
-
-        // Dynamic vault contents
-        List<String> vaultKeys = context.credentialKeys();
-        if (!vaultKeys.isEmpty()) {
-            sb.append("Vault contains: ").append(String.join(", ", vaultKeys)).append("\n\n");
-        }
-
-        // Delegation nudge — injected by AgentLoop when repetitive tool calls are detected
-        Object nudge = context.metadata().get("delegationNudge");
-        if (nudge instanceof String nudgeMsg && !nudgeMsg.isBlank()) {
-            sb.append("COST WARNING: ").append(nudgeMsg).append("\n\n");
-        }
 
         return sb.toString();
     }
@@ -854,17 +792,6 @@ public class ThinkingEngine {
         return sb.toString();
     }
 
-    /**
-     * Build a message summarizing the trajectory of past actions in this execution.
-     */
-    private String buildTrajectoryMessage(AgentTrajectory trajectory) {
-        var sb = new StringBuilder();
-        sb.append("## History\n");
-        sb.append(trajectory.toPromptSummary());
-        sb.append("Next action? If done, use 'respond'.");
-        return sb.toString();
-    }
-
     // Regex that matches multi-line block comments in JSON
     private static final java.util.regex.Pattern BLOCK_COMMENT =
             java.util.regex.Pattern.compile("/\\*.*?\\*/", java.util.regex.Pattern.DOTALL);
@@ -903,21 +830,36 @@ public class ThinkingEngine {
     }
 
     /**
-     * Parse text as an action, or return null if it plainly is not one.
+     * Parse text as an action when the whole of it is one, or return null.
      * <p>
      * {@link #parseAction} reads the text protocol, where a reply that is not an action is a step
      * that produced nothing to run. When tools were offered that is wrong: there, prose means the
      * model chose to answer, but a JSON envelope means a local model ignored the tools array, and
      * handing that envelope to the user as their answer would be worse than either. This
-     * distinguishes the two.
+     * distinguishes the two, and the envelope is the whole reply -- one code fence around it
+     * forgiven. An answer that quotes a call among its prose is the answer: read for its first
+     * object with a "tool" key, "the call looks like this: {...}" ran the example -- an email to
+     * the example's address -- and the answer it was part of never reached the owner.
      */
     AgentAction tryParseAction(String raw) {
         if (raw == null || raw.isBlank()) return null;
-        Map<String, Object> parsed = tryParseJsonObject(LlmOutputUtils.stripCodeFences(raw.strip()));
+        Map<String, Object> parsed = wholeJsonObject(raw);
         if (parsed == null) return null;
         Object tool = parsed.get("tool");
         if (tool == null || String.valueOf(tool).isBlank()) return null;
         return parseAction(raw);
+    }
+
+    /** The text as one JSON object, when that object is all of it but a code fence; else null. */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> wholeJsonObject(String text) {
+        String json = stripJsonComments(LlmOutputUtils.stripCodeFences(text.strip())).strip();
+        try (var parser = mapper.getFactory().createParser(json)) {
+            Object value = mapper.readValue(parser, Object.class);
+            return value instanceof Map && parser.nextToken() == null ? (Map<String, Object>) value : null;
+        } catch (Exception notOneObject) {
+            return null;
+        }
     }
 
     /**

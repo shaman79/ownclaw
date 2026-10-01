@@ -5,6 +5,9 @@ import java.util.List;
 /**
  * Abstraction over the agent's persistent memory.
  * Memory allows the agent to learn from past executions and improve over time.
+ * <p>
+ * A method whose read or write fails throws: its caller says so. It never answers as if the
+ * store were empty, or as if a write had been made.
  *
  * Three tiers:
  *   1. Working memory — the current trajectory (handled by AgentTrajectory, not here)

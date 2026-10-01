@@ -48,7 +48,9 @@ public class OllamaProvider implements LlmProvider {
                 // window, so a prompt that fills the window is some 47 minutes of silence. An hour
                 // covers that; only a server that has stopped answering is silent for longer.
                 // A caller need not wait it out: the call's cancel is handed to its progress
-                // hook (LlmProgress#calling), so Stop and the stall watchdog end it at once.
+                // hook (LlmProgress#calling), so a Stop ends it at once. A task's stall watchdog
+                // does not count the silence: this timeout is what bounds it
+                // (AgentContext#msSinceLastProgress).
                 .readTimeout(60, TimeUnit.MINUTES)
                 .writeTimeout(10, TimeUnit.SECONDS)
                 .build());

@@ -3310,7 +3310,8 @@
             COMPLETED: failedSteps ? 'Completed, ' + tdCount(failedSteps, 'step', 'steps') + ' failed' : 'Completed',
             NEEDS_INPUT: 'Waiting for your answer', PRIVACY_BLOCKED: 'Stopped: it would have sent private data',
             MAX_STEPS: 'Step limit reached', STALLED: 'No progress', TIMEOUT: 'Time limit',
-            FAILURE_LIMIT: 'Too many failed steps', ERROR: 'Internal error', CANCELLED: 'Cancelled'
+            FAILURE_LIMIT: 'Too many failed steps', ERROR: 'Internal error', CANCELLED: 'Cancelled',
+            CONTEXT_WINDOW: 'Longer than the model can read'
         }[r] || String(r || 'Not recorded');
         // Not green while any step's success is unverified (a row from before 24 Sep 2026).
         var tone = r === 'COMPLETED' ? (failedSteps ? 'warn' : unverified ? '' : 'green')

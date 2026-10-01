@@ -324,7 +324,7 @@ class AssistantPartsTest {
         String quoted = REPORT.substring(REPORT.indexOf("wireless.default_radio0"));
         LlmProvider failing = new LlmProvider() {
             public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
-                throw new com.ownclaw.llm.LlmException("anthropic", "HTTP 400: the request held " + quoted, 400, null);
+                throw new com.ownclaw.llm.LlmException("anthropic", "HTTP 500: the request held " + quoted, 500, null);
             }
             public boolean isAvailable() { return true; }
             public boolean supportsTools() { return true; }

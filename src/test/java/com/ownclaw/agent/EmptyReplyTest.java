@@ -119,7 +119,8 @@ class EmptyReplyTest {
                 Replies.of("{\"tool\": \"respond\", \"params\": {\"message\": \"Par", 300, 128_000, 0, 0, "max_tokens"));
         var tooLong = new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
         var privacy = new EgressRefused("anthropic");
-        for (RuntimeException e : List.of(refusal, cutOff, tooLong, privacy)) {
+        var badKey = new LlmException("anthropic", "HTTP 401: invalid x-api-key", 401, null);
+        for (RuntimeException e : List.of(refusal, cutOff, tooLong, privacy, badKey)) {
             var thrown = assertThrows(RuntimeException.class, () -> think(new Script(true, e)),
                     e.getClass().getSimpleName() + " became a step to ask again");
             assertSame(e, thrown, "passed to the loop unchanged, so it can say which it was");
@@ -298,5 +299,97 @@ class EmptyReplyTest {
                 "the model is shown what it wrote, the call as it wrote it included: " + told);
         assertFalse(told.contains("never came"), "the reply came: " + told);
         assertEquals(340 + 320, ctx.cloudTokens(), "the reply that could not be run was billed, and is counted");
+    }
+
+    /** A call that never reached the model: what a network that cannot be reached throws. */
+    static LlmException unreachable() {
+        return new LlmException("anthropic",
+                "Connection failed asking the Models API about 'claude-opus-5': timeout", 0, null);
+    }
+
+    static final String UNREACHABLE = "[anthropic] Connection failed asking the Models API about 'claude-opus-5': timeout";
+
+    @Test
+    @DisplayName("calls that failed stop the task as calls that failed, saying how -- not as a model that produced nothing")
+    void failedCallsAreNamedAsSuch(@TempDir Path tmp) throws Exception {
+        var cloud = new Script(true, unreachable());
+        var ctx = new AgentContext("u1", "t-unreachable", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** The call to the model failed 3 times in a row (the last: "
+                + UNREACHABLE + ").\n\n"), r.response());
+        // Mutation: the stop names steps that ran nothing whatever they were -> "The model
+        // produced nothing that could be run", of a model that was never reached.
+    }
+
+    @Test
+    @DisplayName("a run of empty replies and failed calls says how many were which")
+    void aMixedRunSaysWhichWasWhich(@TempDir Path tmp) throws Exception {
+        var cloud = new Script(true, empty(), unreachable(), empty());
+        var ctx = new AgentContext("u1", "t-mixed", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** 3 steps in a row ran nothing: the model's reply could not "
+                + "be run 2 times, and the call to it failed 1 time (the last: " + UNREACHABLE + ").\n\n"), r.response());
+    }
+
+    @Test
+    @DisplayName("the last step allowed, a call that failed, ends the task out of steps, saying how it failed")
+    void theLastStepAFailedCall(@TempDir Path tmp) throws Exception {
+        var config = new OwnClawConfig();
+        config.getTasks().setMaxPlanSteps(2);
+        var ctx = new AgentContext("u1", "t-last-failed", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), new Script(true, unreachable()), ctx,
+                new ToolRegistry(List.of()), config);
+
+        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** The task used all 2 steps it may take; in the last, the "
+                + "call to the model failed (" + UNREACHABLE + ").\n\n"), r.response());
+    }
+
+    @Test
+    @DisplayName("a request the provider refuses as it stands -- a key it does not take -- is not sent again: the task ends with its message")
+    void aRefusedRequestIsNotSentAgain(@TempDir Path tmp) throws Exception {
+        String refused = "HTTP 401: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\","
+                + "\"message\":\"invalid x-api-key\"}}";
+        var cloud = new Script(true, new LlmException("anthropic", refused, 401, null));
+        var ctx = new AgentContext("u1", "t-401", "What is the capital of France?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        assertEquals(1, cloud.requests.size(), "sent again, the same request is refused again");
+        assertTrue(r.response().startsWith("**Stopped:** [anthropic] " + refused + ".\n\n"), r.response());
+        // Mutation: ask again after any failed call -> three requests, and an ending that blames
+        // the model.
+    }
+
+    @Test
+    @DisplayName("a provider's refusal that quotes a private result is named in the ending, never quoted: later prompts read it")
+    void aRefusalQuotingAPrivateResultIsNotQuoted(@TempDir Path tmp) throws Exception {
+        var registry = new ToolRegistry(List.of(AssistantPartsTest.tool("router_audit",
+                List.of("ROUTER_PASS"), p -> AssistantPartsTest.REPORT)));
+        String quoted = AssistantPartsTest.REPORT.substring(AssistantPartsTest.REPORT.indexOf("wireless.default_radio0"));
+        var cloud = new Script(true, call("router_audit", Map.of()),
+                new LlmException("anthropic", "HTTP 400: the request held " + quoted, 400, null));
+        var ctx = new AgentContext("u1", "t-quote", "Audit the routers.");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
+
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** the call to the model failed (its message quotes a private "
+                + "result; it is in the log).\n\n"), r.response());
+        String said = com.ownclaw.privacy.PrivateIndex.normalise(r.response());
+        String report = com.ownclaw.privacy.PrivateIndex.normalise(quoted);
+        for (int i = 0; i + com.ownclaw.privacy.PrivateIndex.WINDOW <= report.length(); i++) {
+            assertFalse(said.contains(report.substring(i, i + com.ownclaw.privacy.PrivateIndex.WINDOW)),
+                    "a window of the private result is in what later prompts read: " + r.response());
+        }
+        // Mutation: end with the provider's message as it is -> the router's key in the chat.
     }
 }

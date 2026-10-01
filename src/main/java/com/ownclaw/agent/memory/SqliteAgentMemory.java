@@ -3,7 +3,9 @@ package com.ownclaw.agent.memory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,6 +23,11 @@ import java.util.regex.Pattern;
  * and avoids external dependencies for vector search.
  *
  * Upgrade path: swap this for an embedding-based implementation when needed.
+ * <p>
+ * A read or a write that fails throws, as the interface says: every one of them used to be
+ * caught and logged here, so a fact that was never stored was reported "Remembered", a store
+ * that could not be read said "No facts stored", and a task ran without the owner's preferences
+ * with nothing to tell it so.
  */
 @Component
 public class SqliteAgentMemory implements AgentMemory {
@@ -28,24 +35,23 @@ public class SqliteAgentMemory implements AgentMemory {
     private static final Logger log = LoggerFactory.getLogger(SqliteAgentMemory.class);
 
     private final JdbcTemplate jdbc;
+    /** For the one write of two statements, {@link #storeFact}. */
+    private final TransactionTemplate transaction;
 
     public SqliteAgentMemory(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.transaction = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
     @Override
     public void storeEpisode(String userId, String taskId, String summary, boolean outcome, List<String> tags) {
-        try {
-            String tagStr = tags != null ? String.join(",", tags) : "";
-            jdbc.update(
-                    "INSERT INTO agent_memory (user_id, task_id, memory_type, content, outcome, tags, created_at) " +
-                            "VALUES (?, ?, 'episode', ?, ?, ?, datetime('now'))",
-                    userId, taskId, summary, outcome ? 1 : 0, tagStr
-            );
-            log.debug("Stored episode for user={} task={}", userId, taskId);
-        } catch (Exception e) {
-            log.warn("Failed to store episode: {}", e.getMessage());
-        }
+        String tagStr = tags != null ? String.join(",", tags) : "";
+        jdbc.update(
+                "INSERT INTO agent_memory (user_id, task_id, memory_type, content, outcome, tags, created_at) " +
+                        "VALUES (?, ?, 'episode', ?, ?, ?, datetime('now'))",
+                userId, taskId, summary, outcome ? 1 : 0, tagStr
+        );
+        log.debug("Stored episode for user={} task={}", userId, taskId);
     }
 
     @Override
@@ -97,8 +103,9 @@ public class SqliteAgentMemory implements AgentMemory {
 
     @Override
     public void storeFact(String userId, String key, String fact) {
-        try {
-            // Upsert: delete existing fact with same key, then insert
+        // Upsert: the fact under this key is replaced, in one transaction -- as two statements, a
+        // delete that ran before an insert that failed lost the old fact along with the new one.
+        transaction.executeWithoutResult(status -> {
             jdbc.update(
                     "DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'fact' AND tags = ?",
                     userId, key
@@ -108,49 +115,37 @@ public class SqliteAgentMemory implements AgentMemory {
                             "VALUES (?, '', 'fact', ?, 1, ?, datetime('now'))",
                     userId, fact, key
             );
-            log.debug("Stored fact '{}' for user={}", key, userId);
-        } catch (Exception e) {
-            log.warn("Failed to store fact: {}", e.getMessage());
-        }
+        });
+        log.debug("Stored fact '{}' for user={}", key, userId);
     }
 
     @Override
     public boolean deleteFact(String userId, String key) {
-        try {
-            int deleted = jdbc.update(
-                    "DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'fact' AND tags = ?",
-                    userId, key
-            );
-            if (deleted > 0) {
-                log.debug("Deleted fact '{}' for user={}", key, userId);
-            }
-            return deleted > 0;
-        } catch (Exception e) {
-            log.warn("Failed to delete fact: {}", e.getMessage());
-            return false;
+        int deleted = jdbc.update(
+                "DELETE FROM agent_memory WHERE user_id = ? AND memory_type = 'fact' AND tags = ?",
+                userId, key
+        );
+        if (deleted > 0) {
+            log.debug("Deleted fact '{}' for user={}", key, userId);
         }
+        return deleted > 0;
     }
 
     @Override
     public List<MemoryEntry> getFacts(String userId) {
-        try {
-            return jdbc.query(
-                    "SELECT id, content, outcome, tags, created_at FROM agent_memory " +
-                            "WHERE user_id = ? AND memory_type = 'fact' " +
-                            "ORDER BY created_at DESC",
-                    (rs, rowNum) -> new MemoryEntry(
-                            rs.getString("id"),
-                            rs.getString("content"),
-                            rs.getInt("outcome") == 1,
-                            parseTags(rs.getString("tags")),
-                            createdAt(rs)
-                    ),
-                    userId
-            );
-        } catch (Exception e) {
-            log.warn("Failed to get facts: {}", e.getMessage());
-            return List.of();
-        }
+        return jdbc.query(
+                "SELECT id, content, outcome, tags, created_at FROM agent_memory " +
+                        "WHERE user_id = ? AND memory_type = 'fact' " +
+                        "ORDER BY created_at DESC",
+                (rs, rowNum) -> new MemoryEntry(
+                        rs.getString("id"),
+                        rs.getString("content"),
+                        rs.getInt("outcome") == 1,
+                        parseTags(rs.getString("tags")),
+                        createdAt(rs)
+                ),
+                userId
+        );
     }
 
     /** Words nearly every task has: looked for, they would find every episode. */

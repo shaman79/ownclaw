@@ -17,7 +17,10 @@ public class AgentContext {
     private final AgentTrajectory trajectory;
     private final Map<String, Object> metadata;
     private final long startTimeMs;
-    /** When the task last moved: a step finished, a model replied, or an event of a reply arrived. */
+    /**
+     * When the task last moved: a step finished, an event of a model's reply arrived, a model
+     * call ended, or a skill reported its progress. See {@link #msSinceLastProgress}.
+     */
     private volatile long lastProgressMs;
 
     /**
@@ -97,8 +100,18 @@ public class AgentContext {
     /** Mark forward progress (resets stall timer). */
     public void markProgress() { this.lastProgressMs = System.currentTimeMillis(); }
 
-    /** Milliseconds since the last forward progress. */
-    public long msSinceLastProgress() { return System.currentTimeMillis() - lastProgressMs; }
+    /**
+     * Milliseconds since the last forward progress -- what the stall watchdog reads -- and none
+     * while a model call is under way ({@link #progress}): a request sent and not yet returned,
+     * or a wait before trying one again. Such a call is bounded by its own timeouts, and Ollama
+     * sends nothing, not even its headers, while it loads the model and reads the prompt: at the
+     * hundred tokens a second the production host reads, a result of 60,000 tokens is ten minutes
+     * of silence from a model that is working. Counted, that silence was the stall limit, and a
+     * task that had handed a long result to its local model ended STALLED while the model read it.
+     */
+    public long msSinceLastProgress() {
+        return callInFlight != null ? 0 : System.currentTimeMillis() - lastProgressMs;
+    }
 
     public boolean isUnattended() { return unattended; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
@@ -137,8 +150,10 @@ public class AgentContext {
 
     /**
      * The stall watchdog's stop, with the facts it stopped on: from here {@link #isCancelled()}
-     * is true, a model call the task is waiting on is ended ({@link #interruptCall}), and the
-     * task ends STALLED saying them. The first facts are kept.
+     * is true, and the task ends STALLED saying them. The watchdog stops no task while a model
+     * call of it is under way ({@link #msSinceLastProgress}), but one can begin as it stops the
+     * task: that call is ended too ({@link #interruptCall}), or at once when it hands over its
+     * cancel ({@link #progress}). The first facts are kept.
      */
     public void stall(String facts) {
         if (stalled == null) stalled = facts;
@@ -162,10 +177,12 @@ public class AgentContext {
 
     /**
      * The hook for every model call made on this task's behalf ({@code withProgress}): each event
-     * of the streamed reply is progress, so the stall watchdog sees a long call that is still
-     * answering as alive; and once the task has been stopped, the next event ends the call by
-     * throwing {@code TaskCancelledException}, instead of the stop waiting minutes for it. While
-     * the call runs its cancel is kept here, so a stop ends it before any event too
+     * of the streamed reply is progress, and the time a call is under way is not counted as
+     * silence at all ({@link #msSinceLastProgress}), so the stall watchdog never takes a call
+     * that is still reading or answering for a stalled task; its end is progress too. Once the
+     * task has been stopped, the next event ends the call by throwing
+     * {@code TaskCancelledException}, instead of the stop waiting minutes for it. While the call
+     * runs its cancel is kept here, so a stop ends it before any event too
      * ({@link #interruptCall}); one stopped before the call was under way ends it at once. What
      * an attempt that ended without a reply was billed for is counted
      * ({@link #setBilledWithoutReply}).
@@ -180,6 +197,9 @@ public class AgentContext {
 
             @Override
             public void calling(Runnable cancel) {
+                // Marked before the call is let go, so the watchdog never reads the call gone
+                // and the clock from before it.
+                if (cancel == null) markProgress();
                 callInFlight = cancel;
                 if (cancel != null && isCancelled()) cancel.run();
             }
@@ -274,6 +294,23 @@ public class AgentContext {
      */
     public List<String> attachmentIds() {
         return files.stream().map(f -> String.valueOf(f.written().get("fileId"))).toList();
+    }
+
+    /**
+     * What a skill run for this task is handed, the loop's call and a delegation's alike: the
+     * stop to poll, the task's files, and where its progress reports go. Each report is progress
+     * for the stall watchdog ({@link #markProgress}) and then shown, as {@code shown} shows it.
+     * One rule for both paths: a report counted on one of them only let the watchdog stop a scan
+     * the owner watched report its progress for ten minutes, and tell him nothing had moved.
+     */
+    public com.ownclaw.agent.tools.ToolExecutionContext toolContext(
+            com.ownclaw.sandbox.SandboxManager.ProgressCallback shown) {
+        return new com.ownclaw.agent.tools.ToolExecutionContext(userId, taskId, null, this::isCancelled,
+                (message, percent) -> {
+                    markProgress();
+                    shown.onProgress(message, percent);
+                },
+                attachmentIds());
     }
 
     // ── artifacts ──

@@ -92,7 +92,7 @@ class ObservationRetentionTest {
         ctx.trajectory().record(new AgentAction("fetch_page", Map.of("n", 2), "second"),
                 AgentObservation.success("fetch_page", page("B", 70_000), Map.of(), 10));
 
-        assertTrue(openai(ctx).contains("Reasoning: " + reasoning.strip()));
+        assertTrue(openai(ctx).contains("{\"reasoning\":\"" + reasoning.strip()));
         String replay = engine().buildMessages(ctx, "anthropic", NATIVE).stream()
                 .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).findFirst().orElseThrow().content();
         assertTrue(replay.contains(reasoning.strip()), "the replayed turn carries it whole: " + replay);

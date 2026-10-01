@@ -266,10 +266,11 @@ public class LocalExecutor {
         // starve thinking models, which spend part of the budget reasoning before they answer.
         // format:json and tools are mutually exclusive in Ollama, so JSON mode is only asked for
         // on the text protocol, where it is what holds the output shape.
-        // The task's own hook, as its think and code calls carry: every event of the streamed
-        // reply shows the task is alive, so a generation that runs for minutes is not taken for
-        // a stall; and a Stop or the watchdog ends the call -- mid-reply, or while the model is
-        // still loading and has sent nothing -- rather than when the model finishes.
+        // The task's own hook, as its think and code calls carry: while the call is under way the
+        // stall watchdog does not count the time (AgentContext#msSinceLastProgress), so neither a
+        // generation that runs for minutes nor the model loading and reading a long prompt,
+        // sending nothing, is taken for a stall; and a Stop ends the call -- mid-reply, or before
+        // the model has sent anything -- rather than when the model finishes.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
                 .withProgress(parentContext.progress());
 
@@ -758,25 +759,14 @@ public class LocalExecutor {
         }
 
         Tool tool = toolOpt.get();
-        ToolExecutionContext execCtx = new ToolExecutionContext(
-                context.userId(),
-                context.taskId(),
-                null,
-                context::isCancelled,
-                // A skill's report_progress: shown to the owner, as the cloud path shows it, and
-                // progress for the stall watchdog. With no callback the sandbox leaves the line in
-                // the skill's stdout.
-                (message, percent) -> {
-                    context.markProgress();
-                    statusEmitter.emitForTask(context.userId(), context.taskId(),
-                            StatusMessage.Type.PROGRESS, "Delegate: " + toolName + ": " + message
-                                    + (percent == null ? "" : " (" + percent + "%)"));
-                },
-                // The four-argument constructor defaults these to empty, so a delegated skill
-                // could not see a file the task was given. That was survivable while delegation
-                // was the road not taken; it is not once unattended work runs through here.
-                context.attachmentIds()
-        );
+        // What the cloud path hands a skill (AgentContext#toolContext): the task's files, its
+        // stop, and a report_progress that is progress for the stall watchdog -- shown to the
+        // owner here as a delegation step's status line. With no callback the sandbox would
+        // leave the line in the skill's stdout.
+        ToolExecutionContext execCtx = context.toolContext((message, percent) ->
+                statusEmitter.emitForTask(context.userId(), context.taskId(),
+                        StatusMessage.Type.PROGRESS, "Delegate: " + toolName + ": " + message
+                                + (percent == null ? "" : " (" + percent + "%)")));
 
         try {
             return tool.execute(params != null ? params : Map.of(), execCtx);

@@ -98,6 +98,30 @@ public class SkillManager {
     }
 
     /**
+     * Why no skill may be made under this name, as the ERROR line a skill_create step records, or
+     * null when one may: the one rule for a skill's name ({@link #isSkillName}), and no variant of
+     * a skill that exists -- web_fetch_v2, web_fetch_fixed -- which is updated under its own name
+     * instead. {@link #createSkill} asks it, and so does the agent loop before a model writes the
+     * skill's code: the name does not depend on the code, and asked only after it, a refused
+     * name cost a whole code generation every time.
+     */
+    public String nameRefusal(String name) {
+        if (!isSkillName(name)) {
+            return "ERROR: Invalid skill name: " + SKILL_NAME_RULE + ".";
+        }
+        // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
+        // The LLM should overwrite the original skill with the SAME name instead.
+        String baseName = detectBaseSkillName(name);
+        if (baseName != null && toolRegistry.find(baseName).isPresent()) {
+            return "ERROR: Skill '" + baseName + "' already exists. " +
+                    "Do NOT create '" + name + "'. " +
+                    "To fix or update a skill, use skill_create with the SAME name '" + baseName + "' — " +
+                    "it will overwrite the existing skill in-place.";
+        }
+        return null;
+    }
+
+    /**
      * Create (or update) a Python skill.
      *
      * @param params must contain: name, description, code, parameters (JSON string).
@@ -110,19 +134,8 @@ public class SkillManager {
         String code = str(params, "code");
         // --- Validate ---
 
-        if (!isSkillName(name)) {
-            return "ERROR: Invalid skill name: " + SKILL_NAME_RULE + ".";
-        }
-
-        // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
-        // The LLM should overwrite the original skill with the SAME name instead.
-        String baseName = detectBaseSkillName(name);
-        if (baseName != null && toolRegistry.find(baseName).isPresent()) {
-            return "ERROR: Skill '" + baseName + "' already exists. " +
-                    "Do NOT create '" + name + "'. " +
-                    "To fix or update a skill, use skill_create with the SAME name '" + baseName + "' — " +
-                    "it will overwrite the existing skill in-place.";
-        }
+        String refused = nameRefusal(name);
+        if (refused != null) return refused;
 
         if (description == null || description.isBlank()) return "ERROR: Description is required.";
         if (code == null || code.isBlank()) return "ERROR: Code is required.";

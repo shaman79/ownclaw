@@ -113,8 +113,8 @@ public class TaskCancellationService {
     /**
      * Thrown into a model call when its task has been stopped: the call's progress hook throws
      * it on the next event of the streamed reply -- or, for a call ended before any event, when
-     * its provider asks the hook once more -- so a Stop or the stall watchdog ends the call
-     * instead of waiting for it to finish. The loop turns it into the task's ending.
+     * its provider asks the hook once more -- so a stop ends the call instead of waiting for it
+     * to finish. The loop turns it into the task's ending.
      */
     public static class TaskCancelledException extends RuntimeException {
         public TaskCancelledException(String taskId) {

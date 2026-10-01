@@ -180,17 +180,23 @@ class ChatContextTest {
     }
 
     @Test
-    @DisplayName("a handle in an earlier message is read in words: in this task it would be one of its own results")
-    void noHandleResolvesHere(@TempDir Path tmp) throws Exception {
+    @DisplayName("each message as it was written: a template's {{1}} is text; only a message that is nothing but a handle is in words")
+    void eachMessageAsWritten(@TempDir Path tmp) throws Exception {
         var db = db(tmp);
-        String session = db.conversations().createSession("u1", "Mail");
-        db.conversations().saveMessage("u1", session, "user", "send {{1}} to the team");
-        db.conversations().saveMessage("u1", session, "assistant", "Sent {{2.body}} as asked.");
-        String asked = db.conversations().saveMessage("u1", session, "user", "and to Jana?");
+        String session = db.conversations().createSession("u1", "Templates");
+        db.conversations().saveMessage("u1", session, "user",
+                "My WhatsApp template: Hi {{1}}, appointment {{2}} at {{3}}. Make it friendlier.");
+        db.conversations().saveMessage("u1", session, "assistant", "Hello {{1}}! Your appointment is on {{2}} at {{3}}.");
+        db.conversations().saveMessage("u1", session, "user", "{{2}}");
+        String asked = db.conversations().saveMessage("u1", session, "user", "Now make it shorter.");
 
         String shown = contextOf(db, asked);
-        assertTrue(shown.contains("USER: send result 1 to the team"), shown);
-        assertTrue(shown.contains("ASSISTANT: Sent result 2.body as asked."), shown);
-        assertFalse(ArtifactRef.TOKEN.matcher(shown).find(), "a handle this task would resolve: " + shown);
+        assertTrue(shown.contains("USER: My WhatsApp template: Hi {{1}}, appointment {{2}} at {{3}}. Make it "
+                + "friendlier.\nASSISTANT: Hello {{1}}! Your appointment is on {{2}} at {{3}}.\n"), shown);
+        // Inside text a handle never resolves; as the whole value of a call it would, in this
+        // task's own numbering -- and a message that is a handle is nothing but that value.
+        assertTrue(shown.endsWith("\nUSER: result 2"), shown);
+        // Mutation: write every handle in every message in words -> the template comes back
+        // with "result 1" in it.
     }
 }

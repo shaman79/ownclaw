@@ -186,7 +186,11 @@ class AnthropicProvider implements LlmProvider {
             if (!response.isSuccessful()) {
                 int code = response.code();
                 String error = responseBody != null ? responseBody.string() : "";
-                if (code == 400 && error.contains("prompt is too long")) {
+                // Too long for the model either way: a prompt of more tokens than its window, or a
+                // request larger than the API takes at all (413 request_too_large) -- which a
+                // prompt of text only reaches far past the window, since 32 MB of text is several
+                // million tokens. Neither is worth sending again.
+                if (code == 413 || code == 400 && error.contains("prompt is too long")) {
                     throw new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW,
                             modelLimits.contextWindow(), null);
                 }
@@ -479,29 +483,14 @@ class AnthropicProvider implements LlmProvider {
             }
         }
         if (systemPrompt != null) {
-            // System prompt caching. With multi-turn mode, the system prompt is
-            // fully static (no dynamic content) — the no-marker path caches it as
-            // one block. The marker path is kept for backward compatibility.
+            // System prompt caching: the system prompt is the same static text on every step
+            // (what changes goes at the end of the last user message), so it is one block,
+            // cached whole.
             ArrayNode systemArray = body.putArray("system");
-            String marker = LlmMessage.CACHE_BOUNDARY;
-            int markerIdx = systemPrompt.indexOf(marker);
-            if (markerIdx > 0) {
-                // Static part — cached across requests
-                ObjectNode staticBlock = systemArray.addObject();
-                staticBlock.put("type", "text");
-                staticBlock.put("text", systemPrompt.substring(0, markerIdx));
-                staticBlock.putObject("cache_control").put("type", "ephemeral");
-                // Dynamic part — changes every request, not cached
-                ObjectNode dynamicBlock = systemArray.addObject();
-                dynamicBlock.put("type", "text");
-                dynamicBlock.put("text", systemPrompt.substring(markerIdx + marker.length()));
-            } else {
-                // No marker — cache the entire prompt (multi-turn static prompt path)
-                ObjectNode sysBlock = systemArray.addObject();
-                sysBlock.put("type", "text");
-                sysBlock.put("text", systemPrompt);
-                sysBlock.putObject("cache_control").put("type", "ephemeral");
-            }
+            ObjectNode sysBlock = systemArray.addObject();
+            sysBlock.put("type", "text");
+            sysBlock.put("text", systemPrompt);
+            sysBlock.putObject("cache_control").put("type", "ephemeral");
         }
 
         // Sliding-window conversation cache breakpoints.
