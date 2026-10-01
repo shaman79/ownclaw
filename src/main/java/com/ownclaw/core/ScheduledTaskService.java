@@ -171,16 +171,27 @@ public class ScheduledTaskService {
      * Parse a natural-language time expression into an {@link Instant}.
      * Supports: "in 30 minutes", "in 2 hours", "in 1 day", "tomorrow",
      * "tomorrow at 9am", "at 14:30".
+     * <p>
+     * The whole expression must be one of these. Found anywhere in it, "2 hours" made "2 hours
+     * backup my notes" a time too, and /schedule, which takes the longest run of leading words
+     * that is a time, kept only "notes" of the task. A time that does not exist -- "30" read as
+     * a clock time, "14:75" -- is not one either: it used to throw.
      *
      * @return the parsed instant, or empty if the expression is not recognized
      */
     public Optional<Instant> parseTimeExpression(String expression) {
         if (expression == null || expression.isBlank()) return Optional.empty();
-        String expr = expression.trim().toLowerCase();
+        try {
+            return parseTime(expression.trim().toLowerCase());
+        } catch (DateTimeException | ArithmeticException | NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
 
+    private Optional<Instant> parseTime(String expr) {
         // "in N unit(s)"
         Matcher durMatch = DURATION_PATTERN.matcher(expr);
-        if (durMatch.find()) {
+        if (durMatch.matches()) {
             int amount = Integer.parseInt(durMatch.group(1));
             String unit = durMatch.group(2).toLowerCase();
             Instant result = switch (unit) {
@@ -197,7 +208,7 @@ public class ScheduledTaskService {
 
         // "tomorrow" or "tomorrow at HH:mm"
         Matcher tomorrowMatch = TOMORROW_PATTERN.matcher(expr);
-        if (tomorrowMatch.find()) {
+        if (tomorrowMatch.matches()) {
             LocalDate tomorrow = LocalDate.now().plusDays(1);
             int hour = tomorrowMatch.group(1) != null ? Integer.parseInt(tomorrowMatch.group(1)) : 9;
             int minute = tomorrowMatch.group(2) != null ? Integer.parseInt(tomorrowMatch.group(2)) : 0;
@@ -209,7 +220,7 @@ public class ScheduledTaskService {
 
         // "at HH:mm" — today if in the future, otherwise tomorrow
         Matcher atMatch = AT_TIME_PATTERN.matcher(expr);
-        if (atMatch.find()) {
+        if (atMatch.matches()) {
             int hour = Integer.parseInt(atMatch.group(1));
             int minute = atMatch.group(2) != null ? Integer.parseInt(atMatch.group(2)) : 0;
             String ampm = atMatch.group(3);

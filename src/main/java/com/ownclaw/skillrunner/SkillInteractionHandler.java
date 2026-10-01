@@ -10,7 +10,7 @@ import java.util.concurrent.*;
 /**
  * An answer the chat is waiting for. The setup wizard asks its questions as system messages and
  * waits here for each reply; the web chat and Telegram hand a message to a waiting question
- * instead of starting a task with it, and Stop cancels the wait.
+ * instead of starting a task with it, and Stop or /cancel cancels the wait.
  * <p>
  * Named for the skills that once asked the user questions while they ran (need_input). No skill
  * can: a task asks the owner between steps (ask_user), and his answer starts the next task.
@@ -108,12 +108,16 @@ public class SkillInteractionHandler {
 
     /**
      * Cancel all pending input requests for a user (e.g., on disconnect).
+     * <p>
+     * Ended as a failure, not as a cancellation: {@code get()} throws a CancellationException as
+     * it is, past the waiting wizard's catch of ExecutionException, and the wizard ended without
+     * a word.
      */
     public void cancelPending(String userId) {
         pendingInputs.entrySet().removeIf(entry -> {
             if (entry.getKey().startsWith(userId + ":")) {
                 entry.getValue().completeExceptionally(
-                        new CancellationException("User disconnected"));
+                        new IllegalStateException("the question was cancelled"));
                 return true;
             }
             return false;

@@ -84,6 +84,31 @@ class TaskEndingTest {
     }
 
     @Test
+    @DisplayName("an unattended run's report says where a reply reads it: on Telegram, where it is sent too, a message goes to the chat open on the web")
+    void anUnattendedReportSaysWhereToReply() {
+        var attended = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"),
+                auditTask(), Map.of()).response();
+        assertTrue(attended.contains("**Next:** Reply **continue** to carry on: a new task starts from this message."),
+                attended);
+        for (TerminationReason reason : TerminationReason.values()) {
+            if (reason == TerminationReason.COMPLETED || reason == TerminationReason.NEEDS_INPUT) continue;
+            var ctx = auditTask();
+            ctx.setUnattended(true);
+            String text = TaskEnding.apply(ended(reason, "a reason for " + reason), ctx, Map.of()).response();
+            String next = text.substring(text.indexOf("**Next:** "));
+            assertTrue(next.contains(" in the web chat that holds this report "), reason + ": " + next);
+        }
+        var ctx = auditTask();
+        ctx.setUnattended(true);
+        String report = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"),
+                ctx, Map.of()).response();
+        assertTrue(report.contains("**Next:** Reply **continue** in the web chat that holds this report to carry on: "
+                + "a new task starts from this message."), report);
+        // Mutation: one Next line for both -> a Telegram "continue" went to the open chat and
+        // started a task that had never seen the report.
+    }
+
+    @Test
     @DisplayName("public results whole in the text later prompts read; private ones, and public ones repeating them, only on the owner's screen")
     void resultsGoWhereTheyMay() {
         var r = TaskEnding.apply(ended(TerminationReason.PRIVACY_BLOCKED, "blocked"), auditTask(), Map.of());

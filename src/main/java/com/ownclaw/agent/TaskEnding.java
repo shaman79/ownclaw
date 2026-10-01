@@ -49,7 +49,7 @@ final class TaskEnding {
         ending.append(words(did(ctx, trace), ctx));
         var privateResults = new StringBuilder();
         ending.append(produced(ctx, trace, privateResults));
-        String next = next(r.terminationReason());
+        String next = next(r.terminationReason(), ctx.isUnattended());
         if (next != null) {
             ending.append("\n\n**Next:** ").append(next)
                   .append(" Every step is on this task's page: task ").append(ctx.taskId()).append('.');
@@ -147,20 +147,29 @@ final class TaskEnding {
                 : "\n\n**What it produced:**" + words(list.toString(), ctx) + publicResults;
     }
 
-    /** What the owner can do next -- only what is true for this ending. */
-    private static String next(TerminationReason reason) {
+    /**
+     * What the owner can do next -- only what is true for this ending.
+     * <p>
+     * An unattended run's ending -- a scheduled run's, or a /bg task's -- is a report delivered
+     * into a chat of its own: the pinned chat of scheduled results, or the one /bg was typed in.
+     * A message reads it when it is sent in that chat; the report goes to Telegram too, where a
+     * message is filed in whichever chat is open on the web, so "your next message reads this"
+     * was false there. Its ending says where.
+     */
+    private static String next(TerminationReason reason, boolean unattended) {
+        String in = unattended ? " in the web chat that holds this report" : "";
         return switch (reason) {
             case COMPLETED, NEEDS_INPUT -> null;
-            case MAX_STEPS -> "Reply **continue** to carry on: a new task starts from this message.";
-            case PRIVACY_BLOCKED -> "Your next message starts a new task, which reads this message "
+            case MAX_STEPS -> "Reply **continue**" + in + " to carry on: a new task starts from this message.";
+            case PRIVACY_BLOCKED -> "Your next message" + in + " starts a new task, which reads this message "
                     + "but not the private results.";
             // "Your next message starts a new task, which reads this message" was literally true
             // and sent the owner back into a chat whose every later task read the whole of it,
             // this ending too, and failed the same way.
-            case CONTEXT_WINDOW -> "A message sent in this chat is read with the whole chat, this "
-                    + "ending included, so it is likely to be too long as well: start a new chat "
-                    + "(/new) to carry on, and say there what it needs from this one.";
-            default -> "Your next message starts a new task, which reads this message.";
+            case CONTEXT_WINDOW -> "A message sent" + (unattended ? in : " in this chat") + " is read with "
+                    + "the whole chat, this ending included, so it is likely to be too long as well: start "
+                    + "a new chat (/new) to carry on, and say there what it needs from this one.";
+            default -> "Your next message" + in + " starts a new task, which reads this message.";
         };
     }
 

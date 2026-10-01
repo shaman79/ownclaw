@@ -7,6 +7,7 @@ import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.TokenBudgetTracker;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.skillrunner.SkillInteractionHandler;
 import com.ownclaw.users.AuthService;
 import com.ownclaw.users.CredentialGrantService;
 import com.ownclaw.users.CredentialVault;
@@ -50,6 +51,7 @@ public class CommandHandler {
     private final com.ownclaw.conversation.FileStorageService fileStorage;
     private final com.ownclaw.core.TaskCancellationService cancellationService;
     private final com.ownclaw.core.ResultDelivery resultDelivery;
+    private final SkillInteractionHandler interactionHandler;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
@@ -59,7 +61,8 @@ public class CommandHandler {
                           AuthService authService, UserRepository userRepo,
                           com.ownclaw.conversation.FileStorageService fileStorage,
                           com.ownclaw.core.TaskCancellationService cancellationService,
-                          com.ownclaw.core.ResultDelivery resultDelivery) {
+                          com.ownclaw.core.ResultDelivery resultDelivery,
+                          SkillInteractionHandler interactionHandler) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -73,6 +76,7 @@ public class CommandHandler {
         this.fileStorage = fileStorage;
         this.cancellationService = cancellationService;
         this.resultDelivery = resultDelivery;
+        this.interactionHandler = interactionHandler;
     }
 
     /**
@@ -109,7 +113,12 @@ public class CommandHandler {
                 // interface, so typing it in the web UI did nothing at all — it fell through to
                 // the agent as an ordinary message. The Stop button worked; the documented
                 // command did not.
+                // A question waiting for an answer -- the setup wizard's -- is cancelled with it,
+                // as Stop cancels it. Telegram had a /cancel of its own that did; this one did not,
+                // and the wizard took the next message typed in the web chat as its answer: at
+                // the cloud step, as the cloud API key.
                 cancellationService.requestAll(userId, "you sent /cancel");
+                interactionHandler.cancelPending(userId);
                 yield Optional.of("Cancelling. A model call the task is waiting on ends at once, "
                         + "and a delegation stops before its next step; a skill that is running is "
                         + "not interrupted, so the task stops when it returns.");
@@ -325,8 +334,8 @@ public class CommandHandler {
             return "Only the owner can manage accounts.";
         }
         String[] parts = args.split("\\s+");
-        String usage = "Usage: /user list | /user add <username> <password> | "
-                + "/user disable <username|id> | /user telegram <username> <telegram id>";
+        String usage = "Usage: `/user list` | `/user add <username> <password>` | "
+                + "`/user disable <username|id>` | `/user telegram <username> <telegram id>`";
 
         switch (parts[0].toLowerCase()) {
             case "list" -> {
@@ -377,7 +386,7 @@ public class CommandHandler {
     }
 
     private static final String ADD_USAGE =
-            "Usage: /user add <username> <password> (password: at least 4 characters, no spaces)";
+            "Usage: `/user add <username> <password>` (password: at least 4 characters, no spaces)";
 
     /** A well-formed {@code /user add}, as SECRET_COMMAND read it. */
     private String addUser(String userId, String username, String password) {
@@ -431,7 +440,7 @@ public class CommandHandler {
         try {
             num = Integer.parseInt(arg);
         } catch (NumberFormatException e) {
-            return "Usage: /switch <number> — use /history to see session numbers.";
+            return "Usage: `/switch <number>` — use `/history` to see session numbers.";
         }
         List<Map<String, Object>> sessions = conversationService.listSessions(userId, false);
         if (num < 1 || num > sessions.size()) {
@@ -567,12 +576,12 @@ public class CommandHandler {
 
     private String handleCred(String userId, String args) {
         if (args.isEmpty()) {
-            return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
+            return "Usage: `/cred set <KEY> <VALUE>` | `/cred list` | `/cred delete <KEY>`";
         }
 
         if (args.equals("list")) {
             List<String> keys = credentialVault.listCredentialKeys(userId);
-            if (keys.isEmpty()) return "No credentials stored. Use /cred set <KEY> <VALUE> to store one.";
+            if (keys.isEmpty()) return "No credentials stored. Use `/cred set <KEY> <VALUE>` to store one.";
             var sb = new StringBuilder("\uD83D\uDD10 Stored credentials:\n");
             for (String key : keys) {
                 sb.append("  \u2022 ").append(key).append("\n");
@@ -582,12 +591,12 @@ public class CommandHandler {
 
         if (args.startsWith("delete ")) {
             String key = args.substring(7).strip().toUpperCase();
-            if (key.isEmpty()) return "Usage: /cred delete <KEY>";
+            if (key.isEmpty()) return "Usage: `/cred delete <KEY>`";
             credentialVault.deleteCredential(userId, key);
             return "\u274c Credential '" + key + "' deleted.";
         }
 
-        return "Usage: /cred set <KEY> <VALUE> | /cred list | /cred delete <KEY>";
+        return "Usage: `/cred set <KEY> <VALUE>` | `/cred list` | `/cred delete <KEY>`";
     }
 
     /** A well-formed {@code /cred set}, as SECRET_COMMAND read it. */
@@ -651,39 +660,33 @@ public class CommandHandler {
     }
 
     private String handleScheduleDeferred(String userId, String args) {
-        // Parse: "<time expression> <task description>"
-        // Try to find where the time expression ends and the task begins.
-        // Strategy: try progressively longer prefixes as time expressions.
-        String[] words = args.split("\\s+");
-        String timeExpr = null;
+        // "<time> <task>": the time is the longest run of leading words, up to six, that is a
+        // whole time expression -- "2 hours", where "2" alone is two o'clock -- and the task is
+        // all that follows it, as typed.
+        Instant runAt = null;
         String taskDesc = null;
-
-        for (int i = 1; i <= Math.min(words.length - 1, 6); i++) {
-            String candidate = String.join(" ", java.util.Arrays.copyOfRange(words, 0, i));
-            var parsed = scheduledTaskService.parseTimeExpression(candidate);
-            if (parsed.isPresent()) {
-                timeExpr = candidate;
-                taskDesc = String.join(" ", java.util.Arrays.copyOfRange(words, i, words.length));
+        Matcher word = Pattern.compile("\\S+").matcher(args);
+        for (int i = 0; i < 6 && word.find(); i++) {
+            String rest = args.substring(word.end()).strip();
+            var parsed = scheduledTaskService.parseTimeExpression(args.substring(0, word.end()));
+            if (parsed.isPresent() && !rest.isEmpty()) {
+                runAt = parsed.get();
+                taskDesc = rest;
             }
         }
 
-        if (timeExpr == null || taskDesc == null || taskDesc.isBlank()) {
+        if (runAt == null) {
             return "Could not parse time expression. Examples:\n"
                     + "  `/schedule in 2 hours check server status`\n"
                     + "  `/schedule in 30 minutes remind me to call John`\n"
                     + "  `/schedule in 1 day run backup`";
         }
 
-        var runAt = scheduledTaskService.parseTimeExpression(timeExpr);
-        if (runAt.isEmpty()) {
-            return "Could not parse time: \"" + timeExpr + "\"";
-        }
-
         try {
-            long id = scheduledTaskService.scheduleDeferred(userId, taskDesc, runAt.get());
+            long id = scheduledTaskService.scheduleDeferred(userId, taskDesc, runAt);
             var fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d, HH:mm")
                     .withZone(java.time.ZoneId.systemDefault());
-            return "✅ Task **#" + id + "** scheduled for **" + fmt.format(runAt.get())
+            return "✅ Task **#" + id + "** scheduled for **" + fmt.format(runAt)
                     + "**: " + taskDesc;
         } catch (IllegalStateException e) {
             return "❌ " + e.getMessage();
@@ -765,7 +768,7 @@ public class CommandHandler {
     private String handleGrant(String userId, String args) {
         String[] parts = args.split("\\s+", 2);
         if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
-            return "Usage: /grant <tool_name> <credential_key>";
+            return "Usage: `/grant <tool_name> <credential_key>`";
         }
         String toolName = parts[0];
         String credential = parts[1].toUpperCase();
@@ -775,7 +778,7 @@ public class CommandHandler {
     }
 
     private String handleRevoke(String userId, String toolName) {
-        if (toolName.isEmpty()) return "Usage: /revoke <tool_name>";
+        if (toolName.isEmpty()) return "Usage: `/revoke <tool_name>`";
         credentialGrants.resetGrants(userId, toolName);
         return "\u274c Credential grants revoked for '" + toolName + "'";
     }

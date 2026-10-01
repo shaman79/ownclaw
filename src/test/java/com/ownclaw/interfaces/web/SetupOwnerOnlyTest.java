@@ -63,7 +63,7 @@ class SetupOwnerOnlyTest {
         };
         chat = new ChatWebSocketHandler(new TaskQueue(null, null, null, new OwnClawConfig(), null), null,
                 conversations, new ChatStatusEmitter(),
-                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null),
+                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null),
                 wizard, auth, new SkillInteractionHandler(), null, null, new ObjectMapper());
     }
 

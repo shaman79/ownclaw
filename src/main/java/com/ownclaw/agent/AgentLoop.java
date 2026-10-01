@@ -1130,8 +1130,15 @@ public class AgentLoop {
                         action.tool() + " ✓ " + TaskRecord.duration(observation.durationMs()),
                         tokenData(context));
             } else {
+                // Which task, and how long the failure's text is -- not the text, which is whole
+                // in this step's observe detail just before it. This line goes to Telegram as
+                // well, where a long traceback went out in parts for every failed call, of a task
+                // the owner was following in the browser too, ahead of the results and answers
+                // queued after it.
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.WARNING,
-                        action.tool() + " ✗ " + observation.output());
+                        action.tool() + " ✗ " + TaskRecord.duration(observation.durationMs())
+                                + String.format(Locale.ROOT, ", %,d chars — task %s",
+                                        observation.output().length(), context.taskId()));
             }
 
             // === DELEGATION NUDGE ===

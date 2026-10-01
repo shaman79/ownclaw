@@ -2654,6 +2654,8 @@
             document.getElementById('input-area').style.display = '';
             ws.send(JSON.stringify({ type: 'new_session', message: '' }));
             clearMessages();
+            // No chat is on screen until the server names the new one (session_info).
+            displayedSessionId = null;
             resetActivity();
             sidebar.classList.remove('mobile-open');
         }
@@ -5377,10 +5379,15 @@
                 if (type === 'session_info') {
                     // Session list update from server
                     renderSessionList(data.sessions || [], data.activeSessionId || '');
-                    // Only load messages on initial connect / reconnect, not on every
-                    // switch/new_session (those handle message loading themselves).
+                    // Show the chat the server has open -- where what is typed here is saved --
+                    // when it is not the one on screen: on connect and reconnect (then always,
+                    // for what came while away), and after New Chat, /new or /switch, which open
+                    // a chat and say so only here. Left on the old chat, the page drew a result
+                    // for it into the new chat's empty pane, and the answer to the first
+                    // question asked there went unshown, as one for another chat.
                     // Skip if user is viewing task history.
-                    if (needsInitialLoad && data.activeSessionId && currentView === 'chat') {
+                    if ((needsInitialLoad || data.activeSessionId !== displayedSessionId)
+                            && data.activeSessionId && currentView === 'chat') {
                         loadSessionMessages(data.activeSessionId);
                         needsInitialLoad = false;
                     }
@@ -5402,8 +5409,11 @@
                     // moved while the transcript stayed on the old chat. Anything typed here was
                     // then saved into the chat the server considers active, i.e. not the one on
                     // screen. Following the switch is the only reading that is not a lie.
+                    // Measured against the chat on screen, not the one last listed as open: the
+                    // two differ while a switch this window made is under way, and after a list
+                    // fetched when a delete failed named a chat the pane does not show.
                     refreshSessionList();
-                    if (content && content !== activeSessionId && currentView === 'chat') {
+                    if (content && content !== displayedSessionId && currentView === 'chat') {
                         activeSessionId = content;
                         updateSidebarActive(content);
                         // Keep anything half-typed: it belongs to the person, not the chat.

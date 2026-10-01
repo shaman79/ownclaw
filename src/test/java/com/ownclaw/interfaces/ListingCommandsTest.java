@@ -26,7 +26,7 @@ class ListingCommandsTest {
         events = new EventLogService(jdbc);
         conversations = new ConversationService(jdbc);
         commands = new CommandHandler(null, conversations, events, null, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     private String run(String command) {

@@ -43,6 +43,22 @@ class ChatPageTest {
     }
 
     @Test
+    @DisplayName("the page shows the chat the server has open: after New Chat, /new or /switch, results and answers are routed by it")
+    void thePageFollowsTheOpenChat() {
+        assertTrue(page.contains("if ((needsInitialLoad || data.activeSessionId !== displayedSessionId) "
+                + "&& data.activeSessionId && currentView === 'chat') { loadSessionMessages(data.activeSessionId);"),
+                "the chat session_info names as open is loaded when it is not the one on screen");
+        assertTrue(page.contains("if (content && content !== displayedSessionId && currentView === 'chat') {"),
+                "session_updated is measured against the chat on screen");
+        String newChat = page.substring(page.indexOf("newChatBtn.addEventListener('click'"));
+        newChat = newChat.substring(0, newChat.indexOf("});"));
+        assertTrue(newChat.contains("clearMessages();") && newChat.contains("displayedSessionId = null;"),
+                "the cleared pane shows no chat until the server names the new one: " + newChat);
+        // Mutation: load only on (re)connect, as before -> after New Chat a result for the old
+        // chat was drawn into the new one's pane, and the first answer there went unshown.
+    }
+
+    @Test
     @DisplayName("the run history pages on with one handler, so no page is fetched twice")
     void loadMoreHasOneHandler() {
         assertTrue(page.contains("loadMore.onclick = function() { loadMoreRuns(runs.length, container, loadMore); };"),

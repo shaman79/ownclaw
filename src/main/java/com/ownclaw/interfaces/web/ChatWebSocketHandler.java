@@ -233,9 +233,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             userMessage = payload;
         }
 
-        // Heartbeat ping: keep-alive for long-lived browser connections.
-        // Do not treat as user input or command.
-        if ("ping".equalsIgnoreCase(messageType) || "ping".equalsIgnoreCase(userMessage)) {
+        // Heartbeat ping: keep-alive for long-lived browser connections, sent as {type:'ping'}.
+        // Do not treat as user input or command. A typed "ping" is a message like any other:
+        // taken for the heartbeat, it was neither saved nor answered, and the page, which had
+        // drawn it and started waiting, waited for nothing.
+        if ("ping".equalsIgnoreCase(messageType)) {
             sendToSession(session, "pong", "");
             return;
         }
@@ -355,8 +357,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     // instead of presenting it as the finished answer.
                     sendToUser(userId, result.awaitingUser() ? "input_request" : "response",
                                 result.shown(), currentSessionId, result.taskId());
-                    // Notify frontend to refresh session list (title/preview may have changed)
-                    sendToUser(userId, "session_updated", currentSessionId);
+                    // The chat list has changed (count, preview), so every window fetches it
+                    // again. The frame names the chat open now, which a window follows -- not the
+                    // one this answer is saved in, which the owner may have left while the task
+                    // ran: named, it took his page there, and what he typed next was saved into
+                    // the chat he had opened instead.
+                    try {
+                        sendToUser(userId, "session_updated", conversationService.getCurrentSession(userId));
+                    } catch (Exception e) {
+                        log.warn("Could not tell {}'s windows the chat list changed: {}", userId, e.getMessage());
+                    }
                 })
                 // Only the task's own failure arrives here. Saving and sending its answer cannot
                 // throw (send() catches what a socket throws), so an answer that is already saved

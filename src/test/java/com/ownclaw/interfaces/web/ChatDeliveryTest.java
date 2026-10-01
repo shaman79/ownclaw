@@ -99,10 +99,11 @@ class ChatDeliveryTest {
         var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null, null) {
             @Override public boolean isSetupNeeded() { return false; }
         };
+        var interactions = new SkillInteractionHandler();
         var commands = new CommandHandler(null, conversations, null, null, null, null, queue, null, null, null,
-                null, null, new ResultDelivery(conversations, emitter));
+                null, null, new ResultDelivery(conversations, emitter), interactions);
         chat = new ChatWebSocketHandler(queue, null, conversations, emitter, commands, wizard, auth,
-                new SkillInteractionHandler(), null, null, mapper);
+                interactions, null, null, mapper);
         Map<String, Object> attributes = new HashMap<>();
         socket = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{WebSocketSession.class}, (proxy, method, args) -> switch (method.getName()) {
@@ -218,6 +219,41 @@ class ChatDeliveryTest {
         assertTrue(frames("response").isEmpty(), "the page was not sent one: " + sent);
         assertEquals(refreshed + 1, frames("session_updated").size(), "the sends after it still go out");
         assertEquals(asked, frames("session_updated").getLast().path("content").asText());
+    }
+
+    @Test
+    @DisplayName("an answer for a chat the owner has left goes with its chat; the list's refresh after it names the chat open now, which the page follows")
+    void theRefreshNamesTheOpenChat(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        type("check the router");
+        String asked = conversations.getCurrentSession(USER);
+        chat.handleMessage(socket, new TextMessage("{\"type\":\"new_session\",\"message\":\"\"}"));
+        String opened = conversations.getCurrentSession(USER);
+        assertNotEquals(asked, opened);
+
+        queue.futures.getFirst().complete(AgentResult.completed("the router is up", new AgentTrajectory(), 1));
+
+        assertEquals(asked, frames("response").getLast().path("sessionId").asText(), "the answer names its chat");
+        assertEquals(opened, frames("session_updated").getLast().path("content").asText(),
+                "named, the answer's chat took the page there, while what was typed next went to the open one");
+        assertEquals(opened, conversations.getCurrentSession(USER), "the open chat is left alone");
+    }
+
+    @Test
+    @DisplayName("a typed 'ping' is a message like any other; only the page's heartbeat frame is answered with a pong")
+    void aTypedPingIsAMessage(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+
+        type("Ping");
+
+        assertEquals(List.of("Ping"), queue.messages, "run");
+        assertEquals(List.of("Ping"), jdbc.queryForList(
+                "SELECT content FROM conversations WHERE role = 'user'", String.class), "and saved");
+        assertTrue(frames("pong").isEmpty(), String.valueOf(sent));
+
+        chat.handleMessage(socket, new TextMessage("{\"type\":\"ping\"}"));
+        assertEquals(1, frames("pong").size(), String.valueOf(sent));
+        assertEquals(List.of("Ping"), queue.messages, "the heartbeat runs nothing");
     }
 
     @Test

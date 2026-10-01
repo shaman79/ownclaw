@@ -69,7 +69,7 @@ class ChatSecretTest {
             }
         };
         CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, interactions);
         return new ChatWebSocketHandler(null, null, new ConversationService(jdbc), null, commands, null,
                 null, interactions, null, null, new ObjectMapper());
     }
@@ -154,7 +154,7 @@ class ChatSecretTest {
         assertNowhere(SECRET);
         assertEquals(3, sent.stream().filter(s -> s.contains("\"type\":\"user\"") && s.contains("/cred set …")).count(),
                 "the bubble: " + sent);
-        assertTrue(sent.stream().anyMatch(s -> s.contains("Usage: /cred set <KEY> <VALUE>")), "and it is told how: " + sent);
+        assertTrue(sent.stream().anyMatch(s -> s.contains("Usage: `/cred set <KEY> <VALUE>`")), "and it is told how: " + sent);
     }
 
     @Test

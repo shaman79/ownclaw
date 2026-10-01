@@ -74,8 +74,8 @@ class TelegramDeliveryTest {
         config.getTelegram().setBotToken("123:test");
         bot = new TelegramBotService(config, new Answering(answer), new UserRepository(jdbc), emitter, JSON,
                 store.apply(jdbc), new SkillInteractionHandler(), null,
-                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null),
-                null, null, jdbc, telegram.client);
+                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null),
+                null, jdbc, telegram.client);
     }
 
     @AfterEach
@@ -157,6 +157,23 @@ class TelegramDeliveryTest {
         assertTrue(waitedMs >= 2000, "it waited as long as Telegram said: " + waitedMs + " ms");
         assertEquals(List.of("telegram-outbox"), telegram.threadsOf("sendMessage").stream().distinct().toList(),
                 "the waiting is the bot's own: the thread that handed it the answer went on at once");
+    }
+
+    @Test
+    @DisplayName("every part goes out as plain text: no underscore or asterisk of what the web chat writes is taken for a marker")
+    void sentAsWritten(@TempDir Path tmp) throws Exception {
+        String answer = "Done: result 1 (smtp_send_email) mailed report_2026_09.csv; your network is Home_Net_5G, "
+                + "and 2*3*4 = 24.";
+        start(tmp, answer);
+
+        receive("send the report");
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of(answer), sentTexts());
+        for (String body : telegram.bodies("sendMessage")) {
+            assertFalse(JSON.readTree(body).has("parse_mode"), "in Telegram's Markdown the pairs vanish: " + body);
+        }
+        // Mutation: parse_mode Markdown back -> smtpsendemail, HomeNet5G, 234 on the owner's phone.
     }
 
     @Test

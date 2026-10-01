@@ -816,7 +816,8 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("what the activity panel and debug mode are sent is whole: a failure, a result, the prompt")
+    @DisplayName("what the activity panel and debug mode are sent is whole: a failure, a result, the prompt; "
+            + "a failure's status line, which Telegram is sent too, says where it is instead")
     void theActivityIsWhole(@TempDir Path tmp) throws Exception {
         String failure = "Traceback (most recent call last): " + "frame ".repeat(100);
         String big = "row ".repeat(15_000);
@@ -827,18 +828,23 @@ class TaskEndToEndTest {
         rig.cloud.think.add(call("probe", Map.of()));
         rig.cloud.think.add(call("dump", Map.of()));
         rig.cloud.think.add(respond("done"));
-        rig.turn(session(rig), message);
+        var r = rig.turn(session(rig), message);
 
-        assertTrue(seen.stream().anyMatch(m -> m.type() == Type.WARNING && m.text().equals("probe ✗ " + failure)),
-                "the failure's status line");
+        assertTrue(seen.stream().anyMatch(m -> m.data() != null && "observe".equals(m.data().get("category"))
+                && "probe".equals(m.data().get("tool")) && failure.equals(m.data().get("output"))),
+                "the failure in the observe detail");
+        var warnings = seen.stream().filter(m -> m.type() == Type.WARNING).map(m -> m.text()).toList();
+        assertEquals(1, warnings.size(), String.valueOf(warnings));
+        assertTrue(warnings.getFirst().matches("probe ✗ \\S+, " + failure.length() + " chars — task " + r.taskId()),
+                "the failure's status line: " + warnings.getFirst());
         assertTrue(seen.stream().anyMatch(m -> m.data() != null && "observe".equals(m.data().get("category"))
                 && big.equals(m.data().get("output"))), "the result in the observe detail");
         assertTrue(seen.stream().anyMatch(m -> m.data() != null && "think".equals(m.data().get("category"))
                 && String.valueOf(m.data().get("prompt")).contains(message)), "the prompt in the think detail");
         assertTrue(seen.stream().anyMatch(m -> m.type() == Type.DEBUG && m.text().startsWith("TOOL RESULT [dump] OK (")
                 && m.text().endsWith("ms)\n" + big)), "the result in debug mode");
-        // Mutations: put back the 100-character status cut, the 1,000 and 800-character detail
-        // cuts, or the 50,000-character debug cut.
+        // Mutations: the failure's text back in its status line; the 1,000 and 800-character
+        // detail cuts, or the 50,000-character debug cut.
     }
 
     /** A mail skill that keeps what it was asked to send. */

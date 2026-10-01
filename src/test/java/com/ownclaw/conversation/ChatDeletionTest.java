@@ -1,10 +1,16 @@
 package com.ownclaw.conversation;
 
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.users.UserRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -65,5 +71,62 @@ class ChatDeletionTest {
         assertEquals(1, conversations.searchMessages("u1", "phrasing").size());
         assertEquals(0, conversations.searchMessages("u1", "wording").size(),
                 "the old words are gone, and a system row was never indexed");
+    }
+
+    /**
+     * The schema with its foreign keys enforced, as production's datasource URL has them: a chat
+     * with a file sent in it, open, and one other chat. Returns {owner, the file's chat, the other}.
+     */
+    private String[] chatWithAFile(Path tmp) throws Exception {
+        MigratedDatabase.at(tmp.resolve("t.db"));
+        jdbc = new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + tmp.resolve("t.db") + "?foreign_keys=true"));
+        assertEquals(1, jdbc.queryForObject("PRAGMA foreign_keys", Integer.class));
+        conversations = new ConversationService(jdbc);
+        String owner = new UserRepository(jdbc).createUser("owner", 4242L);
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("t.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        String file = new FileStorageService(jdbc, config).store(owner, "statement.pdf", "application/pdf",
+                new ByteArrayInputStream("closing balance".getBytes(StandardCharsets.UTF_8)));
+        String other = conversations.createSession(owner, "Other");
+        conversations.saveMessage(owner, other, "user", "router firmware question");
+        String taxes = conversations.createSession(owner, "Taxes");
+        conversations.saveMessage(owner, taxes, "user", "what does my statement say?", List.of(file));
+        conversations.saveMessage(owner, taxes, "assistant", "the closing balance is in it");
+        return new String[]{owner, taxes, other};
+    }
+
+    @Test
+    @DisplayName("a chat a file was sent in is deleted where foreign keys are enforced; the file stays, and the next chat opens")
+    void aChatWithAFileIsDeleted(@TempDir Path tmp) throws Exception {
+        String[] c = chatWithAFile(tmp);
+
+        conversations.deleteSession(c[0], c[1]);
+
+        assertEquals(0, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM conversations WHERE session_id = ?", Integer.class, c[1]));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM message_attachments", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM file_attachments", Integer.class),
+                "the file itself is kept, listed by /files");
+        assertEquals(c[2], conversations.getCurrentSession(c[0]), "the remaining chat is the open one");
+        indexIsWhole();
+        // Mutation: leave the links in place -> SQLITE_CONSTRAINT_FOREIGNKEY, and the open chat
+        // gone with nothing deleted.
+    }
+
+    @Test
+    @DisplayName("a delete that fails leaves the chat as it was, the open one still open")
+    void aFailedDeleteChangesNothing(@TempDir Path tmp) throws Exception {
+        String[] c = chatWithAFile(tmp);
+        jdbc.execute("CREATE TRIGGER refuse BEFORE DELETE ON chat_sessions BEGIN SELECT RAISE(ABORT, 'locked'); END");
+
+        assertThrows(RuntimeException.class, () -> conversations.deleteSession(c[0], c[1]));
+
+        assertEquals(c[1], conversations.getCurrentSession(c[0]), "the chat is still the open one");
+        assertEquals(2, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM conversations WHERE session_id = ?", Integer.class, c[1]));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM message_attachments", Integer.class));
+        // Mutation: no transaction -> the open-chat pointer and the messages are gone, the chat
+        // is not, and the next message goes to a new, empty chat.
     }
 }

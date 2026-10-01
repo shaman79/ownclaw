@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
-import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -43,7 +42,6 @@ public class TelegramBotService {
     private final ConversationService conversationService;
     private final SkillInteractionHandler interactionHandler;
     private final CommandHandler commandHandler;
-    private final TaskCancellationService cancellationService;
     private final DebugSessionService debugService;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
@@ -77,11 +75,10 @@ public class TelegramBotService {
                               SkillInteractionHandler interactionHandler,
                               SetupWizardService setupWizard,
                               CommandHandler commandHandler,
-                              TaskCancellationService cancellationService,
                               DebugSessionService debugService,
                               org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this(ownClawConfig, taskQueue, userRepo, statusEmitter, mapper, conversationService,
-                interactionHandler, setupWizard, commandHandler, cancellationService, debugService, jdbc,
+                interactionHandler, setupWizard, commandHandler, debugService, jdbc,
                 new OkHttpClient.Builder()
                         .connectTimeout(10, TimeUnit.SECONDS)
                         .readTimeout(35, TimeUnit.SECONDS) // long poll timeout + buffer
@@ -97,7 +94,6 @@ public class TelegramBotService {
                        SkillInteractionHandler interactionHandler,
                        SetupWizardService setupWizard,
                        CommandHandler commandHandler,
-                       TaskCancellationService cancellationService,
                        DebugSessionService debugService,
                        org.springframework.jdbc.core.JdbcTemplate jdbc,
                        OkHttpClient httpClient) {
@@ -109,7 +105,6 @@ public class TelegramBotService {
         this.conversationService = conversationService;
         this.interactionHandler = interactionHandler;
         this.commandHandler = commandHandler;
-        this.cancellationService = cancellationService;
         this.debugService = debugService;
         this.mapper = mapper;
         this.httpClient = httpClient;
@@ -248,21 +243,12 @@ public class TelegramBotService {
 
         subscribe(userId);
 
-        // ── /cancel — stop the running task ──
-        if (text.strip().equalsIgnoreCase("/cancel")) {
-            // Stop with no task named means "whatever is running, stop it".
-            cancellationService.requestAll(userId, "you sent /cancel");
-            interactionHandler.cancelPending(userId);
-            sendMessage(chatId, "⏹ Cancellation requested.");
-            return;
-        }
-
         // ── /debug — toggle debug mode ──
         if (text.strip().equalsIgnoreCase("/debug")) {
             boolean enabled = debugService.toggle(userId);
             sendMessage(chatId, enabled
-                    ? "\uD83D\uDC1B Debug mode *ON* — the web chat shows full prompts, raw LLM output, critic verdicts, and tool results."
-                    : "\uD83D\uDC1B Debug mode *OFF*");
+                    ? "\uD83D\uDC1B Debug mode ON — the web chat shows full prompts, raw LLM output, critic verdicts, and tool results."
+                    : "\uD83D\uDC1B Debug mode OFF");
             return;
         }
 
@@ -277,7 +263,7 @@ public class TelegramBotService {
                 // Session commands: send active session info
                 if (commandHandler.isSessionCommand(text)) {
                     String sessionId = conversationService.getCurrentSession(userId);
-                    sendMessage(chatId, "\uD83D\uDCC2 Active session: *" + sessionId + "*");
+                    sendMessage(chatId, "\uD83D\uDCC2 Active session: " + sessionId);
                 }
                 return;
             }
@@ -342,11 +328,10 @@ public class TelegramBotService {
                 Object steps = data.get("totalSteps");
                 Object ok = data.get("successCount");
                 if (steps != null || cloud != null) {
-                    sb.append("\n_");
+                    sb.append("\n");
                     if (steps != null) sb.append("Steps ").append(steps).append(" OK ").append(ok != null ? ok : 0).append(" | ");
                     if (cloud != null) sb.append("Cloud ").append(cloud);
                     if (local != null) sb.append(" Local ").append(local);
-                    sb.append("_");
                 }
             }
             // Resolve the chat at DELIVERY time, not from whichever message happened to create
@@ -485,10 +470,10 @@ public class TelegramBotService {
     private void deliver(long chatId, String text) {
         List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
         for (int i = 0; i < parts.size(); i++) {
-            int status = sendPart(chatId, parts.get(i));
+            int status = send(chatId, parts.get(i));
             if (status / 100 == 2) continue;
             log.warn("Telegram did not take part {} of {} for chat {}: HTTP {}", i + 1, parts.size(), chatId, status);
-            if (send(chatId, notTaken(i + 1, parts.size(), status), null) / 100 != 2) {
+            if (send(chatId, notTaken(i + 1, parts.size(), status)) / 100 != 2) {
                 log.warn("Telegram did not take the notice of it either");
             }
             return;
@@ -506,34 +491,18 @@ public class TelegramBotService {
     }
 
     /**
-     * One part, in Markdown, or as plain text if Telegram will not parse it; Telegram's status.
+     * One sendMessage call, as plain text; Telegram's HTTP status, as {@link #call} gives it.
      * <p>
-     * Telegram rejects the whole request with HTTP 400 when the Markdown is malformed, and this
-     * text is agent output: skill names like {@code web_search_bikes} and
-     * {@code summarize_web_content} carry underscores, file paths and code carry asterisks, and
-     * an odd count of either is enough. The old code logged the 400 and returned, so the user
-     * simply never received the answer — the task had succeeded and its result vanished. That is
-     * the worst failure shape available: silent, and indistinguishable from the agent ignoring
-     * you.
-     * <p>
-     * Formatting is a nicety; delivery is not. On a parse failure the same text goes out
-     * unformatted.
+     * Not in Telegram's Markdown, which this text is not written in: it is the web chat's, where
+     * an underscore inside a word is a letter. Telegram's takes every pair of underscores or
+     * asterisks for italic or bold markers and drops them, so result 1 (smtp_send_email) arrived
+     * as smtpsendemail and a network named Home_Net_5G as HomeNet5G -- and only a text whose
+     * markers did not pair up was refused, and resent as it was.
      */
-    private int sendPart(long chatId, String part) {
-        int status = send(chatId, part, "Markdown");
-        if (status == 400) {
-            log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
-            status = send(chatId, part, null);
-        }
-        return status;
-    }
-
-    /** One sendMessage call; Telegram's HTTP status, as {@link #call} gives it. */
-    private int send(long chatId, String text, String parseMode) {
+    private int send(long chatId, String text) {
         var payload = new java.util.LinkedHashMap<String, Object>();
         payload.put("chat_id", chatId);
         payload.put("text", text);
-        if (parseMode != null) payload.put("parse_mode", parseMode);
         return call("sendMessage", payload);
     }
 

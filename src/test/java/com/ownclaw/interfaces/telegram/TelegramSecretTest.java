@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
@@ -33,6 +34,7 @@ class TelegramSecretTest {
 
     @TempDir Path dir;
     JdbcTemplate jdbc;
+    String owner;
     TelegramBotService bot;
     final List<String> stored = new ArrayList<>();
     final FakeTelegram telegram = new FakeTelegram();
@@ -40,7 +42,7 @@ class TelegramSecretTest {
     @BeforeEach
     void setUp() throws Exception {
         jdbc = MigratedDatabase.at(dir.resolve("t.db"));
-        new UserRepository(jdbc).createUser("petr", ME);
+        owner = new UserRepository(jdbc).createUser("petr", ME);
         bot = botWith(new SkillInteractionHandler());
     }
 
@@ -52,13 +54,13 @@ class TelegramSecretTest {
             }
         };
         CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
-                null, null, null, null, null, null);
+                null, null, null, null, new TaskCancellationService(), null, interactions);
         OwnClawConfig config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
         ConversationService conv = new ConversationService(jdbc);
         // No task queue: a message handed to the agent fails the test at taskQueue.submit.
         return new TelegramBotService(config, null, new UserRepository(jdbc), new ChatStatusEmitter(),
-                new ObjectMapper(), conv, interactions, null, commands, null, null, jdbc, telegram.client);
+                new ObjectMapper(), conv, interactions, null, commands, null, jdbc, telegram.client);
     }
 
     private void receive(long messageId, String text) throws Exception {
@@ -98,7 +100,7 @@ class TelegramSecretTest {
         assertTrue(stored.isEmpty(), "stored: " + stored);
         assertEquals(81, new ObjectMapper().readTree(telegram.bodies("deleteMessage").getFirst()).path("message_id").asLong(),
                 "calls: " + telegram.calls);
-        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Usage: /cred set")), "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Usage: `/cred set")), "calls: " + telegram.calls);
         assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
     }
 
@@ -142,5 +144,33 @@ class TelegramSecretTest {
         assertEquals(List.of("/home/me/My Photos"), answers);
         assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(CommandHandler.UNKNOWN_COMMAND)),
                 "calls: " + telegram.calls);
+    }
+
+    @Test
+    @DisplayName("/cancel is the web chat's command: it ends a waiting question as there, and answers as there")
+    void cancelIsTheSharedCommand() throws Exception {
+        var interactions = new SkillInteractionHandler();
+        bot = botWith(interactions);
+        var waiting = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try {
+                return "answered " + interactions.requestInputSilent(owner, "setup");
+            } catch (Exception e) {
+                return "ended by " + e.getClass().getSimpleName();
+            }
+        });
+        try {
+            for (int i = 0; i < 100 && !interactions.hasPending(owner); i++) Thread.sleep(50);
+            assertTrue(interactions.hasPending(owner));
+
+            receive(82, "/cancel");
+
+            assertEquals("ended by ExecutionException", waiting.get(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "the wizard hears it and says it was cancelled; a CancellationException got past it");
+            assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Cancelling. A model call")),
+                    "calls: " + telegram.calls);
+        } finally {
+            interactions.cancelPending(owner);   // nothing left waiting when the test failed
+        }
+        // Mutation: Telegram's own /cancel back -> its own reply, and a wait ended unheard.
     }
 }

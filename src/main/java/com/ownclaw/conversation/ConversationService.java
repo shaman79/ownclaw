@@ -2,7 +2,9 @@ package com.ownclaw.conversation;
 
 import com.ownclaw.agent.AgentResult;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -264,36 +266,46 @@ public class ConversationService {
     }
 
     /**
-     * Permanently delete a session and its messages.
+     * Permanently delete a session, its messages and their links to the files sent with them;
+     * the files themselves stay, listed by /files. All of it or nothing, in one transaction.
      * If the deleted session was the active one, switches to the most recent remaining
      * conversation; the pinned chat of scheduled results is never chosen for it.
+     * <p>
+     * A message's links to its files hold a foreign key to it, which production enforces: left in
+     * place, they made every chat a file had been sent in undeletable. The open-chat pointer, the
+     * first thing deleted, was committed alone all the same, so once the open chat had failed to
+     * be deleted, the owner's next message went to a new, empty chat.
      */
     public void deleteSession(String userId, String sessionId) {
-        // Remove the active pointer first (references chat_sessions via FK)
-        jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
-        jdbc.update("DELETE FROM conversations WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
-        jdbc.update("DELETE FROM session_summaries WHERE user_id = ? AND session_id = ?",
-                userId, sessionId);
-        jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
-                sessionId, userId);
+        new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource())).executeWithoutResult(tx -> {
+            // Remove the active pointer first (references chat_sessions via FK)
+            jdbc.update("DELETE FROM active_session WHERE user_id = ? AND session_id = ?",
+                    userId, sessionId);
+            jdbc.update("DELETE FROM message_attachments WHERE message_id IN "
+                    + "(SELECT id FROM conversations WHERE user_id = ? AND session_id = ?)", userId, sessionId);
+            jdbc.update("DELETE FROM conversations WHERE user_id = ? AND session_id = ?",
+                    userId, sessionId);
+            jdbc.update("DELETE FROM session_summaries WHERE user_id = ? AND session_id = ?",
+                    userId, sessionId);
+            jdbc.update("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
+                    sessionId, userId);
 
-        // If there is no active session now, switch to the most recent remaining conversation --
-        // never the pinned chat of scheduled results, which is open only when the owner opens it.
-        List<String> active = jdbc.queryForList(
-                "SELECT session_id FROM active_session WHERE user_id = ?",
-                String.class, userId);
-        if (active.isEmpty()) {
-            List<String> remaining = jdbc.queryForList(
-                    "SELECT id FROM chat_sessions WHERE user_id = ? AND archived = 0 AND kind = 'chat' "
-                            + "ORDER BY updated_at DESC LIMIT 1",
+            // If there is no active session now, switch to the most recent remaining conversation --
+            // never the pinned chat of scheduled results, which is open only when the owner opens it.
+            List<String> active = jdbc.queryForList(
+                    "SELECT session_id FROM active_session WHERE user_id = ?",
                     String.class, userId);
-            if (!remaining.isEmpty()) {
-                setActiveSession(userId, remaining.getFirst());
+            if (active.isEmpty()) {
+                List<String> remaining = jdbc.queryForList(
+                        "SELECT id FROM chat_sessions WHERE user_id = ? AND archived = 0 AND kind = 'chat' "
+                                + "ORDER BY updated_at DESC LIMIT 1",
+                        String.class, userId);
+                if (!remaining.isEmpty()) {
+                    setActiveSession(userId, remaining.getFirst());
+                }
+                // If no sessions remain, getCurrentSession() will create one when needed
             }
-            // If no sessions remain, getCurrentSession() will create one when needed
-        }
+        });
     }
 
     /**

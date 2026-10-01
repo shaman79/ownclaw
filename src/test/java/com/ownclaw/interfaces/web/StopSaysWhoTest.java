@@ -44,7 +44,7 @@ class StopSaysWhoTest {
         assertEquals("you pressed Stop", cancellation.why("u1", "t1", running));
 
         var commands = new CommandHandler(null, null, null, null, null, null, null, null, null, null, null,
-                cancellation, null);
+                cancellation, null, new SkillInteractionHandler());
         commands.handle("u2", "/cancel");
         assertEquals("you sent /cancel", cancellation.why("u2", "t1", running));
 

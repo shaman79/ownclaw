@@ -35,7 +35,7 @@ class SecretCommandTest {
                     kept.add(password);
                     return "jwt";
                 }
-            }, null, null, null, null);
+            }, null, null, null, null, null);
 
     static final String[] HEADS = {"/cred", "/CRED", "/Cred", "/creds", "/cred@bot", "/user", "/USER", "/users"};
     static final String[] VERBS = {"set", "SET", "Set", "add", "ADD", "put", ""};
@@ -141,7 +141,7 @@ class SecretCommandTest {
                         kept.add(password);
                         return "jwt";
                     }
-                }, null, null, null, null);
+                }, null, null, null, null, null);
         assertEquals("Only the owner can manage accounts.", notTheOwner.handle("guest", "/user add eve Pw12-long").orElse(""));
         assertTrue(kept.isEmpty(), "no account made");
     }
