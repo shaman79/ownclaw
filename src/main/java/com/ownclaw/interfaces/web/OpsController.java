@@ -114,7 +114,10 @@ public class OpsController {
                 "notProvided", List.of(
                         "credential values", "arbitrary shell", "deploy", "restart"),
                 "notes", List.of(
-                        "Secrets are redacted by config key and by SQL result column.",
+                        "Secrets are redacted by config key. db/query refuses SQL that names a "
+                                + "table holding secrets or private text, and says which; /users "
+                                + "lists the accounts, /config the stored settings by name, "
+                                + "/forensics one account's records.",
                         "db/query accepts a single SELECT only.",
                         "Listings are paged, never cut: a response with more rows gives nextOffset "
                                 + "(and names the sections in more), /logs gives the cursor next; "

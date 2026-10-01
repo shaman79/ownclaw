@@ -38,9 +38,10 @@ import java.util.zip.GZIPOutputStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The ops API is read by sessions whose model runs in the cloud, so the owner's private answers
- * are redacted from its SQL results and may not be named in its SQL at all. Everything else it
- * holds is reachable whole: listings are paged, never cut, and no column is shortened.
+ * The ops API is read by sessions whose model runs in the cloud, so the tables that hold the
+ * owner's private answers and this instance's secrets may not be named in its SQL at all.
+ * Everything else it holds is reachable whole: listings are paged, never cut, and no column is
+ * shortened or withheld.
  */
 class OpsServiceTest {
 
@@ -100,19 +101,52 @@ class OpsServiceTest {
     }
 
     @Test
-    @DisplayName("paging kept every guard: one SELECT only, and secret columns come back redacted")
+    @DisplayName("the tables that hold secrets are refused whole: no renaming reaches what they hold")
+    void secretsNeverLeaveThroughOps(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        List<String> held = List.of("setting-held", "hash-held", "salt-held", "sealed-held", "iv-held");
+        jdbc.update("INSERT INTO system_settings (key, value) VALUES ('jwt_secret', ?)", held.get(0));
+        jdbc.update("INSERT INTO users (id, display_name, password_hash, encryption_salt) VALUES ('u1', 'owner', ?, ?)",
+                held.get(1), held.get(2));
+        jdbc.update("INSERT INTO credential_vault (user_id, credential_key, encrypted_value, iv) "
+                + "VALUES ('u1', 'SMTP_PASSWORD', ?, ?)", held.get(3), held.get(4));
+        var ops = opsOn(jdbc);
+
+        // A result column's name says nothing about where it came from: an alias, an expression
+        // or a CTE's column list renames a column without naming it.
+        for (String sql : List.of(
+                "SELECT key, value FROM system_settings",
+                "SELECT key, value AS v FROM system_settings",
+                "SELECT key || '=' || value FROM system_settings",
+                "WITH s(k, v) AS (SELECT key, value FROM system_settings) SELECT k, v FROM s",
+                "SELECT (SELECT group_concat(v) FROM (SELECT value AS v FROM System_Settings)) AS s",
+                "SELECT * FROM users",
+                "WITH u(a, b, c, d, e, f, g, h, i, j) AS (SELECT * FROM users) SELECT i, j FROM u",
+                "SELECT credential_key, iv || '' AS x FROM main.\"credential_vault\"",
+                "WITH v(a, b, c, d, e, f, g) AS (SELECT * FROM [Credential_Vault]) SELECT d, e FROM v")) {
+            Map<String, Object> answer = ops.query(sql, FIRST_500);
+            assertTrue(String.valueOf(answer.get("error")).contains("forbidden identifier"), sql + " -> " + answer);
+            for (String value : held) {
+                assertFalse(String.valueOf(answer).contains(value), sql + " -> " + answer);
+            }
+        }
+        // No column is withheld for its name: a value column of any other source comes back whole.
+        assertEquals(List.of(Map.of("key", "a", "value", "b")),
+                rows(ops.query("SELECT key, value FROM json_each('{\"a\":\"b\"}')", FIRST_500)));
+    }
+
+    @Test
+    @DisplayName("paging kept every guard: one SELECT only, and nothing from a table that holds secrets")
     void theGuardsStand(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        jdbc.update("INSERT INTO system_settings (key, value) VALUES ('jwt_secret', 'not-for-the-cloud')");
         var ops = opsOn(jdbc);
 
         assertEquals("Only a single statement is allowed",
                 ops.query("SELECT 1; SELECT 2", FIRST_500).get("error"));
         assertEquals("Only SELECT (or WITH ... SELECT) is allowed",
                 ops.query("DELETE FROM events", FIRST_500).get("error"));
-        Map<String, Object> settings = ops.query("SELECT key, value FROM system_settings", FIRST_500);
-        assertEquals(true, settings.get("redactedColumns"), String.valueOf(settings));
-        assertFalse(String.valueOf(settings).contains("not-for-the-cloud"), String.valueOf(settings));
+        assertEquals("Query names a forbidden identifier: system_settings",
+                ops.query("SELECT key, value FROM system_settings", FIRST_500).get("error"));
     }
 
     @Test

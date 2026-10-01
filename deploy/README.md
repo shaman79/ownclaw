@@ -293,10 +293,12 @@ No endpoint returns a credential value, runs arbitrary shell, triggers a deploy 
 service. Those are what made the old `/api/debug` surface dangerous; `GET /api/debug/credentials`,
 which returned the whole vault in plaintext, was deleted on 2026-09-17.
 
-Secrets are withheld in two independent ways: configuration values whose key looks secret are
-replaced with a placeholder, and SQL results are redacted by column name — so even
-`SELECT * FROM users` comes back without password hashes. `db/query` additionally refuses any
-statement that is not a single `SELECT`, and any statement that so much as names a secret column.
+Configuration values whose key looks secret are replaced with a placeholder. `db/query` refuses
+any statement that is not a single `SELECT`, and any that so much as names a table holding
+secrets or the owner's private text: `users`, `system_settings`, `credential_vault`,
+`conversations` and `file_attachments`. A whole table is refused because a column can be renamed
+without being named. `/users` lists the accounts, `/config` the stored settings by name, and
+`/forensics/{userId}` one account's records.
 
 ### Diagnosing the local model
 

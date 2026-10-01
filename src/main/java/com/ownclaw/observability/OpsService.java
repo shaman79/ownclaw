@@ -47,9 +47,9 @@ import java.util.zip.GZIPInputStream;
  * <p>
  * Two rules hold everywhere in this class:
  * <ol>
- *   <li><b>No secret ever leaves.</b> Values are redacted by key name, SQL results are
- *       redacted by column name, and the raw SQL is additionally screened for the columns
- *       that hold secrets. Callers get "present"/"absent" and lengths, never values.</li>
+ *   <li><b>No secret ever leaves.</b> Values are redacted by key name, and SQL that names a
+ *       table holding secrets is refused. Callers get "present"/"absent" and lengths, never
+ *       values.</li>
  *   <li><b>Nothing mutates</b> unless the method name says so.</li>
  * </ol>
  */
@@ -62,30 +62,24 @@ public class OpsService {
     private static final Pattern SECRET_KEY = Pattern.compile(
             "(?i)(token|secret|password|passwd|api[-_]?key|\\bkey\\b|salt|hash|credential|cookie|authorization)");
 
-    /** Result columns whose values are never returned, whatever the query looked like. */
-    private static final Set<String> SECRET_COLUMNS = Set.of(
-            "password_hash", "encryption_salt", "encrypted_value", "iv",
-            // system_settings.value holds the vault master key, the JWT secret and the
-            // provider API keys. Its "key" column is only a name and stays readable.
-            "value",
-            // conversations.private_content is an answer written on this machine from the
-            // owner's file and kept from the cloud; the ops API is read by sessions whose
-            // model runs in the cloud.
-            "private_content");
-
-    /** Columns whose name says they hold secret material. Deliberately excludes a bare "key". */
-    private static final Pattern SECRET_VALUE_COLUMN = Pattern.compile(
-            "(?i)(secret|passwd|password|api[-_]?key|private[-_]?key|access[-_]?token|bearer)");
-
-    /** Identifiers that may not appear in ops SQL at all (blocks aliasing around the above). */
-    private static final Pattern SQL_FORBIDDEN = Pattern.compile(
-            "(?i)\\b(password_hash|encryption_salt|encrypted_value|jwt_secret|vault_master_key"
-                    + "|private_content|conversations|file_attachments|pragma|attach|detach|vacuum)\\b");
-
     private static final Pattern SQL_ALLOWED_START = Pattern.compile("(?is)^\\s*(select|with)\\b.*");
 
     /** system_settings holds the vault master key and the JWT secret in plaintext. */
     private static final String SETTINGS_TABLE = "system_settings";
+
+    /**
+     * Words ops SQL may not contain: the tables that hold secrets or the owner's private text,
+     * and dangerous statement keywords. users holds password hashes and encryption salts;
+     * system_settings the vault master key, the JWT secret and the provider API keys;
+     * credential_vault the encrypted credentials; conversations the owner's private answers;
+     * file_attachments the names of his uploads. A table is refused whole because a result
+     * column's name says nothing about where it came from: an alias, an expression or a CTE's
+     * column list renames a column without naming it. The ops API is read by sessions whose
+     * model runs in the cloud.
+     */
+    private static final Pattern SQL_FORBIDDEN = Pattern.compile(
+            "(?i)\\b(users|" + SETTINGS_TABLE + "|credential_vault|conversations|file_attachments"
+                    + "|pragma|attach|detach|vacuum)\\b");
 
     /** A /logs cursor: which file, by the hash of its first line, and the line to read up to. */
     private static final Pattern LOG_CURSOR = Pattern.compile("([0-9a-f]{16}):(\\d+)");
@@ -711,11 +705,10 @@ public class OpsService {
 
     /**
      * Run one read-only SELECT and return a page of its rows. Guards, in order: single
-     * statement; must start with SELECT or WITH; must not name a secret column or a dangerous
-     * statement keyword; the statement runs on a connection SQLite itself holds read-only, so
-     * one that would change the database is refused whatever its text; and finally every
-     * returned column whose name holds a secret is redacted, which also catches
-     * {@code SELECT * FROM users}. The statement runs as written and the page is taken from its
+     * statement; must start with SELECT or WITH; must not name a table that holds secrets or
+     * private text, or a dangerous statement keyword ({@link #SQL_FORBIDDEN}); and the statement
+     * runs on a connection SQLite itself holds read-only, so one that would change the database
+     * is refused whatever its text. The statement runs as written and the page is taken from its
      * rows in the order it returns them, so the query's own ORDER BY and LIMIT mean what they say.
      */
     public Map<String, Object> query(String sql, Page page) {
@@ -741,26 +734,11 @@ public class OpsService {
         out.put("sql", trimmed);
         try {
             Rows result = Rows.of(readOnly(trimmed, page), page);
-            boolean redacted = false;
-            var safe = new ArrayList<Map<String, Object>>(result.rows().size());
-            for (Map<String, Object> row : result.rows()) {
-                var clean = new LinkedHashMap<String, Object>();
-                for (Map.Entry<String, Object> e : row.entrySet()) {
-                    if (isSecretColumn(e.getKey())) {
-                        clean.put(e.getKey(), e.getValue() == null ? null : "«redacted»");
-                        redacted = true;
-                    } else {
-                        clean.put(e.getKey(), e.getValue());
-                    }
-                }
-                safe.add(clean);
-            }
             out.put("offset", page.offset());
             out.put("limit", page.limit());
-            out.put("rowCount", safe.size());
+            out.put("rowCount", result.rows().size());
             out.put("nextOffset", result.nextOffset());
-            if (redacted) out.put("redactedColumns", true);
-            out.put("rows", safe);
+            out.put("rows", result.rows());
         } catch (Exception e) {
             out.put("error", String.valueOf(e.getMessage()));
         }
@@ -790,11 +768,6 @@ public class OpsService {
                 }
             }
         });
-    }
-
-    private static boolean isSecretColumn(String column) {
-        String c = column == null ? "" : column.toLowerCase(Locale.ROOT);
-        return SECRET_COLUMNS.contains(c) || SECRET_VALUE_COLUMN.matcher(c).find();
     }
 
     // ────────────────────────────── accounts and forensics ──────────────────────────────
