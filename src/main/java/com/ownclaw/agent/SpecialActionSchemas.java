@@ -130,21 +130,28 @@ public final class SpecialActionSchemas {
 
             spec(AgentAction.DELEGATE,
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
-                            + "tools you name and your credentials, and costs nothing. Best for work "
-                            + "on this machine, the LAN, servers and private data. About a minute "
-                            + "per step, so prefer it when nobody is waiting. Give it a goal; it "
-                            + "works out the steps. A delegation starts with no results and "
-                            + "cannot see earlier ones, so say in words what it should fetch. "
+                            + "tools you name and your credentials, and costs nothing. It reads "
+                            + "what you cannot: a private result or a file the user sent reaches "
+                            + "you only as a description, so to read, summarise, search, compare "
+                            + "or answer a question about one, delegate and name its handle "
+                            + "({{N}}) in the goal -- every earlier result the goal names is given "
+                            + "to it whole, and it sees no other. Never create a skill only to "
+                            + "read or summarise data: a skill is for a deterministic program "
+                            + "(parsing at scale, changing configuration, repeated runs). For work "
+                            + "on this machine, the LAN and its servers, delegate a sequence of "
+                            + "tool calls it can run. Speed: it reads about 100 tokens a second "
+                            + "and writes about 8, so reading a long result or writing a long "
+                            + "answer takes minutes. Give it a goal; it works out the steps. "
                             + "Observations name results as {{N}}. When you have a tool that "
                             + "takes a result, put {{N}} or {{N.field}} as the whole value of that "
                             + "argument to pass it on verbatim without reading it.",
                     params(
-                            "goal", ToolParam.required("string", "What to achieve, stated fully."),
+                            "goal", ToolParam.required("string", "What to achieve, stated fully, "
+                                    + "with the handle of each earlier result it should read."),
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
                                     + "the tools it will need. Only these, and any the goal or an "
                                     + "unattended (scheduled or /bg) task names, are loaded: every tool "
-                                    + "definition takes room in the local model's context that the work needs."),
-                            "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
+                                    + "definition takes room in the local model's context that the work needs."))));
 }

@@ -41,8 +41,6 @@ public record AgentResult(
         COMPLETED,
         /** Stopped on request -- the owner's Stop or /cancel, or the ops API; the ending says which. */
         CANCELLED,
-        /** Maximum number of steps reached. */
-        MAX_STEPS,
         /** The stall watchdog stopped it: nothing moved for the stall timeout. */
         STALLED,
         /** Unrecoverable error. */
@@ -53,7 +51,7 @@ public record AgentResult(
          * every later message in it, so its ending says to carry on in a new chat.
          */
         CONTEXT_WINDOW,
-        /** Too many consecutive failures. */
+        /** Steps in a row produced nothing that could be run. */
         FAILURE_LIMIT,
         /** The cloud request contained bytes of a PRIVATE artifact; nothing was sent. */
         PRIVACY_BLOCKED,
@@ -77,10 +75,6 @@ public record AgentResult(
 
     public static AgentResult cancelled(String response, AgentTrajectory trajectory, long durationMs) {
         return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.CANCELLED);
-    }
-
-    public static AgentResult maxSteps(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.MAX_STEPS);
     }
 
     public static AgentResult stalled(String response, AgentTrajectory trajectory, long durationMs) {

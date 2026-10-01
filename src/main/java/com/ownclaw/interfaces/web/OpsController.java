@@ -3,6 +3,7 @@ package com.ownclaw.interfaces.web;
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
+import com.ownclaw.agent.TaskChat;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
@@ -429,7 +430,8 @@ public class OpsController {
      * With {@code sessionId} the run is a chat turn: the message is saved to that chat as the
      * user row, the task runs attended with that row as the message it answers -- what a
      * web-chat task is handed, so AgentLoop loads its conversation the way it does for one --
-     * and the answer is saved after it, as the web chat saves one.
+     * and the answer is saved after it, as the web chat saves one. Its progress messages are
+     * saved in that chat as the task goes, and sent nowhere ({@code TaskChat.Channel.OPS}).
      */
     @PostMapping("/agent/run")
     public ResponseEntity<?> runAgent(@RequestBody Map<String, Object> body) {
@@ -530,7 +532,7 @@ public class OpsController {
         AgentResult result;
         try {
             result = agentLoop.executeFull(userId, message, unattended,
-                    turn == null ? null : turn.messageId(), List.of());
+                    turn == null ? null : turn.messageId(), List.of(), TaskChat.Channel.OPS);
         } catch (RuntimeException e) {
             if (turn != null) {
                 conversations.saveAnswer(userId, turn.sessionId(), AgentResult.error(

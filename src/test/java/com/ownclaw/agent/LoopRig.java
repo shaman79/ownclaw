@@ -197,7 +197,7 @@ final class LoopRig {
     /** A chat turn, saved the way the web chat saves one; the session is created on first use. */
     AgentResult turn(String session, String text) {
         String row = chat.saveMessage("u1", session, "user", text);
-        AgentResult r = loop.executeFull("u1", text, false, row, List.of());
+        AgentResult r = loop.executeFull("u1", text, false, row, List.of(), TaskChat.Channel.WEB);
         chat.saveMessage("u1", session, "assistant", r.response(), List.of(), r.taskId(), r.ownerText());
         return r;
     }

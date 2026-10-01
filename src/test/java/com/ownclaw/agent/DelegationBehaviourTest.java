@@ -118,7 +118,7 @@ class DelegationBehaviourTest {
     static final java.util.function.BiConsumer<LlmProvider, LlmResponse> UNCOUNTED = (provider, reply) -> { };
 
     static DelegationPlan plan(String goal) {
-        return new DelegationPlan(goal, List.of(), List.of(), 6);
+        return new DelegationPlan(goal, List.of(), List.of());
     }
 
     static AgentContext task() {
@@ -287,14 +287,41 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("a goal that names an earlier result has the reference removed, and the cloud is told")
-    void aGoalCannotReachEarlierResults() {
+    @DisplayName("a goal that names a result there is none of has the reference taken out, and the cloud is told")
+    void aGoalCannotReachAResultThatIsNot() {
         var llm = new Scripted(done("nothing to do"));
         var outcome = executor(llm, new Usage()).execute(plan("Email {{3.body_text}} to Petr"), task(), UNCOUNTED);
 
         assertFalse(llm.allSeen().contains("{{3"),
                 "the local model would read {{3}} as its own third step");
-        assertTrue(outcome.text().startsWith("NOTE:"), outcome.text());
+        assertTrue(outcome.text().startsWith("NOTE: the delegation's goal named results that do not exist"),
+                outcome.text());
+    }
+
+    @Test
+    @DisplayName("a goal that names a private result gives it to the local model whole; its answer stays private, and reading it was the work")
+    void aGoalIsGivenThePrivateResultItNames() {
+        var ctx = new AgentContext("u1", "t1", "What does the bank say my balance is?");
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Your balance is 48,213.07 CZK.", true,
+                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+        var llm = new Scripted(done("The bank says the balance is 48,213.07 CZK."));
+
+        var outcome = executor(llm, new Usage()).execute(plan("Answer from {{1}}: what is the balance?"), ctx, UNCOUNTED);
+
+        String system = llm.calls.get(0).get(0).content();
+        assertTrue(system.contains("**Goal:** Answer from result 1: what is the balance?"), system);
+        assertTrue(system.contains("### result 1 (imap_fetch)\nYour balance is 48,213.07 CZK."),
+                "given whole, in the local model's prompt: " + system);
+        assertTrue(outcome.ok(), "no tool ran, and none had to: " + outcome.text());
+        assertFalse(outcome.text().contains("48,213.07"), "the cloud is not shown what was read: " + outcome.text());
+        assertTrue(ctx.localTierReadPrivate(), "what it does next is written after reading private data");
+        Artifact answer = ctx.artifacts().get(1);
+        assertEquals("local_answer", answer.tool());
+        assertEquals(Label.PRIVATE, answer.label());
+        assertTrue(answer.why().get(0).endsWith("after reading {{1}}"), answer.why().toString());
+        assertTrue(outcome.text().contains("(The local model's answer is {{2}}: private"), outcome.text());
+        // Mutations: count only the delegation's own results as read -> the answer goes to the
+        // cloud as prose; require a tool to have run -> a failed delegation.
     }
 
     @Test
@@ -758,7 +785,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(script.toArray(String[]::new));
 
         executor(llm, new Usage(), ping).execute(
-                new DelegationPlan("ping seven times", List.of(), List.of(), 10), task(), UNCOUNTED);
+                new DelegationPlan("ping seven times", List.of(), List.of()), task(), UNCOUNTED);
 
         List<LlmMessage> last = llm.calls.get(llm.calls.size() - 1);
         assertEquals(2 + 2 * 7, last.size(), "system, opening, and every call with its result");
@@ -770,13 +797,14 @@ class DelegationBehaviourTest {
     void partialResultsAreWhole() {
         String big = DelegationSafetyTest.digest().repeat(15) + "END-OF-RESULT";
         var news = new FakeTool("daily_news_digest", false, List.of(), p -> ToolResult.success(big));
-        var llm = new Scripted(call("daily_news_digest", Map.of()));
+        var llm = new Scripted(call("daily_news_digest", Map.of()), "", "", "");
 
         var outcome = executor(llm, new Usage(), news).execute(
-                new DelegationPlan("the digest", List.of(), List.of(), 1), task(), UNCOUNTED);
+                new DelegationPlan("the digest", List.of(), List.of()), task(), UNCOUNTED);
 
         assertFalse(outcome.ok());
-        assertTrue(outcome.text().startsWith("Delegation incomplete: Delegation reached max steps (1)"));
+        assertTrue(outcome.text().startsWith("Delegation incomplete: the local model produced nothing that "
+                + "could be run 3 turns in a row."), outcome.text());
         assertTrue(outcome.text().contains(big), "2,000 characters of it used to be all the cloud got");
     }
 

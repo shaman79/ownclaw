@@ -58,7 +58,7 @@ class DelegationToolsTest {
     private static final FakeTool NEWS = tool("news_digest");
 
     private static DelegationPlan plan(List<String> tools, List<DelegationPlan.Step> steps) {
-        return new DelegationPlan("get the lunch menus and send them", steps, List.of(), 4, tools);
+        return new DelegationPlan("get the lunch menus and send them", steps, List.of(), tools);
     }
 
     @Test
@@ -125,12 +125,12 @@ class DelegationToolsTest {
         String goal = "Fetch the menus using daily_menu_fetcher, then email them via smtp_send_email.";
         var listed = new Native(done("sent"));
         executor(listed, new Usage(), FETCH, SMTP, NEWS)
-                .execute(new DelegationPlan(goal, List.of(), List.of(), 4, List.of("daily_menu_fetcher")), task(), DelegationBehaviourTest.UNCOUNTED);
+                .execute(new DelegationPlan(goal, List.of(), List.of(), List.of("daily_menu_fetcher")), task(), DelegationBehaviourTest.UNCOUNTED);
         assertEquals(List.of("done", "daily_menu_fetcher", "smtp_send_email"), listed.offered.get(0));
 
         var unlisted = new Native(done("sent"));
         executor(unlisted, new Usage(), FETCH, SMTP, NEWS)
-                .execute(new DelegationPlan(goal, List.of(), List.of(), 4), task(), DelegationBehaviourTest.UNCOUNTED);
+                .execute(new DelegationPlan(goal, List.of(), List.of()), task(), DelegationBehaviourTest.UNCOUNTED);
         assertEquals(List.of("done", "daily_menu_fetcher", "smtp_send_email"), unlisted.offered.get(0),
                 "the cloud forgot the list: the goal still narrows it");
     }
@@ -155,7 +155,7 @@ class DelegationToolsTest {
         ctx.setUnattended(true);
         var llm = new Native(done("sent"));
         executor(llm, new Usage(), FETCH, SMTP, NEWS, tool("daily_news_digest"))
-                .execute(new DelegationPlan("Get the digest and email it", List.of(), List.of(), 4,
+                .execute(new DelegationPlan("Get the digest and email it", List.of(), List.of(),
                         List.of("daily_news_digest")), ctx, DelegationBehaviourTest.UNCOUNTED);
         assertEquals(List.of("done", "daily_news_digest", "smtp_send_email"), llm.offered.get(0),
                 "the cloud listed only the digest and paraphrased the goal");
@@ -167,7 +167,7 @@ class DelegationToolsTest {
         var ctx = new AgentContext("u1", "t1", "Show me today's menus here. Do NOT use smtp_send_email.");
         var llm = new Native(done("shown"));
         executor(llm, new Usage(), FETCH, SMTP, NEWS)
-                .execute(new DelegationPlan("Fetch today's lunch menus and return them", List.of(), List.of(), 4), ctx, DelegationBehaviourTest.UNCOUNTED);
+                .execute(new DelegationPlan("Fetch today's lunch menus and return them", List.of(), List.of()), ctx, DelegationBehaviourTest.UNCOUNTED);
         assertEquals(List.of("done", "daily_menu_fetcher", "news_digest", "smtp_send_email"), llm.offered.get(0));
     }
 

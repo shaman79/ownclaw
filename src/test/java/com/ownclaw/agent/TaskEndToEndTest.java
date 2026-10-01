@@ -532,22 +532,20 @@ class TaskEndToEndTest {
     @DisplayName("an ending already carries the record, so the next turn is not given it twice")
     void anEndingIsNotRecordedTwice(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
-        rig.config.getTasks().setMaxPlanSteps(2);
         String session = session(rig);
         rig.cloud.think.add(call("noop", Map.of()));
-        rig.cloud.think.add(call("noop", Map.of()));
+        for (int i = 0; i < 3; i++) rig.cloud.think.add(c -> com.ownclaw.llm.Replies.of("", 300, 0, 0, 0, "end_turn"));
         AgentResult first = rig.turn(session, "check the network");
-        assertEquals(AgentResult.TerminationReason.MAX_STEPS, first.terminationReason());
-        assertTrue(first.response().startsWith("**Stopped:** it used all 2 steps a task may take.\n\n"
-                + "**What it did** — 2 steps, "), first.response());
-        assertTrue(first.response().contains("\n1. ✓ noop") && first.response().contains("\n2. ✓ noop"),
-                first.response());
-        assertTrue(first.response().contains("**Next:** Reply **continue** to carry on"), first.response());
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, first.terminationReason());
+        assertTrue(first.response().startsWith("**Stopped:** The model produced nothing that could be run 3 "
+                + "times in a row.\n\n**What it did** — 4 steps, "), first.response());
+        assertTrue(first.response().contains("\n1. ✓ noop"), first.response());
+        assertTrue(first.response().contains("**Next:** Your next message starts a new task"), first.response());
 
         rig.cloud.think.add(respond("second"));
-        rig.turn(session, "continue");
-        String next = String.join("\n", userParts(rig.cloud.calls("think").get(2)));
-        assertTrue(next.contains("ASSISTANT: **Stopped:** it used all 2 steps"), next);
+        rig.turn(session, "carry on");
+        String next = String.join("\n", userParts(rig.cloud.calls("think").get(4)));
+        assertTrue(next.contains("ASSISTANT: **Stopped:** The model produced nothing"), next);
         assertFalse(next.contains("[OwnClaw's record of task"), next);
     }
 
@@ -659,8 +657,8 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("a Stop during the last step ends the task as stopped, not as out of steps")
-    void aStopInTheLastStepIsAStop(@TempDir Path tmp) throws Exception {
+    @DisplayName("a Stop during a step ends the task as stopped, with no invitation to carry on")
+    void aStopDuringAStepIsAStop(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(tool("slow_scan", List.of(), p -> {
             try {
                 Thread.sleep(800);
@@ -669,7 +667,6 @@ class TaskEndToEndTest {
             }
             return "scanned";
         })));
-        rig.config.getTasks().setMaxPlanSteps(1);
         rig.cloud.think.add(call("slow_scan", Map.of()));
         var stop = new Thread(() -> {
             try {
@@ -686,7 +683,8 @@ class TaskEndToEndTest {
         assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
         assertTrue(r.response().startsWith("**Stopped:** you pressed Stop.\n\n"), r.response());
         assertFalse(r.response().contains("continue"), "no invitation to carry on after Stop: " + r.response());
-        // Mutation: fall through to the step limit -> MAX_STEPS, "Reply continue".
+        assertEquals(1, rig.cloud.calls("think").size(), "the step after the Stop was never asked for");
+        // Mutation: check the stop only inside a model call -> the script has no second reply.
     }
 
     @Test
@@ -782,7 +780,7 @@ class TaskEndToEndTest {
         var rig = new LoopRig(tmp, List.of());
         String pdf = rig.files.store("u1", "statement.pdf", "application/pdf",
                 new java.io.ByteArrayInputStream("%PDF-1.7 binary".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-        AgentResult r = rig.loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf));
+        AgentResult r = rig.loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf), null);
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
         assertEquals(1, rig.jdbc.queryForObject(
                 "SELECT count(*) FROM events WHERE event_type = 'task_completed' AND task_id = ?", Integer.class, r.taskId()));

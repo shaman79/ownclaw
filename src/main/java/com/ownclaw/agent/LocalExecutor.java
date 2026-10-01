@@ -25,10 +25,12 @@ import java.util.stream.Collectors;
  * <h3>Mini Agent Loop</h3>
  * The executor runs its own Think→Act→Observe cycle:
  * <ol>
- *   <li>System prompt provides the plan and available tools</li>
+ *   <li>System prompt provides the plan, the earlier results the goal names, and the tools</li>
  *   <li>Local LLM picks the next tool call following the plan</li>
  *   <li>Executor runs the tool and feeds result back</li>
- *   <li>Repeat until local LLM says "done" or max_steps reached</li>
+ *   <li>Repeat, as many turns as the work takes, until the local model says "done" -- or the
+ *       task is stopped, a local call fails, or {@link AgentLoop#NOTHING_TO_RUN_IN_A_ROW} turns
+ *       in a row run nothing</li>
  * </ol>
  */
 @Component
@@ -143,17 +145,18 @@ public class LocalExecutor {
      */
     public Outcome execute(DelegationPlan plan, AgentContext parentContext,
                            java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
-        // A delegation sees only its own results. If the goal names an earlier one, the local
-        // model would read {{3}} as ITS OWN third step -- which is exactly how a second
-        // delegation once forwarded the first one's traceback as the body of the morning email.
-        // So the references are taken out of what it is given, and the cloud is told why.
-        int[] removed = {0};
-        Outcome outcome = run(withoutOutsideReferences(plan, removed), parentContext, billed);
+        // The earlier results the goal names are given to the delegation, whole: reading what the
+        // cloud is shown only as a description is what the local model is for. A name that is no
+        // result is taken out, and the cloud is told.
+        Given given = given(plan, parentContext.artifacts());
+        // While it runs, the task's private-result summaries wait: one local model, one request
+        // at a time (TaskChat).
+        Outcome outcome = parentContext.chat().whileDelegating(
+                () -> run(given.plan(), given.results(), parentContext, billed));
         String notes = "";
-        if (removed[0] > 0) {
-            log.warn("Delegation goal named {} earlier result(s); removed — a delegation cannot see them.",
-                    removed[0]);
-            notes += OUTSIDE_REFERENCE_NOTE;
+        if (given.missing() > 0) {
+            log.warn("Delegation goal named {} result(s) that do not exist; taken out.", given.missing());
+            notes += MISSING_REFERENCE_NOTE;
         }
         List<String> unknown = unknownTools(plan);
         if (!unknown.isEmpty()) {
@@ -170,45 +173,72 @@ public class LocalExecutor {
                 outcome.stepCount(), outcome.ok(), outcome.produced());
     }
 
-    private static final String OUTSIDE_REFERENCE_NOTE = "NOTE: the delegation's goal named "
-            + "earlier results. A delegation starts with no results and cannot see earlier ones, "
-            + "so those references were removed from what it was given. When you have a tool that "
-            + "takes an earlier result, put {{N}} or {{N.field}} into that call yourself; otherwise "
-            + "say in words what the delegation should fetch.\n\n";
+    private static final String MISSING_REFERENCE_NOTE = "NOTE: the delegation's goal named "
+            + "results that do not exist, so those references were taken out of what it was given. "
+            + "Name an earlier result by the handle an observation gave it ({{N}}); every result "
+            + "the goal names is given to the delegation whole.\n\n";
 
-    /** The plan with every reference replaced by a note; {@code removed[0]} counts them. */
-    static DelegationPlan withoutOutsideReferences(DelegationPlan plan, int[] removed) {
-        java.util.function.UnaryOperator<String> scrub = text -> {
+    /**
+     * A plan as the local model is given it, the earlier results it names, in the order it first
+     * names them, and how many of its references name no result.
+     */
+    record Given(DelegationPlan plan, List<Artifact> results, int missing) {}
+
+    /**
+     * The plan as the local model is given it, with the earlier results it names. A well-formed
+     * reference in its prose -- the goal, a step's description, a checkpoint -- to a result of
+     * the task gives that result to the delegation, whole, in its prompt, and is written in
+     * words ("result 4"). Left as {{4}}, the local model would read it as its own fourth result,
+     * which is how a second delegation once forwarded the first one's traceback as the body of
+     * the morning email. A reference to no result is taken out and counted. Step PARAMETERS are
+     * left alone: in a plan, {{1}} there means the plan's own step 1, which is exactly how the
+     * delegation numbers.
+     */
+    static Given given(DelegationPlan plan, List<Artifact> results) {
+        var named = new java.util.LinkedHashMap<Integer, Artifact>();
+        int[] missing = {0};
+        java.util.function.UnaryOperator<String> inWords = text -> {
             if (text == null) return null;
             var m = ArtifactRef.TOKEN.matcher(text);
             var sb = new StringBuilder();
             while (m.find()) {
-                removed[0]++;
-                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(
-                        "(an earlier result this delegation cannot see — get it again if needed)"));
+                ArtifactRef ref = ArtifactRef.parse(m.group());
+                String words;
+                if (ref != null && ref.handle() <= results.size()) {
+                    named.putIfAbsent(ref.handle(), results.get(ref.handle() - 1));
+                    words = TaskRecord.inWords(m.group());
+                } else {
+                    missing[0]++;
+                    words = "(a result that does not exist)";
+                }
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(words));
             }
             m.appendTail(sb);
             return sb.toString();
         };
+        String goal = inWords.apply(plan.goal());
         var steps = new ArrayList<DelegationPlan.Step>();
         for (var st : plan.steps()) {
-            // Step PARAMETERS are left alone: in a plan, {{1}} there means the plan's own step 1,
-            // which is exactly how the delegation numbers. Only prose points outside.
-            steps.add(new DelegationPlan.Step(scrub.apply(st.description()), st.tool(), st.params()));
+            steps.add(new DelegationPlan.Step(inWords.apply(st.description()), st.tool(), st.params()));
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
-                : plan.checkpoints().stream().map(scrub).toList();
-        return new DelegationPlan(scrub.apply(plan.goal()), steps, checkpoints, plan.maxSteps(),
-                plan.tools());
+                : plan.checkpoints().stream().map(inWords).toList();
+        return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools()),
+                List.copyOf(named.values()), missing[0]);
     }
 
-    private Outcome run(DelegationPlan plan, AgentContext parentContext,
+    /** @param given the earlier results the goal names, which the local model reads in its prompt */
+    private Outcome run(DelegationPlan plan, List<Artifact> given, AgentContext parentContext,
                         java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
             return Outcome.failed(
                     "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.");
         }
+        // Reading a private result is reading private data: from here every result of the task's
+        // delegations is PRIVATE, and what the local model writes is withheld from the cloud
+        // (AgentContext.decide, recordAnswer).
+        if (given.stream().anyMatch(Artifact::isPrivate)) parentContext.markLocalTierReadPrivate();
 
         // The tool manifest is the largest thing in this prompt and num_ctx is the binding
         // constraint on this hardware, so when the model can take tools as structure, send them
@@ -222,7 +252,6 @@ public class LocalExecutor {
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
                 offered(plan, parentContext).size());
 
-        int maxSteps = plan.maxSteps() > 0 ? plan.maxSteps() : 10;
         // This delegation's own results, and the only ones the local model can name: {{1}} is
         // its first step, {{2}} its second -- which is what the system prompt tells it, and
         // what a small model does unprompted anyway. Numbering them task-wide instead made that
@@ -242,8 +271,8 @@ public class LocalExecutor {
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
-        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, parentContext, nativeTools,
-                fileTask)));
+        messages.add(LlmMessage.system(buildExecutorSystemPrompt(plan, given, parentContext,
+                nativeTools, fileTask)));
 
         // Initial instruction. "Start with step 1" makes no sense without a step list.
         String opening = plan.steps().isEmpty()
@@ -267,7 +296,9 @@ public class LocalExecutor {
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
                 .withProgress(parentContext.progress());
 
-        for (int step = 0; step < maxSteps; step++) {
+        // Turns in a row that ran nothing: the reply was empty, or held no tool call.
+        int nothingInARow = 0;
+        for (int turn = 1; ; turn++) {
             if (parentContext.isCancelled()) {
                 // Partial work is not worthless: it is the only record of what the local model
                 // managed before the plug was pulled, and throwing it away is why a timed-out
@@ -296,16 +327,16 @@ public class LocalExecutor {
                 if (parentContext.localTierReadPrivate() && !(e instanceof OutputTruncated)) {
                     String kept = e.getClass().getSimpleName()
                             + " (its text is kept out: this delegation had read private data)";
-                    log.error("Local LLM call failed during delegation step {}: {}", step + 1, kept);
+                    log.error("Local LLM call failed during delegation turn {}: {}", turn, kept);
                     return partial("Local LLM call failed: " + kept, mine);
                 }
                 if (e instanceof MalformedToolCall) {
                     // Its message quotes the model's own arguments: the log gets their length,
                     // as it does for a reply that could not be parsed.
-                    log.error("Local LLM call failed during delegation step {}: a tool call that "
-                            + "cannot be run ({} chars)", step + 1, msg.length());
+                    log.error("Local LLM call failed during delegation turn {}: a tool call that "
+                            + "cannot be run ({} chars)", turn, msg.length());
                 } else {
-                    log.error("Local LLM call failed during delegation step {}: {}", step + 1, msg, e);
+                    log.error("Local LLM call failed during delegation turn {}: {}", turn, msg, e);
                 }
                 return partial("Local LLM call failed: " + msg, mine);
             }
@@ -324,9 +355,10 @@ public class LocalExecutor {
             // transcript as the empty turn it was.
             if (!response.hasToolCalls()
                     && (response.content() == null || response.content().isBlank())) {
-                log.warn("Delegation step {}: the local model's reply had no text and no tool "
-                                + "call ({} tokens, stop reason {}).", step + 1,
+                log.warn("Delegation turn {}: the local model's reply had no text and no tool "
+                                + "call ({} tokens, stop reason {}).", turn,
                         response.completionTokens(), response.stopDescription());
+                if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
                 messages.add(LlmMessage.assistant(""));
                 messages.add(LlmMessage.user(ThinkingEngine.emptyReply(response)
                         + " Continue from where the task stands."));
@@ -359,8 +391,8 @@ public class LocalExecutor {
 
             if (actions.size() == 1 && actions.get(0).done) {
                 ExecutorAction action = actions.get(0);
-                log.info("Delegation completed after {} steps. Summary length: {}",
-                        step + 1, action.summary != null ? action.summary.length() : 0);
+                log.info("Delegation completed after {} turns. Summary length: {}",
+                        turn, action.summary != null ? action.summary.length() : 0);
                 // The conclusion AND the rows it was drawn from. The cloud tier is kept for its
                 // judgement, and a scheduled task shaped "fetch X, decide whether Y, act" would
                 // otherwise have it judge on a small model's paraphrase of the evidence.
@@ -370,8 +402,15 @@ public class LocalExecutor {
                 // A summary written after the model read something private is withheld from the
                 // cloud, and kept as a PRIVATE result of its own, which the cloud can hand on by
                 // its handle without reading it.
-                Artifact said = recordAnswer(parentContext, action.summary, mine, fileTask);
-                return completed(action.summary, plan.goal(), mine, said);
+                Artifact said = recordAnswer(parentContext, action.summary, given, mine, fileTask);
+                return completed(action.summary, plan.goal(), given, mine, said);
+            }
+
+            // A turn whose every call names no tool ran nothing, as an empty one did.
+            if (actions.stream().noneMatch(a -> a.done || a.tool != null && !a.tool.isBlank())) {
+                if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
+            } else {
+                nothingInARow = 0;
             }
 
             // Every call of the turn, in its order, through the same guards, and none dropped:
@@ -405,7 +444,7 @@ public class LocalExecutor {
                             + "numbering from the results you have now.";
                 } else {
                     int had = mine.size();
-                    reply = act(action, parentContext, mine, nativeTools, plan);
+                    reply = act(action, parentContext, mine, nativeTools, plan, turn);
                     if (mine.size() == had) didNotRun = i + 1;
                 }
                 String name = action.done ? "done" : action.tool;
@@ -431,11 +470,13 @@ public class LocalExecutor {
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(told));
         }
+    }
 
-        // Hit max steps without "done"
-        log.warn("Delegation hit max steps ({}) for goal: {}", maxSteps, plan.goal());
-        return partial("Delegation reached max steps (" + maxSteps + ")",
-                mine);
+    /** A delegation whose local model ran nothing {@link AgentLoop#NOTHING_TO_RUN_IN_A_ROW} turns in a row. */
+    private Outcome ranNothing(List<Artifact> mine) {
+        log.warn("Delegation ended: {} turns in a row ran nothing.", AgentLoop.NOTHING_TO_RUN_IN_A_ROW);
+        return partial("the local model produced nothing that could be run "
+                + AgentLoop.NOTHING_TO_RUN_IN_A_ROW + " turns in a row.", mine);
     }
 
     /**
@@ -443,7 +484,7 @@ public class LocalExecutor {
      * the model is told about it: the result, or why the call did not run.
      */
     private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
-                       boolean nativeTools, DelegationPlan plan) {
+                       boolean nativeTools, DelegationPlan plan, int turn) {
         if (action.tool == null || action.tool.isBlank()) {
             // Local LLM produced something unparseable — tell it, so it can recover
             return nativeTools
@@ -480,7 +521,7 @@ public class LocalExecutor {
 
         // A change is attempted once per delegation, and made once per task. The cloud path
         // has CriticAgent, which blocks an identical action after three tries; delegation
-        // never reaches it, so the only bound here was max_steps -- and an SMTP timeout can
+        // never reaches it, so nothing else bounds a retry here -- and an SMTP timeout can
         // arrive AFTER the server accepted the message, so an unbounded retry of a "failed"
         // send delivered a copy each time. A failed change is retried by the next attempt at
         // the job (a new delegation, or the cloud once the fallback opens), where it is new;
@@ -516,7 +557,11 @@ public class LocalExecutor {
                     + " Text you compose yourself is fine; a partial copy of a result is not.";
         }
 
-        // ACT: execute the tool
+        // ACT: execute the tool -- said in the owner's chat first, so the work on the local
+        // tier is seen as it happens. Named as the registry names it: a name the local model
+        // wrote after reading private data can carry what it read, and a progress row's content
+        // is what the cloud could be shown.
+        if (target != null) parentContext.chat().localTurn(turn, target.name());
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
@@ -545,7 +590,10 @@ public class LocalExecutor {
         Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);
-        if (artifact.isPrivate()) parentContext.markLocalTierReadPrivate();
+        if (artifact.isPrivate()) {
+            parentContext.markLocalTierReadPrivate();
+            parentContext.chat().privateResult(artifact);
+        }
         // Whether it WORKED, which is what everyone downstream asks: the model's feedback, the
         // usage row, the delegation's verdict. The harness's flag said SUCCESS for an SMTP
         // error wrapped as "ok": false, so the delegation reported ok and the fallback never
@@ -615,14 +663,6 @@ public class LocalExecutor {
             }
         }
 
-        int maxSteps = 10;
-        Object maxObj = params.get("max_steps");
-        if (maxObj != null) {
-            try {
-                maxSteps = Integer.parseInt(maxObj.toString());
-            } catch (NumberFormatException ignored) {}
-        }
-
         // Comma-separated names, as the schema asks -- or a list, or a JSON array written as a
         // string, as a model will sometimes send. Tool names are [A-Za-z0-9_-], so anything
         // else separates them.
@@ -632,7 +672,7 @@ public class LocalExecutor {
                 : toolsObj instanceof String s ? s : "";
         for (String name : listed.split("[^A-Za-z0-9_-]+")) if (!name.isBlank()) tools.add(name);
 
-        return new DelegationPlan(goal, steps, checkpoints, maxSteps, tools);
+        return new DelegationPlan(goal, steps, checkpoints, tools);
     }
 
     // ── Private helpers ──
@@ -641,8 +681,9 @@ public class LocalExecutor {
      * Build the system prompt for the local executor.
      * Includes the plan, available tools, and constrained output format.
      */
-    private String buildExecutorSystemPrompt(DelegationPlan plan, AgentContext context,
-                                             boolean nativeTools, boolean fileTask) {
+    private String buildExecutorSystemPrompt(DelegationPlan plan, List<Artifact> given,
+                                             AgentContext context, boolean nativeTools,
+                                             boolean fileTask) {
         var sb = new StringBuilder(4096);
 
         // The header used to say "Follow the plan exactly. No planning authority." unconditionally,
@@ -673,6 +714,19 @@ public class LocalExecutor {
         // The plan
         sb.append("## Plan\n");
         sb.append("**Goal:** ").append(plan.goal()).append("\n\n");
+
+        // Whole, on this machine: reading what the cloud is shown only as a description is what
+        // the local model is for. Named in words, as the goal names them, so a handle never means
+        // one of these and one of its own results at once.
+        if (!given.isEmpty()) {
+            sb.append("**Results you are given** (the earlier results the goal names; read them "
+                    + "here -- they are not among your own numbered results):\n\n");
+            for (Artifact a : given) {
+                sb.append("### result ").append(a.n()).append(" (").append(a.tool())
+                  .append(a.succeeded() ? "" : ", failed").append(")\n")
+                  .append(a.output().isEmpty() ? "(no text)" : a.output()).append("\n\n");
+            }
+        }
 
         if (!plan.steps().isEmpty()) {
             sb.append("**Steps to execute in order:**\n");
@@ -982,19 +1036,24 @@ public class LocalExecutor {
     }
 
     /**
-     * A delegation that said it was done. Successful only if something actually ran.
+     * A delegation that said it was done. Successful only if something actually ran, or it was
+     * given results to read and wrote what it read in them.
      * <p>
      * Zero tools and a confident summary is the shape of a hallucinated success, and it used to
      * produce a successful step, a successful task and a scheduled run recorded as delivered —
-     * with the registry withheld, the cloud has no instrument to check it with.
+     * with the registry withheld, the cloud has no instrument to check it with. A delegation
+     * given results is not that: what it read is in its prompt, and the reading was the work.
      *
-     * @param said the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
-     *             handle and size, never its text, and it joins what the delegation produced.
+     * @param given the earlier results the goal named, which the local model read
+     * @param said  the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
+     *              handle and size, never its text, and it joins what the delegation produced.
      */
-    static Outcome completed(String localSummary, String goal, List<Artifact> results, Artifact said) {
+    static Outcome completed(String localSummary, String goal, List<Artifact> given,
+                             List<Artifact> results, Artifact said) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
-        boolean anyPrivate = results.stream().anyMatch(Artifact::isPrivate);
-        String touched = results.stream().filter(Artifact::isPrivate).map(Artifact::handle)
+        List<Artifact> read = readBy(given, results);
+        boolean anyPrivate = read.stream().anyMatch(Artifact::isPrivate);
+        String touched = read.stream().filter(Artifact::isPrivate).map(Artifact::handle)
                 .collect(Collectors.joining(", "));
         // The local model's own prose is withheld when it has read private content: it is a
         // paraphrase of that content, and a paraphrase is the one thing the canary cannot see.
@@ -1045,18 +1104,28 @@ public class LocalExecutor {
         // page show it; the ledger and the verdict stay about the tools that ran.
         List<Artifact> produced = new ArrayList<>(results);
         if (said != null) produced.add(said);
+        boolean worked = !results.isEmpty()
+                || !given.isEmpty() && localSummary != null && !localSummary.isBlank();
         return new Outcome(head + summary + ledger(results) + verbatimFailures(results),
                 toolNames(results), results.size(),
                 // A step that threw means the cloud should have the registry back: rewriting a
                 // skill from its traceback is the self-learning loop this project exists for,
                 // and it cannot run through a paraphrase. Marking the delegation failed is what
                 // restores the registry and engages the repair path.
-                !results.isEmpty() && !anyFailed, List.copyOf(produced));
+                worked && !anyFailed, List.copyOf(produced));
+    }
+
+    /** What the local model read: the results it was given, then its own. */
+    private static List<Artifact> readBy(List<Artifact> given, List<Artifact> mine) {
+        List<Artifact> read = new ArrayList<>(given);
+        read.addAll(mine);
+        return read;
     }
 
     /**
      * Keep the local model's answer as a PRIVATE result of the task; null when there is none to
-     * keep -- it read nothing private, or wrote nothing.
+     * keep -- it read nothing private, among the results it was given or its own, or wrote
+     * nothing.
      * <p>
      * A summary written after reading something private is withheld from the cloud: it is a
      * paraphrase of what was read, and a paraphrase is the one thing the canary cannot see. It
@@ -1073,13 +1142,13 @@ public class LocalExecutor {
      * again itself -- and indexed, the request carrying the report would be refused, and the
      * cloud's own fetch withheld.
      */
-    static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> mine,
-                                 boolean fileTask) {
-        if (summary == null || summary.isBlank() || mine.stream().noneMatch(Artifact::isPrivate)) {
+    static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> given,
+                                 List<Artifact> mine, boolean fileTask) {
+        List<Artifact> privateRead = readBy(given, mine).stream().filter(Artifact::isPrivate).toList();
+        if (summary == null || summary.isBlank() || privateRead.isEmpty()) {
             return null;
         }
-        String read = mine.stream().filter(Artifact::isPrivate).map(Artifact::handle)
-                .collect(Collectors.joining(", "));
+        String read = privateRead.stream().map(Artifact::handle).collect(Collectors.joining(", "));
         String text = References.proseForTask(summary, mine);
         return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
                 new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,

@@ -246,7 +246,7 @@ class RepeatedPrivateResultTest {
         String digest = "Daily digest, 30 September: markets calm, rain in Brno at 14 degrees, "
                 + "and the council approved the tram line to the campus.";
         for (String provider : List.of("anthropic", "openai")) {
-            for (String stop : List.of("out of steps", "the local model's next call fails")) {
+            for (String stop : List.of("three turns ran nothing", "the local model's next call fails")) {
                 var news = new DelegationBehaviourTest.FakeTool("daily_news_digest", false, List.of(),
                         p -> ToolResult.success(digest));
                 var smtp = new DelegationBehaviourTest.FakeTool("smtp_send_email", true, List.of("SMTP_PASS"),
@@ -259,16 +259,16 @@ class RepeatedPrivateResultTest {
                         DelegationBehaviourTest.call("smtp_send_email", Map.of("to", "owner@example.org", "body", "{{1}}"))));
                 LlmProvider local = new LlmProvider() {
                     public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
-                        if (turns.isEmpty()) throw new com.ownclaw.llm.LlmException("ollama", "Read timed out");
-                        return Replies.of(turns.poll(), 1, 1);
+                        if (!turns.isEmpty()) return Replies.of(turns.poll(), 1, 1);
+                        if ("three turns ran nothing".equals(stop)) return Replies.of("", 1, 1);
+                        throw new com.ownclaw.llm.LlmException("ollama", "Read timed out");
                     }
                     public boolean isAvailable() { return true; }
                     public String name() { return "ollama"; }
                 };
                 var cloud = new Named(provider,
                         AssistantPartsTest.call("delegate", Map.of("goal", "Fetch the morning digest and email it to the owner.",
-                                "tools", "daily_news_digest,smtp_send_email",
-                                "max_steps", "out of steps".equals(stop) ? 2 : 6)),
+                                "tools", "daily_news_digest,smtp_send_email")),
                         AssistantPartsTest.call("respond", Map.of("message", "The digest was sent.")));
                 var rows = new ArrayList<EgressLedger.Row>();
                 var config = new OwnClawConfig();

@@ -2,6 +2,7 @@ package com.ownclaw.interfaces.telegram;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
@@ -294,8 +295,10 @@ public class TelegramBotService {
         String currentMessageId =
                 conversationService.saveMessage(userId, currentSessionId, "user", text);
 
-        // The task runs on the queue; its answer is saved and sent here.
-        taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
+        // The task runs on the queue; its answer is saved and sent here. It came from Telegram,
+        // so its progress messages go to Telegram too (forTelegram).
+        var telegram = TaskChat.Channel.TELEGRAM;
+        taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of(), telegram).thenAccept(result -> {
             // Saved as the web chat saves an answer: the web chat shows it on reload, the private
             // answer included, and links it to what the task did. Saving is one half of
             // delivering it, and failing it must not also lose the other: it is still sent.
@@ -346,15 +349,18 @@ public class TelegramBotService {
 
     /**
      * Whether a status message is sent to Telegram: what is meant for the owner to read --
-     * results, questions, warnings and failures -- and not the queue, step and progress notices
-     * of a running task, nor debug output. Those went out one message each, the twenty-second
-     * heartbeats of a long code generation and every full prompt of debug mode included; a
-     * part Telegram refuses for coming too fast is now waited for, not dropped, and a flood of
-     * them would hold up the answer queued behind them.
+     * results, questions, warnings and failures, and the progress messages of a task that came
+     * from Telegram -- and not the queue, step and progress notices of a running task, nor debug
+     * output. Those went out one message each, the twenty-second heartbeats of a long code
+     * generation and every full prompt of debug mode included; a part Telegram refuses for
+     * coming too fast is now waited for, not dropped, and a flood of them would hold up the
+     * answer queued behind them. A progress message is one per step, written to be read; a
+     * task asked from the web chat shows its own there.
      */
     static boolean forTelegram(ChatStatusEmitter.StatusMessage msg) {
         return switch (msg.type()) {
             case RESULT, NEED_INPUT, WARNING, FAILED -> true;
+            case PROGRESS_MESSAGE -> msg.data() != null && Boolean.TRUE.equals(msg.data().get("telegram"));
             default -> false;
         };
     }
@@ -406,13 +412,15 @@ public class TelegramBotService {
     }
 
     /**
-     * What Telegram is sent for a status message: for a result that carries the owner's private
-     * text, that text -- the owner decided Telegram gets private answers in full; otherwise the
-     * message as it is formatted everywhere.
+     * What Telegram is sent for a status message: for a result or a progress message that carries
+     * the owner's private text, that text -- the owner decided Telegram gets private answers in
+     * full, and a private result's summary is his alone as well; otherwise the message as it is
+     * formatted everywhere.
      */
     public static String telegramText(ChatStatusEmitter.StatusMessage msg) {
-        if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT && msg.data() != null
-                && msg.data().get("ownerText") instanceof String owner) {
+        boolean ownersOwn = msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT
+                || msg.type() == ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE;
+        if (ownersOwn && msg.data() != null && msg.data().get("ownerText") instanceof String owner) {
             return owner;
         }
         return msg.formatted();

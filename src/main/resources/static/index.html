@@ -426,6 +426,19 @@
             color: var(--text-3);
         }
 
+        /* ───── Progress messages ───── */
+        /* A running task's steps, in its chat: compact and secondary to the answer. */
+        .msg.progress {
+            margin: 2px 0 2px 42px;
+            padding: 3px 12px;
+            border-left: 2px solid var(--border-mid);
+            font-size: 12.5px;
+            line-height: 1.55;
+            color: var(--text-3);
+        }
+        .msg.progress p { margin: 0 }
+        .msg.progress p + p { margin-top: 2px }
+
         /*  Connection banner  */
         #conn-banner {
             display: none;
@@ -2797,7 +2810,7 @@
             clearMessages();
             var msgs = data.messages || [];
             msgs.forEach(function(m) {
-                var type = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'response');
+                var type = m.role === 'user' || m.role === 'system' || m.role === 'progress' ? m.role : 'response';
                 addMsg(type, m.content, m.task_id);
             });
         })
@@ -3309,6 +3322,7 @@
     function tdOutcome(outcome, failedSteps, unverified) {
         if (!outcome) return { words: 'Not recorded', tone: '' };
         var r = outcome.reason;
+        // MAX_STEPS and TIMEOUT are no longer endings; rows of tasks from before keep them.
         var words = {
             COMPLETED: failedSteps ? 'Completed, ' + tdCount(failedSteps, 'step', 'steps') + ' failed' : 'Completed',
             NEEDS_INPUT: 'Waiting for your answer', PRIVACY_BLOCKED: 'Stopped: it would have sent private data',
@@ -5482,6 +5496,14 @@
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
                     addMsg('debug', content);
+                } else if (type === 'progress') {
+                    // A running task saying what it is doing, in the chat it was asked from: drawn
+                    // there while that chat is on screen (it is saved, so a reload shows it too),
+                    // and evidence that the work goes on -- never the end of it.
+                    resetThinkingSafetyTimer();
+                    if (currentView === 'chat' && data.sessionId === displayedSessionId) {
+                        addMsg('progress', content);
+                    }
                 } else if (type === 'pong' || type === 'ping') {
                     // heartbeat
                 } else {

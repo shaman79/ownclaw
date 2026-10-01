@@ -38,7 +38,8 @@ import java.util.stream.Collectors;
  *   2. CriticAgent validates the action (fast, rule-based)
  *   3. Tool is executed (sandbox, HTTP, etc.)
  *   4. Observation is recorded in the trajectory
- *   5. Repeat until the agent responds, times out, or hits a limit
+ *   5. Repeat until the agent answers or asks, is stopped, or steps in a row produce nothing
+ *      to run -- however many steps the work takes
  *
  * The loop is the central execution engine that replaced the old plan-first approach.
  */
@@ -134,7 +135,7 @@ public class AgentLoop {
     }
 
     public AgentResult executeFull(String userId, String message, boolean unattended) {
-        return executeFull(userId, message, unattended, null, List.of());
+        return executeFull(userId, message, unattended, null, List.of(), null);
     }
 
     /**
@@ -143,9 +144,12 @@ public class AgentLoop {
      *                         run without one has no chat
      * @param attachmentIds    the files sent with this turn; each one this user owns is
      *                         registered PRIVATE, and every result of the task is PRIVATE with it
+     * @param channel          where that row came from, which decides where the task's progress
+     *                         messages are shown ({@link TaskChat}); null when it has no chat
      */
     public AgentResult executeFull(String userId, String message, boolean unattended,
-                                   String currentMessageId, List<String> attachmentIds) {
+                                   String currentMessageId, List<String> attachmentIds,
+                                   TaskChat.Channel channel) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
@@ -153,6 +157,20 @@ public class AgentLoop {
         // The chat this task came from, whole, with the record of each finished task in it.
         loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage,
                 id -> TaskRecord.forLaterTask(id, traceOf(userId, id)));
+        // And where it says what it is doing: that same chat. Unattended work has none -- nobody
+        // waits for it, and its report is delivered when it is done.
+        if (!unattended && currentMessageId != null && channel != null) {
+            try {
+                String session = conversationService.sessionOf(userId, currentMessageId);
+                if (session != null) {
+                    context.setChat(new TaskChat(context, session, channel, conversationService,
+                            statusEmitter, llmRouter.local(), accountOf(context)));
+                }
+            } catch (RuntimeException e) {
+                log.warn("Task {}: its chat could not be found, so it posts no progress: {}",
+                        taskId, e.getMessage());
+            }
+        }
         registerAttachments(context, attachmentIds, fileStorage, eventLog);
         AgentResult stopped = stopWithoutLocalModel(context, () -> {
             LlmProvider local = llmRouter.local();
@@ -263,6 +281,7 @@ public class AgentLoop {
             result = AgentResult.error(internalError(e, context), context.trajectory(), context.elapsedMs());
         } finally {
             inFlight.remove(taskId);
+            context.chat().close();
         }
         return end(context, result, true);
     }
@@ -572,16 +591,26 @@ public class AgentLoop {
         return AgentResult.error(LOCAL_DOWN_FOR_FILES, ctx.trajectory(), ctx.elapsedMs());
     }
 
+    /**
+     * How many steps in a row may produce nothing to run before the task, or a delegation, ends:
+     * a model that has not managed to act that many times running is not making progress. Not
+     * a limit on the work: a step that runs anything starts the count again.
+     */
+    static final int NOTHING_TO_RUN_IN_A_ROW = 3;
+
+    /**
+     * The steps of the task, as many as the work takes. It ends when the model answers or asks,
+     * when it is stopped -- the owner's Stop, the ops API, the stall watchdog -- or when
+     * {@link #NOTHING_TO_RUN_IN_A_ROW} steps in a row ran nothing. A step limit ended a task that
+     * was twenty successful steps into the router fixes the owner had asked for.
+     */
     private AgentResult runLoop(AgentContext context) {
-        int maxSteps = config.getTasks().getMaxPlanSteps();
-        int consecutiveFallbacks = 0; // Track consecutive LLM failures to cap retries
-        int totalThinkingFailures = 0; // Track total thinking failures across entire task
+        int consecutiveFallbacks = 0;  // steps in a row that produced nothing to run
         int failedCallsInARow = 0;     // of the steps consecutiveFallbacks counts, the calls that failed
-        int failedCallsInTask = 0;     // of those totalThinkingFailures counts
         String lastFailure = null;     // how the last of those calls failed
         int unansweredQuestions = 0;   // ask_user calls on a task with nobody to answer them
 
-        for (int step = 0; step < maxSteps; step++) {
+        for (int step = 0; ; step++) {
             // Stopped from outside -- the owner's Stop or /cancel, the ops API, or the stall
             // watchdog (cancelStalledTasks) -- between steps. Inside one, a model call hears it on
             // its progress hook and a tool through the supplier it was handed.
@@ -625,6 +654,8 @@ public class AgentLoop {
                         AgentAction.SKILL_CREATE, skillParams,
                         "CapabilityResolver detected missing " + hint.category()
                                 + " capability — creating skill deterministically");
+                // No model chose this step, so nothing was written beside it.
+                context.chat().step(step + 1, action, null);
 
                 if (debug) {
                     emitDebug(context.userId(),
@@ -681,6 +712,11 @@ public class AgentLoop {
             context.markProgress(); // LLM responded — task is alive
             AgentAction action = thinkResult.action();
             int billed = account(context, local, provider, thinkResult.reply());
+            // One tool call runs per step. The others the reply made are not dropped unsaid: the
+            // observation this step records names them (recordAndEmitObservation).
+            if (!ThinkingEngine.THINKING.equals(action.tool())) {
+                context.setCallsNotRun(callsNotRun(thinkResult.reply()));
+            }
 
             // Emit running token totals so the frontend can update the live counter
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
@@ -703,21 +739,20 @@ public class AgentLoop {
             // The engine returns THINKING for a reply that was empty, that is not an action, that
             // never came because the call failed, or -- unattended, before anything ran -- that
             // answered instead of doing the work. Nothing runs. What the model is told about it
-            // is recorded in its place, and the model is asked again, within the limits below.
+            // is recorded in its place, and the model is asked again -- until
+            // NOTHING_TO_RUN_IN_A_ROW of them come in a row. However many there are in a long
+            // task that keeps making progress between them, they do not end it.
             if (ThinkingEngine.THINKING.equals(action.tool())) {
                 consecutiveFallbacks++;
-                totalThinkingFailures++;
                 // A new run of them starts wherever an answer or a step that ran reset the count.
                 if (consecutiveFallbacks == 1) failedCallsInARow = 0;
                 if (thinkResult.callFailed() != null) {
                     failedCallsInARow++;
-                    failedCallsInTask++;
                     lastFailure = thinkResult.callFailed();
                 }
-                boolean stop = consecutiveFallbacks >= 3 || totalThinkingFailures >= 5
-                        || step >= maxSteps - 1;
+                boolean stop = consecutiveFallbacks >= NOTHING_TO_RUN_IN_A_ROW;
                 String told = action.reasoning();
-                if (!stop && (consecutiveFallbacks == 2 || totalThinkingFailures == 4)) {
+                if (consecutiveFallbacks == NOTHING_TO_RUN_IN_A_ROW - 1) {
                     told += "\n\nWARNING: one more step like this and the task is stopped.";
                 }
                 // Recorded before any stop, so the task's steps hold every one of them -- the one
@@ -728,31 +763,15 @@ public class AgentLoop {
                 // failureLimit, not completed: an abort. Recording it as COMPLETED marked the
                 // event log "info" and stored the episode with a [SUCCESS] prefix, so the memory
                 // layer later recalled a failed task as a worked example.
-                if (consecutiveFallbacks >= 3) {
+                if (stop) {
                     log.error("Task {} step {}: {} steps in a row produced nothing to run — aborting task",
                             context.taskId(), step + 1, consecutiveFallbacks);
                     return AgentResult.failureLimit(ranNothing(consecutiveFallbacks, failedCallsInARow,
-                                    lastFailure, "in a row", context),
+                                    lastFailure, context),
                             context.trajectory(), context.elapsedMs());
                 }
-                if (totalThinkingFailures >= 5) {
-                    log.error("Task {} step {}: {} steps in this task produced nothing to run — aborting task",
-                            context.taskId(), step + 1, totalThinkingFailures);
-                    return AgentResult.failureLimit(ranNothing(totalThinkingFailures, failedCallsInTask,
-                                    lastFailure, "in this task", context),
-                            context.trajectory(), context.elapsedMs());
-                }
-                // Out of steps on the very same kind of failure: not an answer either.
-                if (step >= maxSteps - 1) {
-                    log.error("Task {} step {}: the last step produced nothing to run", context.taskId(), step + 1);
-                    return AgentResult.maxSteps("The task used all " + maxSteps + " steps it may take; "
-                                    + (thinkResult.callFailed() == null ? "the last produced nothing that could be run."
-                                            : "in the last, the call to the model failed ("
-                                                    + quotable(thinkResult.callFailed(), context) + ")."),
-                            context.trajectory(), context.elapsedMs());
-                }
-                log.warn("Task {} step {}: nothing to run, asking the model again (in a row {}/3, in this task {}/5)",
-                        context.taskId(), step + 1, consecutiveFallbacks, totalThinkingFailures);
+                log.warn("Task {} step {}: nothing to run, asking the model again ({}/{} in a row)",
+                        context.taskId(), step + 1, consecutiveFallbacks, NOTHING_TO_RUN_IN_A_ROW);
                 continue;
             }
 
@@ -760,9 +779,10 @@ public class AgentLoop {
             if (action.isResponse()) {
                 consecutiveFallbacks = 0; // an answer, not a step that produced nothing
                 Answer answer = answerFor(action.responseText(), context);
-                if (answer.refusal() != null) {
+                String refusal = answer.refusal() != null ? answer.refusal() : alongsideOtherCalls(context);
+                if (refusal != null) {
                     recordAndEmitObservation(context, action, AgentObservation.failure(
-                            action.tool(), "Not delivered: " + answer.refusal(), 0), step + 1);
+                            action.tool(), "Not delivered: " + refusal, 0), step + 1);
                     context.markProgress();
                     continue;
                 }
@@ -799,9 +819,10 @@ public class AgentLoop {
                     continue;
                 }
                 Answer question = answerFor(action.responseText(), context);
-                if (question.refusal() != null) {
+                String refusal = question.refusal() != null ? question.refusal() : alongsideOtherCalls(context);
+                if (refusal != null) {
                     recordAndEmitObservation(context, action, AgentObservation.failure(
-                            action.tool(), "Not delivered: " + question.refusal(), 0), step + 1);
+                            action.tool(), "Not delivered: " + refusal, 0), step + 1);
                     context.markProgress();
                     continue;
                 }
@@ -812,73 +833,26 @@ public class AgentLoop {
                 ).withOwnerText(question.ownerText());
             }
 
+            // === PROGRESS ===
+            // Before the step runs, the owner's chat says which step it is and what the model
+            // wrote beside the call: what it found, and what it does now and why.
+            context.chat().step(step + 1, action, action.reasoning());
+
             // === SKILL MANAGEMENT (special actions — always available) ===
             if (action.isSkillCreate()) {
-                String skillName = str(action.params(), "name");
-
-                // --- Skill-create retry guard ---
-                // Count failures only AFTER the most recent successful deletion of this
-                // skill (or any skill). A delete+recreate cycle is a legitimate retry
-                // strategy and should not be blocked by stale failure history.
-                int sameNameFails = 0;
-                int totalSkillFails = 0;
-                int lastDeleteIndex = -1;
-                var allTurns = context.trajectory().turns();
-                for (int i = allTurns.size() - 1; i >= 0; i--) {
-                    var turn = allTurns.get(i);
-                    // Find the most recent successful skill deletion (any name or this name)
-                    if (AgentAction.SKILL_MANAGE.equals(turn.action().tool())
-                            && turn.observation().success()
-                            && "delete".equals(str(turn.action().params(), "action"))) {
-                        lastDeleteIndex = i;
-                        break;
-                    }
-                }
-                // Only count failures that occurred AFTER the last deletion reset point
-                for (int i = lastDeleteIndex + 1; i < allTurns.size(); i++) {
-                    var turn = allTurns.get(i);
-                    if (AgentAction.SKILL_CREATE.equals(turn.action().tool()) && !turn.observation().success()) {
-                        totalSkillFails++;
-                        String prevName = str(turn.action().params(), "name");
-                        if (skillName != null && skillName.equals(prevName)) sameNameFails++;
-                    }
-                }
-                if (sameNameFails >= 3) {
-                    // The advice here used to be "break into smaller sub-skills", and the counter
-                    // above keys on the skill NAME — so the cheapest way out of this block was to
-                    // rename, which reset the count to zero and produced a sibling. That is how
-                    // imap_move_to_trash_by_sender acquired _imaplib and _gmail variants. Renaming
-                    // is now refused by the critic's duplicate gate anyway, so suggesting it would
-                    // just deadlock the model between two blocks.
-                    String msg = "ERROR: Skill '" + skillName + "' has failed " + sameNameFails
-                            + " times. Do not retry the same approach, and do NOT create a "
-                            + "differently-named variant of it — that is refused. Either change "
-                            + "the implementation of '" + skillName + "' itself (a different "
-                            + "library or approach, same name), or use ask_user to clarify the "
-                            + "requirement.";
-                    recordAndEmitObservation(context, action,
-                            AgentObservation.failure(action.tool(), msg, 0), step + 1);
-                    context.markProgress();
-                    log.warn("Task {} step {}: blocked repeated skill_create for '{}' ({} fails)",
-                            context.taskId(), step + 1, skillName, sameNameFails);
-                    continue;
-                }
-                if (totalSkillFails >= 5) {
-                    String msg = "ERROR: " + totalSkillFails + " skill creation attempts have failed. "
-                            + "Simplify your approach. Describe the exact behavior needed in "
-                            + "skill_create with a clear, specific description — the cloud LLM generates the code.";
-                    recordAndEmitObservation(context, action,
-                            AgentObservation.failure(action.tool(), msg, 0), step + 1);
-                    context.markProgress();
-                    log.warn("Task {} step {}: blocked skill_create after {} total failures",
-                            context.taskId(), step + 1, totalSkillFails);
-                    continue;
-                }
-
                 statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                         "Creating skill '" + action.params().getOrDefault("name", "?") + "'...");
 
+                // Never refused for having failed before, however often: a skill that has failed
+                // is fixed under its own name, and a refusal left the model no way to fix it. A
+                // failure is told what the earlier attempts at that name failed with instead, so
+                // the next attempt changes the approach rather than repeating it.
+                String earlier = earlierAttempts(context.trajectory(), str(action.params(), "name"));
                 AgentObservation obs = createSkill(action, context);
+                if (!obs.success() && earlier != null) {
+                    obs = AgentObservation.failure(obs.tool(), obs.output() + earlier,
+                            Map.of(SKILL_CREATE_ERROR, obs.output()), obs.durationMs());
+                }
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 consecutiveFallbacks = 0; // Valid tool call from LLM
@@ -1016,15 +990,16 @@ public class AgentLoop {
                     continue;
                 }
 
-                log.info("Task {} step {}: delegating to local LLM — goal: {}, steps: {}, max: {}",
-                        context.taskId(), step + 1, truncate(plan.goal(), 100),
-                        plan.steps().size(), plan.maxSteps());
+                log.info("Task {} step {}: delegating to local LLM — goal: {}, steps: {}",
+                        context.taskId(), step + 1, truncate(plan.goal(), 100), plan.steps().size());
 
                 LocalExecutor.Outcome outcome = localExecutor.execute(plan, context, accountOf(context));
                 long durationMs = System.currentTimeMillis() - startMs;
                 String result = outcome.text();
-                // Zero tools ran is not a success, whatever the summary says. A local model that
-                // fetched nothing and called done with a confident paragraph used to produce a
+                // Zero tools ran is not a success, whatever the summary says -- unless the goal
+                // gave it results to read, and it wrote what it read (LocalExecutor.completed).
+                // A local model that fetched nothing and called done with a confident paragraph
+                // used to produce a
                 // successful step, a successful task, and a scheduled run recorded as delivered
                 // -- and with the registry withheld the cloud has no way to check it. Failing
                 // here also trips the valve in ThinkingEngine, so the registry comes back and
@@ -1148,17 +1123,6 @@ public class AgentLoop {
             // Inject reflection after consecutive failures OR consecutive hollow results
             injectReflection(context, action);
         }
-
-        // A stop that came during the last step -- the owner's, the ops API's, the stall
-        // watchdog's -- is how this task ended, not the step limit: ended as MAX_STEPS, its
-        // ending invited "continue" to the owner who had just pressed Stop.
-        if (context.isCancelled()) return stopped(context);
-
-        // maxSteps, not completed: the task did NOT finish and must not be stored as a
-        // successful episode. Its ending invites the owner to reply "continue".
-        log.warn("Task {} hit max steps ({})", context.taskId(), maxSteps);
-        return AgentResult.maxSteps("it used all " + maxSteps + " steps a task may take",
-                context.trajectory(), context.elapsedMs());
     }
 
     /**
@@ -1167,16 +1131,81 @@ public class AgentLoop {
      * model produced nothing that could be run" of a model the call had never reached -- a
      * network that could not be reached, a Models API lookup that timed out.
      *
+     * @param steps       how many steps in a row ran nothing
      * @param failedCalls how many of the {@code steps} were calls that failed
      * @param lastFailure how the last of those failed, the provider's message
-     * @param span        "in a row" or "in this task"
      */
-    static String ranNothing(int steps, int failedCalls, String lastFailure, String span, AgentContext context) {
-        if (failedCalls == 0) return "The model produced nothing that could be run " + steps + " times " + span + ".";
+    static String ranNothing(int steps, int failedCalls, String lastFailure, AgentContext context) {
+        if (failedCalls == 0) return "The model produced nothing that could be run " + steps + " times in a row.";
         String last = " (the last: " + quotable(lastFailure, context) + ")";
-        if (failedCalls == steps) return "The call to the model failed " + steps + " times " + span + last + ".";
-        return steps + " steps " + span + " ran nothing: the model's reply could not be run "
+        if (failedCalls == steps) return "The call to the model failed " + steps + " times in a row" + last + ".";
+        return steps + " steps in a row ran nothing: the model's reply could not be run "
                 + times(steps - failedCalls) + ", and the call to it failed " + times(failedCalls) + last + ".";
+    }
+
+    /** Where a failed skill_create's observation keeps its own error, apart from the earlier ones. */
+    static final String SKILL_CREATE_ERROR = "skillCreateError";
+
+    /**
+     * What a skill_create that failed is told beyond its own error when skill_create has already
+     * failed for the same name in this task: each earlier attempt's error, whole and in order, so
+     * the model changes the approach instead of the wording. Null when there is none.
+     */
+    static String earlierAttempts(AgentTrajectory trajectory, String name) {
+        if (name == null) return null;
+        var errors = new ArrayList<String>();
+        for (var turn : trajectory.turns()) {
+            if (turn.action().isSkillCreate() && !turn.observation().success()
+                    && name.equals(String.valueOf(turn.action().params().get("name")))) {
+                // Its own error, without the earlier ones it was told of: those are listed here.
+                Object own = turn.observation().structured() == null ? null
+                        : turn.observation().structured().get(SKILL_CREATE_ERROR);
+                errors.add(own != null ? own.toString() : turn.observation().output());
+            }
+        }
+        if (errors.isEmpty()) return null;
+        var sb = new StringBuilder("\n\nskill_create for '").append(name).append("' failed ")
+                .append(times(errors.size())).append(" before in this task. Change the approach -- "
+                        + "a different library, method or data source -- not only the wording. "
+                        + "The earlier errors, in order:");
+        for (int i = 0; i < errors.size(); i++) {
+            sb.append("\n\n--- attempt ").append(i + 1).append(" ---\n").append(errors.get(i));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * What the model is told of the tool calls a reply made beyond the first, which is the one
+     * the step runs: each by name with its arguments as it wrote them, and that they did not run.
+     * Null when the reply made one call or none.
+     */
+    static String callsNotRun(LlmResponse reply) {
+        if (reply == null || reply.toolCalls().size() < 2) return null;
+        var sb = new StringBuilder("Your reply made ").append(reply.toolCalls().size())
+                .append(" tool calls, and a step runs one: the first. These did not run:");
+        for (var call : reply.toolCalls().subList(1, reply.toolCalls().size())) {
+            String args;
+            try {
+                args = TextCalls.MAPPER.writeValueAsString(call.arguments() == null ? Map.of() : call.arguments());
+            } catch (Exception e) {
+                args = String.valueOf(call.arguments());
+            }
+            sb.append("\n- ").append(call.name()).append(' ').append(args);
+        }
+        return sb.append("\nMake them again, one per step, if they are still needed.").toString();
+    }
+
+    /**
+     * Why an answer or a question is not delivered when the reply that made it made other tool
+     * calls too, or null when it made none: it would end the task, and those calls would be
+     * dropped with nobody told. The model is told which calls they were (the note the step's
+     * observation carries), and can make them first, or answer alone.
+     */
+    private static String alongsideOtherCalls(AgentContext context) {
+        return context.hasCallsNotRun()
+                ? "it came with other tool calls, and an answer or a question ends the task. Make "
+                        + "the calls you still need first, one per step, or send it on its own."
+                : null;
     }
 
     private static String times(int n) {
@@ -1275,6 +1304,9 @@ public class AgentLoop {
                 result.output());
         Artifact artifact = context.addArtifact(tool.name(), action.params(), resolved,
                 result.output(), result.success(), decision);
+        // The cloud is shown a description of it, and its words beside the next call cannot say
+        // what it holds: the local model summarises it for the owner's chat.
+        if (artifact.isPrivate()) context.chat().privateResult(artifact);
 
         // Usage, with the error whole: the curator's row is the owner's diagnostic and is read
         // through ops; the label on it is what keeps it out of the cloud's repair prompt. Whole
@@ -1580,9 +1612,9 @@ public class AgentLoop {
      * When the cloud LLM has made 2+ consecutive calls to registered skills (non-special
      * tools), this suggests routine execution that the local model could carry instead.
      * <p>
-     * Only on unattended work. The argument for delegating is entirely about cloud tokens, and
-     * it ignores the minute per step the local model costs — which is free when nobody is
-     * waiting and unacceptable when someone is.
+     * Only on unattended work. The argument for delegating here is entirely about cloud tokens,
+     * and it ignores the time the local model takes — which is free when nobody is waiting; when
+     * someone is, the prompt states the local model's speed and the model weighs it.
      *
      * The nudge is picked up by ThinkingEngine's buildDynamicContext() and rendered
      * as a cost warning in the prompt.
@@ -1597,10 +1629,10 @@ public class AgentLoop {
         }
 
         // Never while someone is waiting. The nudge counts only cloud tokens, and on that axis
-        // delegation is always the right answer -- but a local step costs about a minute, so
-        // taking this advice in a live chat trades seconds of cloud time for minutes of silence.
-        // It also flatly contradicts what the prompt now tells an attended run to do, and a
-        // prompt that argues with itself is worse than one that says nothing.
+        // delegation is always the right answer -- but the local model writes about eight tokens
+        // a second, so taking this advice in a live chat can trade seconds of cloud time for
+        // minutes of waiting. There the prompt says where the local model is the right tool and
+        // how fast it is, and that is what the model weighs.
         if (!context.isUnattended()) {
             context.metadata().remove("delegationNudge");
             return;
@@ -2095,8 +2127,9 @@ public class AgentLoop {
         }
         context.addCloudTokens(billed);
         if (billed > 0) {
-            budgetTracker.recordUsage(context.userId(), provider.name(), billed,
-                    ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply));
+            double cost = ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply);
+            context.addCloudCost(cost);
+            budgetTracker.recordUsage(context.userId(), provider.name(), billed, cost);
         }
         return billed;
     }
@@ -2353,9 +2386,18 @@ public class AgentLoop {
                 "⚡ Act · " + action.tool(), detail));
     }
 
-    /** Record an observation in trajectory AND emit detail to the frontend (for live stats). */
+    /**
+     * Record an observation in trajectory AND emit detail to the frontend (for live stats). The
+     * one place a step's observation is recorded, so the one place the tool calls its reply made
+     * beyond the one that ran are added to it ({@link #callsNotRun}).
+     */
     private void recordAndEmitObservation(AgentContext context, AgentAction action,
                                            AgentObservation obs, int step) {
+        String notRun = context.takeCallsNotRun();
+        if (notRun != null) {
+            obs = new AgentObservation(obs.tool(), obs.success(), obs.output() + "\n\n" + notRun,
+                    obs.structured(), obs.durationMs());
+        }
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
         persistStep(context, action, obs, step);
@@ -2397,6 +2439,12 @@ public class AgentLoop {
         }
     }
 
+    /** The skill an action names, when its name is one a skill can have; otherwise null. */
+    static String skillOf(AgentAction action) {
+        return action.params().get("name") instanceof String skill && SkillManager.isSkillName(skill)
+                ? skill : null;
+    }
+
     /** A step row's details. Claims the step's artifact on the context, so call it once. */
     static Map<String, Object> stepDetails(AgentContext context, AgentAction action,
                                            AgentObservation obs, int step) {
@@ -2405,10 +2453,8 @@ public class AgentLoop {
         details.put("tool", action.tool());
         // Which skill a skill_create or skill_manage step was about: a name the cloud chose, not
         // the owner's data -- and without it no record could say which skill was built or failed.
-        if ((action.isSkillCreate() || action.isSkillManage())
-                && action.params().get("name") instanceof String skill && SkillManager.isSkillName(skill)) {
-            details.put("skill", skill);
-        }
+        String skill = action.isSkillCreate() || action.isSkillManage() ? skillOf(action) : null;
+        if (skill != null) details.put("skill", skill);
         // And what a skill_manage step did -- one of its actions, or nothing: a skill written and
         // then deleted was reported as kept.
         if (action.isSkillManage() && action.params().get("action") instanceof String what
@@ -2631,7 +2677,7 @@ public class AgentLoop {
      * This used to be created per call, and only the ScheduledFuture was returned. Cancelling a
      * future does not shut down the executor that owns it, so each LLM call and each tool call
      * left a live {@code llm-heartbeat} thread parked forever. On a server that runs two
-     * scheduled tasks a day plus interactive chat, at up to twenty steps a task, that is
+     * scheduled tasks a day plus interactive chat, at tens of steps a task, that is
      * thousands of threads and their stacks — an ordinary day's work would eventually exhaust
      * the process. Nothing surfaced it because the threads are daemons and idle.
      * <p>

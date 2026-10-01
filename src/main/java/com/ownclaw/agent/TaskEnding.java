@@ -160,7 +160,6 @@ final class TaskEnding {
         String in = unattended ? " in the web chat that holds this report" : "";
         return switch (reason) {
             case COMPLETED, NEEDS_INPUT -> null;
-            case MAX_STEPS -> "Reply **continue**" + in + " to carry on: a new task starts from this message.";
             case PRIVACY_BLOCKED -> "Your next message" + in + " starts a new task, which reads this message "
                     + "but not the private results.";
             // "Your next message starts a new task, which reads this message" was literally true

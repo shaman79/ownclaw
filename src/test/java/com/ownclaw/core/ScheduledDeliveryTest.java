@@ -128,9 +128,9 @@ class ScheduledDeliveryTest {
     @DisplayName("a run that did not finish is delivered whole, with the owner's private text beside it")
     void aFailureIsDeliveredWhole(@TempDir Path tmp) throws Exception {
         start(tmp);
-        String ending = "Stopped: the step limit.\n" + "- step that ran and what it found\n".repeat(40);
+        String ending = "Stopped: the stall watchdog stopped it.\n" + "- step that ran and what it found\n".repeat(40);
         String secret = "Closing balance 48,213.07 CZK";
-        queue.result = AgentResult.maxSteps(ending, new AgentTrajectory(), 30)
+        queue.result = AgentResult.stalled(ending, new AgentTrajectory(), 30)
                 .withOwnerText(ending + "\nPrivate: " + secret);
         due("summarise my statement");
         conversations.createSession(USER, "Something else, open");
@@ -205,8 +205,8 @@ class ScheduledDeliveryTest {
     @DisplayName("a recurring run that fails keeps its whole error and runs again; its status line points at the report")
     void aRecurringFailureIsKeptWhole(@TempDir Path tmp) throws Exception {
         start(tmp);
-        String ending = "Stopped: the step limit.\n" + "- step that ran and what it found\n".repeat(40);
-        queue.result = AgentResult.maxSteps(ending, new AgentTrajectory(), 30);
+        String ending = "Stopped: the stall watchdog stopped it.\n" + "- step that ran and what it found\n".repeat(40);
+        queue.result = AgentResult.stalled(ending, new AgentTrajectory(), 30);
         long id = dueRecurring(LONG_TASK, null);
 
         scheduler.pollDueTasks();
@@ -269,14 +269,14 @@ class ScheduledDeliveryTest {
     @DisplayName("a run that failed while its schedule was deleted still delivers its report, once")
     void aDeletedScheduleStillReportsItsFailure(@TempDir Path tmp) throws Exception {
         start(tmp);
-        queue.result = AgentResult.maxSteps("Stopped: the step limit.", new AgentTrajectory(), 30);
+        queue.result = AgentResult.stalled("Stopped: the stall watchdog stopped it.", new AgentTrajectory(), 30);
         queue.duringRun = () -> jdbc.update("DELETE FROM scheduled_tasks");
         due(LONG_TASK);
 
         scheduler.pollDueTasks();
 
         assertEquals(List.of("**Scheduled task did not finish: " + LONG_TASK + "**\n\n"
-                        + "Stopped: the step limit."),
+                        + "Stopped: the stall watchdog stopped it."),
                 jdbc.queryForList("SELECT content FROM conversations WHERE role = 'assistant'", String.class));
         assertEquals(1, lines(StatusMessage.Type.RESULT).size(), "sent once");
     }

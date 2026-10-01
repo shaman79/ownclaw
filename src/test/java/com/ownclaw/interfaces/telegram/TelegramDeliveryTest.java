@@ -40,6 +40,7 @@ class TelegramDeliveryTest {
     /** Answers every message with the given result; runs nothing. */
     static final class Answering extends TaskQueue {
         final AgentResult answer;
+        final List<com.ownclaw.agent.TaskChat.Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         Answering(AgentResult answer) {
             super(null, null, null, new OwnClawConfig(), null);
@@ -48,13 +49,16 @@ class TelegramDeliveryTest {
 
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds) {
+                                                     String currentMessageId, List<String> attachmentIds,
+                                                     com.ownclaw.agent.TaskChat.Channel channel) {
+            channels.add(channel);
             return CompletableFuture.completedFuture(answer);
         }
     }
 
     final FakeTelegram telegram = new FakeTelegram();
     final ChatStatusEmitter emitter = new ChatStatusEmitter();
+    Answering queue;
     JdbcTemplate jdbc;
     String owner;
     TelegramBotService bot;
@@ -73,7 +77,8 @@ class TelegramDeliveryTest {
         owner = new UserRepository(jdbc).createUser("petr", ME);
         var config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
-        bot = new TelegramBotService(config, new Answering(answer), new UserRepository(jdbc), emitter, JSON,
+        queue = new Answering(answer);
+        bot = new TelegramBotService(config, queue, new UserRepository(jdbc), emitter, JSON,
                 store.apply(jdbc), new SkillInteractionHandler(), null,
                 new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null),
                 null, jdbc, telegram.client);
@@ -419,5 +424,41 @@ class TelegramDeliveryTest {
         FakeTelegram.drain(bot);
 
         assertEquals(List.of("\u26a0\ufe0f No progress for 600s", "\u274c STALLED"), sentTexts());
+    }
+
+    @Test
+    @DisplayName("a task asked from Telegram sends its progress there, a private summary in full; another task's progress is not sent")
+    void progressOfATelegramTask(@TempDir Path tmp) throws Exception {
+        start(tmp, "It is up.");
+        telegram.answer("getMe", FakeTelegram.Answer.ok("{\"username\":\"testbot\"}"));
+        telegram.otherwise.put("getUpdates", FakeTelegram.Answer.refused(502));
+        bot.start();
+        receive("is the router up?");
+        assertEquals(List.of(com.ownclaw.agent.TaskChat.Channel.TELEGRAM), queue.channels,
+                "the task knows it came from Telegram");
+        FakeTelegram.drain(bot);
+        int before = sentTexts().size();
+
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
+                "**Step 1 · ping · 2.0s · $0.01**\n\nPinging the router.",
+                java.util.Map.of("sessionId", "s1", "telegram", true), "abcd1234"));
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
+                "**Step 1 · ping · 1.0s · $0.01**\n\nAsked from the web chat.",
+                java.util.Map.of("sessionId", "s2"), "bcde2345"));
+        emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS_MESSAGE,
+                "**Result 1 (bank_fetch)** — summarised by your local model; private, shown only to you.",
+                java.util.Map.of("sessionId", "s1", "telegram", true, "ownerText",
+                        "**Result 1 (bank_fetch)** — summarised by your local model, not seen by the cloud:\n\n"
+                                + "Balance 48,213.07 CZK"), "abcd1234"));
+        FakeTelegram.drain(bot);
+
+        assertEquals(List.of("<b>Step 1 · ping · 2.0s · $0.01</b>\n\nPinging the router.",
+                        "<b>Result 1 (bank_fetch)</b> — summarised by your local model, not seen by the cloud:\n\n"
+                                + "Balance 48,213.07 CZK"),
+                sentTexts().subList(before, sentTexts().size()));
+        for (String b : telegram.bodies("sendMessage").subList(before, sentTexts().size())) {
+            var body = JSON.readTree(b);
+            assertEquals("HTML", body.path("parse_mode").asText(), "rendered like an answer");
+        }
     }
 }

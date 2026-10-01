@@ -73,7 +73,9 @@ public class CriticAgent {
             return Verdict.allow(warnings);
         }
 
-        // 1b. skill_manage gets loop detection — prevent endless list/analyze cycles
+        // 1b. skill_manage gets loop detection — prevent endless list/analyze cycles. How many
+        // times a task inspects skills is no measure of a loop: a long task that reads or removes
+        // one skill after another is working, so only a call repeated as it was is refused.
         if (action.isSkillManage()) {
             AgentTrajectory trajectory = context.trajectory();
             int identicalCount = countIdenticalTrailingActions(trajectory, action);
@@ -87,14 +89,6 @@ public class CriticAgent {
                         "The result of the earlier call is already in your context — use it. " +
                         "If an existing tool fits, call it. Only create a new skill if you have " +
                         "checked the inventory and nothing covers this capability.");
-            }
-            // Also detect any excessive skill_manage calls (different params but same tool)
-            long totalManage = trajectory.toolInvocationCount("skill_manage");
-            if (totalManage >= 4) {
-                return Verdict.block("You have called skill_manage " + totalManage +
-                        " times. Stop inspecting and act on what you already know: call an " +
-                        "existing tool, combine several, or — if nothing covers this capability " +
-                        "— create one new general skill that takes the specifics as parameters.");
             }
             return Verdict.allow(warnings);
         }
@@ -157,12 +151,7 @@ public class CriticAgent {
             warnings.add("Tool '" + toolName + "' has been used " + totalUses + " times in this task.");
         }
 
-        // 8. Check if task is taking too long (step count)
-        if (trajectory.size() > 15) {
-            warnings.add("Task has taken " + trajectory.size() + " steps. Consider wrapping up.");
-        }
-
-        // 9. Wasted-effort detection — tiered response.
+        // 8. Wasted-effort detection — tiered response.
         //    Moderate waste: warn + redirect to different strategy (agent can still act).
         //    Extreme waste: hard block — force wrap-up.
         int blockedOrFailed = 0;

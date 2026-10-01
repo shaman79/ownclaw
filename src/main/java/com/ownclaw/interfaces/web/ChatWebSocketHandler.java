@@ -2,6 +2,7 @@ package com.ownclaw.interfaces.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
@@ -132,7 +133,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             if (msg.type() == ChatStatusEmitter.StatusMessage.Type.DEBUG) {
                 // Debug messages are rendered as full message blocks, not brief activity entries
                 sendToSession(session, "debug", msg.text());
-            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT) {
+            } else if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT
+                    || msg.type() == ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE) {
                 // The output of background work is a message, not a status. Rendered as a status
                 // it would land in the collapsed activity strip, which is exactly how a finished
                 // scheduled task managed to produce a full digest that nobody ever saw.
@@ -145,9 +147,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // the note that the answer exists, for everything that stores or forwards it.
                 // With the chat it was saved into, so a page showing another chat marks that one
                 // instead of appending the result to the conversation on screen.
+                // A running task's progress message is a message too, of the same shape: sent as
+                // "progress", it is drawn in its chat, secondary to the answer, and leaves the
+                // activity strip and the working state alone.
                 Object owner = msg.data() == null ? null : msg.data().get("ownerText");
                 Object chat = msg.data() == null ? null : msg.data().get("sessionId");
-                sendToSession(session, "result", owner != null ? owner.toString() : msg.text(),
+                sendToSession(session,
+                        msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT ? "result" : "progress",
+                        owner != null ? owner.toString() : msg.text(),
                         chat == null ? null : chat.toString(), msg.taskId());
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
@@ -340,7 +347,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // answer simply never arrived. It is persisted just above, so the only way to see it
         // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
         // sendSystemToUser already does.
-        taskQueue.submit(userId, userMessage, 1, currentMessageId, attachmentIds)
+        taskQueue.submit(userId, userMessage, 1, currentMessageId, attachmentIds, TaskChat.Channel.WEB)
                 .thenAccept(result -> {
                     // Two texts. The history every later prompt is built from gets the safe one;
                     // a private answer is kept beside it, for this chat and its reload only.

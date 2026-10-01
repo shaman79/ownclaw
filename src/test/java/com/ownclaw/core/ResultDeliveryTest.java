@@ -136,10 +136,10 @@ class ResultDeliveryTest {
     @Test
     @DisplayName("a run that did not finish is delivered as its ending, which lists every result: no second count beneath it")
     void anEndingIsNotCountedTwice(@TempDir Path tmp) throws Exception {
-        String ending = "**Stopped:** it used all 2 steps a task may take.\n\n**What it produced:**\n"
+        String ending = "**Stopped:** no progress for 10m 0s.\n\n**What it produced:**\n"
                 + "- result 1 (web_fetch): 54 chars, public — in full below.\n"
                 + "- result 2 (imap_fetch): 61 chars, private (credentials (1)) — shown to you only.";
-        String saved = deliveredAsBg(tmp, AgentResult.maxSteps(ending, mixedRun(), 30));
+        String saved = deliveredAsBg(tmp, AgentResult.stalled(ending, mixedRun(), 30));
         assertTrue(saved.endsWith(ending), "a line counting \"1 result\" under a list of two: " + saved);
     }
 
@@ -153,9 +153,9 @@ class ResultDeliveryTest {
     @Test
     @DisplayName("the header of a run that did not finish says so; why is the ending's first line, said once")
     void theHeaderDoesNotRepeatWhy(@TempDir Path tmp) throws Exception {
-        String saved = deliveredAsBg(tmp, AgentResult.maxSteps("**Stopped:** it used all 2 steps a task may take.",
+        String saved = deliveredAsBg(tmp, AgentResult.stalled("**Stopped:** no progress for 10m 0s.",
                 new AgentTrajectory(), 30));
-        assertEquals("**Background task: digest — did not finish**\n\n**Stopped:** it used all 2 steps a task may take.",
+        assertEquals("**Background task: digest — did not finish**\n\n**Stopped:** no progress for 10m 0s.",
                 saved);
     }
 

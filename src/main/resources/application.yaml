@@ -124,7 +124,6 @@ ownclaw:
     # No wall-clock timeout — tasks run until done.
     # Stalled tasks (no progress for stall-timeout) are killed instead.
     step-timeout: 600
-    max-plan-steps: 20
     long-running-threshold: 120
     stall-timeout: 600
     heartbeat-interval: 30

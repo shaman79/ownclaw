@@ -123,7 +123,8 @@ public class ThinkingEngine {
                         messages, text, response);
             }
 
-            // A native tool call is unambiguous: no parsing, so no parse failure.
+            // A native tool call is unambiguous: no parsing, so no parse failure. A step runs the
+            // first; the loop tells the model of any others the reply made (AgentLoop.callsNotRun).
             if (nativeTools && response.hasToolCalls()) {
                 var call = response.toolCalls().get(0);
                 Map<String, Object> args = call.arguments() == null ? Map.of() : call.arguments();
@@ -159,7 +160,8 @@ public class ThinkingEngine {
             // The reply came, whole, and was billed; a tool call in it cannot be run, because its
             // arguments are not a JSON object. Not an ending, and not a reply that "never came":
             // nothing ran, the model is shown what it wrote, the call as it wrote it included,
-            // and it is asked again, within the loop's limits on steps that produce nothing.
+            // and it is asked again -- until steps in a row that produce nothing end the task
+            // (AgentLoop.NOTHING_TO_RUN_IN_A_ROW).
             LlmResponse reply = malformed.reply();
             String text = reply.content() == null ? "" : reply.content();
             String wrote = (text.isBlank() ? "" : text + "\n\n") + reply.invalidToolCall();
@@ -376,7 +378,7 @@ public class ThinkingEngine {
                 // The valve. If a delegation has already failed, the local tier has had its
                 // turn and the registry comes back for the rest of the task. Without this, a
                 // local model that cannot manage the work leaves the orchestrator re-delegating
-                // into the step limit and the owner's morning email simply never arrives --
+                // until the task is stopped, and the owner's morning email simply never arrives --
                 // trading a token saving for a silently broken task.
                 && !delegationFailed(context);
 
@@ -502,14 +504,16 @@ public class ThinkingEngine {
 
         // Whether anyone is waiting for this answer.
         //
-        // The agent was asked to weigh latency against cost -- delegate to the free local model
-        // when nobody is waiting, do it yourself when someone is -- and given no way to tell the
-        // two apart, so it had to guess. It is not a guess: the origin of the task settles it.
+        // The agent weighs time against cost, and was given no way to tell whether anyone is
+        // waiting, so it had to guess. It is not a guess: the origin of the task settles it.
         // The scheduler and /bg submit at background priority, a chat message does not, and
         // TaskQueue has already recorded which this is.
         //
-        // Stating it plainly is what makes the trade-off actionable, and it is the whole reason
-        // the local tier can carry real work without anyone noticing the latency.
+        // A waiting user is a fact, not a ban on the local model. Told "use it only when it
+        // genuinely saves more than it costs", attended work never delegated: the cloud wrote
+        // three skills in seventeen minutes to read router data it could not see, which the
+        // local model reads directly. So the local model's speed is stated as the facts it is,
+        // and the delegate description and the rules say where it is the right tool.
         if (context.isUnattended()) {
             sb.append("- Attendance: NOBODY IS WAITING. This was started by the scheduler or sent "
                     + "to the background; the answer is delivered to the chat whenever it is "
@@ -518,10 +522,12 @@ public class ThinkingEngine {
                     + "and never stop to ask a question -- decide, and say which assumption you "
                     + "made.\n\n");
         } else {
-            sb.append("- Attendance: THE USER IS WAITING in the chat right now. Favour the "
-                    + "shortest path to a correct answer; a local delegation costs about a "
-                    + "minute per step, so use it only when it genuinely saves more than it "
-                    + "costs.\n\n");
+            sb.append("- Attendance: THE USER IS WAITING in the chat right now, and reads what "
+                    + "you write beside each call as you go. Delegate where the local model is "
+                    + "the right tool -- private data, and tool calls on this machine, the LAN "
+                    + "and its servers -- knowing its speed: it reads about 100 tokens a second "
+                    + "and writes about 8, so a delegation that reads a long result or writes a "
+                    + "long answer takes minutes.\n\n");
         }
 
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
@@ -663,17 +669,22 @@ public class ThinkingEngine {
         // with the whole tool manifest. So it takes a goal, and steps are a hint.
         sb.append("delegate: hand a sub-goal to the local model. It runs its own loop on this\n");
         sb.append("  machine with the tools you name and your credentials, and costs nothing.\n");
-        sb.append("  Best for: work on the local machine, LAN, servers and files, and long\n");
-        sb.append("  mechanical sequences. Nothing leaves the host, so prefer it for private data.\n");
-        sb.append("  Trade-off: roughly a minute per step, so prefer it when nobody is waiting;\n");
-        sb.append("  do it yourself when the user is sitting in the chat expecting an answer.\n");
-        sb.append("  goal* — what to achieve, stated fully; the local model works out the steps.\n");
+        sb.append("  It reads what you cannot: every earlier result the goal names by its handle\n");
+        sb.append("  ({{N}}) is given to it whole -- a private result or a file you are shown only\n");
+        sb.append("  as a description. It sees no other earlier result.\n");
+        sb.append("  Best for: private data -- to read, summarise, search, compare or answer a\n");
+        sb.append("  question about it -- and tool calls on this machine, the LAN and its servers.\n");
+        sb.append("  Nothing leaves the host.\n");
+        sb.append("  Speed: it reads about 100 tokens a second and writes about 8, so reading a\n");
+        sb.append("  long result or writing a long answer takes minutes.\n");
+        sb.append("  goal* — what to achieve, stated fully, with the handle of each earlier\n");
+        sb.append("    result it should read; the local model works out the steps.\n");
         sb.append("  steps (optional): [{description, tool, params}] only when the order matters\n");
         sb.append("    and you already know it. Omit it rather than guess at params.\n");
         sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");
         sb.append("    and any the goal or an unattended (scheduled or /bg) task names, are loaded -- every tool\n");
         sb.append("    definition takes room in its context that the work needs.\n");
-        sb.append("  checkpoints | max_steps (default 10)\n\n");
+        sb.append("  checkpoints: what to verify before it says it is done\n\n");
         }
 
         // Credential rules
@@ -693,10 +704,13 @@ public class ThinkingEngine {
         // Output format
         sb.append("## Output\n");
         if (nativeTools) {
-            sb.append("Call exactly one tool per step. Any text alongside it is reasoning, not the answer.\n");
+            sb.append("Call exactly one tool per step. When the user is waiting, the text you write "
+                    + "beside a tool call is shown to them live in the chat: " + NARRATION + "\n");
             sb.append("For respond: put the whole answer in the message argument.\n\n");
         } else {
             sb.append("Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n");
+            sb.append("When the user is waiting, 'reasoning' is shown to them live in the chat: "
+                    + NARRATION + "\n");
             sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
         }
 
@@ -705,8 +719,10 @@ public class ThinkingEngine {
         sb.append("- No tools needed → respond directly. Never fabricate outputs.\n");
         sb.append("- On failure: diagnose WHY, then try fundamentally different approach. Never repeat failed actions.\n");
         sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
-        sb.append("- Local/LAN/server work, or a long mechanical sequence nobody is waiting on → delegate it (free, stays on the host).\n");
+        sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
+        sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
+        sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");
         sb.append("- Respond in user's language. Search/selectors in content's language.\n");
         sb.append("- Outputs: clean text. Extract file content (PDF/DOCX/CSV), don't just report links.\n");
@@ -761,8 +777,10 @@ public class ThinkingEngine {
           .append("Every skill run in this task is given them as params._attached_files, a list of ")
           .append("{id, name, content_type, path, container_path}, so every result of this task is ")
           .append("private too and reaches you only as a description. Only the local model reads ")
-          .append("private results. To answer from a file, delegate and name the skill that reads it ")
-          .append("(if none does, skill_create one that reads params._attached_files). The ")
+          .append("private results. To answer from a file, delegate: name its handle in the goal, and ")
+          .append("a text file is given to the local model whole; for one with no text read, name the ")
+          .append("skill that reads it (if none does, skill_create one that parses it from ")
+          .append("params._attached_files -- parsing is what a skill is for). The ")
           .append("delegation's answer comes back as a handle; make that handle the whole of ")
           .append("respond's message and its text is filled in on this machine for the user. ")
           .append("A file is handed only to this task: asking the user a question ends it, and ")
@@ -881,6 +899,15 @@ public class ThinkingEngine {
                     + e.getMessage() + "), so nothing was run.", ACTION_FORMAT);
         }
     }
+
+    /**
+     * What the words beside a call are for, on both protocols: the owner reads them in the chat
+     * as the task goes ({@code TaskChat}), so they say what is happening, in his language. No
+     * length is asked for: on the text protocol these words are the model's reasoning too, and a
+     * sentence count asked of them is a cap on it.
+     */
+    static final String NARRATION = "write it for them, in their language -- what the last result "
+            + "showed, and what you are doing now and why.";
 
     /** The text protocol's action, restated to a model whose reply was not one. */
     private static final String ACTION_FORMAT = "Reply with one JSON object: {\"reasoning\": "

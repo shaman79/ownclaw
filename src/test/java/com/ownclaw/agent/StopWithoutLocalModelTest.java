@@ -93,7 +93,7 @@ class StopWithoutLocalModelTest {
                         : local instanceof Down ? "a local model that is down" : "a local server that never answers";
                 AgentResult r = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
                         () -> assertDoesNotThrow(
-                                () -> loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf)),
+                                () -> loop.executeFull("u1", "summarise this statement", false, null, List.of(pdf), null),
                                 which + ": the task went on past the stop"),
                         which + ": the probe waited as a chat waits for its first line");
                 assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), which);

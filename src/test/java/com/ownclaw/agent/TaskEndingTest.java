@@ -86,9 +86,9 @@ class TaskEndingTest {
     @Test
     @DisplayName("an unattended run's report says where a reply reads it: on Telegram, where it is sent too, a message goes to the chat open on the web")
     void anUnattendedReportSaysWhereToReply() {
-        var attended = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"),
+        var attended = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"),
                 auditTask(), Map.of()).response();
-        assertTrue(attended.contains("**Next:** Reply **continue** to carry on: a new task starts from this message."),
+        assertTrue(attended.contains("**Next:** Your next message starts a new task, which reads this message."),
                 attended);
         for (TerminationReason reason : TerminationReason.values()) {
             if (reason == TerminationReason.COMPLETED || reason == TerminationReason.NEEDS_INPUT) continue;
@@ -100,11 +100,11 @@ class TaskEndingTest {
         }
         var ctx = auditTask();
         ctx.setUnattended(true);
-        String report = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"),
+        String report = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"),
                 ctx, Map.of()).response();
-        assertTrue(report.contains("**Next:** Reply **continue** in the web chat that holds this report to carry on: "
-                + "a new task starts from this message."), report);
-        // Mutation: one Next line for both -> a Telegram "continue" went to the open chat and
+        assertTrue(report.contains("**Next:** Your next message in the web chat that holds this report starts a "
+                + "new task, which reads this message."), report);
+        // Mutation: one Next line for both -> a reply on Telegram went to the open chat and
         // started a task that had never seen the report.
     }
 
@@ -143,7 +143,7 @@ class TaskEndingTest {
         ctx.addArtifact("smtp_send_email", Map.of(), Map.of(), "Sent to someone@example.org: " + digest
                 + " (message id 4471-abc@example.org)", true, new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
 
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"), ctx, Map.of());
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, Map.of());
         assertTrue(r.response().contains("- result 1 (daily_news_digest): " + digest.length()
                 + " chars, public — in full below."), r.response());
         assertTrue(r.response().contains("**result 1 (daily_news_digest):**\n\n" + digest), r.response());
@@ -164,7 +164,7 @@ class TaskEndingTest {
         ctx.addArtifact("imap_count", Map.of(), Map.of(), "3", true,
                 new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
 
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 3 steps a task may take"), ctx, trace);
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, trace);
         assertTrue(r.response().contains("**What it did** — 3 steps"), r.response());
         assertTrue(r.response().contains("- result 1 (count_unread): 1 chars, public — in full below."), r.response());
         assertTrue(r.response().contains("**result 1 (count_unread):**\n\n3\n\n**Next:**"), r.response());
@@ -185,13 +185,13 @@ class TaskEndingTest {
         ctx.addArtifact("port_probe", Map.of(), Map.of(), "connection refused on 192.0.2.7", false,
                 new Artifact.Decision(Label.PUBLIC, List.of()));
 
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"), ctx, trace);
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, trace);
         assertEquals(1, count(r.response(), "KeyError: 'uid'"), "once, under its step: " + r.response());
         assertTrue(r.response().contains("- result 1 (imap_fetch): failed, " + traceback.length()
                 + " chars, public — shown above."), r.response());
         assertTrue(r.response().contains("- result 2 (port_probe): failed, 31 chars, public — in full below."), r.response());
         assertTrue(r.response().endsWith("**result 2 (port_probe), failed:**\n\nconnection refused on 192.0.2.7"
-                + "\n\n**Next:** Reply **continue** to carry on: a new task starts from this message. Every step "
+                + "\n\n**Next:** Your next message starts a new task, which reads this message. Every step "
                 + "is on this task's page: task a1b2c3d4."), r.response());
     }
 
@@ -206,7 +206,7 @@ class TaskEndingTest {
         var trace = new Rows(events(tmp), ctx).step(new AgentAction("ssh_login", Map.of(), ""),
                 Artifact.asObservation(failed, com.ownclaw.agent.tools.ToolResult.failure(output), 5)).trace();
 
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"), ctx, trace);
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, trace);
         assertEquals(1, count(r.response(), "login failed for admin:«vault:OPENWRT_PASS» on 192.0.2.1"), r.response());
         assertTrue(r.response().contains("public — shown above."), r.response());
         assertFalse(r.response().contains(PASSWORD));
@@ -216,7 +216,7 @@ class TaskEndingTest {
     @Test
     @DisplayName("no vault value in either text, and no handle in anything OwnClaw writes")
     void noVaultValueAndNoHandle() {
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"),
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"),
                 auditTask(), Map.of());
         for (String text : List.of(r.response(), r.ownerText())) {
             assertFalse(text.contains(PASSWORD), text);
@@ -238,7 +238,7 @@ class TaskEndingTest {
         ctx.addArtifact("sms_template", Map.of(), Map.of(), reminder, true,
                 new Artifact.Decision(Label.PUBLIC, List.of()));
 
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"), ctx, Map.of());
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, Map.of());
         assertTrue(r.ownerText().endsWith("**result 2 (whatsapp_template):**\n\n" + template), r.ownerText());
         assertTrue(r.response().contains("**result 3 (sms_template):**\n\n" + reminder), r.response());
         assertTrue(r.response().contains("- result 2 (whatsapp_template): 45 chars, private (references result 1)"),
@@ -402,7 +402,7 @@ class TaskEndingTest {
                 .step(new AgentAction(AgentAction.SKILL_CREATE, Map.of("name", "openwrt_audit"), ""),
                         AgentObservation.success(AgentAction.SKILL_CREATE, "Skill created", Map.of(), 9))
                 .trace();
-        var s = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 20 steps a task may take"), built, trace);
+        var s = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), built, trace);
         assertTrue(s.response().contains("**What it produced:**\n- The skill openwrt_audit: written, and kept for later tasks."),
                 s.response());
     }
@@ -418,7 +418,7 @@ class TaskEndingTest {
                         AgentObservation.success(AgentAction.SKILL_MANAGE, "Skill 'openwrt_audit' has been permanently deleted.",
                                 Map.of(), 3))
                 .trace();
-        var r = TaskEnding.apply(ended(TerminationReason.MAX_STEPS, "it used all 2 steps a task may take"), ctx, trace);
+        var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, trace);
         assertTrue(r.response().contains("\n2. ✓ skill_manage delete openwrt_audit · 3ms"), r.response());
         assertTrue(r.response().contains("**What it produced:** nothing."), r.response());
         // Mutations: drop the action from the row, or keep a deleted skill -> "kept for later tasks".

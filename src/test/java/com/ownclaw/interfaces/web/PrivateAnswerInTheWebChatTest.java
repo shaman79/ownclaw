@@ -61,7 +61,8 @@ class PrivateAnswerInTheWebChatTest {
 
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds) {
+                                                     String currentMessageId, List<String> attachmentIds,
+                                                     com.ownclaw.agent.TaskChat.Channel channel) {
             return CompletableFuture.completedFuture(privateAnswer());
         }
     }

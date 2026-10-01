@@ -56,6 +56,7 @@ class OpsControllerTest {
         final JdbcTemplate jdbc;
         final AtomicInteger calls = new AtomicInteger();
         final List<String> currentMessageIds = new CopyOnWriteArrayList<>();
+        final List<String> channels = new CopyOnWriteArrayList<>();
         final List<Boolean> unattended = new CopyOnWriteArrayList<>();
         /** The row each call was told it answers, as the database had it when the call began. */
         final List<List<Object>> rowAtCall = new CopyOnWriteArrayList<>();
@@ -71,9 +72,11 @@ class OpsControllerTest {
 
         @Override
         public AgentResult executeFull(String userId, String message, boolean unattended,
-                                       String currentMessageId, List<String> attachmentIds) {
+                                       String currentMessageId, List<String> attachmentIds,
+                                           com.ownclaw.agent.TaskChat.Channel channel) {
             this.unattended.add(unattended);
             currentMessageIds.add(String.valueOf(currentMessageId));
+            channels.add(String.valueOf(channel));
             if (currentMessageId != null) {
                 var row = jdbc.queryForMap(
                         "SELECT role, content, session_id FROM conversations WHERE id = ?", currentMessageId);
@@ -136,6 +139,7 @@ class OpsControllerTest {
         assertEquals(List.of("user", "remember 7", chat), s.loop().rowAtCall.getFirst(),
                 "the user row was in the chat before the task ran");
         assertEquals(List.of(false), s.loop().unattended, "a chat turn is attended");
+        assertEquals(List.of("OPS"), s.loop().channels, "its progress is saved in the chat and sent nowhere");
         assertEquals("00000001", first.get("taskId"), "the task's own id, the one its chat row carries");
 
         @SuppressWarnings("unchecked")

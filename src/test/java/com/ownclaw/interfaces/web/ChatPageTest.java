@@ -75,4 +75,27 @@ class ChatPageTest {
         assertTrue(page.contains("'<div class=\"session-title\" title=\"' + title + '\">'"),
                 "a title cut by the one-line layout is whole on hover");
     }
+
+    @Test
+    @DisplayName("a task's progress is drawn in its own chat, live and after a reload, compact and apart from the answer")
+    void progressIsDrawnInItsChat() {
+        assertTrue(page.contains("} else if (type === 'progress') {"), "a frame of its own");
+        String handler = page.substring(page.indexOf("} else if (type === 'progress') {"));
+        handler = handler.substring(0, handler.indexOf("} else if (type === 'pong'"));
+        assertTrue(handler.contains("if (currentView === 'chat' && data.sessionId === displayedSessionId) { "
+                + "addMsg('progress', content); }"), "only in the chat it belongs to: " + handler);
+        assertFalse(handler.contains("setThinking(false)") || handler.contains("doneActivity()"),
+                "progress is not the end of the work: " + handler);
+        assertTrue(page.contains("var type = m.role === 'user' || m.role === 'system' || m.role === 'progress' "
+                + "? m.role : 'response';"), "a saved progress row is drawn as one after a reload");
+        assertTrue(page.contains(".msg.progress {"), "and styled as secondary");
+        // Mutation: draw it as a response -> after a reload every step reads as an answer.
+    }
+
+    @Test
+    @DisplayName("the task page still names an old row that ended on the step limit, which no task reaches now")
+    void anOldStepLimitRowIsStillNamed() {
+        assertTrue(page.contains("MAX_STEPS: 'Step limit reached'"), "rows from before 1 October 2026 keep it");
+    }
 }
+

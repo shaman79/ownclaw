@@ -54,9 +54,16 @@ public class AgentContext {
     /** Null until the local tier is checked; see {@link #localTierReady()}. */
     private volatile Boolean localTierReady;
 
-    // Per-task token usage counters
+    // Per-task token usage counters, and what the cloud calls cost
     private int localTokens;
     private int cloudTokens;
+    private double cloudCostUsd;
+
+    /** Where the task reports its progress; see {@link TaskChat}. */
+    private volatile TaskChat chat = TaskChat.NONE;
+
+    /** See {@link #setCallsNotRun}. */
+    private String callsNotRun;
 
     /**
      * The files sent with this message, as registered: each one this user's, each a PRIVATE
@@ -161,15 +168,17 @@ public class AgentContext {
     }
 
     /**
-     * End the model call this task is waiting on, if it is waiting on one. A stop is otherwise
-     * heard on the next event of the reply ({@link #progress}), and a call that sends nothing --
-     * Ollama loading the model and reading the prompt, a cloud call before its first event, a
-     * call waiting minutes to try again after an overload -- has no next event: it ran until its
-     * read timeout, most of an hour for Ollama, or to the end of its wait.
+     * End the model calls this task is waiting on: its own, if it is waiting on one, and the
+     * local model's summary of a private result, if one is being written ({@link TaskChat}). A
+     * stop is otherwise heard on the next event of the reply ({@link #progress}), and a call that
+     * sends nothing -- Ollama loading the model and reading the prompt, a cloud call before its
+     * first event, a call waiting minutes to try again after an overload -- has no next event: it
+     * ran until its read timeout, most of an hour for Ollama, or to the end of its wait.
      */
     public void interruptCall() {
         Runnable cancel = callInFlight;
         if (cancel != null) cancel.run();
+        chat.interrupt();
     }
 
     /** What the stall watchdog stopped this task on, or null when it has not. */
@@ -256,10 +265,40 @@ public class AgentContext {
 
     // ── Token tracking ──
 
-    public void addLocalTokens(int tokens) { this.localTokens += tokens; }
-    public void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
-    public int localTokens() { return localTokens; }
-    public int cloudTokens() { return cloudTokens; }
+    // Synchronized: the local model's summaries of private results are counted from their own
+    // thread (TaskChat), beside the task's.
+    public synchronized void addLocalTokens(int tokens) { this.localTokens += tokens; }
+    public synchronized void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
+    public synchronized int localTokens() { return localTokens; }
+    public synchronized int cloudTokens() { return cloudTokens; }
+
+    /** What a cloud call made for this task cost, in USD, at the rates ModelPricing knows. */
+    public synchronized void addCloudCost(double usd) { this.cloudCostUsd += usd; }
+    /** What this task's cloud calls have cost so far, in USD; a progress message's header shows it. */
+    public synchronized double cloudCostUsd() { return cloudCostUsd; }
+
+    // ── Progress ──
+
+    /** The chat this task reports its progress in; {@link TaskChat#NONE} when it has none. */
+    public TaskChat chat() { return chat; }
+    public void setChat(TaskChat chat) { this.chat = chat == null ? TaskChat.NONE : chat; }
+
+    /**
+     * What the model is told of the tool calls its last reply made beyond the one a step runs,
+     * or null: the loop sets it after the step is decided and adds it to the observation the
+     * step records ({@code AgentLoop.recordAndEmitObservation}), once.
+     */
+    void setCallsNotRun(String note) { this.callsNotRun = note; }
+
+    /** Whether there is a {@link #setCallsNotRun} note still to be taken. */
+    boolean hasCallsNotRun() { return callsNotRun != null; }
+
+    /** {@link #setCallsNotRun}'s note, taken: null after the first time. */
+    String takeCallsNotRun() {
+        String note = callsNotRun;
+        callsNotRun = null;
+        return note;
+    }
 
     // ── File attachments ──
 

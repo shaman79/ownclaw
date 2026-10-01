@@ -3,6 +3,7 @@ package com.ownclaw.core;
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
+import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -103,7 +104,7 @@ public class TaskQueue {
      * @return a future that will contain the response (or an error message)
      */
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
-        return submit(userId, message, priority, null, List.of());
+        return submit(userId, message, priority, null, List.of(), null);
     }
 
     /**
@@ -111,9 +112,12 @@ public class TaskQueue {
      *                         and no other; null for a scheduled or background run
      * @param attachmentIds    the files sent with the message, bound to this task explicitly
      *                         rather than guessed from the newest chat row
+     * @param channel          where that row came from, so the task's progress messages are
+     *                         shown there too; null for a scheduled or background run
      */
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                 String currentMessageId, List<String> attachmentIds) {
+                                                 String currentMessageId, List<String> attachmentIds,
+                                                 TaskChat.Channel channel) {
         if (queueSize.get() >= maxQueuedTasks) {
             eventLog.warn(userId, null, "queue.full", "Queue full, task rejected");
             // An outcome, not a sentence. Returned as a bare string, "System busy" was
@@ -125,7 +129,7 @@ public class TaskQueue {
 
         CompletableFuture<AgentResult> future = new CompletableFuture<>();
         QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future,
-                currentMessageId, attachmentIds == null ? List.of() : List.copyOf(attachmentIds));
+                currentMessageId, attachmentIds == null ? List.of() : List.copyOf(attachmentIds), channel);
         // With lanes off, background work stays in the interactive queue and the behaviour is
         // byte-for-byte what it was: one queue, one thread, priority order within it.
         boolean background = separateBackgroundLane && priority >= BACKGROUND_PRIORITY;
@@ -208,7 +212,7 @@ public class TaskQueue {
                     // up and recorded every run as completed.
                     task.future().complete(
                             agentLoop.executeFull(task.userId(), task.message(), unattended,
-                                    task.currentMessageId(), task.attachmentIds()));
+                                    task.currentMessageId(), task.attachmentIds(), task.channel()));
                 } catch (Exception e) {
                     log.error("Task processing failed on the {} lane for user {}: {}",
                             laneName, task.userId(), e.getMessage(), e);
@@ -244,7 +248,8 @@ public class TaskQueue {
             long enqueuedAt,
             CompletableFuture<AgentResult> future,
             String currentMessageId,
-            List<String> attachmentIds
+            List<String> attachmentIds,
+            TaskChat.Channel channel
     ) implements Comparable<QueuedTask> {
 
         @Override

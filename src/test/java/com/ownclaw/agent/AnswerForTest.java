@@ -117,15 +117,15 @@ class AnswerForTest {
     }
 
     @Test
-    @DisplayName("a task that ends without respond -- step limit, cloud errors -- still gives the owner every private result")
+    @DisplayName("a task that ends without respond -- a stall, cloud errors -- still gives the owner every private result")
     void everyExitCarriesTheLocalAnswer() {
-        var stopped = AgentResult.maxSteps("it used all 20 steps a task may take", new AgentTrajectory(), 5);
+        var stopped = AgentResult.stalled("no progress for 10m 0s", new AgentTrajectory(), 5);
         var r = TaskEnding.apply(stopped, fileTask(), Map.of());
         assertTrue(r.ownerText().contains(PRIVATE_HEADER + "**result 3 (local_answer):**\n\n" + ANSWER), r.ownerText());
         assertTrue(r.ownerText().contains("statement text"), "what a skill read from the file is the owner's too");
         assertFalse(r.response().contains(ANSWER), "the text every later prompt reads never holds it");
         assertFalse(r.response().contains("statement text"));
-        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason());
+        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason());
 
         // Without a file as well: a private result is the owner's whatever made it private.
         var noFile = new AgentContext("u1", "t2", "x");

@@ -116,8 +116,10 @@ public class ConversationService {
      * <p>
      * Only the conversation: a {@code system} row is a command's reply or the setup wizard's
      * prompt -- /files lists uploaded files by name, and a file's name can carry an account
-     * number -- and no part of what is being continued. Rows an earlier summariser marked
-     * {@code compressed} are read like any other; they were marked, never changed.
+     * number -- and no part of what is being continued; a {@code progress} row is the owner's
+     * view of a task at work ({@code TaskChat}), and its private text a summary only he may read.
+     * Rows an earlier summariser marked {@code compressed} are read like any other; they were
+     * marked, never changed.
      */
     public List<Map<String, Object>> contextOf(String userId, String messageId) {
         return jdbc.queryForList("""
@@ -130,6 +132,14 @@ public class ConversationService {
                    OR role = 'user' AND rowid < (SELECT rowid FROM conversations WHERE id = ? AND user_id = ?))
             ORDER BY timestamp ASC, rowid ASC
             """, userId, messageId, messageId, userId, messageId, userId);
+    }
+
+    /** The chat a message of this user was saved in, or null when he has no such message. */
+    public String sessionOf(String userId, String messageId) {
+        List<String> session = jdbc.queryForList(
+                "SELECT session_id FROM conversations WHERE id = ? AND user_id = ?",
+                String.class, messageId, userId);
+        return session.isEmpty() ? null : session.getFirst();
     }
 
     // ── Session Management ──

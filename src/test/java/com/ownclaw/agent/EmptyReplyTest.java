@@ -221,44 +221,30 @@ class EmptyReplyTest {
     }
 
     @Test
-    @DisplayName("five in a task stop it, though never three in a row -- with a warning before the fifth")
-    void fiveInATaskStopIt(@TempDir Path tmp) throws Exception {
+    @DisplayName("empty replies scattered through a long task that keeps working do not end it, however many")
+    void scatteredOnesDoNotEndIt(@TempDir Path tmp) throws Exception {
         var registry = new ToolRegistry(List.of(AssistantPartsTest.tool("fetch_page", List.of(),
                 p -> "the page says the service is up")));
-        var cloud = new Script(true, empty(), call("fetch_page", Map.of()), empty(), call("fetch_page", Map.of()),
-                empty(), call("fetch_page", Map.of()), empty(), call("fetch_page", Map.of()), empty());
-        var ctx = new AgentContext("u1", "t-five", "Is the service up?");
+        var script = new ArrayList<Object>();
+        for (int i = 0; i < 6; i++) {
+            script.add(empty());
+            script.add(call("fetch_page", Map.of()));
+        }
+        script.add(respond("It is up."));
+        var cloud = new Script(true, script.toArray());
+        var ctx = new AgentContext("u1", "t-six", "Is the service up?");
 
         AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
 
-        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
-        assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run 5 times "
-                + "in this task.\n\n"), r.response());
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("It is up.", r.response());
         var told = ctx.trajectory().turns().stream()
                 .filter(t -> ThinkingEngine.THINKING.equals(t.action().tool()))
                 .map(t -> t.observation().output()).toList();
-        assertEquals(5, told.size(), "every one on the record, the one that ended the task too");
-        for (int i = 0; i < 5; i++) {
-            assertEquals(i == 3, told.get(i).contains("WARNING: one more step like this"),
-                    "warned before the fifth, and only then: " + i + " " + told.get(i));
-        }
-    }
-
-    @Test
-    @DisplayName("the last step allowed, producing nothing to run, ends the task as out of steps, saying so")
-    void theLastStepProducingNothing(@TempDir Path tmp) throws Exception {
-        var config = new OwnClawConfig();
-        config.getTasks().setMaxPlanSteps(2);
-        var cloud = new Script(true, empty());
-        var ctx = new AgentContext("u1", "t-last", "What is the capital of France?");
-
-        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, new ToolRegistry(List.of()), config);
-
-        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason(), r.response());
-        assertTrue(r.response().startsWith("**Stopped:** The task used all 2 steps it may take; the last produced "
-                + "nothing that could be run.\n\n"), "the last step's failure, not the bare step limit: " + r.response());
-        assertFalse(ctx.trajectory().turns().get(1).observation().output().contains("WARNING"),
-                "the task stopped; a warning about the next step would not be true");
+        assertEquals(6, told.size(), "every one on the record");
+        assertTrue(told.stream().noneMatch(t -> t.contains("WARNING")),
+                "never two in a row, so never a warning: " + told);
+        // Mutation: count them across the task again -> the fifth ends it, FAILURE_LIMIT.
     }
 
     @Test
@@ -350,21 +336,6 @@ class EmptyReplyTest {
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
         assertTrue(r.response().startsWith("**Stopped:** 3 steps in a row ran nothing: the model's reply could not "
                 + "be run 2 times, and the call to it failed 1 time (the last: " + UNREACHABLE + ").\n\n"), r.response());
-    }
-
-    @Test
-    @DisplayName("the last step allowed, a call that failed, ends the task out of steps, saying how it failed")
-    void theLastStepAFailedCall(@TempDir Path tmp) throws Exception {
-        var config = new OwnClawConfig();
-        config.getTasks().setMaxPlanSteps(2);
-        var ctx = new AgentContext("u1", "t-last-failed", "What is the capital of France?");
-
-        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), new Script(true, unreachable()), ctx,
-                new ToolRegistry(List.of()), config);
-
-        assertEquals(AgentResult.TerminationReason.MAX_STEPS, r.terminationReason(), r.response());
-        assertTrue(r.response().startsWith("**Stopped:** The task used all 2 steps it may take; in the last, the "
-                + "call to the model failed (" + UNREACHABLE + ").\n\n"), r.response());
     }
 
     @Test

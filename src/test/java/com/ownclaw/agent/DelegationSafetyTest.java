@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * applying to the work that actually runs. {@code AgentLoop} handles {@code delegate} and
  * continues before {@code CriticAgent} is consulted, and {@link LocalExecutor} calls
  * {@code tool.execute} straight off the registry. Two of those gates matter enough to rebuild
- * here rather than leave to {@code max_steps}:
+ * here, where nothing counts a delegation's turns:
  * <ul>
  *   <li>The critic blocks an identical action after three tries. Without it, a local model that
  *       is unsure whether {@code smtp_send_email} worked sends the owner ten copies.</li>
@@ -129,8 +129,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("finishing without running anything is not a success")
     void zeroStepsIsNotSuccess() {
-        var outcome = LocalExecutor.completed(
-                "I have fetched today's headlines and emailed the digest.", "send the digest", List.of(), null);
+        var outcome = LocalExecutor.completed("I have fetched today's headlines and emailed the digest.", "send the digest", List.of(), List.of(), null);
 
         assertFalse(outcome.ok(),
                 "the summary reads like a delivered job; nothing ran. With the registry "
@@ -143,7 +142,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a real delegation carries its ledger with the claim")
     void successCarriesEvidence() {
-        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(), List.of(
                 step("daily_news_digest", Map.of(), "...headlines..."),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")), null);
 
@@ -350,7 +349,7 @@ class DelegationSafetyTest {
                 "files:\n" + forwarded + "\n/tmp/other.txt", true, com.ownclaw.privacy.Label.PUBLIC, List.of()));
         assertNull(LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
                 LocalExecutor.planText(new DelegationPlan("Send " + forwarded + " to Petr", List.of(),
-                        List.of(), 6))));
+                        List.of()))));
         assertEquals("attachment", LocalExecutor.retyped(smtp, Map.of("attachment", forwarded), listed,
                         List.of()),
                 "from nowhere but the listing, it is a copy out of a result -- as before");
@@ -457,7 +456,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a failure that already sent the email says so first")
     void failureNamesWhatAlreadySucceeded() {
-        var outcome = LocalExecutor.completed("Could not verify.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Could not verify.", "send it", List.of(), List.of(
                 step("daily_news_digest", Map.of(), "...digest..."),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent, id 42"),
                 new Artifact("verify_delivery", Map.of(), "ERROR: no such tool",
@@ -477,7 +476,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a clean delegation is not prefixed with a warning about itself")
     void successHasNoAlreadyDoneHeader() {
-        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(), List.of(
                 step("smtp_send_email", Map.of(), "Sent")), null);
         assertTrue(outcome.ok());
         assertTrue(outcome.text().startsWith("Digest sent."));
@@ -486,7 +485,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a failure with nothing successful carries no misleading header")
     void allFailedHasNoHeader() {
-        var outcome = LocalExecutor.completed("Nothing worked.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Nothing worked.", "send it", List.of(), List.of(
                 new Artifact("x", Map.of(), "ERROR: boom", false)), null);
         assertFalse(outcome.text().startsWith("ALREADY DONE"));
     }
@@ -504,7 +503,7 @@ class DelegationSafetyTest {
         var broken = new Artifact(2, "web_fetch_and_parse", Map.of(), Map.of(), trace, false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-        var outcome = LocalExecutor.completed("Fetched.", "fetch", List.of(fetched, broken), null);
+        var outcome = LocalExecutor.completed("Fetched.", "fetch", List.of(), List.of(fetched, broken), null);
 
         assertTrue(big.length() > 20_000 && trace.length() > 20_000);
         assertTrue(outcome.text().contains(big),
@@ -524,7 +523,7 @@ class DelegationSafetyTest {
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
         var priv = privateStep(2, "smtp_send_email", "Sent, message id 42", true);
 
-        var outcome = LocalExecutor.completed("Local prose about the mailbox", "send it",
+        var outcome = LocalExecutor.completed("Local prose about the mailbox", "send it", List.of(),
                 List.of(pub, priv), null);
 
         assertTrue(outcome.ok());
@@ -543,7 +542,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("an all-public delegation reads exactly as before, summary included")
     void allPublicIsUnchanged() {
-        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(), List.of(
                 step("daily_news_digest", Map.of(), "the digest"),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")), null);
 
@@ -560,7 +559,7 @@ class DelegationSafetyTest {
                 Map.of("url", "https://x"), "Traceback: KeyError 'menu'", false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-        var outcome = LocalExecutor.completed("", "fetch", List.of(priv, pub), null);
+        var outcome = LocalExecutor.completed("", "fetch", List.of(), List.of(priv, pub), null);
 
         assertFalse(outcome.text().contains("petr@x"));
         assertTrue(outcome.text().contains("{{1}}"));
@@ -609,7 +608,7 @@ class DelegationSafetyTest {
         var send = new Artifact(3, "smtp_send_email", Map.of(), Map.of(),
                 "{\"ok\": false, \"error\": \"timed out\"}", true,
                 com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
-        var outcome = LocalExecutor.completed("sent", "send", List.of(send), null);
+        var outcome = LocalExecutor.completed("sent", "send", List.of(), List.of(send), null);
         assertTrue(outcome.text().contains("{{3}} smtp_send_email FAILED"), outcome.text());
         assertFalse(outcome.ok());
     }
@@ -619,7 +618,7 @@ class DelegationSafetyTest {
     void theSummaryIsRenumbered() {
         var digest = new Artifact(7, "daily_news_digest", Map.of(), Map.of(), "digest", true,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
-        var outcome = LocalExecutor.completed("Forwarded {{1}} to Petr.", "send it", List.of(digest), null);
+        var outcome = LocalExecutor.completed("Forwarded {{1}} to Petr.", "send it", List.of(), List.of(digest), null);
         assertTrue(outcome.text().startsWith("Forwarded {{7}} to Petr."), outcome.text());
     }
 
@@ -664,7 +663,7 @@ class DelegationSafetyTest {
     @Test
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
-        var outcome = LocalExecutor.completed("Done.", "send it", List.of(
+        var outcome = LocalExecutor.completed("Done.", "send it", List.of(), List.of(
                 new Artifact("smtp_send_email", Map.of(), "ERROR: auth", false)), null);
 
         assertTrue(outcome.text().contains("smtp_send_email FAILED"),
@@ -673,21 +672,30 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("the goal loses references to earlier results; a plan's own step parameters keep theirs")
-    void theGoalScrubTouchesProseOnly() {
-        var plan = new DelegationPlan("Email {{3.body_text}} to Petr",
+    @DisplayName("the results a plan's prose names are given to it, named in words; a name of no result is taken out; step parameters keep theirs")
+    void thePlanIsGivenWhatItNames() {
+        var page = new Artifact(1, "web_fetch", Map.of(), Map.of(), "the page", true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var menu = new Artifact(2, "daily_menu_fetcher", Map.of(), Map.of(), "the menu", true,
+                com.ownclaw.privacy.Label.PUBLIC, List.of());
+        var mail = new Artifact(3, "imap_fetch", Map.of(), Map.of(), "{\"body_text\":\"the mail\"}", true,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+        var plan = new DelegationPlan("Email {{3.body_text}} to Petr, not {{9}}",
                 List.of(new DelegationPlan.Step("fetch the menu", "daily_menu_fetcher", Map.of()),
                         new DelegationPlan.Step("send {{3}}", "smtp_send_email",
                                 Map.of("body", "{{1.body_text}}"))),
-                List.of(), 6);
-        int[] removed = {0};
-        var own = LocalExecutor.withoutOutsideReferences(plan, removed);
+                List.of("{{1}} was read"));
 
-        assertFalse(own.goal().contains("{{3"), own.goal());
-        assertFalse(own.steps().get(1).description().contains("{{3"));
-        assertEquals("{{1.body_text}}", own.steps().get(1).params().get("body"),
+        var given = LocalExecutor.given(plan, List.of(page, menu, mail));
+
+        assertEquals("Email result 3.body_text to Petr, not (a result that does not exist)", given.plan().goal(),
+                "left as {{3}}, the local model would read it as its own third result");
+        assertEquals("send result 3", given.plan().steps().get(1).description());
+        assertEquals(List.of("result 1 was read"), given.plan().checkpoints());
+        assertEquals("{{1.body_text}}", given.plan().steps().get(1).params().get("body"),
                 "in a plan, {{1}} means the plan's own step 1 -- exactly how the delegation numbers");
-        assertEquals(2, removed[0]);
+        assertEquals(List.of(mail, page), given.results(), "each once, in the order first named");
+        assertEquals(1, given.missing());
     }
 
     @Test

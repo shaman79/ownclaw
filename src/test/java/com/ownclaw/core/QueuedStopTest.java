@@ -32,7 +32,8 @@ class QueuedStopTest {
                 null, null, null, null, null, null, null, null) {
             @Override
             public AgentResult executeFull(String userId, String message, boolean unattended,
-                                           String currentMessageId, List<String> attachmentIds) {
+                                           String currentMessageId, List<String> attachmentIds,
+                                           com.ownclaw.agent.TaskChat.Channel channel) {
                 ran.add(message);
                 try {
                     release.await(5, TimeUnit.SECONDS);
@@ -46,11 +47,11 @@ class QueuedStopTest {
                 new ChatStatusEmitter(), new OwnClawConfig(), cancellation);
         queue.start();
         try {
-            var first = queue.submit("u1", "first", 1, null, List.of());
+            var first = queue.submit("u1", "first", 1, null, List.of(), null);
             long until = System.currentTimeMillis() + 5_000;
             while (ran.isEmpty() && System.currentTimeMillis() < until) Thread.sleep(5);
             assertFalse(ran.isEmpty(), "the first task never started");
-            var second = queue.submit("u1", "second", 1, null, List.of());
+            var second = queue.submit("u1", "second", 1, null, List.of(), null);
             cancellation.requestAll("u1", "you sent /cancel");
             release.countDown();
 

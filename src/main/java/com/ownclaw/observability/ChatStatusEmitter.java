@@ -135,7 +135,16 @@ public class ChatStatusEmitter {
              * as an ordinary assistant message rather than an entry in the activity strip. A
              * morning digest is not a status line.
              */
-            RESULT
+            RESULT,
+            /**
+             * A message in a running task's own chat about what it is doing -- a step, a tool
+             * call of the local model, the local model's summary of a private result -- saved
+             * there as a progress row ({@code TaskChat}). Shown in the chat, secondary to the
+             * answer, not in the activity strip; Telegram gets it for a task that came from
+             * Telegram. Carries the chat it was saved in, and the owner's text when only he may
+             * read it, as a result does.
+             */
+            PROGRESS_MESSAGE
         }
 
         /** Format with icon prefix for display. */
@@ -155,6 +164,7 @@ public class ChatStatusEmitter {
                 case DEBUG      -> "\uD83D\uDC1B " + text;  // 🐛
                 case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
                 case RESULT     -> text;                    // the answer, not a note about it
+                case PROGRESS_MESSAGE -> text;              // a message of its own, written whole
             };
         }
     }

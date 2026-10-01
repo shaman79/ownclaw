@@ -428,7 +428,7 @@ class AssistantPartsTest {
         var rows = new ArrayList<EgressLedger.Row>();
 
         AgentResult r = loop(jdbc, registry, gateway(cloud, rows), config)
-                .executeFull("u1", "Audit the routers and save the report.", false, null, List.of());
+                .executeFull("u1", "Audit the routers and save the report.", false, null, List.of(), null);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(),
                 "the step after the writer was refused on the cloud's own spec: " + r.response());

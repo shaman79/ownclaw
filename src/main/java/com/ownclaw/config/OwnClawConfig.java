@@ -116,7 +116,6 @@ public class OwnClawConfig {
     public static class Tasks {
         private int defaultTimeout = 300;
         private int stepTimeout = 60;
-        private int maxPlanSteps = 20;
         private int longRunningThreshold = 120;
         private int stallTimeout = 1200;
         private int heartbeatInterval = 30;
@@ -126,8 +125,6 @@ public class OwnClawConfig {
         public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
         public int getStepTimeout() { return stepTimeout; }
         public void setStepTimeout(int v) { this.stepTimeout = v; }
-        public int getMaxPlanSteps() { return maxPlanSteps; }
-        public void setMaxPlanSteps(int v) { this.maxPlanSteps = v; }
         public int getLongRunningThreshold() { return longRunningThreshold; }
         public void setLongRunningThreshold(int v) { this.longRunningThreshold = v; }
         public int getStallTimeout() { return stallTimeout; }

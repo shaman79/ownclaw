@@ -120,7 +120,7 @@ scenario breaks the system's ability to handle all others.
 │   │ • OpenAI       │  │  • steps: ordered [{description,          │     │
 │   │ • Anthropic    │  │           tool, params}, ...]             │     │
 │   │                │  │  • checkpoints: verification points       │     │
-│   │ Always drives  │  │  • max_steps: execution limit             │     │
+│   │ Always drives  │  │  • tools: the skills it needs             │     │
 │   │ main loop.     │  │                                          │     │
 │   │ Decides ALL    │  │  Runs mini Think→Act→Observe loop         │     │
 │   │ actions.       │  │  using local LLM (qwen2.5:14b).          │     │
@@ -341,7 +341,7 @@ When the cloud LLM determines that a task involves multiple routine steps that d
       }
     ],
     "checkpoints": ["Verify files were found before counting"],
-    "max_steps": 10
+    "tools": "shell"
   }
 }
 ```
@@ -352,7 +352,7 @@ public record DelegationPlan(
     String goal,
     List<Step> steps,
     List<String> checkpoints,
-    int maxSteps
+    List<String> tools
 ) {
     public record Step(
         String description,
@@ -383,14 +383,14 @@ public record DelegationPlan(
 │     b. Parse response → tool call or "done" signal       │
 │     c. If tool call → executeToolDirect() via ToolRegistry│
 │     d. Record result as observation                      │
-│     e. Repeat until "done" or maxSteps reached           │
+│     e. Repeat until "done", a stop, a local error, or    │
+│        3 turns in a row that run nothing                 │
 │                                                          │
 │  3. Return consolidated results to AgentLoop             │
 │     (which feeds them back to cloud LLM as observation)  │
 │                                                          │
 │  Constraints:                                            │
 │  • skill_create is BLOCKED (only cloud can create skills)│
-│  • maxSteps hard limit prevents runaway execution        │
 │  • Partial results returned on timeout/error             │
 │  • All tool execution goes through same ToolRegistry     │
 └──────────────────────────────────────────────────────────┘
@@ -1380,7 +1380,6 @@ ownclaw:
     default_timeout: 300             # seconds, for whole task (not per step)
     step_timeout: 60                 # seconds, per plan step
     long_running_threshold: 120      # seconds; tasks exceeding this become "long-running"
-    max_plan_steps: 20               # Maximum steps in a DAG plan
 
   # Telegram
   telegram:

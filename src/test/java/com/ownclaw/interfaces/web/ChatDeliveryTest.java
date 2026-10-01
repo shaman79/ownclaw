@@ -52,6 +52,7 @@ class ChatDeliveryTest {
     /** Hands out futures the test completes; runs nothing. */
     static final class Queue extends TaskQueue {
         final List<String> messages = new ArrayList<>();
+        final List<com.ownclaw.agent.TaskChat.Channel> channels = new ArrayList<>();
         final List<CompletableFuture<AgentResult>> futures = new ArrayList<>();
 
         Queue() {
@@ -60,8 +61,10 @@ class ChatDeliveryTest {
 
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds) {
+                                                     String currentMessageId, List<String> attachmentIds,
+                                                     com.ownclaw.agent.TaskChat.Channel channel) {
             messages.add(message);
+            channels.add(channel);
             var future = new CompletableFuture<AgentResult>();
             futures.add(future);
             return future;
@@ -69,7 +72,7 @@ class ChatDeliveryTest {
 
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
-            return submit(userId, message, priority, null, List.of());
+            return submit(userId, message, priority, null, List.of(), null);
         }
     }
 
@@ -187,7 +190,8 @@ class ChatDeliveryTest {
                 null, null, null, null, null, null, null, null, null, null) {
             @Override
             public AgentResult executeFull(String userId, String message, boolean unattended,
-                                           String currentMessageId, List<String> attachmentIds) {
+                                           String currentMessageId, List<String> attachmentIds,
+                                           com.ownclaw.agent.TaskChat.Channel channel) {
                 throw new IllegalStateException("database is locked");
             }
         };
@@ -283,6 +287,30 @@ class ChatDeliveryTest {
         assertEquals(opened, frames("session_updated").getLast().path("content").asText(),
                 "named, the answer's chat took the page there, while what was typed next went to the open one");
         assertEquals(opened, conversations.getCurrentSession(USER), "the open chat is left alone");
+    }
+
+    @Test
+    @DisplayName("a web chat task's progress messages reach the page as messages of their chat: the owner's text, when only he may read it")
+    void progressReachesThePage(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        type("check the router");
+        assertEquals(List.of(com.ownclaw.agent.TaskChat.Channel.WEB), queue.channels, "the task knows it came from here");
+
+        emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
+                "**Step 1 · ping · 2.0s · $0.01**\n\nPinging it.", Map.of("sessionId", "s1"));
+        emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
+                "**Result 1 (bank_fetch)** — private, shown only to you.",
+                Map.of("sessionId", "s1", "ownerText", "**Result 1 (bank_fetch)** — Balance 48,213.07 CZK"));
+
+        var progress = frames("progress");
+        assertEquals(List.of("**Step 1 · ping · 2.0s · $0.01**\n\nPinging it.", "**Result 1 (bank_fetch)** — Balance 48,213.07 CZK"),
+                progress.stream().map(f -> f.path("content").asText()).toList());
+        for (var f : progress) {
+            assertEquals("s1", f.path("sessionId").asText());
+            assertEquals("abcd1234", f.path("taskId").asText());
+        }
+        assertTrue(frames("status").stream().noneMatch(f -> f.path("content").asText().contains("Step 1 · ping")),
+                "not an entry of the activity strip");
     }
 
     @Test
