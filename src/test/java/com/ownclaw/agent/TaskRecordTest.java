@@ -46,7 +46,7 @@ class TaskRecordTest {
 
         Rows call(String purpose, int completionTokens) {
             ledger.record(new EgressLedger.Row(ctx.userId(), ctx.taskId(), purpose, "anthropic", "claude-opus-5",
-                    EgressLedger.Decision.SENT, List.of(), 100, 0, 3_000, completionTokens, 0, 0, 0.0, 0, null, "end_turn"));
+                    EgressLedger.Decision.SENT, List.of(), 100, 0, 3_000, completionTokens, 0, 0, 0.0, 0, 0, null, "end_turn"));
             return this;
         }
 
@@ -68,7 +68,7 @@ class TaskRecordTest {
 
     /** A result recorded the way the loop records one, and its observation. */
     static AgentObservation result(AgentContext ctx, String tool, String output, List<String> credentials, long ms) {
-        var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, Artifact.labelFor(credentials, List.of()));
+        var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, Artifact.labelFor(!credentials.isEmpty(), List.of()));
         return Artifact.asObservation(a, com.ownclaw.agent.tools.ToolResult.success(output), ms);
     }
 
@@ -95,7 +95,7 @@ class TaskRecordTest {
                 "  File \"skill.py\", line 849",
                 "    an =",
                 "SyntaxError: invalid syntax (see result 1)",
-                "3. ✓ openwrt_audit · 1m 20s → result 2, 174,617 chars, private (credentials (2))",
+                "3. ✓ openwrt_audit · 1m 20s → result 2, 174,617 chars, private (personal source)",
                 "4. ✗ _thinking — the reply was empty ×2",
                 "5. ✓ skill_manage delete · 3ms"), TaskRecord.steps(rows.trace()));
         // Mutations: drop the skill from the row, drop the codegen calls, keep the handle, or
@@ -168,7 +168,7 @@ class TaskRecordTest {
     void privateFailuresStayOut(@TempDir Path tmp) throws Exception {
         var ctx = new AgentContext("u1", "a1b2c3d4", "x");
         var a = ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Traceback: mailbox someone@example.com", false,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
         var rows = new Rows(events(tmp), ctx).step(new AgentAction("imap_fetch", Map.of(), ""),
                 AgentObservation.failure("imap_fetch", a.describe(), 5));
         String steps = TaskRecord.steps(rows.trace());

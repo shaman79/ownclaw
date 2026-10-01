@@ -20,10 +20,13 @@ import java.util.Map;
  * boolean so that {@code ok=false} is never hidden inside an envelope. Nothing
  * downstream needs to know about labels, because nothing downstream ever holds the bytes.
  * <p>
- * The label comes from facts the code already has: in {@link #labelFor}, the skill declared
- * credentials or the call pulled in a PRIVATE result; and inside a delegation, a step that
- * came after one of those (see {@code LocalExecutor}). Not from a model, and not from a rule
- * list — the moment the label needs a taxonomy of tool names, this design has failed.
+ * The label comes from facts the code already has: in {@link #labelFor}, the skill reads a
+ * personal-content source -- its credentials name one, mail by default -- or the call pulled in a
+ * PRIVATE result; the task holds a file; inside a delegation, a step that came after one of those
+ * (see {@code LocalExecutor}); and a result whose bytes repeat a PRIVATE one
+ * ({@code AgentContext.decide}). Not from a model, and not from a rule list of tool names. Every
+ * other result goes to the cloud as it is, through the gateway's filter, which removes secrets
+ * and replaces identifiers wherever they are.
  *
  * @param n        the task-wide handle number; {@code {{n}}} in every cloud prompt and ledger
  * @param tool     the tool or skill that produced it
@@ -85,26 +88,28 @@ public record Artifact(int n, String tool, Map<String, Object> written,
 
     /**
      * The label from the call's own facts — two of them, and nothing a model decides: the skill
-     * declared credentials, or the call pulled in a PRIVATE result. (Inside a delegation there is
-     * a third, about timing: after the local model has read private data, everything it does is
-     * PRIVATE. That one is applied by {@code AgentContext.decide}, which both paths call.)
+     * reads a personal-content source, or the call pulled in a PRIVATE result. (Inside a
+     * delegation there is a third, about timing: after the local model has read private data,
+     * everything it does is PRIVATE. That one is applied by {@code AgentContext.decide}, which both
+     * paths call.) Needing credentials is not one of them: a router's configuration read with a
+     * password goes to the cloud with the password removed.
      *
-     * @param requiredCredentials what the skill declared; non-empty means it reached something
-     *                            that needed a secret, and its output is that something
-     * @param used                the results this call's arguments actually pulled in, as the
-     *                            resolver substituted them — so the label describes what moved
-     *                            rather than re-reading the arguments and guessing
+     * @param personalSource whether the skill's credentials name a personal-content source
+     *                       ({@code AgentContext.readsPersonalSource}): its output is that content
+     * @param used           the results this call's arguments actually pulled in, as the
+     *                       resolver substituted them — so the label describes what moved
+     *                       rather than re-reading the arguments and guessing
      */
-    public static Decision labelFor(List<String> requiredCredentials, List<Artifact> used) {
+    public static Decision labelFor(boolean personalSource, List<Artifact> used) {
         var why = new ArrayList<String>();
-        if (requiredCredentials != null && !requiredCredentials.isEmpty()) {
-            // The COUNT, not the names. A vault miss is worded "Missing required credentials:
-            // SMTP_PASS, SMTP_USER" by the skill harness, so naming them here put a 40-character
-            // run of the output into the descriptor -- and the descriptor is what the cloud
-            // reads, so the canary refused the call that carried it and the run died instead of
-            // saying "credentials missing". The key names are already in the tool schema the
-            // cloud holds, and the raw text is in the skill_usage row the owner reads.
-            why.add("credentials (" + requiredCredentials.size() + ")");
+        if (personalSource) {
+            // That it is one, not the key names. A vault miss is worded "Missing required
+            // credentials: IMAP_PASS, IMAP_USER" by the skill harness, so naming them here put a
+            // 40-character run of the output into the descriptor -- and the descriptor is what
+            // the cloud reads, so the canary refused the call that carried it and the run died
+            // instead of saying "credentials missing". The key names are already in the tool
+            // schema the cloud holds, and the raw text is in the skill_usage row the owner reads.
+            why.add("personal source");
         }
         // Files are not weighed here. Every skill run in a task holding one is given it, whether
         // or not the call references it, so the rule belongs to the task rather than to the

@@ -138,7 +138,7 @@ class ResultDeliveryTest {
     void anEndingIsNotCountedTwice(@TempDir Path tmp) throws Exception {
         String ending = "**Stopped:** no progress for 10m 0s.\n\n**What it produced:**\n"
                 + "- result 1 (web_fetch): 54 chars, public — in full below.\n"
-                + "- result 2 (imap_fetch): 61 chars, private (credentials (1)) — shown to you only.";
+                + "- result 2 (imap_fetch): 61 chars, private (personal source) — shown to you only.";
         String saved = deliveredAsBg(tmp, AgentResult.stalled(ending, mixedRun(), 30));
         assertTrue(saved.endsWith(ending), "a line counting \"1 result\" under a list of two: " + saved);
     }

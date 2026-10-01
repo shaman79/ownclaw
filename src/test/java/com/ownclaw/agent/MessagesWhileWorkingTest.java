@@ -128,22 +128,25 @@ class MessagesWhileWorkingTest {
     @Test
     @DisplayName("a message quoting a private result is the owner's own words: the request carrying it is sent, the result still is not")
     void quotingAPrivateResultIsHisToDo(@TempDir Path tmp) throws Exception {
+        // Mail is a personal source, so what the skill reads stays private (a router's config no
+        // longer does: the privacy filter sends it, without secrets and identifiers).
+        String mail = "From the landlord: the heating in the flat is serviced on Thursday morning, "
+                + "please leave the boiler room unlocked.";
         var inbox = new Inbox(TaskChat.Channel.WEB);
-        String line = "wireless.default_radio0.key='x7Qp-2Lm-9Rt-Wq4z'";
-        String quote = "Keep " + line + " as it is.";
-        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("router_audit", List.of("ROUTER_PASS"), p -> {
+        String quote = "About \"the heating in the flat is serviced on Thursday morning\": I will be home.";
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("mail_read", List.of("IMAP_PASS"), p -> {
             inbox.offer(owner("r2", quote), 2);
-            return AssistantPartsTest.REPORT;
+            return mail;
         })));
-        rig.cloud.think.add(call("router_audit", Map.of()));
+        rig.cloud.think.add(call("mail_read", Map.of()));
         rig.cloud.think.add(respond("Noted."));
 
-        AgentResult r = rig.loop.executeFull("u1", "Audit the routers.", false, null, List.of(), null, inbox);
+        AgentResult r = rig.loop.executeFull("u1", "Read my mail.", false, null, List.of(), null, inbox);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         String second = lastUser(rig.cloud.calls("think").get(1));
         assertTrue(second.contains(AgentLoop.FROM_THE_OWNER + quote), second);
-        assertFalse(second.contains("Devices checked: 2, unreachable: 0"), "the private result itself stays here");
+        assertFalse(second.contains("please leave the boiler room unlocked"), "the private result itself stays here");
         // Mutation: leave his messages out of the excuses -> the canary refuses step 2's request,
         // and the task ends PRIVACY_BLOCKED over words he typed.
     }

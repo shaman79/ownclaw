@@ -326,7 +326,10 @@ class EmptyReplyTest {
         var second = cloud.requests.get(1);
         String told = second.get(second.size() - 1).content();
         assertTrue(told.contains("Your previous reply held a tool call that cannot be run, so nothing was run."), told);
-        assertTrue(told.contains(arguments) && told.contains("Sending the answer."),
+        // Through the gateway's filter, as every part is: the address as its placeholder, which is
+        // what a cloud model shown only placeholders writes to begin with.
+        assertTrue(told.contains(arguments.replace("owner@example.org", "<email_1>"))
+                        && told.contains("Sending the answer."),
                 "the model is shown what it wrote, the call as it wrote it included: " + told);
         assertFalse(told.contains("never came"), "the reply came: " + told);
         assertEquals(340 + 320, ctx.cloudTokens(), "the reply that could not be run was billed, and is counted");
@@ -395,6 +398,7 @@ class EmptyReplyTest {
         var cloud = new Script(true, call("router_audit", Map.of()),
                 new LlmException("anthropic", "HTTP 400: the request held " + quoted, 400, null));
         var ctx = new AgentContext("u1", "t-quote", "Audit the routers.");
+        ctx.setPersonalSources(List.of("ROUTER_"));   // the audit stands for a private result
 
         AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
 

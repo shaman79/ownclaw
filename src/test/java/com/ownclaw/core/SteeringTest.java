@@ -46,7 +46,7 @@ class SteeringTest {
 
         Driven() {
             super(null, null, null, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, null, null);
+                    null, null, null, null, null, null, null, null, null, null, null);
         }
 
         @Override

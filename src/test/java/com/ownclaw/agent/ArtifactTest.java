@@ -28,21 +28,48 @@ class ArtifactTest {
 
     private static Artifact privateResult(String tool, String output, boolean ok) {
         return new Artifact(2, tool, Map.of(), Map.of(), output, ok, Label.PRIVATE,
-                List.of("credentials (1)"));
+                List.of("personal source"));
     }
 
     // ── labelFor: every clause on its own ──
 
     @Test
-    @DisplayName("a skill that declared credentials produces a PRIVATE result")
-    void credentialsMakeItPrivate() {
-        var d = Artifact.labelFor(List.of("IMAP_PASS"), List.of());
+    @DisplayName("a skill that reads a personal source produces a PRIVATE result; credentials alone do not")
+    void aPersonalSourceMakesItPrivate() {
+        var d = Artifact.labelFor(true, List.of());
         assertEquals(Label.PRIVATE, d.label());
-        assertEquals(List.of("credentials (1)"), d.why(),
-                "the COUNT, not the names: the skill harness words a vault miss as 'Missing "
-                        + "required credentials: SMTP_PASS, SMTP_USER', so naming them here put "
-                        + "a run of the OUTPUT into the descriptor and the canary refused the "
-                        + "call that carried it");
+        assertEquals(List.of("personal source"), d.why(),
+                "that it is one, not the key names: the skill harness words a vault miss as "
+                        + "'Missing required credentials: IMAP_PASS, IMAP_USER', so naming them "
+                        + "here put a run of the OUTPUT into the descriptor and the canary "
+                        + "refused the call that carried it");
+
+        // Which skills those are is the configuration's: IMAP_ and POP3_ by default, any key
+        // starting so, in any case. A router password is a credential and not a personal source.
+        var ctx = new AgentContext("u1", "t1", "check the router");
+        assertTrue(ctx.readsPersonalSource(List.of("IMAP_USER", "IMAP_PASS")));
+        assertTrue(ctx.readsPersonalSource(List.of("SMTP_PASS", "pop3_pass")));
+        assertFalse(ctx.readsPersonalSource(List.of("OPENWRT_PASS")));
+        assertFalse(ctx.readsPersonalSource(List.of()));
+        assertEquals(Label.PUBLIC, ctx.decide(List.of("OPENWRT_PASS"), List.of(), false,
+                "option ssid 'x'").label(), "credentials (N) alone no longer make a result PRIVATE");
+        assertEquals(Label.PRIVATE, ctx.decide(List.of("IMAP_PASS"), List.of(), false, "a mail").label());
+        ctx.setPersonalSources(List.of("BANK_"));
+        assertFalse(ctx.readsPersonalSource(List.of("IMAP_PASS")));
+        assertTrue(ctx.readsPersonalSource(List.of("BANK_TOKEN")));
+    }
+
+    @Test
+    @DisplayName("application.yaml names the same personal sources the code defaults to")
+    void personalSourcesAreConfigured() throws Exception {
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader().load("application.yaml",
+                new org.springframework.core.io.ClassPathResource("application.yaml"));
+        var bound = new org.springframework.boot.context.properties.bind.Binder(
+                org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+                .bind("ownclaw.privacy.personal-sources",
+                        org.springframework.boot.context.properties.bind.Bindable.listOf(String.class))
+                .get();
+        assertEquals(com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES, bound);
     }
 
     @Test
@@ -54,7 +81,7 @@ class ArtifactTest {
         var attachment = new Artifact(1, "attachment", Map.of(), Map.of(),
                 "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("uploaded file"));
         var used = References.resolve(Map.of("text", "{{1}}"), List.of(attachment)).used();
-        var d = Artifact.labelFor(List.of(), used);
+        var d = Artifact.labelFor(false, used);
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("references {{1}}"), d.why());
     }
@@ -68,7 +95,7 @@ class ArtifactTest {
         // public page then tripped the canary, and a run whose email had been sent reported
         // "did not finish". What the model WRITES after reading private content is withheld
         // elsewhere (LocalExecutor.completed, verbatimFailures); the label has two facts only.
-        var d = Artifact.labelFor(List.of(), List.of());
+        var d = Artifact.labelFor(false, List.of());
         assertEquals(Label.PUBLIC, d.label());
     }
 
@@ -77,20 +104,20 @@ class ArtifactTest {
     void referenceToPrivateMakesItPrivate() {
         var priv = privateResult("imap_fetch", "{\"body_text\":\"x\"}", true);   // handle {{2}}
         var used = References.resolve(Map.of("body", "{{1.body_text}}"), List.of(priv)).used();
-        var d = Artifact.labelFor(List.of(), used);
+        var d = Artifact.labelFor(false, used);
         assertEquals(Label.PRIVATE, d.label(), "derived from private is private");
         assertEquals(List.of("references {{2}}"), d.why(),
                 "named by its TASK handle, which is what the cloud reads in the descriptor");
 
         var pub = new Artifact(2, "x", Map.of(), Map.of(), "{}", true, Label.PUBLIC, List.of());
-        assertEquals(Label.PUBLIC, Artifact.labelFor(List.of(), List.of(pub)).label(),
+        assertEquals(Label.PUBLIC, Artifact.labelFor(false, List.of(pub)).label(),
                 "a PUBLIC result is not a reason");
     }
 
     @Test
     @DisplayName("with none of the facts, a result is PUBLIC — exactly as today")
     void nothingMakesItPublic() {
-        var d = Artifact.labelFor(List.of(), List.of());
+        var d = Artifact.labelFor(false, List.of());
         assertEquals(Label.PUBLIC, d.label());
         assertTrue(d.why().isEmpty());
     }
@@ -102,7 +129,7 @@ class ArtifactTest {
     void descriptorCarriesShapeNotContent() {
         String d = privateResult("smtp_send_email", PRIVATE_JSON, false).describe();
 
-        assertTrue(d.startsWith("{{2}} smtp_send_email ✗ — PRIVATE (credentials (1))"), d);
+        assertTrue(d.startsWith("{{2}} smtp_send_email ✗ — PRIVATE (personal source)"), d);
         assertTrue(d.contains("json"), d);
         assertTrue(d.contains("ok=false"),
                 "a success envelope around a failure is the normal shape of a skill result; a "
@@ -196,7 +223,7 @@ class ArtifactTest {
         withNull.put("cc", null);
 
         var a = assertDoesNotThrow(() -> new Artifact(2, "smtp_send_email", withNull, withNull,
-                "{\"ok\":true}", true, Label.PRIVATE, List.of("credentials (1)")));
+                "{\"ok\":true}", true, Label.PRIVATE, List.of("personal source")));
         assertTrue(a.written().containsKey("cc"));
         assertNull(a.written().get("cc"));
         assertDoesNotThrow(a::describe);
@@ -261,7 +288,7 @@ class ArtifactTest {
         // description and the owner gets a confident message with no menu in it.
         var a = new Artifact(1, "daily_menu_fetcher", Map.of(), Map.of(),
                 "{\"body_text\": \"Polévka: česneková\"}", true, Label.PRIVATE,
-                List.of("credentials (2)"));
+                List.of("personal source"));
         String d = a.describe();
 
         // Complete tokens, not a template. "pass <handle>.<field>" beside a list that annotates
@@ -319,7 +346,7 @@ class ArtifactTest {
         var ctx = new AgentContext("u1", "t1", "which invoice was it?");
         Artifact a = ctx.addArtifact("invoice_lookup", Map.of(), Map.of(),
                 "{\"ok\": true, \"" + key + "\": \"value 4711\"}", true,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
 
         String d = a.describe();
         assertNull(ctx.egress("test").index().firstLeakIn(d, (h, w) -> false), "the canary finds its own window in: " + d);
@@ -428,7 +455,7 @@ class ArtifactTest {
         // envelope is.
         String records = "{\"ok\": false, \"host\": \"192.0.2.1\"}\n{\"ok\": true, \"host\": \"192.0.2.2\"}";
         var a = new Artifact(1, "net_scan", Map.of(), Map.of(), records, true, Label.PRIVATE,
-                List.of("credentials (1)"));
+                List.of("personal source"));
 
         assertTrue(a.succeeded(), "one record's ok is not the call's");
         assertTrue(a.describe().contains(" · text · "), a.describe());

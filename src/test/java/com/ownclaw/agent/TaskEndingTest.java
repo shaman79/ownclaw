@@ -40,7 +40,7 @@ class TaskEndingTest {
         ctx.addArtifact("lan_inventory", Map.of(), Map.of(), "192.0.2.1 main router, admin password "
                 + PASSWORD, true, new Artifact.Decision(Label.PUBLIC, List.of()));
         ctx.addArtifact("openwrt_audit", Map.of(), Map.of(), AUDIT, true,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (2)")));
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
         ctx.addArtifact("write_text_file_verbatim", Map.of(), Map.of(), "{\"ok\": true, \"preview\": \""
                 + AUDIT.substring(0, 200) + "\"}", true, new Artifact.Decision(Label.PRIVATE, List.of("references {{2}}")));
         ctx.addArtifact("cat_report", Map.of(), Map.of(), AUDIT, true, new Artifact.Decision(Label.PUBLIC, List.of()));
@@ -78,7 +78,7 @@ class TaskEndingTest {
             }
             assertTrue(text.contains(":\n1. ✓ lan_inventory · 2.1s → result 5, 0 chars, public"), text);
             assertTrue(text.contains("\n- result 2 (openwrt_audit): " + String.format("%,d", AUDIT.length())
-                    + " chars, private (credentials (2)) — shown to you only, never to the cloud model."), text);
+                    + " chars, private (personal source) — shown to you only, never to the cloud model."), text);
             assertEquals(reason, r.terminationReason());
         }
     }
@@ -141,7 +141,7 @@ class TaskEndingTest {
         var ctx = new AgentContext("u1", "d1d2d3d4", "send me the digest");
         ctx.addArtifact("daily_news_digest", Map.of(), Map.of(), digest, true, new Artifact.Decision(Label.PUBLIC, List.of()));
         ctx.addArtifact("smtp_send_email", Map.of(), Map.of(), "Sent to someone@example.org: " + digest
-                + " (message id 4471-abc@example.org)", true, new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+                + " (message id 4471-abc@example.org)", true, new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
 
         var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, Map.of());
         assertTrue(r.response().contains("- result 1 (daily_news_digest): " + digest.length()
@@ -162,7 +162,7 @@ class TaskEndingTest {
                 .step(new AgentAction("noop", Map.of(), ""), AgentObservation.success("noop", "nothing", Map.of(), 1))
                 .trace();
         ctx.addArtifact("imap_count", Map.of(), Map.of(), "3", true,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
 
         var r = TaskEnding.apply(ended(TerminationReason.STALLED, "no progress for 10m 0s"), ctx, trace);
         assertTrue(r.response().contains("**What it did** — 3 steps"), r.response());
@@ -277,7 +277,7 @@ class TaskEndingTest {
         assertTrue(r.response().startsWith(AgentLoop.PRIVATE_NOTE + "\n\n**What it did**"), r.response());
         assertTrue(r.ownerText().startsWith(AgentLoop.PRIVATE_RESULT_HEADER), r.ownerText());
         assertTrue(r.ownerText().contains("- result 2 (openwrt_audit): " + String.format("%,d", AUDIT.length())
-                + " chars, private (credentials (2)) — shown above."), r.ownerText());
+                + " chars, private (personal source) — shown above."), r.ownerText());
         String scrubbedAudit = AUDIT.replace(PASSWORD, "«vault:OPENWRT_PASS»");
         assertEquals(2, count(r.ownerText(), scrubbedAudit), "placed once, and repeated once by cat_report: " + r.ownerText());
     }

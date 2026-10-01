@@ -3306,7 +3306,8 @@
                     + (failed ? ', as reported before the call failed' : '')));
         d.appendChild(tdRow('Cost', c.decision === 'REFUSED' ? 'none'
                 : c.costUsd == null ? 'not recorded: the call failed' : (failed ? '≥ ' : '') + formatUsd(c.costUsd)));
-        if (c.scrubs > 0) d.appendChild(tdRow('Vault values replaced', String(c.scrubs)));
+        if (c.scrubs > 0) d.appendChild(tdRow('Secrets removed', String(c.scrubs)));
+        if (c.identifiers > 0) d.appendChild(tdRow('Identifiers replaced', String(c.identifiers)));
         var why = c.refusal ? ' (' + c.refusal + ')' : '';
         d.appendChild(c.decision === 'SENT' ? tdRow('Decision', 'Sent')
                 : c.decision === 'REFUSED' ? tdRow('Decision', 'Stopped before sending' + why + '. Nothing was sent.', 'error')

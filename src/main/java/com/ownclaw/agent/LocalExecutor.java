@@ -5,6 +5,7 @@ import com.ownclaw.llm.*;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.privacy.PrivateIndex;
+import com.ownclaw.privacy.Redactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -71,13 +72,15 @@ public class LocalExecutor {
 
     /**
      * {@link #DONE} on a task holding the user's files. There the summary is not an outline for
-     * the orchestrator: every result is withheld from it, so the summary is kept as the answer
-     * the user reads (see {@link #recordAnswer}), and an outline would be all they got.
+     * the orchestrator: every result is withheld from it, so the summary is the answer the user
+     * reads -- the orchestrator's too, unless it quotes them (see {@link #recordAnswer}) -- and an
+     * outline would be all they got.
      */
     private static final ToolSpec DONE_FILE = new ToolSpec("done",
-            "Call this when the goal is reached. Your summary is the answer the user reads; the "
-                    + "orchestrator is never shown it or the results. Write it in full, copying "
-                    + "figures, dates and names exactly as the tools returned them.",
+            "Call this when the goal is reached. Your summary is the answer the user reads. The "
+                    + "orchestrator is never shown the results, and reads your summary only when "
+                    + "it quotes none of them. Write it in full, copying figures, dates and names "
+                    + "exactly as the tools returned them.",
             ToolSchemas.toJsonSchema(Map.of("summary",
                     ToolParam.required("string", "The answer for the user, in full."))));
 
@@ -240,8 +243,8 @@ public class LocalExecutor {
                     "ERROR: Local LLM (Ollama) is not available. Cannot execute delegation.");
         }
         // Reading a private result is reading private data: from here every result of the task's
-        // delegations is PRIVATE, and what the local model writes is withheld from the cloud
-        // (AgentContext.decide, recordAnswer).
+        // delegations is PRIVATE (AgentContext.decide), and what the local model writes reaches
+        // the cloud only when it quotes none of what it read (recordAnswer).
         if (given.stream().anyMatch(Artifact::isPrivate)) parentContext.markLocalTierReadPrivate();
 
         // The tool manifest is the largest thing in this prompt and num_ctx is the binding
@@ -250,7 +253,8 @@ public class LocalExecutor {
         boolean nativeTools = localProvider.supportsTools();
         // A task holding the user's files: every result is PRIVATE (AgentContext.decide), so the
         // cloud cannot answer from them, and the local model's summary is the user's answer -- the
-        // model is told so, and the user is given it whether or not the cloud places it.
+        // model is told so. The user is given it whether or not the cloud places it, and when it
+        // quotes the files it stays private (recordAnswer, AgentLoop.withLocalAnswers).
         boolean fileTask = !parentContext.files().isEmpty();
         List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, given, fileTask) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
@@ -425,9 +429,9 @@ public class LocalExecutor {
                 // The claim and the evidence travel together. Without the ledger the cloud reads
                 // a summary it cannot check, and scheduled_task_runs.last_result records the
                 // claim alone -- so a false success is not even auditable afterwards.
-                // A summary written after the model read something private is withheld from the
-                // cloud, and kept as a PRIVATE result of its own, which the cloud can hand on by
-                // its handle without reading it.
+                // A summary that quotes private data the model read is withheld from the cloud,
+                // and kept as a PRIVATE result of its own, which the cloud can hand on by its
+                // handle without reading it.
                 Artifact said = recordAnswer(parentContext, action.summary, given, mine, fileTask);
                 return completed(action.summary, plan.goal(), given, mine, said);
             }
@@ -544,6 +548,12 @@ public class LocalExecutor {
                     + "you were given, by its exact name.";
         }
 
+        // A secret the filter removed from the cloud's view, copied from its goal into a call.
+        if (Redactor.holdsRemovedSecret(action.params)) {
+            log.warn("Delegation turn {}: a call that writes a removed secret — refused.", turn);
+            return "Not run: an argument holds a removed secret. " + AgentLoop.REMOVED_SECRET;
+        }
+
         // One resolution of the arguments, used by every check below and by the call itself.
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart.
@@ -658,7 +668,7 @@ public class LocalExecutor {
         curatorService.recordUsage(action.tool, parentContext.userId(), parentContext.taskId(),
                 worked, toolMs,
                 worked || wroteAfterPrivate ? null : References.argsForTask(action.params, mine),
-                worked ? null : CloudGateway.scrub(toolResult, parentContext.secretValues()).text(),
+                worked ? null : Redactor.scrubVault(toolResult, parentContext.secretValues()).text(),
                 artifact.label());
 
         log.info("Delegation step {} — {} {} (result: {} chars, {})",
@@ -844,10 +854,10 @@ public class LocalExecutor {
             // reads. No file name is given: the prompt says only that the files are handed.
             sb.append("- The user's files are given to every tool you call (as _attached_files);\n");
             sb.append("  you do not pass them.\n");
-            sb.append("- What the tools return here is private: the orchestrator is never shown it,\n");
-            sb.append("  only told that your answer exists. Your done summary is the answer the user\n");
-            sb.append("  reads — write it in full, and copy figures, dates and names exactly as the\n");
-            sb.append("  tools returned them.\n");
+            sb.append("- What the tools return here is private: the orchestrator is never shown it.\n");
+            sb.append("  Your done summary is the answer the user reads — write it in full, and copy\n");
+            sb.append("  figures, dates and names exactly as the tools returned them. The orchestrator\n");
+            sb.append("  reads it too, unless it quotes what the tools returned.\n");
         } else {
             sb.append("- Your summary says what you DID. Every tool result is passed on verbatim\n");
             sb.append("  underneath it, so never retype data — a date or number written from\n");
@@ -1101,8 +1111,9 @@ public class LocalExecutor {
      * given results is not that: what it read is in its prompt, and the reading was the work.
      *
      * @param given the earlier results the goal named, which the local model read
-     * @param said  the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
-     *              handle and size, never its text, and it joins what the delegation produced.
+     * @param said  the answer recorded by {@link #recordAnswer}, or null. Of a private one the
+     *              cloud is told its handle and size, never its text; a released one it reads as
+     *              the summary. Either joins what the delegation produced.
      */
     /** A delegation handed results to read that names no tool, in its list or in a step. */
     static boolean readsWhatItWasGiven(DelegationPlan plan, List<Artifact> given) {
@@ -1113,34 +1124,24 @@ public class LocalExecutor {
     static Outcome completed(String localSummary, String goal, List<Artifact> given,
                              List<Artifact> results, Artifact said) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
-        List<Artifact> read = readBy(given, results);
-        boolean anyPrivate = read.stream().anyMatch(Artifact::isPrivate);
-        String touched = read.stream().filter(Artifact::isPrivate).map(Artifact::handle)
-                .collect(Collectors.joining(", "));
-        // The local model's own prose is withheld when it has read private content: it is a
-        // paraphrase of that content, and a paraphrase is the one thing the canary cannot see.
-        // The descriptors, the ledger and the PUBLIC outputs remain, which is what the cloud
-        // decides on. All-PUBLIC delegations read exactly as before.
         String summary;
-        if (said != null) {
-            // Withheld all the same, but not lost: it is the answer, and the cloud can deliver it
-            // by its handle. Said here, because a handle the cloud was never told about is one it
-            // cannot use.
+        if (said != null && said.isPrivate()) {
+            // The local model's answer quotes private data it read (recordAnswer): withheld, but
+            // not lost -- it is the answer, and the cloud can deliver it by its handle. Said here,
+            // because a handle the cloud was never told about is one it cannot use.
             String k = said.handle();
             summary = "(The local model's answer is " + k + ": private, "
                     + String.format(Locale.ROOT, "%,d", said.output().length())
-                    + " characters, written after reading " + touched + ". You are not shown it. "
+                    + " characters -- it " + String.join("; ", said.why()) + ", which you are shown "
+                    + "only as a description, so you are not shown it either. "
                     + "To give it to the user, make " + k + " the whole of respond's message; its "
                     + "text is filled in on this machine. To send it somewhere, make " + k
                     + " the whole value of a tool argument.)";
-        } else if (anyPrivate) {
-            // No answer kept beside private results: there was no summary (recordAnswer keeps any
-            // there is), or the caller kept none -- and the prose is not shown either way.
-            summary = localSummary == null || localSummary.isBlank() ? ""
-                    : "(local summary withheld — this delegation touched " + touched + ")";
         } else {
-            // In the task's numbering: the summary says "sent {{1}}" meaning the delegation's
-            // first step, and the cloud reads task handles everywhere else.
+            // Written after reading private data or not, a summary that quotes none of it is the
+            // cloud's to read, through the gateway's filter like everything else. In the task's
+            // numbering: the summary says "sent {{1}}" meaning the delegation's first step, and
+            // the cloud reads task handles everywhere else.
             summary = localSummary == null || localSummary.isBlank() ? ""
                     : References.proseForTask(localSummary, results);
         }
@@ -1185,20 +1186,25 @@ public class LocalExecutor {
     }
 
     /**
-     * Keep the local model's answer as a PRIVATE result of the task; null when there is none to
-     * keep -- it read nothing private, among the results it was given or its own, or wrote
-     * nothing.
+     * Keep the local model's answer as a PRIVATE result of the task when it quotes private data
+     * it read; on a file task, as a PUBLIC one when it does not; null otherwise -- it wrote
+     * nothing, or off a file task, read nothing private or wrote an answer that quotes none of it.
      * <p>
-     * A summary written after reading something private is withheld from the cloud: it is a
-     * paraphrase of what was read, and a paraphrase is the one thing the canary cannot see. It
-     * used to be withheld and then dropped: on a file task, whose every result is withheld, that
-     * left the user with no answer at all, and anywhere else it lost what the local model had
-     * been asked to write -- the digest of the mail it had read. Kept, it is a handle the cloud
-     * can deliver without reading. In the task's numbering, like any summary.
+     * What the local model writes after reading private data is labelled by its content, like
+     * any result: PRIVATE when it repeats a run of a private result it read -- a window of 32
+     * characters, a whole short value, or a word shaped like a credential
+     * ({@link AgentContext#firstRunOf}, over every one of them, indexed for the canary or not) --
+     * and otherwise the cloud's to read, through the gateway's filter like everything else. So
+     * the cloud can ask a question about the owner's mail or file and be given the answer; a
+     * digest that copies the messages out stays here. A paraphrase passes: that is the release.
+     * Kept, a quoting answer is a handle the cloud can deliver without reading. On a file task
+     * every answer is kept, released or not: it is the answer the task exists for, and the user
+     * is given it whether or not the cloud places it (AgentLoop.withLocalAnswers). In the task's
+     * numbering, like any summary.
      * <p>
      * Indexed on a file task, so the canary looks for it in every later request of the task:
      * there every result is private, and nothing the cloud is shown can repeat it but a leak.
-     * Elsewhere not, like every other result the local model makes after reading private data
+     * Elsewhere not, like every other result that is PRIVATE because it repeats another
      * ({@link AgentContext#decide}): such an answer quotes what the cloud is shown -- the
      * arguments of a step that failed, which the report prints, or a page the cloud may fetch
      * again itself -- and indexed, the request carrying the report would be refused, and the
@@ -1206,15 +1212,17 @@ public class LocalExecutor {
      */
     static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> given,
                                  List<Artifact> mine, boolean fileTask) {
+        if (summary == null || summary.isBlank()) return null;
         List<Artifact> privateRead = readBy(given, mine).stream().filter(Artifact::isPrivate).toList();
-        if (summary == null || summary.isBlank() || privateRead.isEmpty()) {
-            return null;
-        }
-        String read = privateRead.stream().map(Artifact::handle).collect(Collectors.joining(", "));
         String text = References.proseForTask(summary, mine);
-        return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
-                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                        List.of("written by the local model after reading " + read), fileTask));
+        PrivateIndex.Hit quoted = privateRead.isEmpty() ? null : context.firstRunOf(privateRead, text);
+        if (quoted != null) {
+            return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
+                    new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                            List.of("quotes {{" + quoted.handle() + "}}"), fileTask));
+        }
+        return fileTask ? context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of(), false)) : null;
     }
 
     /**

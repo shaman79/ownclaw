@@ -49,8 +49,12 @@ class PrivateFileEndToEndTest {
     static final String NAME = "vypis_123456789.csv";
     static final String STATEMENT = "date,amount,counterparty\n" + DelegationBehaviourTest.statement(3_000)
             + "\n2026-09-30,closing,balance 48213.07 KV-7f3a9c21\n";
-    static final String SUMMARY = "Your closing balance was 48,213.07 CZK (reference KV-7f3a9c21); "
-            + "card spending ran through the whole month.";
+    /**
+     * The local model's answer, quoting the statement's last line: so it stays private. One that
+     * quotes none of the file goes to the cloud (DelegationBehaviourTest).
+     */
+    static final String SUMMARY = "Your closing balance was 48,213.07 CZK; the statement ends with "
+            + "2026-09-30,closing,balance 48213.07 KV-7f3a9c21 -- card spending ran through the whole month.";
 
     /** A skill that reads the files it is handed, as a generated one does. */
     static final class ReadsFiles implements Tool {
@@ -144,5 +148,34 @@ class PrivateFileEndToEndTest {
         assertTrue(cloudBound.get("ops task").contains(fileId), "ops sees the task's file, by its id");
         // Mutation: the name back in the attachment's events row -> forensics, tasks, the task
         // and a query of events all name the file.
+    }
+
+    @Test
+    @DisplayName("an answer that quotes nothing of the file reaches the owner though the cloud, which read it, does not give it")
+    void aReleasedAnswerReachesTheOwner(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("t.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        var files = new FileStorageService(jdbc, config);
+        String fileId = files.store("u1", NAME, "text/csv",
+                new ByteArrayInputStream(STATEMENT.getBytes(StandardCharsets.UTF_8)));
+        var ctx = new AgentContext("u1", "a1b2c3d4", "summarise this statement");
+        AgentLoop.registerAttachments(ctx, List.of(fileId), files, new EventLogService(jdbc));
+        String plain = "Your closing balance was 48,213.07 CZK, and card spending ran through the whole month.";
+
+        var outcome = DelegationBehaviourTest.executor(new Scripted(call("read_statement", Map.of()), done(plain)),
+                new Usage(), new ReadsFiles(files))
+                .execute(plan("summarise the attached statement"), ctx, DelegationBehaviourTest.UNCOUNTED);
+        assertTrue(outcome.text().startsWith(plain), "it quotes nothing of the file, so the cloud reads it: "
+                + outcome.text());
+
+        // The cloud answers in words of its own.
+        var answer = AgentLoop.answerFor("Done -- the summary is above.", ctx);
+        assertNull(answer.refusal());
+        assertEquals("Done -- the summary is above.\n\n" + AgentLoop.LOCAL_HEADER + plain, answer.response(),
+                "the owner is given the local model's answer, and the history holds what the cloud read");
+        assertNull(answer.ownerText(), "nothing private: the owner reads the response");
+        // Mutation: keep only an answer that quotes the file -> the owner reads "Done -- the summary is above."
     }
 }

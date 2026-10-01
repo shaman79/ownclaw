@@ -516,7 +516,7 @@ class DelegationSafetyTest {
     // ── what the cloud reads of a delegation that touched private data ──
 
     @Test
-    @DisplayName("a private result is rendered as its descriptor and the local summary is withheld")
+    @DisplayName("a private result is rendered as its descriptor; the local summary is withheld only when it was kept private")
     void privateResultsAreDescribedNotShown() {
         String digest = "📰 Digest — 2026-09-23\n" + "line ".repeat(200);
         var pub = new Artifact(1, "daily_news_digest", Map.of(), Map.of(), digest, true,
@@ -531,12 +531,20 @@ class DelegationSafetyTest {
         assertTrue(outcome.text().contains("{{2}} smtp_send_email"), "the private one by its task handle");
         assertTrue(outcome.text().contains("PRIVATE"));
         assertFalse(outcome.text().contains("message id 42"), "and never by content");
-        assertFalse(outcome.text().contains("Local prose"),
-                "the local model's prose is a paraphrase of what it read, and a paraphrase is the "
-                        + "one thing the canary cannot see");
+        assertTrue(outcome.text().startsWith("Local prose about the mailbox"),
+                "an answer that quotes none of what was read is the cloud's (recordAnswer decides)");
         assertTrue(outcome.text().contains("withheld"));
         assertTrue(outcome.text().contains("When you have a tool that takes one"),
                 "and the cloud is told how to move it without reading it");
+
+        // One that quotes it was kept as a private result, and the cloud is told only its handle.
+        var kept = new Artifact(3, "local_answer", Map.of(), Map.of(), "Local prose about the mailbox", true,
+                com.ownclaw.privacy.Label.PRIVATE, List.of("quotes {{2}}"), false);
+        var withheld = LocalExecutor.completed("Local prose about the mailbox", "send it", List.of(),
+                List.of(pub, priv), kept);
+        assertFalse(withheld.text().contains("Local prose"), withheld.text());
+        assertTrue(withheld.text().startsWith("(The local model's answer is {{3}}: private, 29 characters -- "
+                + "it quotes {{2}}, which you are shown only as a description"), withheld.text());
     }
 
     @Test
@@ -607,7 +615,7 @@ class DelegationSafetyTest {
     void theLedgerUsesTheHonestVerdict() {
         var send = new Artifact(3, "smtp_send_email", Map.of(), Map.of(),
                 "{\"ok\": false, \"error\": \"timed out\"}", true,
-                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+                com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"));
         var outcome = LocalExecutor.completed("sent", "send", List.of(), List.of(send), null);
         assertTrue(outcome.text().contains("{{3}} smtp_send_email FAILED"), outcome.text());
         assertFalse(outcome.ok());
@@ -679,7 +687,7 @@ class DelegationSafetyTest {
         var menu = new Artifact(2, "daily_menu_fetcher", Map.of(), Map.of(), "the menu", true,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
         var mail = new Artifact(3, "imap_fetch", Map.of(), Map.of(), "{\"body_text\":\"the mail\"}", true,
-                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+                com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"));
         var plan = new DelegationPlan("Email {{3.body_text}} to Petr, not {{9}}",
                 List.of(new DelegationPlan.Step("fetch the menu", "daily_menu_fetcher", Map.of()),
                         new DelegationPlan.Step("send {{3}}", "smtp_send_email",
@@ -703,7 +711,7 @@ class DelegationSafetyTest {
     void refusalsListNothing() {
         var priv = new Artifact(1, "contacts", Map.of(), Map.of(),
                 "{\"jana.novakova.private@example.com\":\"x\"}", true,
-                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+                com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"));
         var r = References.resolve(Map.of("body", "{{1.nope}}"), List.of(priv));
         assertFalse(r.ok());
         assertFalse(r.reason().contains("jana.novakova"),
@@ -742,7 +750,7 @@ class DelegationSafetyTest {
     @DisplayName("a private step is described once in the consolidated result, not twice")
     void privateStepsAreNotDoublePrefixed() {
         var priv = new Artifact(1, "imap_unread_summarizer", Map.of(), Map.of(), "{\"ok\":true}",
-                true, com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (3)"));
+                true, com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"));
         String text = LocalExecutor.buildConsolidatedResult("fetch mail", List.of(priv));
         assertEquals(1, text.split("imap_unread_summarizer", -1).length - 1,
                 "the descriptor already names the handle and the tool: " + text);
@@ -757,7 +765,7 @@ class DelegationSafetyTest {
         var priv = new Artifact(2, "smtp_send_email",
                 Map.of("to", "ucetni@firma.example.com", "body", "Faktura 2026-09 od Novák s.r.o."),
                 Map.of(), "Traceback: smtplib.SMTPAuthenticationError", false,
-                com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
+                com.ownclaw.privacy.Label.PRIVATE, List.of("personal source"));
 
         String text = LocalExecutor.verbatimFailures(List.of(pub, priv));
 

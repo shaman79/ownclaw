@@ -23,6 +23,7 @@ import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventEgressLedger;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.privacy.Redactor;
 import com.ownclaw.users.CredentialVault;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -40,8 +41,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
- * The real loop, the real thinking engine, the real gateway and the real delegation, over a real
- * database, with a scripted model where the cloud provider stands. What the loop does with a
+ * The real loop, the real thinking engine, the real gateway -- its placeholder table in the
+ * database -- and the real delegation, over a real database, with a scripted model where the
+ * cloud provider stands. What the loop does with a
  * task -- how it ends, what it records, what the next turn is given -- can then be driven end to
  * end.
  */
@@ -182,7 +184,9 @@ final class LoopRig {
         events = new EventLogService(jdbc);
         files = new FileStorageService(jdbc, config);
         chat = new ConversationService(jdbc);
-        var gateway = new CloudGateway(cloud, cloud, config, new EventEgressLedger(events, new ObjectMapper()), null);
+        var redactor = new Redactor(jdbc);
+        var gateway = new CloudGateway(cloud, cloud, config, new EventEgressLedger(events, new ObjectMapper()), null,
+                redactor);
         var router = new LlmRouter(local, gateway, config, null);
         var registry = new ToolRegistry(tools);
         vault = new CredentialVault(jdbc);
@@ -195,7 +199,7 @@ final class LoopRig {
                 curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null,
-                new LocalExecutor(router, registry, emitter, curator), files);
+                new LocalExecutor(router, registry, emitter, curator), files, redactor);
         queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);
     }
 

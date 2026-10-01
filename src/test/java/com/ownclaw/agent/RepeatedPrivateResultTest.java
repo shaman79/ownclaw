@@ -45,7 +45,7 @@ class RepeatedPrivateResultTest {
     private static AgentContext withPrivateAudit(String message) {
         var ctx = new AgentContext("u1", "t1", message);
         ctx.addArtifact("router_audit", Map.of(), Map.of(), REPORT, true,
-                Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
         return ctx;
     }
 
@@ -70,7 +70,7 @@ class RepeatedPrivateResultTest {
         // The private result quotes the task; so does the public one. Only the task's own text is
         // shared -- the brackets differ -- so every run they share is one the owner wrote.
         ctx.addArtifact("router_audit", Map.of(), Map.of(), "Audited [" + message + "] -- isolated", true,
-                Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
 
         var d = ctx.decide(List.of(), List.of(), false, "Saved the request <" + message + ">");
         assertEquals(Label.PUBLIC, d.label(), "the owner wrote that in the task: " + d.why());
@@ -89,7 +89,7 @@ class RepeatedPrivateResultTest {
     // ── one question, asked by the label and by the door ──
 
     @Test
-    @DisplayName("the label is PRIVATE exactly when the gateway would refuse the result as each renderer sends it")
+    @DisplayName("the gateway never refuses a result the label let go, as each renderer sends it")
     void theLabelAndTheDoorAgree() {
         String excusedLine = "Output: a Markdown report that begins exactly with the audit header";
         String secret = REPORT + "\nwireless.default_radio0.key='Qx7-Lm2-Rt9-Wq4z-Pk5-Hn8'";
@@ -131,7 +131,7 @@ class RepeatedPrivateResultTest {
             ctx.trajectory().record(new AgentAction("plan_report", Map.of("spec", spec), "planning"),
                     AgentObservation.success("plan_report", "noted", Map.of(), 5));
             var audit = ctx.addArtifact("router_audit", Map.of(), Map.of(), privateResult, true,
-                    Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+                    Artifact.labelFor(true, List.of()));
             ctx.trajectory().record(new AgentAction("router_audit", Map.of(), "auditing"),
                     Artifact.asObservation(audit, ToolResult.success(privateResult), 10));
             boolean labelledPrivate = ctx.decide(List.of(), List.of(), false, output).label() == Label.PRIVATE;
@@ -149,7 +149,10 @@ class RepeatedPrivateResultTest {
                 } catch (EgressRefused e) {
                     refused = true;
                 }
-                assertEquals(refused, labelledPrivate, provider + ": the label and the door disagree on: " + output);
+                // The door reads the result filtered, the label as it is: a run that holds an
+                // identifier or a secret is not in what the door sends, so the door can pass what
+                // the label withholds. Never the reverse, which would end the task at the door.
+                assertTrue(!refused || labelledPrivate, provider + ": the door refused what the label let go: " + output);
             }
             if (labelledPrivate) privateSeen++; else publicSeen++;
         }
@@ -285,9 +288,11 @@ class RepeatedPrivateResultTest {
                         new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,
                         new com.ownclaw.core.TokenBudgetTracker(jdbc, config, emitter), events, null,
                         new LocalExecutor(new LlmRouter(local, null, null, null), registry, emitter,
-                                new DelegationBehaviourTest.Usage()), null);
+                                new DelegationBehaviourTest.Usage()), null, new com.ownclaw.privacy.Redactor(null));
                 var ctx = new AgentContext("u1", "t-partial", "Email me the morning digest.");
                 ctx.setLocalTierReady(false);
+                // The confirmation stands for a private result that quotes a public one.
+                ctx.setPersonalSources(List.of("SMTP_"));
 
                 AgentResult r = loop.run(ctx);
 
@@ -320,11 +325,11 @@ class RepeatedPrivateResultTest {
         assertTimeoutPreemptively(Duration.ofSeconds(30), () -> {
             var ctx = new AgentContext("u1", "t1", "Email me the morning digest.");
             var published = ctx.addArtifact("daily_news_digest", Map.of(), Map.of(), digest, true,
-                    Artifact.labelFor(List.of(), List.of()));
+                    Artifact.labelFor(false, List.of()));
             ctx.trajectory().record(new AgentAction("daily_news_digest", Map.of(), ""),
                     Artifact.asObservation(published, ToolResult.success(digest), 10));
             var sent = ctx.addArtifact("smtp_send_email", Map.of(), Map.of(), "Sent: \"" + digest + "\"", true,
-                    Artifact.labelFor(List.of("SMTP_PASS"), List.of()));
+                    Artifact.labelFor(true, List.of()));
             ctx.trajectory().record(new AgentAction("smtp_send_email", Map.of("body", "{{1}}"), ""),
                     Artifact.asObservation(sent, ToolResult.success(sent.output()), 10));
 
@@ -369,7 +374,7 @@ class RepeatedPrivateResultTest {
         ctx.trajectory().record(new AgentAction("plan_audit", Map.of("scope", typed), "planning"),
                 AgentObservation.success("plan_audit", "noted", Map.of(), 5));
         ctx.addArtifact("router_audit", Map.of(), Map.of(), traceback.toString(), false,
-                Artifact.labelFor(List.of("ROUTER_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
 
         var d = ctx.decide(List.of(), List.of(), false, source);
 
@@ -399,7 +404,7 @@ class RepeatedPrivateResultTest {
         ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Skill error:\nTraceback (most recent call last):\n"
                         + "  File \"/skills/imap_fetch/skill.py\", line 12, in run\n"
                         + "    box = imaplib.IMAP4_SSL(params['host'])\nKeyError: 'host'", false,
-                Artifact.labelFor(List.of("IMAP_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
         String publicError = "Skill error:\nTraceback (most recent call last):\n"
                 + "  File \"/skills/web_fetch/skill.py\", line 5, in run\n"
                 + "    r = requests.get(url, timeout=10)\n"
@@ -430,6 +435,7 @@ class RepeatedPrivateResultTest {
                 AssistantPartsTest.call("respond", Map.of("message", "{{2}}"))));
         var rows = new ArrayList<EgressLedger.Row>();
         var ctx = new AgentContext("u1", "t-cat", "Audit the routers and show me the saved report.");
+        ctx.setPersonalSources(List.of("ROUTER_"));   // the audit stands for a private result
 
         AgentResult r = AssistantPartsTest.loop(jdbc, registry, AssistantPartsTest.gateway(cloud, rows), config)
                 .run(ctx);

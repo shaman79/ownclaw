@@ -329,6 +329,7 @@ class TaskEndToEndTest {
                 // the task goes on (AgentContext.decide).
                 tool("cat_report", List.of(), p -> AUDIT)));
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");   // the vault's salt lives on it
+        rig.config.getPrivacy().setPersonalSources(List.of("OPENWRT_"));   // the audit stands for a private result
         rig.vault.storeCredential("u1", "OPENWRT_PASS", PASSWORD);
         // What still reaches the door: a special action's answer, which is no result the task
         // labels -- here another skill's files, whose baseline holds the same configuration lines.
@@ -344,7 +345,7 @@ class TaskEndToEndTest {
         assertEquals(AgentResult.TerminationReason.PRIVACY_BLOCKED, r.terminationReason(), r.response());
         assertEquals(3, rig.cloud.calls("think").size(), "the fourth request was refused, not sent");
         assertTrue(r.response().startsWith("**Stopped:** the next request to the cloud model held text of "
-                + "result 1 (openwrt_audit), which is private (credentials (2)); it was found in a user "
+                + "result 1 (openwrt_audit), which is private (personal source); it was found in a user "
                 + "message, so nothing was sent."), r.response());
         assertTrue(r.response().contains("result 2 (cat_report): "), r.response());
         assertTrue(r.response().contains("result 2 (cat_report): 226 chars, private (repeats result 1)"),
@@ -615,6 +616,7 @@ class TaskEndToEndTest {
         var rig = new LoopRig(tmp, List.of(
                 tool("openwrt_audit", List.of("OPENWRT_USER", "OPENWRT_PASS"), p -> AUDIT),
                 tool("lan_inventory", List.of(), p -> "main router, admin password " + PASSWORD)));
+        rig.config.getPrivacy().setPersonalSources(List.of("OPENWRT_"));   // the audit stands for a private result
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
         rig.vault.storeCredential("u1", "OPENWRT_PASS", PASSWORD);
         String session = session(rig);
@@ -641,6 +643,7 @@ class TaskEndToEndTest {
     @DisplayName("an exception whose message quotes a private result ends without that message")
     void anExceptionQuotingAPrivateResultIsWithheld(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(tool("openwrt_audit", List.of("OPENWRT_PASS"), p -> AUDIT)));
+        rig.config.getPrivacy().setPersonalSources(List.of("OPENWRT_"));   // the audit stands for a private result
         rig.cloud.think.add(call("openwrt_audit", Map.of()));
         rig.cloud.think.add(c -> { throw new IllegalStateException("could not read the reply near: " + AUDIT.substring(0, 160)); });
 

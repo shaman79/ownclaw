@@ -208,4 +208,27 @@ class WholePromptTest {
         // Mutation: render the history line as the tool's name alone -> the model cannot tell
         // whom it wrote to.
     }
+
+    @Test
+    @DisplayName("the prompt's own text -- system prompt, actions, schemas -- passes the privacy filter unchanged")
+    void thePromptHasNothingToFilter() {
+        // Every request carries it: a false positive here would take words out of every call.
+        var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "do something");
+        var redactor = new com.ownclaw.privacy.Redactor(null);
+        for (boolean nativeTools : List.of(true, false)) {
+            var mode = new ThinkingEngine.StepMode(nativeTools, false);
+            var texts = new ArrayList<String>();
+            for (LlmMessage m : engine.buildMessages(ctx, "anthropic", mode)) texts.add(m.content());
+            for (ToolSpec t : engine.toolsFor(ctx, mode)) {
+                texts.add(t.description());
+                texts.add(String.valueOf(t.inputSchema()));
+            }
+            for (String text : texts) {
+                var tally = new com.ownclaw.privacy.Redactor.Tally();
+                assertEquals(text, redactor.filter("u1", text, Map.of(), tally), tally.secretsRemoved()
+                        + " secrets, " + tally.identifiersReplaced() + " identifiers, or a placeholder's shape");
+            }
+        }
+    }
 }

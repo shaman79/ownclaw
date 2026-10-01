@@ -41,6 +41,9 @@ public class TaskTraceService {
                     + "of 8 or more). A paraphrase, or a short value such as a PIN, is not caught.",
             "Private text the cloud already had from elsewhere (your own message, a public "
                     + "result, a tool's description) is not counted as found.",
+            "Secrets and identifiers are found by their shape or by the name they are written "
+                    + "under: a password in prose, a key with no label or a person's name in free "
+                    + "text goes to the cloud model as it is.",
             "The local model's server is assumed to be private; nothing checks that.",
             "What a task saves through a skill -- notes, a file, a sheet -- is not private when a "
                     + "later task reads it back, scheduled runs included. That covers the local "
@@ -93,7 +96,7 @@ public class TaskTraceService {
         var pending = new ArrayList<Map<String, Object>>();
         var decisions = new LinkedHashMap<String, Integer>();
         long bytesOut = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0;
-        int scrubs = 0;
+        int scrubs = 0, identifiers = 0;
         double cost = 0;
         boolean costIsFloor = false;
         long prevCloud = 0, prevLocal = 0, localAfterEnd = 0;
@@ -123,6 +126,7 @@ public class TaskTraceService {
                     cacheRead += d.path("cacheReadTokens").asLong();
                     cacheWrite += d.path("cacheWriteTokens").asLong();
                     scrubs += d.path("scrubs").asInt();
+                    identifiers += d.path("identifiers").asInt();
                     cost += d.path("costUsd").asDouble();
                     // A failed call is recorded with at most what its stream had reported when
                     // it ended, so a total over it is a lower bound.
@@ -260,6 +264,7 @@ public class TaskTraceService {
         totals.put("cacheReadTokens", cacheRead);
         totals.put("cacheWriteTokens", cacheWrite);
         totals.put("scrubs", scrubs);
+        totals.put("identifiers", identifiers);
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
@@ -319,6 +324,7 @@ public class TaskTraceService {
         c.put("cacheWriteTokens", unrecorded ? null : d.path("cacheWriteTokens").asLong());
         c.put("costUsd", unrecorded ? null : d.path("costUsd").asDouble());
         c.put("scrubs", d.path("scrubs").asInt());
+        c.put("identifiers", d.path("identifiers").asInt());
         c.put("refusal", d.hasNonNull("refusal") ? d.path("refusal").asText() : null);
         // Why the reply ended ("end_turn", "refusal (cyber)", ...). A call with no reply has
         // none, and neither does a row written before it was recorded.

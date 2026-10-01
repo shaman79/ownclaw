@@ -37,7 +37,7 @@ class DebugControllerTest {
         jdbc.update("INSERT INTO users (id, display_name, password_hash) VALUES ('owner', 'owner', 'x')");
         var calls = new AtomicInteger();
         var loop = new AgentLoop(null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null) {
+                null, null, null, null, null, null, null, null, null, null, null) {
             @Override
             public AgentResult executeFull(String userId, String message) {
                 return AgentResult.completed("done", new AgentTrajectory(), 1)

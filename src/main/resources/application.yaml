@@ -96,9 +96,14 @@ ownclaw:
     # tools' descriptions and schemas (see CloudGateway). ENFORCE refuses a hit and ends the task
     # PRIVACY_BLOCKED; OBSERVE sends it and records OBSERVED_LEAK. There is no off: the door
     # being the only path to a provider, labels at source, descriptors for private results,
-    # secrets scrubbed and every call ledgered are not policies. Expected hits in normal
-    # operation: zero. Flip at runtime: POST /api/ops/config/privacy-canary?mode=observe
+    # secrets removed and identifiers replaced by the filter (privacy.Redactor), and every call
+    # ledgered are not policies. Expected hits in normal operation: zero. Flip at runtime:
+    # POST /api/ops/config/privacy-canary?mode=observe
     canary: ${OWNCLAW_PRIVACY_CANARY:ENFORCE}
+    # Personal-content sources: a result of a skill whose required credentials include a key
+    # starting with one of these is PRIVATE -- the cloud model is shown a description of it, and
+    # only the local model reads it. Any other result goes to the cloud through the filter.
+    personal-sources: [IMAP_, POP3_]
 
   budgets:
     daily-cloud-tokens: 0

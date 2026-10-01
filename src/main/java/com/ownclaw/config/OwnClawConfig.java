@@ -3,6 +3,8 @@ package com.ownclaw.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 /**
  * Root configuration mapping to the {@code ownclaw:} prefix in application.yaml.
  * Uses mutable POJOs because Spring Boot property binding requires setters for nested objects.
@@ -157,13 +159,22 @@ public class OwnClawConfig {
      * Privacy. One switch, and it is not "off": the canary is ENFORCE or OBSERVE. OBSERVE
      * changes exactly one thing — a canary hit is sent and recorded as OBSERVED_LEAK instead of
      * refused. The gateway being the only door, labels being assigned at source, private
-     * observations rendering as descriptors, secrets being scrubbed and every call writing its
-     * row are not policies and cannot be toggled.
+     * observations rendering as descriptors, the filter removing secrets and replacing
+     * identifiers, and every call writing its row are not policies and cannot be toggled.
+     * <p>
+     * {@code personalSources} says which results hold personal content, and are PRIVATE: those of
+     * a skill whose required credentials include a key starting with one of these prefixes.
      */
     public static class Privacy {
+        /** Reading mail: the default {@code personalSources}. */
+        public static final List<String> DEFAULT_PERSONAL_SOURCES = List.of("IMAP_", "POP3_");
+
         private com.ownclaw.llm.CloudGateway.Mode canary = com.ownclaw.llm.CloudGateway.Mode.ENFORCE;
+        private List<String> personalSources = DEFAULT_PERSONAL_SOURCES;
         public com.ownclaw.llm.CloudGateway.Mode getCanary() { return canary; }
         public void setCanary(com.ownclaw.llm.CloudGateway.Mode v) { this.canary = v; }
+        public List<String> getPersonalSources() { return personalSources; }
+        public void setPersonalSources(List<String> v) { this.personalSources = v == null ? List.of() : List.copyOf(v); }
     }
 
     private Privacy privacy = new Privacy();

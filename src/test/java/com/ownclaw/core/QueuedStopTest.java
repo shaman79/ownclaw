@@ -29,7 +29,7 @@ class QueuedStopTest {
         var release = new CountDownLatch(1);
         var ran = new CopyOnWriteArrayList<String>();
         var loop = new AgentLoop(null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null) {
+                null, null, null, null, null, null, null, null, null) {
             @Override
             public AgentResult executeFull(String userId, String message, boolean unattended,
                                            String currentMessageId, List<String> attachmentIds,

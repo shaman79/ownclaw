@@ -48,6 +48,9 @@ public class AgentContext {
     /** Credential keys available in the vault for this user (loaded once at task start). */
     private List<String> credentialKeys = List.of();
 
+    /** See {@link #setPersonalSources}. */
+    private List<String> personalSources = com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES;
+
     /** Null until a step restricts the set; see {@link #offeredTools()}. */
     private volatile java.util.Set<String> offeredTools;
 
@@ -263,6 +266,31 @@ public class AgentContext {
     public List<String> credentialKeys() { return credentialKeys; }
     public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }
 
+    /**
+     * The credential key prefixes that mark a personal-content source
+     * ({@code ownclaw.privacy.personal-sources}), set from the configuration at task start.
+     */
+    public void setPersonalSources(List<String> prefixes) {
+        this.personalSources = prefixes == null ? List.of() : List.copyOf(prefixes);
+    }
+
+    /**
+     * Whether a skill that needs these credentials reads a personal-content source: one of the
+     * keys starts with a {@link #setPersonalSources} prefix -- IMAP_ and POP3_ by default, which
+     * is reading mail.
+     */
+    public boolean readsPersonalSource(List<String> requiredCredentials) {
+        if (requiredCredentials == null) return false;
+        for (String key : requiredCredentials) {
+            if (key == null) continue;
+            String k = key.toUpperCase(java.util.Locale.ROOT);
+            for (String prefix : personalSources) {
+                if (k.startsWith(prefix.toUpperCase(java.util.Locale.ROOT))) return true;
+            }
+        }
+        return false;
+    }
+
     // ── Token tracking ──
 
     // Synchronized: the local model's summaries of private results are counted from their own
@@ -399,13 +427,14 @@ public class AgentContext {
     /**
      * The label for a result about to be recorded — one place, for both paths.
      * <p>
-     * From the call's own facts ({@link Artifact#labelFor}); then, inside a delegation whose local
-     * model has read private data ({@code tainted}), PRIVATE regardless, because anything it
-     * typed from then on can carry what it read. Such a result is not indexed for the canary, and
-     * neither is one that is PRIVATE only because it pulled in such a result: its bytes are the
-     * same public page one hop on, and indexing them is what made the cloud's own later fetch of
-     * that page trip the canary. In a task holding a file every result is PRIVATE and, unless it
-     * needed credentials, unindexed -- so the cloud sees each as a handle, a kind and a size.
+     * From the call's own facts ({@link Artifact#labelFor}: a personal-content source, a PRIVATE
+     * result pulled in); then, inside a delegation whose local model has read private data
+     * ({@code tainted}), PRIVATE regardless, because anything it typed from then on can carry
+     * what it read. Such a result is not indexed for the canary, and neither is one that is
+     * PRIVATE only because it pulled in such a result: its bytes are the same public page one hop
+     * on, and indexing them is what made the cloud's own later fetch of that page trip the
+     * canary. In a task holding a file every result is PRIVATE and unindexed -- so the cloud sees
+     * each as a handle, a kind and a size.
      * <p>
      * Last, the bytes themselves: a result its own facts call PUBLIC whose {@code output} repeats
      * a PRIVATE one ({@link #firstLeakIn}) is PRIVATE -- "repeats {{N}}" -- and unindexed, like
@@ -417,8 +446,9 @@ public class AgentContext {
      * <p>
      * A run is 32 characters, and some runs are nobody's in particular: a Python traceback opens
      * with "Traceback (most recent call last)", which is one window, and web pages share their
-     * standard head. After a credentialed skill has failed with a traceback, or returned a page,
-     * a public result carrying the same boilerplate repeats it, and is withheld whole: the cloud
+     * standard head. After a skill that reads a personal source has failed with a traceback, or
+     * returned a page, a public result carrying the same boilerplate repeats it, and is withheld
+     * whole: the cloud
      * is told that the public skill failed but not why, and cannot repair it from the error. The
      * same collision used to end the task at the door.
      *
@@ -426,8 +456,8 @@ public class AgentContext {
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
                                     boolean tainted, String output) {
-        Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
-        boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
+        boolean personal = readsPersonalSource(requiredCredentials);
+        Artifact.Decision own = Artifact.labelFor(personal, used);
         if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
             if (tainted) {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
@@ -447,12 +477,13 @@ public class AgentContext {
             }
             return own;
         }
-        // Not indexed on a file task, credentials or not: text read out of a PDF is nothing the
-        // canary holds, so indexing it guards nothing -- and an indexed result's descriptor shows
-        // its JSON key names and booleans, which for a statement parser are the statement. Every
-        // skill is handed the file, a credentialed one too, so its keys can be the file's data.
-        // References still resolve; the cloud forwards the whole {{N}} instead of a field.
-        boolean unindexed = !files.isEmpty() || (!credentials && used != null
+        // Not indexed on a file task, a personal source's result or not: an indexed result's
+        // descriptor shows its JSON key names and booleans, which for a statement parser are the
+        // statement. Every skill is handed the file, a mail reader too, so its keys can be the
+        // file's data. References still resolve; the cloud forwards the whole {{N}} instead of a
+        // field. (What the local model writes after reading such a result is checked against it
+        // all the same: LocalExecutor.recordAnswer.)
+        boolean unindexed = !files.isEmpty() || (!personal && used != null
                 && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed));
         return unindexed ? new Artifact.Decision(own.label(), own.why(), false) : own;
     }
@@ -546,12 +577,69 @@ public class AgentContext {
      * that takes in a visible character of the frame (the ')' ending the line before the output,
      * the first character of whatever follows it) is refused at the door if a private result has
      * that character in that place too, though the label passed the result -- a collision, like
-     * any other the door refuses.
+     * any other the door refuses. And the door reads what the privacy filter left of the result:
+     * a run that holds an identifier or a secret is not in what it sends, so the door can pass a
+     * short repeat the label withholds -- the label errs on the private side, never the other.
      *
      * @param output the result's text, as it will be recorded
      */
     public com.ownclaw.privacy.PrivateIndex.Hit firstLeakIn(String output) {
         return privateIndex.firstLeakInResult(output, new Excuses());
+    }
+
+    /**
+     * {@link #firstLeakIn}, asked of {@code output} against the PRIVATE results among
+     * {@code sources}, indexed for the canary or not: the first run of one of them that
+     * {@link Excuses} does not excuse, or null. What the local model writes after reading private
+     * data goes to the cloud only when this finds nothing in it ({@code LocalExecutor.recordAnswer}),
+     * and what it read includes results the canary does not index -- the text a skill read out of
+     * a PDF the owner sent.
+     * <p>
+     * A run here is also a word of a source shaped like a credential -- {@link #credentialShaped}
+     * -- that the output repeats: "the wifi password is Kolibri-2291" is shorter than a window
+     * and no whole value of the mail it came from, and is the one thing the owner named that
+     * must not leave.
+     */
+    public com.ownclaw.privacy.PrivateIndex.Hit firstRunOf(List<Artifact> sources, String output) {
+        var index = new com.ownclaw.privacy.PrivateIndex();
+        var words = new HashMap<String, Integer>();
+        for (Artifact a : sources) {
+            if (!a.isPrivate()) continue;
+            index.addPrivate(a.n(), a.output());
+            for (String w : credentialShaped(a.output())) words.putIfAbsent(w, a.n());
+        }
+        var hit = index.firstLeakInResult(output, new Excuses());
+        if (hit != null) return hit;
+        for (String w : credentialShaped(output)) {
+            Integer handle = words.get(w);
+            if (handle != null) {
+                return new com.ownclaw.privacy.PrivateIndex.Hit(handle,
+                        com.ownclaw.privacy.PrivateIndex.normalise(output).indexOf(w), w.length());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The words of {@code text} shaped like a credential, lowercased: split at blanks, quotes and
+     * the punctuation that delimits a value, without the punctuation at their ends, of
+     * {@link com.ownclaw.privacy.PrivateIndex#MIN_SHORT} characters or more, with letters and
+     * digits both -- Kolibri-2291, not "password" or 48,213.07.
+     */
+    static java.util.Set<String> credentialShaped(String text) {
+        var out = new java.util.HashSet<String>();
+        if (text == null) return out;
+        for (String raw : text.split("[\\s\"'`,;=()\\[\\]{}<>]+")) {
+            int a = 0, b = raw.length();
+            while (a < b && !Character.isLetterOrDigit(raw.charAt(a))) a++;
+            while (b > a && !Character.isLetterOrDigit(raw.charAt(b - 1))) b--;
+            String w = raw.substring(a, b);
+            if (w.length() >= com.ownclaw.privacy.PrivateIndex.MIN_SHORT
+                    && w.chars().anyMatch(Character::isLetter) && w.chars().anyMatch(Character::isDigit)) {
+                out.add(w.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return out;
     }
 
     /** See {@link #givenEarlier}. */
@@ -564,9 +652,9 @@ public class AgentContext {
      * its repair. A source of {@link Excuses} like the message: a past answer or a past
      * public traceback that shares a run with a private result of this task was the cloud's to
      * read before this task began. "Traceback (most recent call last" is a window of every Python
-     * traceback, so once a credentialed skill had failed with one, recalling a task that had
-     * failed so too ended the task at the next request, and the repair of a skill whose recorded
-     * failures held one was refused.
+     * traceback, so once a skill whose result is private had failed with one, recalling a task
+     * that had failed so too ended the task at the next request, and the repair of a skill whose
+     * recorded failures held one was refused.
      */
     public synchronized void givenEarlier(String text) {
         if (text != null && !text.isEmpty()) fromEarlierTasks.add(text);
@@ -594,16 +682,17 @@ public class AgentContext {
      * what earlier tasks gave the cloud that this one hands it again ({@link #givenEarlier}). The
      * output of every PUBLIC artifact recorded BEFORE the private
      * one that hit; the order matters there. What the CLOUD itself wrote —
-     * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
+     * its own tool-call arguments and reasoning, as typed (its placeholders put back by the
+     * gateway), where they reach a part the gateway
      * scans: a result that echoes an argument it was given (which would otherwise make the next
      * prompt unsendable), the code generator's request, the correction after a reply that could
      * not be parsed, the OpenAI history. Its own turns, which the Anthropic renderer replays as
      * JSON, are assistant parts and are not scanned at all. And the SOURCE of the skill that
-     * produced the hit artifact: a Python traceback quotes the line that threw, so a credentialed
-     * skill's failure would otherwise make its own repair prompt — the loop this project exists
-     * for — impossible. A public artifact recorded after a private one can be that private
-     * content laundered — a skill that echoes what it was given,
-     * a summary the local model wrote — and whitelisting it would let the leak through as
+     * produced the hit artifact: a Python traceback quotes the line that threw, so the failure of
+     * a skill whose result is private -- one that reads mail -- would otherwise make its own
+     * repair prompt — the loop this project exists for — impossible. A public artifact recorded
+     * after a private one can be that private content laundered — a skill that echoes what it was
+     * given, a summary the local model wrote — and whitelisting it would let the leak through as
      * "already public". The smtp confirmation that quotes the public digest it just sent is the
      * case the order exists to allow; a public result quoting a private one is the case it
      * exists to refuse.

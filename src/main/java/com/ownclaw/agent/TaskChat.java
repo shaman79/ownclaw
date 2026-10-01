@@ -3,7 +3,7 @@ package com.ownclaw.agent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
-import com.ownclaw.llm.CloudGateway;
+import com.ownclaw.privacy.Redactor;
 import com.ownclaw.llm.LlmException;
 import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
@@ -24,18 +24,18 @@ import java.util.function.BiConsumer;
 
 /**
  * The chat an attended task reports its progress in while it works: a message before each step
- * of the loop, one before each tool call of a delegation, the local model's summary of each
+ * of the loop, one before each tool call of a delegation, a note after a step whose result the
+ * privacy filter changes before the cloud model reads it, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
  * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
  * <p>
- * Every row opens with its {@link Header}: who acts -- the cloud or the local model -- and where
- * the task stands. The row's content is that header as one line, with what the cloud could be
- * shown under it: the cloud's own words beside its call, or a note that a summary exists or why
- * there is none. What
- * only the owner may read -- a summary of a private result, and the local model's words and
- * calls, written after it may have read private data -- is the row's private content, which only
- * the owner's own chat reads back.
+ * Every row but the filter's note opens with its {@link Header}: who acts -- the cloud or the
+ * local model -- and where the task stands. The row's content is that header as one line, with
+ * what the cloud could be shown under it: the cloud's own words beside its call, or a note that a
+ * summary exists or why there is none. What only the owner may read -- a summary of a private
+ * result, and the local model's words and calls, written after it may have read private data --
+ * is the row's private content, which only the owner's own chat reads back.
  * <p>
  * A progress row is the owner's view of a task at work. No prompt reads one:
  * {@link ConversationService#contextOf} reads user and assistant rows only, and the full-text
@@ -166,7 +166,7 @@ public final class TaskChat {
     void step(int step, AgentAction action, String narration, boolean local) {
         if (sessionId == null) return;
         String words = narration == null ? "" : TaskRecord.inWords(
-                CloudGateway.scrub(narration, task.secretValues()).text()).strip();
+                Redactor.scrubVault(narration, task.secretValues()).text()).strip();
         Header header = header(local ? Actor.LOCAL : Actor.CLOUD, "step", step, action.tool(),
                 action.isSkillCreate() ? AgentLoop.skillOf(action) : null);
         if (local) post(header, "", words.isEmpty() ? null : words);
@@ -190,7 +190,29 @@ public final class TaskChat {
         String call = readable(args);
         if (!call.isEmpty()) owner.add(call);
         post(header(Actor.LOCAL, "turn", turn, tool, null), "", owner.isEmpty() ? null
-                : CloudGateway.scrub(String.join("\n\n", owner), task.secretValues()).text());
+                : Redactor.scrubVault(String.join("\n\n", owner), task.secretValues()).text());
+    }
+
+    /**
+     * After a step whose result the gateway's filter changes before the cloud model reads it:
+     * how many secrets it removes and identifiers it replaces -- counts, nothing of what they are.
+     */
+    void filtered(Redactor.Tally taken) {
+        if (sessionId == null || !taken.any()) return;
+        note("🔒 For the cloud model: " + described(taken) + ".");
+    }
+
+    /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
+    static String described(Redactor.Tally t) {
+        var parts = new java.util.ArrayList<String>();
+        if (t.secretsRemoved() > 0) {
+            parts.add(t.secretsRemoved() + (t.secretsRemoved() == 1 ? " secret" : " secrets") + " removed");
+        }
+        if (t.identifiersReplaced() > 0) {
+            parts.add(t.identifiersReplaced() + (t.identifiersReplaced() == 1 ? " identifier" : " identifiers")
+                    + " replaced");
+        }
+        return String.join(", ", parts);
     }
 
     /**
@@ -274,7 +296,7 @@ public final class TaskChat {
             return;
         }
         post(header, "A private summary, shown only to you.",
-                CloudGateway.scrub(summary, task.secretValues()).text());
+                Redactor.scrubVault(summary, task.secretValues()).text());
     }
 
     /**
@@ -372,6 +394,28 @@ public final class TaskChat {
      * shown; one that cannot be saved for another reason is still shown; and none is either once
      * the task has ended.
      */
+    /**
+     * A line about the task that is no step of it -- the filter's counts -- posted without a
+     * header, so it is not read as one more step. The page draws a row without one as its text.
+     */
+    private void note(String content) {
+        synchronized (this) {
+            if (ended) return;
+            try {
+                if (!conversations.saveProgress(task.userId(), sessionId, content, task.taskId(), null, null)) {
+                    return;
+                }
+            } catch (RuntimeException e) {
+                log.warn("Task {}: a progress message could not be saved: {}", task.taskId(), e.getMessage());
+            }
+            if (channel == Channel.OPS) return;
+            var data = new HashMap<String, Object>();
+            data.put("sessionId", sessionId);
+            if (channel == Channel.TELEGRAM) data.put("telegram", true);
+            emitter.emitForTask(task.userId(), task.taskId(), StatusMessage.Type.PROGRESS_MESSAGE, content, data);
+        }
+    }
+
     private void post(Header header, String body, String ownerBody) {
         post(header, body, ownerBody, null);
     }
