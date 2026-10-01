@@ -2831,11 +2831,14 @@
             if (authToken !== asked) return;
             clearMessages();
             var msgs = data.messages || [];
+            var lastTask = null;
             msgs.forEach(function(m) {
+                if (m.task_id) lastTask = m.task_id;
                 if (m.role === 'progress') { addProgress(m.content, m.progress); return; }
                 var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
                 addMsg(type, m.content, m.task_id);
             });
+            if (lastTask) restoreTaskStats(lastTask, sessionId);
         })
         .catch(function(e) {
             // Say what happened. clearMessages() alone left a blank pane, which is exactly what
@@ -5097,6 +5100,34 @@
         var span = last.querySelector('.step-dot + span');
             if (span) span.textContent = text;
         }
+    }
+
+    /**
+     * The counters of the chat's latest task -- running or finished -- from the server. They were
+     * fed only by live frames, so a reload or a chat switch showed zeros for a task that had
+     * spent a million tokens. The totals are the task page's own (renderTaskDetail), so the two
+     * cannot disagree; live frames that arrive afterwards go on updating them as before.
+     */
+    function restoreTaskStats(taskId, sessionId) {
+        if (!authToken || !isTaskId(taskId)) return;
+        var asked = authToken;
+        fetch('/api/tasks/' + taskId, { headers: { 'Authorization': 'Bearer ' + authToken } })
+        .then(okJson)
+        .then(function(t) {
+            if (authToken !== asked || displayedSessionId !== sessionId) return;
+            var steps = t.steps || [], totals = t.totals || {}, outcome = t.outcome;
+            var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');
+            var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');
+            var ok = steps.filter(function(st) { return st.ok !== false; }).length;
+            if (activityWrap.style.display !== 'block') {
+                activityWrap.style.display = 'block';
+                activityLabel.textContent = outcome ? 'Last task' : 'Working...';
+                if (outcome) doneActivity();
+            }
+            updateStats({ totalSteps: steps.length, successCount: ok, cloudTokens: cloud, localTokens: local });
+            updateTokens({ cloudTokens: cloud, localTokens: local });
+        })
+        .catch(function(e) { console.error('Task ' + taskId + ' totals:', e); });
     }
 
     /** Update the live token counter in the activity header. */

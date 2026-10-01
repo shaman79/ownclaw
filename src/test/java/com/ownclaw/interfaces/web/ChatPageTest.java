@@ -93,6 +93,25 @@ class ChatPageTest {
     }
 
     @Test
+    @DisplayName("the token counters survive a reload: a chat's latest task is read back from the server")
+    void countersAreReadBackOnLoad() {
+        String load = page.substring(page.indexOf("function loadSessionMessages(sessionId) {"));
+        load = load.substring(0, load.indexOf("function clearMessages()"));
+        assertTrue(load.contains("if (m.task_id) lastTask = m.task_id;")
+                && load.contains("if (lastTask) restoreTaskStats(lastTask, sessionId);"),
+                "loading a chat asks for its latest task's totals");
+        String restore = page.substring(page.indexOf("function restoreTaskStats(taskId, sessionId) {"));
+        restore = restore.substring(0, restore.indexOf("/** Update the live token counter"));
+        assertTrue(restore.contains("fetch('/api/tasks/' + taskId"), "from the task API");
+        assertTrue(restore.contains("var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');")
+                && restore.contains("var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');"),
+                "with the task page's own totals");
+        assertTrue(restore.contains("updateStats({") && restore.contains("updateTokens({"), "into both counters");
+        assertTrue(restore.contains("displayedSessionId !== sessionId"), "not into a chat opened since");
+        // Mutation: drop the call -> the counters read zero after a reload, as before.
+    }
+
+    @Test
     @DisplayName("a progress row's header is the line the server wrote, its emoji drawn as a chip for who acts; a row without one is its text")
     void progressHeadersAreChips() {
         String draw = page.substring(page.indexOf("function addProgress(text, header) {"));
