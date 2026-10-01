@@ -20,8 +20,8 @@ import java.util.Set;
  * It is made of what the step rows hold: tool and skill names, what a skill_manage step did,
  * outcomes, durations, the model calls a step made, each result's label and size -- and, for a
  * failed step whose result was not private, how it failed, with vault values already scrubbed
- * ({@link AgentLoop#stepOutcome}). Nothing else of a result; and never the request or an
- * attachment's name, which other rows of the task hold.
+ * ({@link AgentLoop#stepOutcome}). Nothing else of a result; and never the request, which another
+ * row of the task holds, or an attachment's name, which none holds.
  * <p>
  * Results are named in words, never by handle: {{2}} named a result of that task, and in the task
  * that reads the record it names another one, so a handle copied from here would resolve to it.

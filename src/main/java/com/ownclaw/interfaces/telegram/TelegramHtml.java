@@ -10,13 +10,13 @@ import java.util.regex.Pattern;
 /**
  * The Markdown the models and the commands write, in the HTML Telegram reads ({@code parse_mode}
  * HTML). A block fenced with backticks is {@code <pre>}, its text escaped and not read as
- * Markdown; a code span is {@code <code>}; {@code **bold**}, {@code __bold__} and a line that
- * starts with one to six {@code #} and a space are {@code <b>}; {@code [text](address)} with an
- * http or https address is a link. Every {@code &}, {@code <}, {@code >} and {@code "} is
- * escaped, and nothing else is markup: a single {@code *} or {@code _} stays as it is, so
- * {@code smtp_send_email} and {@code 2*3*4} arrive as written, and a pair of markers with a
- * letter or digit outside it is not bold, so {@code x**2 + y**2} and {@code skill__name__v2} do
- * too.
+ * Markdown; a code span is {@code <code>}; {@code **bold**} and a line that starts with one to
+ * six {@code #} and a space are {@code <b>}; {@code [text](address)} with an http or https
+ * address is a link. Every {@code &}, {@code <}, {@code >} and {@code "} is escaped, and nothing
+ * else is markup: an underscore never is, so {@code smtp_send_email} and {@code __init__.py}
+ * arrive as written, in prose and in an address; a single {@code *} is not, so {@code 2*3*4}
+ * does; and a pair of {@code **} with a letter or digit just outside it is not bold, so
+ * {@code x**2 + y**2} does too.
  */
 final class TelegramHtml {
 
@@ -35,16 +35,22 @@ final class TelegramHtml {
     /**
      * A link to an http or https address, whose parentheses -- a Wikipedia address has them --
      * are taken one level deep. A held piece ({@link #HELD}) is never part of an address.
+     * <p>
+     * The address is read a run at a time. java.util.regex goes one call deeper for each turn of
+     * a repeated group like the one here, and the group this replaced turned once per character:
+     * a tracking address a couple of thousand characters long ran the sending thread out of
+     * stack. This one turns once per bracketed part of the address.
      */
-    private static final Pattern LINK =
-            Pattern.compile("\\[([^\\[\\]]+)]\\((https?://(?:[^\\s()<>]|\\([^\\s()<>]*\\))+)\\)");
+    private static final Pattern LINK = Pattern.compile(
+            "\\[([^\\[\\]]+)]\\((https?://[^\\s()<>]+(?:\\([^\\s()<>]*\\)[^\\s()<>]*)*)\\)");
 
     /**
-     * Bold: two markers, not three or more, with no letter, digit or underscore just outside
-     * them and no space just inside them.
+     * Bold: two asterisks, not three or more, with no letter, digit or underscore just outside
+     * them and no space just inside them. Not two underscores: those are a Python name's
+     * ({@code __init__}), in prose and in an address, far more often than a model's bold.
      */
     private static final Pattern BOLD = Pattern.compile(
-            "(?<![\\p{L}\\p{N}_*])(\\*\\*|__)(?![\\s*_])(.+?)(?<![\\s*_])\\1(?![\\p{L}\\p{N}_*])");
+            "(?<![\\p{L}\\p{N}_*])\\*\\*(?![\\s*])(.+?)(?<![\\s*])\\*\\*(?![\\p{L}\\p{N}_*])");
 
     /**
      * A rendered piece of a line, held while the rest of the line is read so that nothing in it
@@ -108,7 +114,7 @@ final class TelegramHtml {
     }
 
     private static String bold(String s) {
-        return replace(BOLD, s, m -> "<b>" + m.group(2) + "</b>");
+        return replace(BOLD, s, m -> "<b>" + m.group(1) + "</b>");
     }
 
     private static String hold(List<String> held, String html) {

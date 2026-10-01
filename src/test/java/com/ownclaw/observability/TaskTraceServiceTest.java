@@ -167,9 +167,9 @@ class TaskTraceServiceTest {
     }
 
     @Test
-    @DisplayName("a file keeps its name for the owner's page; no other result is given one")
-    void anAttachmentKeepsItsName() {
-        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
+    @DisplayName("a file is given by its id, for the owner's page to name it by; no other result has one")
+    void anAttachmentKeepsItsId() {
+        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"fileId\":\"f1\","
                 + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,"
                 + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, or not UTF-8)\"]}");
         row("egress", egress("SENT", 1, 1, 0, null));
@@ -184,7 +184,7 @@ class TaskTraceServiceTest {
         var file = arts.get(0);
         assertEquals("{{1}}", file.get("handle"));
         assertEquals("attachment", file.get("tool"));
-        assertEquals("statement.pdf", file.get("name"));
+        assertEquals("f1", file.get("fileId"));
         assertEquals("PRIVATE", file.get("label"));
         assertEquals(0L, file.get("chars"));
         assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)"), file.get("why"));
@@ -192,7 +192,7 @@ class TaskTraceServiceTest {
         assertEquals(1, file.get("requestsAfter"));
 
         assertEquals(List.of("pdf_text", "local_answer"), arts.subList(1, 3).stream().map(a -> a.get("tool")).toList());
-        for (var a : arts.subList(1, 3)) assertNull(a.get("name"), "only the file has a name: " + a);
+        for (var a : arts.subList(1, 3)) assertNull(a.get("fileId"), "only the file has one: " + a);
         @SuppressWarnings("unchecked")
         var limits = (List<String>) t.get("notObserved");
         assertTrue(limits.stream().anyMatch(l -> l.contains("is not private when a later task reads it back")

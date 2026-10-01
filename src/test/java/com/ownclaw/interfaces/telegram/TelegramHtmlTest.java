@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -24,12 +25,20 @@ class TelegramHtmlTest {
     }
 
     @Test
-    @DisplayName("an identifier's underscores and arithmetic's asterisks are not markers, and there is no italic")
+    @DisplayName("an identifier's underscores and arithmetic's asterisks are not markers, in prose or in an address, and there is no italic")
     void identifiersAndArithmeticSurvive() {
         String text = "Done: result 1 (smtp_send_email) mailed report_2026_09.csv to Home_Net_5G; "
                 + "2*3*4 = 24, x**2 + y**2 = 2**5 and skill__name__v2 too; *one* and _one_ stay as they are.";
         assertEquals(text, html(text));
-        // Mutation: drop the letter-or-digit lookarounds -> x<b>2 + y</b>2, skill<b>name</b>v2.
+        // Two underscores are a Python name's, not bold: in prose, and in an address, which
+        // Telegram shows as a link -- to another address, were a marker taken out of it.
+        String python = "__init__.py runs before __main__; see https://example.org/owner/repo/blob/main/pkg/__init__.py, "
+                + "https://docs.example.org/3/library/__main__.html and "
+                + "https://docs.example.org/3/reference/datamodel.html#object.__init__ -- and __this__ is no bold either.";
+        assertEquals(python, html(python));
+        assertEquals("<b>Fixed</b> in https://example.org/pkg/__init__.py", html("**Fixed** in https://example.org/pkg/__init__.py"));
+        // Mutations: drop the letter-or-digit lookarounds -> x<b>2 + y</b>2; two underscores a
+        // marker again -> .../pkg/<b>init</b>.py, and the link on the phone goes to .../pkg/init.py.
     }
 
     @Test
@@ -43,7 +52,7 @@ class TelegramHtmlTest {
                         + "<b><code>smtp_send_email</code></b> ran; see <a href=\"https://example.org/wiki/Mail_(protocol)\">"
                         + "<b>the</b> page</a>.",
                 html("## Daily digest\n"
-                        + "**3 new mails** and __1 reminder__ from `imap_fetch`; "
+                        + "**3 new mails** and **1 reminder** from `imap_fetch`; "
                         + "[the report](https://example.org/r?a=1&b=\"2\").\n"
                         + "```python\nfor m in mails:\n    print(m)\n```\n"
                         + "###### Next\n"
@@ -51,6 +60,28 @@ class TelegramHtmlTest {
         // Not markup: no space after #, seven of them, a pair of three markers, an address that is not the web's.
         String plain = "#hashtag ####### seven ***x*** [a](javascript:alert(1)) [b](ftp://example.org)";
         assertEquals(plain, html(plain));
+    }
+
+    @Test
+    @DisplayName("a link to an address thousands of characters long is a link, even on a thread with a small stack")
+    void aLongAddressIsALink() throws Exception {
+        // A tracking address. Its & are &amp; by the time the pattern reads it: three times as long.
+        String address = "https://example.org/click?u=1" + "&x".repeat(1500);
+        String line = "- [Read the newsletter](" + address + ") **today**";
+        var rendered = new AtomicReference<Object>();
+        Thread small = new Thread(null, () -> {
+            try {
+                rendered.set(html(line));
+            } catch (Throwable e) {
+                rendered.set(e);
+            }
+        }, "small-stack", 256 * 1024);
+        small.start();
+        small.join();
+        assertEquals("- <a href=\"" + address.replace("&", "&amp;") + "\">Read the newsletter</a> <b>today</b>",
+                rendered.get());
+        // Mutation: the address read a character at a time again -> StackOverflowError, which on
+        // the outbox's thread lost the whole message.
     }
 
     @Test

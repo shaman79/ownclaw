@@ -357,7 +357,6 @@ public class AgentLoop {
                             context.taskId(), id);
                     continue;
                 }
-                String name = String.valueOf(info.get("original_name"));
                 String ct = String.valueOf(info.get("content_type"));
                 Object size = info.get("size_bytes");
                 String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
@@ -368,10 +367,9 @@ public class AgentLoop {
                 Artifact a = context.addFile(id, text, why);
                 // A row per file, metadata only. No step ever names an attachment, so without
                 // this nothing recorded that a task had one -- the task page could not show the
-                // file, its label, or whether it was withheld. The name goes into this local row,
-                // for the task page, and not into the artifact.
+                // file, its label, or whether it was withheld.
                 eventLog.log(context.userId(), context.taskId(), "attachment", "info",
-                        "attachment " + a.label(), JSON.writeValueAsString(attachmentDetails(a, name)), 0);
+                        "attachment " + a.label(), JSON.writeValueAsString(attachmentDetails(a)), 0);
             } catch (Exception e) {
                 log.debug("Could not register attachment {}: {}", id, e.getMessage());
             }
@@ -2489,14 +2487,16 @@ public class AgentLoop {
     }
 
     /**
-     * An attachment's row: what it is and how it is labelled -- never its text. The name is
-     * here for the task page, which is the owner's; the artifact itself does not carry it.
+     * An attachment's row: which file, what it is and how it is labelled -- never its text, and
+     * not its name, which can say what the file holds (a statement's carries its account
+     * number): the ops API reads these rows. The owner's task page looks the name up by the
+     * file's id ({@code TaskTraceController}).
      */
-    static Map<String, Object> attachmentDetails(Artifact a, String name) {
+    static Map<String, Object> attachmentDetails(Artifact a) {
         var d = new LinkedHashMap<String, Object>();
         d.put("artifact", a.handle());
         d.put("tool", a.tool());
-        d.put("name", name);
+        d.put("fileId", a.written().get("fileId"));
         d.put("label", a.label().name());
         d.put("chars", a.output().length());
         d.put("indexed", a.indexed());

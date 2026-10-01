@@ -27,10 +27,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What reaches the owner's Telegram chat, through the real bot and a recorded Bot API: every part
- * of a long answer, in Telegram's HTML or, where Telegram refuses that, as written, however often
- * Telegram says to slow down, sent from the bot's own thread; what could not be sent, said;
- * results from the first moment after a restart, or after a first message; and not the steps of
- * a running task.
+ * of a long answer, in Telegram's HTML or, where Telegram refuses that or it cannot be made, as
+ * written, however often Telegram says to slow down, sent from the bot's own thread; what could
+ * not be sent, said; results from the first moment after a restart, or after a first message;
+ * and not the steps of a running task.
  */
 class TelegramDeliveryTest {
 
@@ -177,6 +177,44 @@ class TelegramDeliveryTest {
         }
         // Mutation: parse_mode Markdown back -> smtpsendemail, HomeNet5G, 234 on the owner's phone;
         // no parse_mode -> he reads ## and ** and backticks.
+    }
+
+    @Test
+    @DisplayName("a text the renderer fails on still arrives, every part of it, as it was written")
+    void whatCannotBeRenderedGoesAsWritten(@TempDir Path tmp) throws Exception {
+        // A link whose address has two thousand bracketed parts: the renderer's pattern goes a
+        // call deeper for each, more than the smallest stack a thread may have can hold.
+        String answer = "**Route**\n[the map](https://example.org/m" + "()".repeat(2000) + ")\n"
+                + ("line of the answer " + "x".repeat(80) + "\n").repeat(30);
+        var parts = TelegramBotService.telegramParts(answer, TelegramBotService.TELEGRAM_MAX_CHARS);
+        assertEquals(2, parts.size());
+        start(tmp, "The router is up.");
+        // The way to Telegram, taken once on the outbox's thread: nothing on it is loaded for the
+        // first time on the small stack.
+        receive("is the router up?");
+        FakeTelegram.drain(bot);
+
+        var deliver = TelegramBotService.class.getDeclaredMethod("deliver", long.class, String.class);
+        deliver.setAccessible(true);
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread small = new Thread(null, () -> {
+            try {
+                deliver.invoke(bot, ME, answer);
+            } catch (Throwable e) {
+                failure.set(e);
+            }
+        }, "small-stack", 1);                  // as small as the JVM allows
+        small.start();
+        small.join();
+
+        assertNull(failure.get(), "nothing escaped the delivery");
+        var sent = new java.util.ArrayList<JsonNode>();
+        for (String b : telegram.bodies("sendMessage")) sent.add(JSON.readTree(b));
+        assertEquals("The router is up.", sent.removeFirst().path("text").asText());
+        assertEquals(parts, sent.stream().map(s -> s.path("text").asText()).toList(), "every part, as written");
+        assertEquals(List.of(false, false), sent.stream().map(s -> s.has("parse_mode")).toList(), "as plain text");
+        // Mutation: render with no guard -> StackOverflowError on the outbox's thread: no part,
+        // no notice, no line in the log.
     }
 
     @Test

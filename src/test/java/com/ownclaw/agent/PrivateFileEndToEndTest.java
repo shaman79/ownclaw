@@ -1,5 +1,6 @@
 package com.ownclaw.agent;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.DelegationBehaviourTest.Scripted;
 import com.ownclaw.agent.DelegationBehaviourTest.Usage;
 import com.ownclaw.agent.tools.Tool;
@@ -10,7 +11,10 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.core.TaskQueue;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.observability.OpsService;
+import com.ownclaw.users.AuthService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -33,7 +37,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * A statement sent in chat, from upload to the next turn, through the real pieces: the file on
  * disk and in the database, registration, the local model's delegation, the answer, the saved
- * row, the next turn's history and the episode memory keeps.
+ * row, the next turn's history, the episode memory keeps, and what the ops API answers about it
+ * -- read by sessions whose model runs in the cloud.
  * <p>
  * One property over every string that goes to the cloud, rather than one check per guard: a
  * guard that each parse of the same data enforces separately leaks through the others' gaps,
@@ -110,12 +115,21 @@ class PrivateFileEndToEndTest {
         AgentLoop.loadConversationContext(next, "u1", nextRow, conversations, files, id -> null);
         String episode = AgentLoop.episodeSummary(ctx.originalMessage(), result);
 
+        jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'someone')");
+        var ops = new OpsService(config, jdbc, null, null, new TaskQueue(null, null, null, config, null),
+                new AuthService(jdbc, null, config), null, new ObjectMapper(), null);
+        var page = new OpsService.Page(0, 500);
+
         var cloudBound = new LinkedHashMap<String, String>();
         cloudBound.put("files section", filesSection);
         cloudBound.put("delegation report", outcome.text());
         cloudBound.put("response", result.response());
         cloudBound.put("next turn's history", next.conversationSummary());
         cloudBound.put("episode", episode);
+        cloudBound.put("ops forensics", String.valueOf(ops.forensics("u1", page)));
+        cloudBound.put("ops tasks", String.valueOf(ops.tasks(page)));
+        cloudBound.put("ops task", String.valueOf(ops.task(ctx.taskId())));
+        cloudBound.put("ops query of events", String.valueOf(ops.query("SELECT * FROM events", page)));
         for (var e : cloudBound.entrySet()) {
             String text = e.getValue();
             assertNotNull(text, e.getKey());
@@ -127,5 +141,8 @@ class PrivateFileEndToEndTest {
         }
         assertTrue(next.conversationSummary().contains(AgentLoop.PRIVATE_NOTE),
                 "the next turn is told an answer was given privately");
+        assertTrue(cloudBound.get("ops task").contains(fileId), "ops sees the task's file, by its id");
+        // Mutation: the name back in the attachment's events row -> forensics, tasks, the task
+        // and a query of events all name the file.
     }
 }

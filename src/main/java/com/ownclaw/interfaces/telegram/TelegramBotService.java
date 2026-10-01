@@ -467,7 +467,8 @@ public class TelegramBotService {
      * Send a text in the parts Telegram accepts, in order, each until Telegram takes it: in
      * Telegram's HTML, which {@link TelegramHtml} makes of the Markdown the text is written in.
      * A part Telegram refuses as a bad request (400), as it refuses HTML it cannot read, is sent
-     * again as it was written, as plain text.
+     * again as it was written, as plain text; and a text the renderer fails on goes as written,
+     * as plain text, every part of it ({@link #html}).
      * <p>
      * A part Telegram does not take in the end -- it refused it, kept failing or could not be
      * reached -- ends the text there, and the owner is told what is missing. The parts after it
@@ -476,10 +477,11 @@ public class TelegramBotService {
      */
     private void deliver(long chatId, String text) {
         List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
-        List<String> html = TelegramHtml.render(parts);
+        List<String> html = html(parts);
+        boolean asHtml = html != null;
         for (int i = 0; i < parts.size(); i++) {
-            int status = send(chatId, html.get(i), true);
-            if (status == 400) {
+            int status = send(chatId, asHtml ? html.get(i) : parts.get(i), asHtml);
+            if (status == 400 && asHtml) {
                 log.warn("Telegram refused part {} of {} for chat {} as HTML (HTTP 400); sending it as written",
                         i + 1, parts.size(), chatId);
                 status = send(chatId, parts.get(i), false);
@@ -490,6 +492,22 @@ public class TelegramBotService {
                 log.warn("Telegram did not take the notice of it either");
             }
             return;
+        }
+    }
+
+    /**
+     * The parts in Telegram's HTML, or null when {@link TelegramHtml} fails on them: then they
+     * are sent as written. Its patterns can run out of stack on a line nobody foresaw -- a link
+     * whose address has over a thousand bracketed parts -- and the error, thrown on the outbox's
+     * thread before any part went, lost the whole text: no part, no notice, no line in the log.
+     */
+    private static List<String> html(List<String> parts) {
+        try {
+            return TelegramHtml.render(parts);
+        } catch (RuntimeException | StackOverflowError e) {
+            log.warn("Telegram HTML could not be made of a text ({}); sending it as written",
+                    e.getClass().getSimpleName());
+            return null;
         }
     }
 

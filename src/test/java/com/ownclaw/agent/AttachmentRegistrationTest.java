@@ -2,7 +2,10 @@ package com.ownclaw.agent;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.FileStorageService;
+import com.ownclaw.conversation.MigratedDatabase;
+import com.ownclaw.interfaces.web.TaskTraceController;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.observability.TaskTraceService;
 import com.ownclaw.privacy.Label;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,8 +28,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * on SQLite, the events table the task page reads.
  * <p>
  * The ids come from the browser. What reaches a skill, and what the label weighs, is only what
- * survives registration -- and the file's name, which can itself be what the file holds, stays
- * in the owner's events row.
+ * survives registration -- and the file's name, which can itself be what the file holds, is in
+ * no row of the task: the owner's task page looks it up by the file's id.
  */
 class AttachmentRegistrationTest {
 
@@ -64,7 +67,7 @@ class AttachmentRegistrationTest {
         String foreign = h.upload("u2", "someone_elses.csv", "text/csv", "not yours\n");
         String missing = UUID.randomUUID().toString();
 
-        var ctx = new AgentContext("u1", "t1", "summarise this statement");
+        var ctx = new AgentContext("u1", "a1b2c3d4", "summarise this statement");
         assertFalse(ctx.isUnattended(), "attended chat, where files used to be PUBLIC");
         AgentLoop.registerAttachments(ctx, List.of(own, foreign, missing), h.files(), h.events());
 
@@ -86,13 +89,22 @@ class AttachmentRegistrationTest {
                     "the name is in an artifact field: " + part);
         }
 
-        var rows = h.events().taskEvents("u1", "t1");
+        var rows = h.events().taskEvents("u1", "a1b2c3d4");
         assertEquals(1, rows.size(), "one row per registered file");
         String details = String.valueOf(rows.get(0).get("details"));
-        assertTrue(details.contains("\"name\":\"" + NAME + "\""), "the owner's page names it: " + details);
+        assertTrue(details.contains("\"fileId\":\"" + own + "\""), "the file, by its id: " + details);
+        assertFalse(details.contains("vypis") || details.contains("123456789"),
+                "the ops API reads this row, and the name says what the file is: " + details);
         assertFalse(details.contains("UNIQUE-COUNTERPARTY"), "metadata only, never the text");
         assertFalse(details.contains("someone_elses"));
         assertEquals("attachment PRIVATE", rows.get(0).get("summary"));
+
+        // The owner's task page names it all the same, looked up by that id.
+        var page = new TaskTraceController(new TaskTraceService(h.events()), h.files()).trace("u1", "a1b2c3d4");
+        @SuppressWarnings("unchecked")
+        var shown = (List<Map<String, Object>>) ((Map<?, ?>) page.getBody()).get("artifacts");
+        assertEquals(NAME, shown.getFirst().get("name"));
+        // Mutation: the name back in this row -> the ops API names the file to a cloud-run session.
     }
 
     @Test
@@ -108,5 +120,23 @@ class AttachmentRegistrationTest {
         assertEquals("", a.output(), "the bytes are read by a skill, not carried here");
         assertEquals(List.of("uploaded file", "application/pdf, 15 bytes, no text read (not text, or not UTF-8)"), a.why());
         assertEquals(Map.of("fileId", pdf), a.written());
+    }
+
+    @Test
+    @DisplayName("an attachment's row written before keeps all it held but the file's name")
+    void anEarlierRowLosesTheName(@TempDir Path tmp) throws Exception {
+        Path file = tmp.resolve("t.db");
+        var jdbc = MigratedDatabase.at(file);
+        jdbc.update("INSERT INTO events (user_id, task_id, event_type, severity, summary, details) "
+                        + "VALUES ('u1', 'a1b2c3d4', 'attachment', 'info', 'attachment PRIVATE', ?)",
+                "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"" + NAME + "\",\"label\":\"PRIVATE\","
+                        + "\"chars\":64,\"indexed\":true,\"why\":[\"uploaded file\",\"text/csv, 64 bytes\"]}");
+        // A database the change has not reached yet: Liquibase runs it at the next start.
+        jdbc.update("DELETE FROM DATABASECHANGELOG WHERE ID = '021-attachment-rows-without-name'");
+        MigratedDatabase.at(file);
+
+        assertEquals("{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"label\":\"PRIVATE\","
+                        + "\"chars\":64,\"indexed\":true,\"why\":[\"uploaded file\",\"text/csv, 64 bytes\"]}",
+                jdbc.queryForObject("SELECT details FROM events WHERE task_id = 'a1b2c3d4'", String.class));
     }
 }

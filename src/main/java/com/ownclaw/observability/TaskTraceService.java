@@ -21,10 +21,11 @@ import java.util.Optional;
  * so nothing here reuses them.
  * <p>
  * What it does not contain, on purpose: the text of any request (never stored), the per-part list
- * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), and
- * any tool's output beyond how a failed step failed, which its row carries (none for a private
- * step). The same parse is the record of the task that its ending and later tasks of its chat
- * read ({@code TaskRecord}).
+ * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), any
+ * tool's output beyond how a failed step failed, which its row carries (none for a private step),
+ * and the name a file was uploaded with, which no row holds: the page's endpoint looks it up by
+ * the file's id ({@code TaskTraceController}). The same parse is the record of the task that its
+ * ending and later tasks of its chat read ({@code TaskRecord}).
  */
 @Service
 public class TaskTraceService {
@@ -333,9 +334,9 @@ public class TaskTraceService {
         for (JsonNode w : d.path("why")) why.add(w.asText());
         a.put("why", why);
         a.put("indexed", d.has("indexed") ? d.path("indexed").asBoolean() : null);
-        // Only an attachment's row has one: the name the file was uploaded with. This page is
-        // the owner's; the cloud was never told it, so no artifact carries it.
-        a.put("name", d.hasNonNull("name") ? d.path("name").asText() : null);
+        // Only an attachment's row has one: which file it is. Absent on rows from before it was
+        // recorded.
+        a.put("fileId", d.hasNonNull("fileId") ? d.path("fileId").asText() : null);
         return a;
     }
 
