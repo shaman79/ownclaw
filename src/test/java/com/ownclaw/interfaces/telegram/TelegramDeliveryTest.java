@@ -27,9 +27,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * What reaches the owner's Telegram chat, through the real bot and a recorded Bot API: every part
- * of a long answer, however often Telegram says to slow down, sent from the bot's own thread;
- * what could not be sent, said; results from the first moment after a restart, or after a first
- * message; and not the steps of a running task.
+ * of a long answer, in Telegram's HTML or, where Telegram refuses that, as written, however often
+ * Telegram says to slow down, sent from the bot's own thread; what could not be sent, said;
+ * results from the first moment after a restart, or after a first message; and not the steps of
+ * a running task.
  */
 class TelegramDeliveryTest {
 
@@ -160,20 +161,93 @@ class TelegramDeliveryTest {
     }
 
     @Test
-    @DisplayName("every part goes out as plain text: no underscore or asterisk of what the web chat writes is taken for a marker")
-    void sentAsWritten(@TempDir Path tmp) throws Exception {
-        String answer = "Done: result 1 (smtp_send_email) mailed report_2026_09.csv; your network is Home_Net_5G, "
-                + "and 2*3*4 = 24.";
+    @DisplayName("an answer goes in Telegram's HTML: what the model marked up renders, and no underscore or asterisk of an identifier or a sum is taken for a marker")
+    void sentInTelegramsHtml(@TempDir Path tmp) throws Exception {
+        String answer = "## Report\nDone: result 1 (**smtp_send_email**) mailed `report_2026_09.csv`; "
+                + "your network is Home_Net_5G, and 2*3*4 = 24 < 25.";
         start(tmp, answer);
 
         receive("send the report");
         FakeTelegram.drain(bot);
 
-        assertEquals(List.of(answer), sentTexts());
+        assertEquals(List.of("<b>Report</b>\nDone: result 1 (<b>smtp_send_email</b>) mailed "
+                + "<code>report_2026_09.csv</code>; your network is Home_Net_5G, and 2*3*4 = 24 &lt; 25."), sentTexts());
         for (String body : telegram.bodies("sendMessage")) {
-            assertFalse(JSON.readTree(body).has("parse_mode"), "in Telegram's Markdown the pairs vanish: " + body);
+            assertEquals("HTML", JSON.readTree(body).path("parse_mode").asText(), body);
         }
-        // Mutation: parse_mode Markdown back -> smtpsendemail, HomeNet5G, 234 on the owner's phone.
+        // Mutation: parse_mode Markdown back -> smtpsendemail, HomeNet5G, 234 on the owner's phone;
+        // no parse_mode -> he reads ## and ** and backticks.
+    }
+
+    @Test
+    @DisplayName("a part Telegram refuses as HTML is sent again as it was written, as plain text; the next part is HTML again")
+    void refusedHtmlGoesAsWritten(@TempDir Path tmp) throws Exception {
+        String answer = ("**line** of the answer " + "x".repeat(80) + "\n").repeat(60);   // two parts
+        start(tmp, answer);
+        var parts = TelegramBotService.telegramParts(answer, TelegramBotService.TELEGRAM_MAX_CHARS);
+        assertEquals(2, parts.size());
+        telegram.answer("sendMessage", FakeTelegram.Answer.refused(400));
+
+        receive("what is in the log?");
+        FakeTelegram.drain(bot);
+
+        var sent = new java.util.ArrayList<JsonNode>();
+        for (String b : telegram.bodies("sendMessage")) sent.add(JSON.readTree(b));
+        assertEquals(3, sent.size(), "the refused part once more, and nothing else");
+        var html = TelegramHtml.render(parts);
+        assertEquals(List.of("HTML", "", "HTML"), sent.stream().map(s -> s.path("parse_mode").asText()).toList());
+        assertEquals(List.of(html.get(0), parts.get(0), html.get(1)), sent.stream().map(s -> s.path("text").asText()).toList(),
+                "the refused part as written -- the Markdown, not the HTML Telegram could not read");
+        assertTrue(parts.get(0).startsWith("**line**") && html.get(0).startsWith("<b>line</b>"));
+        // Mutation: resend the HTML -> refused again; no resend -> the owner is told it was not taken.
+    }
+
+    @Test
+    @DisplayName("a code block longer than a message is code in every part it is cut into, and the text after it is read again")
+    void aLongCodeBlock(@TempDir Path tmp) throws Exception {
+        String code = "print('**not bold** <tag>')  # " + "y".repeat(60) + "\n";
+        String answer = "Here is the **script**:\n```python\n" + code.repeat(100) + "```\nRun it **daily**.";
+        start(tmp, answer);
+
+        receive("write the script");
+        FakeTelegram.drain(bot);
+
+        List<String> texts = sentTexts();
+        assertTrue(texts.size() >= 3, "in parts: " + texts.size());
+        assertTrue(texts.getFirst().startsWith("Here is the <b>script</b>:\n<pre>print('**not bold** &lt;tag&gt;')"),
+                texts.getFirst());
+        assertTrue(texts.getLast().endsWith("</pre>\nRun it <b>daily</b>."), texts.getLast());
+        for (int i = 0; i < texts.size(); i++) {
+            String t = texts.get(i);
+            assertEquals(1, t.split("<pre>", -1).length - 1, "one block opened in part " + i);
+            assertEquals(1, t.split("</pre>", -1).length - 1, "and closed in it");
+            if (i > 0) assertTrue(t.startsWith("<pre>print('**not bold**"), "code from its first character: " + t);
+            if (i > 0 && i < texts.size() - 1) assertTrue(t.endsWith("</pre>"), "code to its last: " + t);
+        }
+        // Every line of the script is there, as written.
+        String shown = texts.stream().map(TelegramHtmlTest::textOf).collect(java.util.stream.Collectors.joining());
+        assertEquals(("Here is the script:" + code.repeat(100) + "Run it daily.").replace("\n", ""), shown.replace("\n", ""));
+    }
+
+    @Test
+    @DisplayName("a part as long as a message may be goes whole, as HTML, though its HTML is longer: Telegram counts the text the HTML holds")
+    void theLimitCountsTheText(@TempDir Path tmp) throws Exception {
+        String line = "**a** <b> & `c`\n";                                // 16 characters, 40 as HTML
+        String answer = line.repeat(TelegramBotService.TELEGRAM_MAX_CHARS / line.length());
+        assertEquals(TelegramBotService.TELEGRAM_MAX_CHARS, answer.length(), "one part");
+        start(tmp, answer);
+
+        receive("show me");
+        FakeTelegram.drain(bot);
+
+        var bodies = telegram.bodies("sendMessage");
+        assertEquals(1, bodies.size(), "one message: not cut, not split again, not sent as plain text");
+        JsonNode sent = JSON.readTree(bodies.getFirst());
+        assertEquals("HTML", sent.path("parse_mode").asText());
+        String html = sent.path("text").asText();
+        assertEquals("<b>a</b> &lt;b&gt; &amp; <code>c</code>\n".repeat(256), html);
+        assertEquals(10_240, html.length(), "longer than a message may be");
+        assertEquals("a <b> & c\n".repeat(256), TelegramHtmlTest.textOf(html), "the 2,560 characters Telegram counts");
     }
 
     @Test
@@ -252,7 +326,7 @@ class TelegramDeliveryTest {
                 java.util.Map.of("sessionId", "s1"), "abcd1234"));
         FakeTelegram.drain(bot);
 
-        assertEquals(List.of("hello to you", "**Scheduled task: digest**\n\nall quiet"), sentTexts());
+        assertEquals(List.of("hello to you", "<b>Scheduled task: digest</b>\n\nall quiet"), sentTexts());
     }
 
     @Test
@@ -268,7 +342,7 @@ class TelegramDeliveryTest {
                 java.util.Map.of("sessionId", "s1"), "abcd1234"));
         FakeTelegram.drain(bot);
 
-        assertEquals(List.of("**Scheduled task: digest**\n\nall quiet"), sentTexts());
+        assertEquals(List.of("<b>Scheduled task: digest</b>\n\nall quiet"), sentTexts());
         assertEquals(ME, JSON.readTree(telegram.bodies("sendMessage").getFirst()).path("chat_id").asLong());
     }
 

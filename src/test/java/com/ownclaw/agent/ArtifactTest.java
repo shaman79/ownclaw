@@ -345,10 +345,10 @@ class ArtifactTest {
         // window of the result, and the gateway refused every request carrying the descriptor.
         String[][] cases = {
                 // the key, and what the result says in its text; beside each, why they make a window
-                {"alice.novak@example-company.org", "5 new messages from alice.novak@example-company.org today"},  // 31 + a space
+                {"alice.novak@company.example.org", "5 new messages from alice.novak@company.example.org today"},  // 31 + a space
                 {"nas-backup-01.home.example.org", "Host nas-backup-01.home.example.org is down"},                 // 30 + a space each side
-                {"bob.brook@mail.example-co.org", "Anna, bob.brook@mail.example-co.org (Bob)"},                    // 29 + ", " and " ("
-                {"carol.jones@examplemail.info", "Petr, carol.jones@examplemail.info (Carol)"},                    // 28 + ", " and " ("
+                {"bob.brook@mailbox.example.net", "Anna, bob.brook@mailbox.example.net (Bob)"},                    // 29 + ", " and " ("
+                {"carol.jones@mail.example.net", "Petr, carol.jones@mail.example.net (Carol)"},                    // 28 + ", " and " ("
         };
         for (String[] c : cases) {
             String key = c[0];
@@ -374,8 +374,8 @@ class ArtifactTest {
         assertNull(ctx.firstLeakIn(d), d);
         assertTrue(d.contains("fields: #1 (number), last (string, "), d);
         ctx = new AgentContext("u1", "t1", "block the sender");
-        d = mailSummary(ctx, "{\"ok\": false, \"error\": \"blocked alice.novak@example-company.org today\", "
-                + "\"alice.novak@example-company.org\": true}").describe();
+        d = mailSummary(ctx, "{\"ok\": false, \"error\": \"blocked alice.novak@company.example.org today\", "
+                + "\"alice.novak@company.example.org\": true}").describe();
         assertNull(ctx.firstLeakIn(d), d);
         assertTrue(d.contains(" · ok=false · #3=true · fields: ok, error (string, ") && d.endsWith(" chars), #3"), d);
 
@@ -393,16 +393,16 @@ class ArtifactTest {
     @DisplayName("a name the result does not repeat around separators is shown, however long below a window")
     void aNameOnlyItsKeyHoldsIsShown() {
         var ctx = new AgentContext("u1", "t1", "summarise my new mail");
-        String d = mailSummary(ctx, "{\"alice.novak@example-company.org\": 5, "
-                + "\"summary\": \"5 new messages, the newest <alice.novak@example-company.org>\"}").describe();
-        assertTrue(d.contains("use: {{1}}, {{1.alice.novak@example-company.org}}, {{1.summary}} — "), d);
+        String d = mailSummary(ctx, "{\"alice.novak@company.example.org\": 5, "
+                + "\"summary\": \"5 new messages, the newest <alice.novak@company.example.org>\"}").describe();
+        assertTrue(d.contains("use: {{1}}, {{1.alice.novak@company.example.org}}, {{1.summary}} — "), d);
         assertNull(ctx.firstLeakIn(d), d);
     }
 
     @Test
     @DisplayName("through the real loop: a mail summary keyed by sender does not stop the task, run after run")
     void aSummaryKeyedBySenderIsNotADeadEnd(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
-        String key = "alice.novak@example-company.org";
+        String key = "alice.novak@company.example.org";
         String output = "{\"" + key + "\": 5, \"summary\": \"5 new messages from " + key + " today\"}";
         var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("mail_summary", List.of("IMAP_PASS"), p -> output)));
         String session = rig.chat.createSession("u1", "Mail");

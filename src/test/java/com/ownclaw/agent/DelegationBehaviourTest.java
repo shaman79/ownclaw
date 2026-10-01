@@ -203,7 +203,7 @@ class DelegationBehaviourTest {
                 p -> ToolResult.success("{\"body_text\":\"guest wifi password Kolibri-2291\"}"));
         var page = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(pageText));
         var llm = new Scripted(call("imap_fetch", Map.of()),
-                call("web_fetch", Map.of("url", "https://ufleku.cz/menu")),
+                call("web_fetch", Map.of("url", "https://ufleku.example.org/menu")),
                 done("The mail says the wifi password is Kolibri-2291; the menu page is fetched."));
 
         var ctx = task();

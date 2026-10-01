@@ -290,7 +290,7 @@ class OpsServiceTest {
             jdbc.update("INSERT INTO scheduled_task_runs (task_id, user_id, description, task_type, status, "
                     + "result, executed_at) VALUES (1, 'u1', 'daily', 'recurring', 'ok', ?, ?)", which, at);
             jdbc.update("INSERT INTO file_attachments (id, user_id, original_name, stored_name, uploaded_at) "
-                    + "VALUES (?, 'u1', ?, ?, ?)", "f-" + which, which, "f-" + which, at);
+                    + "VALUES (?, 'u1', ?, ?, ?)", which, "f-" + which, "f-" + which, at);
             jdbc.update("INSERT INTO long_running_tasks (task_id, user_id, description, started_at) "
                     + "VALUES (?, 'u1', ?, ?)", "l-" + which, which, at);
             jdbc.update("INSERT INTO token_usage (user_id, date, provider) VALUES ('u1', '2026-09-30', ?)", which);
@@ -298,7 +298,7 @@ class OpsServiceTest {
         var ops = opsOn(jdbc);
         Map<String, String> shown = Map.of("conversations", "content", "sessions", "title", "events", "summary",
                 "toolCalls", "tool_name", "memory", "content", "scheduledTasks", "description",
-                "scheduledRuns", "result", "attachments", "original_name", "longRunningTasks", "description",
+                "scheduledRuns", "result", "attachments", "id", "longRunningTasks", "description",
                 "tokenUsage", "provider");
 
         Map<String, Object> newest = ops.forensics("u1", new OpsService.Page(0, 1));
@@ -309,6 +309,46 @@ class OpsServiceTest {
         });
         assertEquals(shown.keySet(), Set.copyOf((List<?>) newest.get("more")));
         assertEquals(List.of(), older.get("more"));
+    }
+
+    @Test
+    @DisplayName("forensics lists an upload by id, type, size and date: its name, which can say what the file holds, never appears")
+    void forensicsNeverNamesAnUpload(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'someone')");
+        String name = "statement account 2045-7781.pdf";
+        jdbc.update("INSERT INTO file_attachments (id, user_id, original_name, stored_name, content_type, size_bytes) "
+                + "VALUES ('f1', 'u1', ?, ?, 'application/pdf', 48213)", name, "f1_" + name);
+
+        Map<String, Object> report = opsOn(jdbc).forensics("u1", FIRST_500);
+
+        Map<String, Object> upload = list(report, "attachments").getFirst();
+        assertEquals(List.of("id", "content_type", "size_bytes", "uploaded_at"), List.copyOf(upload.keySet()));
+        assertEquals(List.of("f1", "application/pdf", 48213),
+                List.of(upload.get("id"), upload.get("content_type"), ((Number) upload.get("size_bytes")).intValue()));
+        assertFalse(String.valueOf(report).contains("2045-7781"), String.valueOf(report));
+        // Mutation: original_name back in the SELECT -> the account number in the ops answer.
+    }
+
+    @Test
+    @DisplayName("db/query returns every column: a label that repeats is keyed label#2, label#3 from its second column on")
+    void aRepeatedLabelKeepsEveryColumn(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        insertEvents(jdbc, 1, i -> "the summary");
+        var ops = opsOn(jdbc);
+
+        Map<String, Object> row = rows(ops.query("SELECT 1 AS a, 2 AS a, 3 AS a, 4 AS A, 5 AS \"a#2\"", FIRST_500)).getFirst();
+        assertEquals(List.of("a", "a#2", "a#3", "A", "a#2#2"), List.copyOf(row.keySet()),
+                "a label a later key would take is suffixed in turn; a label in other case is a key of its own");
+        assertEquals(List.of(1, 2, 3, 4, 5), row.values().stream().map(v -> ((Number) v).intValue()).toList());
+
+        // A join's two id columns, which SQLite labels alike.
+        Map<String, Object> joined = rows(ops.query(
+                "SELECT e.id, f.id, e.summary FROM events e JOIN events f ON f.id = e.id", FIRST_500)).getFirst();
+        assertEquals(List.of("id", "id#2", "summary"), List.copyOf(joined.keySet()));
+        assertEquals("the summary", joined.get("summary"));
+        // Mutation: the map keyed by label, case ignored, back -> {a=1, a#2=5} and {id=1, summary=...}:
+        // the other columns gone without a word.
     }
 
     @Test

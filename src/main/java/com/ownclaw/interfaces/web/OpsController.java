@@ -118,7 +118,9 @@ public class OpsController {
                                 + "table holding secrets or private text, and says which; /users "
                                 + "lists the accounts, /config the stored settings by name, "
                                 + "/forensics one account's records.",
-                        "db/query accepts a single SELECT only.",
+                        "db/query accepts a single SELECT only, and returns every column: a label "
+                                + "that repeats is keyed label#2, label#3, ... from its second "
+                                + "column on (SELECT 1 AS a, 2 AS a gives a and a#2).",
                         "Listings are paged, never cut: a response with more rows gives nextOffset "
                                 + "(and names the sections in more), /logs gives the cursor next; "
                                 + "ask again from there. Any limit may be asked for. An offset "

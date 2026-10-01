@@ -16,9 +16,9 @@ import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.JdbcUtils;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
@@ -748,17 +748,26 @@ public class OpsService {
     /**
      * The rows of {@code page}, plus one, from a statement run on a connection SQLite holds
      * read-only: {@code PRAGMA query_only} makes SQLite refuse anything that would change the
-     * database, and it is switched off again before the connection goes back to the pool.
+     * database, and it is switched off again before the connection goes back to the pool. Each
+     * row holds every column, under the key {@link #columnKeys} gives it.
      */
     private List<Map<String, Object>> readOnly(String sql, Page page) {
         return jdbc.execute((ConnectionCallback<List<Map<String, Object>>>) con -> {
             try (Statement st = con.createStatement()) {
                 st.execute("PRAGMA query_only = ON");
                 try (ResultSet rs = st.executeQuery(sql)) {
-                    var columns = new ColumnMapRowMapper();
+                    var meta = rs.getMetaData();
+                    var labels = new ArrayList<String>();
+                    for (int i = 1; i <= meta.getColumnCount(); i++) labels.add(JdbcUtils.lookupColumnName(meta, i));
+                    List<String> keys = columnKeys(labels);
                     var fetched = new ArrayList<Map<String, Object>>();
                     for (long row = 0; fetched.size() <= page.limit() && rs.next(); row++) {
-                        if (row >= page.offset()) fetched.add(columns.mapRow(rs, fetched.size()));
+                        if (row < page.offset()) continue;
+                        var values = new LinkedHashMap<String, Object>();
+                        for (int i = 1; i <= keys.size(); i++) {
+                            values.put(keys.get(i - 1), JdbcUtils.getResultSetValue(rs, i));
+                        }
+                        fetched.add(values);
                     }
                     return fetched;
                 }
@@ -768,6 +777,25 @@ public class OpsService {
                 }
             }
         });
+    }
+
+    /**
+     * The key of each column of a result, in order: its label, or, when an earlier column's key
+     * is that label already, the label with the first of #2, #3, ... that no earlier column's
+     * key is -- so {@code SELECT 1 AS a, 2 AS a} gives a and a#2, and a and A are two keys. A
+     * row is a map, and the one this replaced, keyed by label with case ignored, kept the first
+     * of the columns that shared one and dropped the others: a join's two id columns came back
+     * as one.
+     */
+    private static List<String> columnKeys(List<String> labels) {
+        var keys = new ArrayList<String>(labels.size());
+        var taken = new HashSet<String>();
+        for (String label : labels) {
+            String key = label;
+            for (int n = 2; !taken.add(key); n++) key = label + "#" + n;
+            keys.add(key);
+        }
+        return keys;
     }
 
     // ────────────────────────────── accounts and forensics ──────────────────────────────
@@ -854,8 +882,10 @@ public class OpsService {
                 "SELECT task_id, executed_at, status, skills_used, duration_ms, result, error "
                         + "FROM scheduled_task_runs WHERE user_id = ? ORDER BY executed_at DESC, rowid DESC",
                 page, userId);
+        // Not the name: an uploaded file is private, and its name can say what it holds -- a
+        // statement's carries its account number.
         section(out, more, "attachments",
-                "SELECT id, original_name, content_type, size_bytes, uploaded_at "
+                "SELECT id, content_type, size_bytes, uploaded_at "
                         + "FROM file_attachments WHERE user_id = ? ORDER BY uploaded_at DESC, rowid DESC",
                 page, userId);
         section(out, more, "longRunningTasks",

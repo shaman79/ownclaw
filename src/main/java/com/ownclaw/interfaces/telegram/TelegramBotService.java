@@ -429,7 +429,11 @@ public class TelegramBotService {
         return chat != null && linkedUser.apply(chat).filter(userId::equals).isPresent();
     }
 
-    /** Telegram refuses a message over 4,096 characters; a long answer goes in parts. */
+    /**
+     * Telegram takes at most 4,096 characters of text in a message, counted once its HTML is
+     * read: the tags are not text, and an escaped character is one. A long answer goes in parts,
+     * cut from the text as it is written; a part's HTML holds no more text than the part.
+     */
     static final int TELEGRAM_MAX_CHARS = 4096;
 
     /**
@@ -460,7 +464,10 @@ public class TelegramBotService {
     }
 
     /**
-     * Send a text in the parts Telegram accepts, in order, each until Telegram takes it.
+     * Send a text in the parts Telegram accepts, in order, each until Telegram takes it: in
+     * Telegram's HTML, which {@link TelegramHtml} makes of the Markdown the text is written in.
+     * A part Telegram refuses as a bad request (400), as it refuses HTML it cannot read, is sent
+     * again as it was written, as plain text.
      * <p>
      * A part Telegram does not take in the end -- it refused it, kept failing or could not be
      * reached -- ends the text there, and the owner is told what is missing. The parts after it
@@ -469,11 +476,17 @@ public class TelegramBotService {
      */
     private void deliver(long chatId, String text) {
         List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
+        List<String> html = TelegramHtml.render(parts);
         for (int i = 0; i < parts.size(); i++) {
-            int status = send(chatId, parts.get(i));
+            int status = send(chatId, html.get(i), true);
+            if (status == 400) {
+                log.warn("Telegram refused part {} of {} for chat {} as HTML (HTTP 400); sending it as written",
+                        i + 1, parts.size(), chatId);
+                status = send(chatId, parts.get(i), false);
+            }
             if (status / 100 == 2) continue;
             log.warn("Telegram did not take part {} of {} for chat {}: HTTP {}", i + 1, parts.size(), chatId, status);
-            if (send(chatId, notTaken(i + 1, parts.size(), status)) / 100 != 2) {
+            if (send(chatId, notTaken(i + 1, parts.size(), status), false) / 100 != 2) {
                 log.warn("Telegram did not take the notice of it either");
             }
             return;
@@ -491,18 +504,19 @@ public class TelegramBotService {
     }
 
     /**
-     * One sendMessage call, as plain text; Telegram's HTTP status, as {@link #call} gives it.
+     * One sendMessage call, in Telegram's HTML when {@code html} is true and as plain text when
+     * it is not; Telegram's HTTP status, as {@link #call} gives it.
      * <p>
-     * Not in Telegram's Markdown, which this text is not written in: it is the web chat's, where
+     * Never in Telegram's Markdown, which this text is not written in: it is the web chat's, where
      * an underscore inside a word is a letter. Telegram's takes every pair of underscores or
      * asterisks for italic or bold markers and drops them, so result 1 (smtp_send_email) arrived
-     * as smtpsendemail and a network named Home_Net_5G as HomeNet5G -- and only a text whose
-     * markers did not pair up was refused, and resent as it was.
+     * as smtpsendemail and a network named Home_Net_5G as HomeNet5G.
      */
-    private int send(long chatId, String text) {
+    private int send(long chatId, String text, boolean html) {
         var payload = new java.util.LinkedHashMap<String, Object>();
         payload.put("chat_id", chatId);
         payload.put("text", text);
+        if (html) payload.put("parse_mode", "HTML");
         return call("sendMessage", payload);
     }
 

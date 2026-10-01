@@ -100,7 +100,8 @@ class TelegramSecretTest {
         assertTrue(stored.isEmpty(), "stored: " + stored);
         assertEquals(81, new ObjectMapper().readTree(telegram.bodies("deleteMessage").getFirst()).path("message_id").asLong(),
                 "calls: " + telegram.calls);
-        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Usage: `/cred set")), "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Usage: <code>/cred set &lt;KEY&gt;")),
+                "calls: " + telegram.calls);
         assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
     }
 

@@ -351,7 +351,7 @@ public class ConversationService {
      * The raw string was passed straight through, and MATCH is an expression language: a bare
      * {@code .}, {@code '} or {@code -} is a syntax error, and SQLite answers with an exception
      * rather than with no results. The sidebar search fires on every keystroke, so typing an
-     * ordinary thing -- {@code claw.avercode.com}, {@code don't}, or the name of a skill such as
+     * ordinary thing -- {@code claw.example.com}, {@code don't}, or the name of a skill such as
      * {@code web_search_bikes} -- produced a 500 partway through the word. Searching for this
      * system's own vocabulary was reliably broken.
      * <p>

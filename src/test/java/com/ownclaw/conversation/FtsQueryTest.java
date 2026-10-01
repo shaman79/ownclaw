@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * search box: a bare {@code .}, {@code '} or {@code -} is a syntax error, and SQLite raises
  * rather than returning nothing. The sidebar searches on every keystroke, so ordinary input
  * produced a 500 partway through a word — including this system's own vocabulary, such as a skill
- * named {@code web_search_bikes} or the host {@code claw.avercode.com}.
+ * named {@code web_search_bikes}, and a host name such as {@code claw.example.com}.
  */
 class FtsQueryTest {
 
@@ -26,10 +26,10 @@ class FtsQueryTest {
     @Test
     @DisplayName("a dotted hostname becomes literal terms instead of a syntax error")
     void dottedInputIsSafe() {
-        String q = ConversationService.ftsQuery("claw.avercode.com");
+        String q = ConversationService.ftsQuery("claw.example.com");
         assertTrue(q.startsWith("\""), "must be quoted, not passed through as syntax: " + q);
         assertFalse(q.contains("."), "the dot is not tokenised by FTS5: " + q);
-        assertTrue(q.contains("claw") && q.contains("avercode") && q.contains("com"), q);
+        assertTrue(q.contains("claw") && q.contains("example") && q.contains("com"), q);
     }
 
     @Test

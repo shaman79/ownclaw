@@ -657,7 +657,7 @@ class DelegationSafetyTest {
         assertNull(LocalExecutor.priorSideEffect(smtp, args, List.of(failed), true),
                 "a send that failed is exactly what a retry is for");
         assertNull(LocalExecutor.priorSideEffect(smtp,
-                Map.of("to", "someone@else.cz", "body", "menu"), List.of(sent), true),
+                Map.of("to", "someone@example.net", "body", "menu"), List.of(sent), true),
                 "different arguments are a different change");
     }
 
@@ -747,7 +747,7 @@ class DelegationSafetyTest {
         var pub = new Artifact(1, "daily_news_digest", Map.of("topic", "rust"), Map.of(),
                 "ERROR: feed timed out", false, com.ownclaw.privacy.Label.PUBLIC, List.of());
         var priv = new Artifact(2, "smtp_send_email",
-                Map.of("to", "ucetni@firma.cz", "body", "Faktura 2026-09 od Novák s.r.o."),
+                Map.of("to", "ucetni@firma.example.com", "body", "Faktura 2026-09 od Novák s.r.o."),
                 Map.of(), "Traceback: smtplib.SMTPAuthenticationError", false,
                 com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
 
@@ -756,7 +756,7 @@ class DelegationSafetyTest {
         assertTrue(text.contains("feed timed out"), "a public failure IS the repair evidence");
         assertTrue(text.contains("topic"), "together with the arguments that produced it");
         assertTrue(text.contains("(arguments withheld)"));
-        assertFalse(text.contains("ucetni@firma.cz"),
+        assertFalse(text.contains("ucetni@firma.example.com"),
                 "a tainted step's arguments are what the local model wrote AFTER reading private "
                         + "content — the recipient it was given, the body it forwarded — so "
                         + "printing them hands the cloud exactly what the descriptor two lines "

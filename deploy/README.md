@@ -276,9 +276,9 @@ curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops | jq      # lists eve
 | `GET /api/ops/config` | effective configuration with secrets redacted, plus `system_settings` key names and their `updated_at` (useful for spotting tampering) |
 | `GET /api/ops/logs?lines=200&grep=&level=&cursor=` | the newest `lines` lines that pass the filters, oldest first, read from the log file and every file it was rolled into; pass the page's `next` as `cursor` for the lines before it |
 | `GET /api/ops/db/tables` | every table with its row count |
-| `POST /api/ops/db/query` | one read-only `SELECT`, a page of its rows — `{"sql":"SELECT ...","offset":0,"limit":500}`; `nextOffset` is where the next page starts |
+| `POST /api/ops/db/query` | one read-only `SELECT`, a page of its rows — `{"sql":"SELECT ...","offset":0,"limit":500}`; `nextOffset` is where the next page starts; every column comes back, a label that repeats keyed `label#2`, `label#3`, … from its second column on |
 | `GET /api/ops/users` | accounts, who the owner is, who is disabled |
-| `GET /api/ops/forensics/{userId}?offset=0&limit=200` | everything recorded for one account: messages, tasks, tool calls, memory, scheduled tasks, uploads, spend — a page of each, newest first; `more` names the sections that go on and `nextOffset` is where their next page starts |
+| `GET /api/ops/forensics/{userId}?offset=0&limit=200` | everything recorded for one account: messages, tasks, tool calls, memory, scheduled tasks, uploads (type, size and date, not the name), spend — a page of each, newest first; `more` names the sections that go on and `nextOffset` is where their next page starts |
 | `GET /api/ops/skills` | each generated skill with size, mtime and SHA-256, so an unexpected change is visible |
 | `GET /api/ops/ollama` | installed and loaded models, capabilities, and a live chat round-trip test |
 | `GET /api/ops/tasks?offset=0&limit=50`, `GET /api/ops/tasks/{taskId}` | recent tasks, paged like forensics; one task correlated across events, tool calls and memory |
