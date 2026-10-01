@@ -156,4 +156,107 @@ class PrivacyFilterRoundTripTest {
         // the text but not the arguments -> the same; keep "credentials (N)" -> the read is a
         // descriptor and the cloud has no placeholder to use.
     }
+
+    @Test
+    @DisplayName("every vault value stored under a secret's name is removed from what the cloud reads: a WiFi key, a WireGuard key, a PIN")
+    void vaultValuesUnderEverySecretNameAreRemoved(@TempDir Path tmp) throws Exception {
+        String psk = "fake-psk-value-31", wg = "RmFrZVdnUHJpdmF0ZUtleUZvclRlc3RzMDAwMDAwMDA=", pin = "4821";
+        // Printed where no name marks them: a QR code's text, prose, a log line.
+        String printed = "QR payload: WIFI:T:WPA;S:Fake Kolibri;P:" + psk + ";;\npeer configured with " + wg
+                + "\nunlock code accepted: " + pin;
+        var rig = new LoopRig(tmp, List.of(tool("router_qr", List.of("ROUTER_HOST", "WIFI_PSK", "WG_PRIVATE_KEY",
+                "ROUTER_PIN"), false, new CopyOnWriteArrayList<>(), printed)));
+        rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        rig.vault.storeCredential("u1", "ROUTER_HOST", "10.0.0.1");
+        rig.vault.storeCredential("u1", "WIFI_PSK", psk);
+        rig.vault.storeCredential("u1", "WG_PRIVATE_KEY", wg);
+        rig.vault.storeCredential("u1", "ROUTER_PIN", pin);
+        String session = rig.chat.createSession("u1", "Network");
+        rig.cloud.think.add(call("router_qr", Map.of()));
+        rig.cloud.think.add(respond("done"));
+
+        rig.turn(session, "show me the guest network's QR code");
+
+        var task = rig.cloud.calls("think");
+        String read = String.join("\n", LoopRig.userParts(task.get(1)));
+        assertTrue(read.contains("P:«vault:WIFI_PSK»;;") && read.contains("peer configured with «vault:WG_PRIVATE_KEY»")
+                && read.contains("unlock code accepted: «vault:ROUTER_PIN»"), read);
+        for (var c : task) {
+            for (String part : allParts(c)) {
+                for (String v : List.of(psk, wg, pin)) assertFalse(part.contains(v), "[" + v + "] sent in: " + part);
+            }
+        }
+        // Mutation: decrypt only the keys the old pattern named (pass|token|secret...) -> all three sent.
+    }
+
+    @Test
+    @DisplayName("a placeholder the cloud uses as a key of an argument comes back as the real value")
+    void placeholderKeysAreRestored(@TempDir Path tmp) throws Exception {
+        var assigned = new CopyOnWriteArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(
+                tool("router_read", List.of("OPENWRT_PASS"), false, new CopyOnWriteArrayList<>(), UCI),
+                tool("assign_vlans", List.of("OPENWRT_PASS"), true, assigned, "assigned")));
+        String session = rig.chat.createSession("u1", "Network");
+        rig.cloud.think.add(call("router_read", Map.of()));
+        rig.cloud.think.add(c -> call("assign_vlans", Map.of(
+                "vlan_by_mac", Map.of(shown(rig, "option mac '(<mac_\\d+>)'"), 20),
+                "hosts", List.of(Map.of(shown(rig, "option name '(<host_\\d+>)'"), "guest")))).answer(c));
+        rig.cloud.think.add(respond("ok"));
+
+        rig.turn(session, "put the laptop on VLAN 20");
+
+        assertEquals(List.of(Map.of("vlan_by_mac", Map.of("00:00:5e:00:53:01", 20),
+                "hosts", List.of(Map.of("fake-laptop", "guest")))), assigned);
+        // Mutation: restore the values of a map and not its keys -> the tool is handed <mac_1>.
+    }
+
+    @Test
+    @DisplayName("an SSID that json.dumps escaped comes back as the SSID itself, to the tool and to the owner")
+    void escapedValuesComeBackAsTheyRead(@TempDir Path tmp) throws Exception {
+        var moves = new CopyOnWriteArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(
+                tool("wifi_status", List.of(), false, new CopyOnWriteArrayList<>(),
+                        "{\"ssid\": \"Kav\\u00e1rna Fake\", \"clients\": 3}"),
+                tool("wifi_move", List.of(), true, moves, "moved")));
+        String session = rig.chat.createSession("u1", "Network");
+        String[] ssid = new String[1];
+        rig.cloud.think.add(call("wifi_status", Map.of()));
+        rig.cloud.think.add(c -> {
+            ssid[0] = shown(rig, "\"ssid\": \"(<ssid_\\d+>)\"");
+            return call("wifi_move", Map.of("ssid", ssid[0])).answer(c);
+        });
+        rig.cloud.think.add(c -> respond("Moved the laptop to " + ssid[0] + ".").answer(c));
+
+        AgentResult r = rig.turn(session, "move the laptop to the café network");
+
+        assertEquals(List.of(Map.of("ssid", "Kavárna Fake")), moves);
+        assertEquals("Moved the laptop to Kavárna Fake.", r.response());
+        // Mutation: keep a value as it is written -> the tool is handed Kav\u00e1rna Fake.
+    }
+
+    @Test
+    @DisplayName("a call that writes back a secret the filter removed is refused, and the tool never runs")
+    void aRemovedSecretIsNeverWrittenBack(@TempDir Path tmp) throws Exception {
+        var writes = new CopyOnWriteArrayList<Map<String, Object>>();
+        var rig = new LoopRig(tmp, List.of(
+                tool("router_read", List.of("OPENWRT_PASS"), false, new CopyOnWriteArrayList<>(), UCI),
+                tool("router_write_wireless", List.of("OPENWRT_PASS"), true, writes, "written")));
+        String session = rig.chat.createSession("u1", "Network");
+        rig.cloud.think.add(call("router_read", Map.of()));
+        rig.cloud.think.add(c -> {
+            // The section as the cloud was shown it, with only the encryption changed.
+            String read = String.join("\n", LoopRig.userParts(rig.cloud.calls.get(rig.cloud.calls.size() - 1)));
+            String section = read.substring(read.indexOf("config wifi-iface"), read.indexOf("config host"))
+                    .replace("psk2", "sae-mixed");
+            return call("router_write_wireless", Map.of("config", section)).answer(c);
+        });
+        rig.cloud.think.add(respond("ok"));
+
+        rig.turn(session, "switch the main network to WPA3");
+
+        assertTrue(writes.isEmpty(), "the router's WiFi key would have become the marker: " + writes);
+        String told = String.join("\n", LoopRig.userParts(rig.cloud.calls("think").get(2)));
+        assertTrue(told.contains("Not run: an argument holds a removed secret."), told);
+        // Mutation: no check before the call -> the tool runs with option key '«secret removed»'.
+    }
 }

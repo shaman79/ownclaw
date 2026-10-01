@@ -149,4 +149,33 @@ class PrivateFileEndToEndTest {
         // Mutation: the name back in the attachment's events row -> forensics, tasks, the task
         // and a query of events all name the file.
     }
+
+    @Test
+    @DisplayName("an answer that quotes nothing of the file reaches the owner though the cloud, which read it, does not give it")
+    void aReleasedAnswerReachesTheOwner(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var config = new OwnClawConfig();
+        config.getDatabase().setPath(tmp.resolve("t.db").toString());
+        Files.createDirectories(tmp.resolve("uploads"));
+        var files = new FileStorageService(jdbc, config);
+        String fileId = files.store("u1", NAME, "text/csv",
+                new ByteArrayInputStream(STATEMENT.getBytes(StandardCharsets.UTF_8)));
+        var ctx = new AgentContext("u1", "a1b2c3d4", "summarise this statement");
+        AgentLoop.registerAttachments(ctx, List.of(fileId), files, new EventLogService(jdbc));
+        String plain = "Your closing balance was 48,213.07 CZK, and card spending ran through the whole month.";
+
+        var outcome = DelegationBehaviourTest.executor(new Scripted(call("read_statement", Map.of()), done(plain)),
+                new Usage(), new ReadsFiles(files))
+                .execute(plan("summarise the attached statement"), ctx, DelegationBehaviourTest.UNCOUNTED);
+        assertTrue(outcome.text().startsWith(plain), "it quotes nothing of the file, so the cloud reads it: "
+                + outcome.text());
+
+        // The cloud answers in words of its own.
+        var answer = AgentLoop.answerFor("Done -- the summary is above.", ctx);
+        assertNull(answer.refusal());
+        assertEquals("Done -- the summary is above.\n\n" + AgentLoop.LOCAL_HEADER + plain, answer.response(),
+                "the owner is given the local model's answer, and the history holds what the cloud read");
+        assertNull(answer.ownerText(), "nothing private: the owner reads the response");
+        // Mutation: keep only an answer that quotes the file -> the owner reads "Done -- the summary is above."
+    }
 }

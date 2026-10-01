@@ -246,8 +246,8 @@ public class LocalExecutor {
         boolean nativeTools = localProvider.supportsTools();
         // A task holding the user's files: every result is PRIVATE (AgentContext.decide), so the
         // cloud cannot answer from them, and the local model's summary is the user's answer -- the
-        // model is told so. When it quotes the files it stays private, and the user is given it
-        // whether or not the cloud places it (AgentLoop.withLocalAnswers).
+        // model is told so. The user is given it whether or not the cloud places it, and when it
+        // quotes the files it stays private (recordAnswer, AgentLoop.withLocalAnswers).
         boolean fileTask = !parentContext.files().isEmpty();
         List<ToolSpec> specs = nativeTools ? executorTools(parentContext, plan, fileTask) : null;
         log.info("Delegation protocol: {} ({} tools)", nativeTools ? "native" : "json-text",
@@ -517,6 +517,12 @@ public class LocalExecutor {
             log.warn("Delegation turn {}: a call to a tool that does not exist — refused.", turn);
             return "Not run: there is no tool named '" + action.tool + "'. Call one of the tools "
                     + "you were given, by its exact name.";
+        }
+
+        // A secret the filter removed from the cloud's view, copied from its goal into a call.
+        if (Redactor.holdsRemovedSecret(action.params)) {
+            log.warn("Delegation turn {}: a call that writes a removed secret — refused.", turn);
+            return "Not run: an argument holds a removed secret. " + AgentLoop.REMOVED_SECRET;
         }
 
         // One resolution of the arguments, used by every check below and by the call itself.
@@ -1062,8 +1068,9 @@ public class LocalExecutor {
      * given results is not that: what it read is in its prompt, and the reading was the work.
      *
      * @param given the earlier results the goal named, which the local model read
-     * @param said  the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
-     *              handle and size, never its text, and it joins what the delegation produced.
+     * @param said  the answer recorded by {@link #recordAnswer}, or null. Of a private one the
+     *              cloud is told its handle and size, never its text; a released one it reads as
+     *              the summary. Either joins what the delegation produced.
      */
     /** A delegation handed results to read that names no tool, in its list or in a step. */
     static boolean readsWhatItWasGiven(DelegationPlan plan, List<Artifact> given) {
@@ -1075,7 +1082,7 @@ public class LocalExecutor {
                              List<Artifact> results, Artifact said) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
         String summary;
-        if (said != null) {
+        if (said != null && said.isPrivate()) {
             // The local model's answer quotes private data it read (recordAnswer): withheld, but
             // not lost -- it is the answer, and the cloud can deliver it by its handle. Said here,
             // because a handle the cloud was never told about is one it cannot use.
@@ -1137,17 +1144,19 @@ public class LocalExecutor {
 
     /**
      * Keep the local model's answer as a PRIVATE result of the task when it quotes private data
-     * it read; null otherwise -- it read nothing private, among the results it was given or its
-     * own, wrote nothing, or wrote an answer that quotes none of it.
+     * it read; on a file task, as a PUBLIC one when it does not; null otherwise -- it wrote
+     * nothing, or off a file task, read nothing private or wrote an answer that quotes none of it.
      * <p>
      * What the local model writes after reading private data is labelled by its content, like
      * any result: PRIVATE when it repeats a run of a private result it read -- a window of 32
-     * characters, or a whole short value ({@link AgentContext#firstRunOf}, over every one of
-     * them, indexed for the canary or not) -- and otherwise the cloud's to read, through the
-     * gateway's filter like everything else. So the cloud can ask a question about the owner's
-     * mail or file and be given the answer; a digest that copies the messages out stays here. A
-     * paraphrase passes: that is the release. Kept, a quoting answer is a handle the cloud can
-     * deliver without reading -- on a file task the user is given it either way. In the task's
+     * characters, a whole short value, or a word shaped like a credential
+     * ({@link AgentContext#firstRunOf}, over every one of them, indexed for the canary or not) --
+     * and otherwise the cloud's to read, through the gateway's filter like everything else. So
+     * the cloud can ask a question about the owner's mail or file and be given the answer; a
+     * digest that copies the messages out stays here. A paraphrase passes: that is the release.
+     * Kept, a quoting answer is a handle the cloud can deliver without reading. On a file task
+     * every answer is kept, released or not: it is the answer the task exists for, and the user
+     * is given it whether or not the cloud places it (AgentLoop.withLocalAnswers). In the task's
      * numbering, like any summary.
      * <p>
      * Indexed on a file task, so the canary looks for it in every later request of the task:
@@ -1160,16 +1169,17 @@ public class LocalExecutor {
      */
     static Artifact recordAnswer(AgentContext context, String summary, List<Artifact> given,
                                  List<Artifact> mine, boolean fileTask) {
+        if (summary == null || summary.isBlank()) return null;
         List<Artifact> privateRead = readBy(given, mine).stream().filter(Artifact::isPrivate).toList();
-        if (summary == null || summary.isBlank() || privateRead.isEmpty()) {
-            return null;
-        }
         String text = References.proseForTask(summary, mine);
-        PrivateIndex.Hit quoted = context.firstRunOf(privateRead, text);
-        if (quoted == null) return null;
-        return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
-                new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
-                        List.of("quotes {{" + quoted.handle() + "}}"), fileTask));
+        PrivateIndex.Hit quoted = privateRead.isEmpty() ? null : context.firstRunOf(privateRead, text);
+        if (quoted != null) {
+            return context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
+                    new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                            List.of("quotes {{" + quoted.handle() + "}}"), fileTask));
+        }
+        return fileTask ? context.addArtifact("local_answer", Map.of(), Map.of(), text, true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of(), false)) : null;
     }
 
     /**

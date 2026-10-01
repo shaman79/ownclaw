@@ -165,15 +165,14 @@ public final class CloudGateway implements LlmProvider {
         // trusted input here; the canary's promise covers the message parts the model did not
         // write (see the assistant clause below).
         // The filter's post-condition for vault values, checked rather than trusted, on every
-        // part -- assistant parts included. A marker is built from the key name and a value can
-        // be a substring of its own replacement, so the fallback marker was itself unverified --
-        // a value of "redacted" would have been written out inside «vault:redacted». Whatever the
+        // part -- assistant parts included -- by the rule the filter removes them by
+        // (Redactor.vaultValueAt). A marker is built from the key name and a value can be a
+        // substring of its own replacement, so the fallback marker was itself unverified -- a
+        // value of "redacted" would have been written out inside «vault:redacted». Whatever the
         // markers are, no vault value survives this point.
         for (var sv : vault.entrySet()) {
-            String value = sv.getValue();
-            if (value == null || value.length() < Redactor.MIN_SECRET_LENGTH) continue;
             for (Part part : parts) {
-                int at = part.text() == null ? -1 : part.text().indexOf(value);
+                int at = Redactor.vaultValueAt(part.text(), sv.getValue(), 0);
                 if (at < 0) continue;
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
                         parts, tally, null, List.of(), 0, "vault:" + sv.getKey() + " survived scrubbing"));

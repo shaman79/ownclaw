@@ -206,7 +206,7 @@ class DelegationBehaviourTest {
         var page = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(pageText));
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_fetch", Map.of("url", "https://ufleku.example.org/menu")),
-                done("The mail is about the guest network; the menu page is fetched."));
+                done("The mail says the wifi password is Kolibri-2291; the menu page is fetched."));
 
         var ctx = task();
         var outcome = executor(llm, new Usage(), imap, page).execute(plan("check mail and the menu"), ctx, UNCOUNTED);
@@ -217,9 +217,14 @@ class DelegationBehaviourTest {
         assertNull(ctx.egress("test").index().firstLeakIn(pageText, (h, w) -> false),
                 "not indexed, so the cloud's own fetch of the same page is not refused");
         assertFalse(outcome.text().contains("Restaurant U Fleků"), "withheld from the cloud");
-        assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the mail");
-        // The model's own answer quotes neither, so it is the cloud's to read (recordAnswer).
-        assertTrue(outcome.text().contains("The mail is about the guest network"), outcome.text());
+        // The model's summary copies the mail's password: a word shaped like a credential,
+        // shorter than a window and no whole value of the mail, kept here as a private answer.
+        assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the model's summary: " + outcome.text());
+        Artifact answer = ctx.artifacts().get(2);
+        assertEquals("local_answer", answer.tool());
+        assertEquals(Label.PRIVATE, answer.label());
+        assertEquals(List.of("quotes {{1}}"), answer.why());
+        // Mutation: check the answer by windows and whole values only -> the password is sent.
     }
 
     @Test
@@ -1059,9 +1064,15 @@ class DelegationBehaviourTest {
         Artifact fromFile = ctx.artifacts().get(1);
         assertEquals(Label.PRIVATE, fromFile.label());
         assertFalse(fromFile.indexed());
-        assertEquals(2, ctx.artifacts().size(), "no private answer kept");
         assertTrue(outcome.text().startsWith(SUMMARY), "the cloud reads the answer: " + outcome.text());
         assertNull(windowOf(STATEMENT, outcome.text()), outcome.text());
+        // Kept all the same, as a public result: the owner is given it whether or not the cloud
+        // places it (AgentLoop.withLocalAnswers).
+        Artifact answer = ctx.artifacts().get(2);
+        assertEquals("local_answer", answer.tool());
+        assertEquals(Label.PUBLIC, answer.label());
+        assertEquals(SUMMARY, answer.output());
+        assertTrue(outcome.produced().contains(answer));
     }
 
     @Test

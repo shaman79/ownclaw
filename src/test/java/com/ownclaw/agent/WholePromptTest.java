@@ -225,9 +225,9 @@ class WholePromptTest {
                 texts.add(String.valueOf(t.inputSchema()));
             }
             for (String text : texts) {
-                var tally = redactor.count("u1", text, Map.of());
-                assertFalse(tally.any(), tally.secretsRemoved() + " secrets, " + tally.identifiersReplaced()
-                        + " identifiers in: " + text);
+                var tally = new com.ownclaw.privacy.Redactor.Tally();
+                assertEquals(text, redactor.filter("u1", text, Map.of(), tally), tally.secretsRemoved()
+                        + " secrets, " + tally.identifiersReplaced() + " identifiers, or a placeholder's shape");
             }
         }
     }

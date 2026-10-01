@@ -317,4 +317,43 @@ class SkillCodegenTest {
         assertTrue(rig.cloud.calls("codegen").get(0).messages().get(1).content().contains(recorded),
                 "the recorded failure is the evidence the repair is for");
     }
+
+    @Test
+    @DisplayName("a placeholder the code is written with comes back as valid code when its value holds the quote around it")
+    void aRestoredApostropheStaysCode(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        // The one fault this code can have: the SSID put back between the quotes it holds.
+        rig.skills.syntax = code -> code.contains("'Fake Jana's WiFi'")
+                ? "SyntaxError: unterminated string literal (detected at line 1)" : null;
+        var spec = spec();
+        spec.put("description", "Says whether the network ssid=\"Fake Jana's WiFi\" is up.");
+        rig.cloud.codegen.add(c -> {
+            String shown = rig.cloud.calls("codegen").get(0).messages().get(1).content();
+            var m = java.util.regex.Pattern.compile("ssid=\"(<ssid_\\d+>)\"").matcher(shown);
+            assertTrue(m.find(), shown);
+            return finished("NETWORK = '" + m.group(1) + "'\n" + module("")).answer(c);
+        });
+
+        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec, task());
+
+        assertNull(out.error(), "repaired for ever against code the model never wrote: " + out.error());
+        assertTrue(String.valueOf(out.params().get("code")).startsWith("NETWORK = \"Fake Jana's WiFi\"\n"),
+                String.valueOf(out.params().get("code")));
+        assertEquals(1, rig.cloud.calls("codegen").size());
+        // Mutation: put the value back as it is -> 'Fake Jana's WiFi', and every repair fails.
+    }
+
+    @Test
+    @DisplayName("code that writes a secret the filter removed is refused, and nothing is created")
+    void codeThatWritesARemovedSecretIsRefused(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        rig.cloud.codegen.add(finished("KEY = '«secret removed»'\n" + module("")));
+
+        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), task());
+
+        assertNull(out.params());
+        assertTrue(out.error().startsWith("ERROR: the code for 'openwrt_audit' holds a removed secret, so "
+                + "nothing was created."), out.error());
+        // Mutation: no check -> a skill that writes «secret removed» as the router's key is created.
+    }
 }

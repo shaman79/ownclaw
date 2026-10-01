@@ -213,12 +213,13 @@ public class AgentLoop {
             List<String> keys = credentialVault.listCredentialKeys(userId);
             context.setCredentialKeys(keys);
             // The secret ones, decrypted once. The gateway removes them from every cloud call;
-            // decrypting per call would run PBKDF2 on every step. Keys that are not secrets --
-            // SMTP_HOST, SMTP_USER -- are not decrypted and not removed: a prompt can still say
-            // which server the mail goes through, and an address in one is an identifier, which
-            // the gateway's filter writes as a placeholder.
-            List<String> secretKeys = keys.stream()
-                    .filter(com.ownclaw.users.CredentialVault::isSecretKey).toList();
+            // decrypting per call would run PBKDF2 on every step. Which they are is the filter's
+            // own rule for a secret's name (Redactor.isSecretName): WIFI_PSK, WG_PRIVATE_KEY,
+            // ROUTER_PIN, SMTP_PASS. Keys that are not secrets -- SMTP_HOST, SMTP_USER -- are not
+            // decrypted and not removed: a prompt can still say which server the mail goes
+            // through, and an address in one is an identifier, which the filter writes as a
+            // placeholder.
+            List<String> secretKeys = keys.stream().filter(Redactor::isSecretName).toList();
             if (!secretKeys.isEmpty()) {
                 context.setSecretValues(credentialVault.getCredentials(userId, secretKeys));
             }
@@ -227,9 +228,10 @@ public class AgentLoop {
         }
 
         // A skill's own source is not a disclosure of what that skill returned: a Python
-        // traceback quotes the line that threw, so without this a credentialed skill's failure
-        // made its own repair prompt unsendable. Outside the vault's try, because it has nothing
-        // to do with credentials and a vault error must not silently leave it unwired.
+        // traceback quotes the line that threw, so without this the failure of a skill whose
+        // result is private -- a mail reader's -- made its own repair prompt unsendable. Outside
+        // the vault's try, because it has nothing to do with credentials and a vault error must
+        // not silently leave it unwired.
         context.setSkillSource(skillManager::readSkillCode);
 
         // Deterministic capability gap detection — if the task requires a known
@@ -482,6 +484,9 @@ public class AgentLoop {
     /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
     static final String PRIVATE_HEADER = "**Private — written by your local model, not seen by the cloud:**\n\n";
 
+    /** Above an answer of the local model on a file task that the cloud read but did not give the owner. */
+    static final String LOCAL_HEADER = "**Written by your local model:**\n\n";
+
     /** Above any other private result the cloud gives the owner: a skill's output, a file. */
     static final String PRIVATE_RESULT_HEADER = "**Private — not seen by the cloud:**\n\n";
 
@@ -522,10 +527,10 @@ public class AgentLoop {
      * Telegram an error notice -- and the text the model had written beside the call was lost; a
      * PDF's {{1}} is empty in the same way.
      * <p>
-     * On a task holding a file, a private answer of the local model -- one that quotes the file
-     * -- reaches the owner even when the cloud does not place its handle: "Done, see above" is a
-     * likely reply from a model that never saw the answer, relying on the cloud to remember is
-     * an instruction, and this is the one answer the task exists for.
+     * On a task holding a file, the local model's answer reaches the owner even when the cloud
+     * does not place it: "Done, see above" is a likely reply from a model that never saw a
+     * private answer, or that paraphrased a released one, relying on the cloud to remember is an
+     * instruction, and this is the one answer the task exists for.
      * <p>
      * Every result an answer shows in full is marked on the context ({@link AgentContext#markShown}),
      * so the ending of a task that asked a question does not show it a second time.
@@ -567,24 +572,36 @@ public class AgentLoop {
     }
 
     /**
-     * On a task holding a file, every private local answer the owner has not been given goes
-     * beneath the text, oldest first: two delegations can be two halves of the answer, and the
-     * cloud, which saw neither, cannot choose between them. The one it placed is not repeated.
-     * (A local answer is kept as a result only when it is private: one that quotes none of what
-     * the local model read went to the cloud in the delegation's report.)
+     * On a task holding a file, every local answer the owner has not been given goes beneath the
+     * text, oldest first: two delegations can be two halves of the answer, and the cloud cannot
+     * choose between them -- it saw neither of the private ones, and may have answered from a
+     * released one in words of its own. The one it placed is not repeated, and neither is a
+     * released one it copied out whole. A private answer goes to the owner only; a released
+     * one, which the cloud read in the delegation's report, goes in the response too.
      */
     static Answer withLocalAnswers(Answer a, Artifact placed, AgentContext ctx) {
         if (ctx.files().isEmpty()) return a;
-        var owed = new StringBuilder();
+        var owed = new StringBuilder();       // every answer owed, for the owner
+        var released = new StringBuilder();   // of those, the ones the cloud read
+        boolean anyPrivate = false;
         for (Artifact x : ctx.artifacts()) {
-            if ("local_answer".equals(x.tool()) && (placed == null || placed.n() != x.n())) {
+            if (!"local_answer".equals(x.tool()) || placed != null && placed.n() == x.n()) continue;
+            if (x.isPrivate()) {
                 owed.append("\n\n").append(PRIVATE_HEADER).append(x.output());
-                ctx.markShown(x);
+                anyPrivate = true;
+            } else if (!a.response().contains(x.output().strip())) {
+                String part = "\n\n" + LOCAL_HEADER + x.output();
+                owed.append(part);
+                released.append(part);
             }
+            ctx.markShown(x);
         }
         if (owed.length() == 0) return a;
-        String response = a.response().contains(PRIVATE_NOTE) ? a.response() : a.response() + "\n\n" + PRIVATE_NOTE;
-        return new Answer(response, (a.ownerText() != null ? a.ownerText() : a.response()) + owed, a.refusal());
+        String response = a.response() + released;
+        if (anyPrivate && !response.contains(PRIVATE_NOTE)) response = response + "\n\n" + PRIVATE_NOTE;
+        String ownerText = a.ownerText() == null && !anyPrivate ? null
+                : (a.ownerText() != null ? a.ownerText() : a.response()) + owed;
+        return new Answer(response, ownerText, a.refusal());
     }
 
     /**
@@ -1164,6 +1181,16 @@ public class AgentLoop {
     static final String SKILL_CREATE_ERROR = "skillCreateError";
 
     /**
+     * What the model is told of a call, or a skill's code, that holds a secret the privacy filter
+     * removed ({@link Redactor#holdsRemovedSecret}): it is not run, and why.
+     */
+    static final String REMOVED_SECRET = "«secret removed» and «vault:KEY» stand for a secret that "
+            + "was removed from what you were shown. Neither is a value: written anywhere, it would "
+            + "replace the secret with that text. Leave the setting it stands for as it is and change "
+            + "only what you mean to change, or have a skill read the secret where it is -- from the "
+            + "device, or from the vault as one of its credentials.";
+
+    /**
      * What a skill_create that failed is told beyond its own error when skill_create has already
      * failed for the same name in this task: each earlier attempt's error, whole and in order, so
      * the model changes the approach instead of the wording. Null when there is none.
@@ -1260,6 +1287,17 @@ public class AgentLoop {
         }
 
         Tool tool = toolOpt.get();
+
+        // A secret the filter removed is no value. The cloud reads a router's configuration with
+        // option key '«secret removed»', and a call that writes the section back as it read it
+        // would set the WiFi key to that text and lock every device out. Refused, whatever the
+        // tool: no call has a use for the marker.
+        if (Redactor.holdsRemovedSecret(action.params())) {
+            log.warn("Task {}: refused '{}' — an argument holds a removed secret.",
+                    context.taskId(), action.tool());
+            return AgentObservation.failure(action.tool(),
+                    "Not run: an argument holds a removed secret. " + REMOVED_SECRET, 0);
+        }
 
         // Where a skill's progress reports are shown: through LongRunningTaskManager. The
         // callback is available to every skill; only skills that call report_progress() will
@@ -2092,6 +2130,11 @@ public class AgentLoop {
                         ? "the reply for '" + name + "' held no Python code, so nothing was created."
                         : "the reply for '" + name + "' held Python code but no def run(params), which "
                                 + "every skill needs, so nothing was created.");
+            }
+            if (Redactor.holdsRemovedSecret(code)) {
+                log.warn("Skill '{}': the code holds a removed secret — refused.", name);
+                return Codegen.failed("the code for '" + name + "' holds a removed secret, so nothing "
+                        + "was created. " + REMOVED_SECRET);
             }
             String syntaxError = skillManager.checkPythonSyntax(code);
             if (syntaxError == null) {

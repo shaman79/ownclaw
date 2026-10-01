@@ -47,6 +47,39 @@ class RedactorTest {
             secret("GET https://api.example.org/v1/items?access_token=fakeQueryToken&page=2", "fakeQueryToken"),
             secret("mysql --password=fake-flag-pass -h db", "fake-flag-pass"),
             secret("connect(host, password=\"fake-kwarg-pass\")", "fake-kwarg-pass"),
+            // ... with an apostrophe written the way UCI and the shell write one
+            secret("\toption key 'Don'\\''t-guess-fake-77'", "t-guess-fake-77"),
+            secret("wireless.default_radio0.key='Don'\\''t-guess-fake-78'", "t-guess-fake-78"),
+            // ... unquoted, blanks and all, where a machine wrote the line
+            secret("wpa_passphrase=fake horse battery staple", "fake horse battery staple"),
+            secret("802-11-wireless-security.psk:           fake horse battery staple", "fake horse battery staple"),
+            secret("PASSWORD=fake-env-pass-2   # router admin", "fake-env-pass-2"),
+            // ... in the middle of a line
+            secret("2026-09-29 10:00:01 login ok user=root password=fake-logfmt-pass from 10.0.0.10", "fake-logfmt-pass"),
+            secret("Environment=\"API_TOKEN=fake-systemd-token\"", "fake-systemd-token"),
+            secret("Environment=OLLAMA_HOST=0.0.0.0 DB_PASSWORD=fake-systemd-pass", "fake-systemd-pass"),
+            secret("                \"MYSQL_ROOT_PASSWORD=fake-docker-pass\",", "fake-docker-pass"),
+            secret("uci set wireless.default_radio0.key=fake-uci-set-key", "fake-uci-set-key"),
+            secret("> Authorization: Basic ZmFrZTpmYWtlLWJhc2lj", "ZmFrZTpmYWtlLWJhc2lj"),
+            secret("curl -H 'Authorization: Bearer fakeMidLineToken01' https://api.example.org", "fakeMidLineToken01"),
+            secret("< Set-Cookie: sysauth_https=fakefakefakefakefakefakefake0002; path=/cgi-bin/luci/",
+                    "fakefakefakefakefakefakefake0002"),
+            // ... under names of keys, sessions and numbered keys
+            secret("network.wgpeer1.preshared_key='RmFrZVByZXNoYXJlZEtleUZvclRlc3RzMDAwMDA='",
+                    "RmFrZVByZXNoYXJlZEtleUZvclRlc3RzMDAwMDA="),
+            secret("PresharedKey = RmFrZVByZXNoYXJlZEtleUZvclRlc3RzMDAwMDE=", "RmFrZVByZXNoYXJlZEtleUZvclRlc3RzMDAwMDE="),
+            secret("\toption key1 's:Fake1'", "s:Fake1"),
+            secret("{\"result\":[0,{\"ubus_rpc_session\":\"fakefakefakefakefakefakefake0001\"}]}",
+                    "fakefakefakefakefakefakefake0001"),
+            // ... as command-line flags and Kubernetes pairs
+            secret("root 1 0 /usr/bin/backup-agent --user admin --password fake-ps-pass --host 10.0.0.10", "fake-ps-pass"),
+            secret("Example: curl -u root:fake-curl-pass http://10.0.0.1/", "fake-curl-pass"),
+            secret("        - name: DB_PASSWORD\n          value: fake-k8s-pass", "fake-k8s-pass"),
+            // ... in a URL, a WiFi QR code
+            secret("DATABASE_URL=postgres://app:fake-db-pass@db:5432/app", "fake-db-pass"),
+            secret("REDIS_URL=redis://:fake-redis-pass@cache:6379/0", "fake-redis-pass"),
+            secret("url: http://root:fake-url-pass@10.0.0.1/ubus", "fake-url-pass"),
+            secret("QR payload: WIFI:T:WPA;P:fake-qr-pass;;", "fake-qr-pass"),
             // secrets by their shape
             secret("key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nRkFLRUtFWU1BVEVSSUFM\n-----END OPENSSH PRIVATE KEY-----\nend",
                     "RkFLRUtFWU1BVEVSSUFM"),
@@ -68,6 +101,9 @@ class RedactorTest {
             secret("key xoxb-0000000000-FAKEFAKEFAKE here", "xoxb-0000000000-FAKEFAKEFAKE"),
             secret("key AKIAFAKEFAKEFAKE0000 here", "AKIAFAKEFAKEFAKE0000"),
             secret("key AIzaFakeFakeFakeFakeFakeFakeFakeFake000 here", "AIzaFakeFakeFakeFakeFakeFakeFakeFake000"),
+            secret("admin:$apr1$fakesalt$FakeApr1HashValue000/", "$apr1$fakesalt$FakeApr1HashValue000/"),
+            secret("GET https://api.telegram.org/bot123456789:FAKEfakeFAKEfakeFAKEfakeFAKEfake123/getUpdates",
+                    "FAKEfakeFAKEfakeFAKEfakeFAKEfake123"),
             // identifiers
             id("mail alice@example.org today", "alice@example.org", Redactor.Kind.EMAIL),
             id("call +1 202 555 0143 now", "+1 202 555 0143", Redactor.Kind.PHONE),
@@ -88,13 +124,23 @@ class RedactorTest {
             id("\tSSID: Fake Neighbour", "Fake Neighbour", Redactor.Kind.SSID),
             id("wlan0     ESSID: \"Fake-Essid\"", "Fake-Essid", Redactor.Kind.SSID),
             id("{\"ssid\":\"Fake-Json-Net\",\"encryption\":\"psk2\"}", "Fake-Json-Net", Redactor.Kind.SSID),
+            id("\toption ssid 'Fake'\\''s Net'", "Fake'\\''s Net", Redactor.Kind.SSID),
+            id("\t\tssid Fake-Iw-Net", "Fake-Iw-Net", Redactor.Kind.SSID),
+            id("ssid2=\"Fake-Ssid2\"", "Fake-Ssid2", Redactor.Kind.SSID),
+            id("QR payload: WIFI:T:WPA;S:Fake-QR-Net;;", "Fake-QR-Net", Redactor.Kind.SSID),
             id("\toption hostname 'fake-desktop'", "fake-desktop", Redactor.Kind.HOST),
             id("config host\n\toption name 'fake-laptop'\n\toption ip '10.0.0.20'", "fake-laptop", Redactor.Kind.HOST),
             id("dhcp.@host[0].name='fake-printer'", "fake-printer", Redactor.Kind.HOST),
             id("{\"hostname\": \"fake-phone\", \"ip\": \"10.0.0.31\"}", "fake-phone", Redactor.Kind.HOST),
             id("1727777777 00:00:5e:00:53:10 10.0.0.40 fake-tablet *", "fake-tablet", Redactor.Kind.HOST),
             id("# br-lan 0001000127aabbccdd 1a2b3c4d fake-nas 1727777777 1f 128 fd00::1f/128", "fake-nas",
-                    Redactor.Kind.HOST));
+                    Redactor.Kind.HOST),
+            id("fake-iphone.lan (10.0.0.23) at 00:00:5e:00:53:10 [ether]  on br-lan", "fake-iphone.lan",
+                    Redactor.Kind.HOST),
+            id("Sep 29 10:00:01 dnsmasq-dhcp[1234]: DHCPACK(br-lan) 10.0.0.23 00:00:5e:00:53:10 fake-iphone",
+                    "fake-iphone", Redactor.Kind.HOST),
+            id("GET /unsubscribe?email=jan.fake%40example.org HTTP/1.1", "jan.fake%40example.org", Redactor.Kind.EMAIL),
+            id("{\"contact\": \"jan.fake\\u0040example.org\"}", "jan.fake\\u0040example.org", Redactor.Kind.EMAIL));
 
     @Test
     @DisplayName("every secret form is removed and every identifier kind replaced, one each")
@@ -145,7 +191,17 @@ class RedactorTest {
                 "Enter your password:\npassword: str\nsecret = \"{secret}\"\nAPI_KEY=${API_KEY}",
                 "email the report @ noon; npm i pkg@1.2.3; @decorator",
                 "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAKHHIG\n-----END CERTIFICATE-----",
-                "shell: echo $1$2$3 and price $5$"));
+                "shell: echo $1$2$3 and price $5$",
+                // paging cursors, a public key, a GPIO pin, code that names a variable, a uid:gid,
+                // a help text's placeholder, and a word in brackets that is no address
+                "{\"files\": [{\"name\": \"a.txt\"}], \"nextPageToken\": \"CAoQAA\"}",
+                "{\"IsTruncated\": true, \"NextContinuationToken\": \"1ueGcxLPRx1Tr\"}",
+                "PublicKey = RmFrZVB1YmxpY0tleUZvclRlc3RzMDAwMDAwMDA=",
+                "  pin: 17\n  mode: output",
+                "    client.login(user=user, password=password)",
+                "docker run -u 1000:1000 image",
+                "  --password PASSWORD   the router's admin password\n  --token-file PATH",
+                "Lunch (tomorrow) at noon"));
         for (int[] o : new int[][] {{10, 0, 0, 1}, {10, 255, 3, 7}, {172, 16, 5, 4}, {172, 31, 255, 254},
                 {192, 168, 1, 20}, {100, 64, 0, 1}, {100, 127, 255, 254}, {127, 0, 0, 1}, {169, 254, 1, 1}}) {
             texts.add("gateway " + ip(o[0], o[1], o[2], o[3]) + " is up");
@@ -169,6 +225,80 @@ class RedactorTest {
         assertEquals(2, tally.secretsRemoved());
         assertEquals(2, new Redactor(null).count("u1", "fake-vault-value-9 fake-vault-value-9",
                 Map.of("ROUTER_PASS", "fake-vault-value-9")).secretsRemoved());
+    }
+
+    @Test
+    @DisplayName("a vault value under eight characters is removed where it stands as a word, and only there")
+    void shortVaultValues() {
+        var tally = new Redactor.Tally();
+        String out = new Redactor(null).filter("u1",
+                "Command '['sshpass', '-p', 'admin12', 'ssh']' failed; admin123, xadmin12 and ADMIN12_X are other words; ok: true",
+                Map.of("ROUTER_PASS", "admin12", "SMTP_AUTH", "true", "SHORT_PIN", "12"), tally);
+        assertEquals("Command '['sshpass', '-p', '«vault:ROUTER_PASS»', 'ssh']' failed; admin123, xadmin12 and "
+                + "ADMIN12_X are other words; ok: true", out, "a word every JSON holds, or two characters, is not removed");
+        assertEquals(1, tally.secretsRemoved());
+        assertEquals(-1, Redactor.vaultValueAt("the admin12_x key", "admin12", 0));
+        assertEquals(4, Redactor.vaultValueAt("pin 4821.", "4821", 0));
+    }
+
+    @Test
+    @DisplayName("one rule names a secret, for the vault's keys as for what a skill prints")
+    void secretNames() {
+        for (String name : List.of("WIFI_PSK", "WG_PRIVATE_KEY", "SSH_KEY", "WIFI_KEY", "ROUTER_PIN", "SMTP_PASS",
+                "IMAP_PASSWORD", "TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "key1", "sysauth", "ubus_rpc_session",
+                "Set-Cookie", "PresharedKey")) {
+            assertTrue(Redactor.isSecretName(name), name);
+        }
+        for (String name : List.of("ROUTER_HOST", "SMTP_USER", "SMTP_HOST", "nextPageToken", "NextContinuationToken",
+                "PublicKey", "pin", "auth_server", "max_tokens", "key_mgmt")) {
+            assertFalse(Redactor.isSecretName(name), name);
+        }
+    }
+
+    @Test
+    @DisplayName("a value written with a quoted string's escapes is kept as it reads, and found again as json.dumps writes it")
+    void escapedValuesAreKeptAsTheyRead() {
+        var redactor = new Redactor(null);
+        assertEquals("{\"ssid\": \"<ssid_1>\", \"clients\": 3}",
+                redactor.filter("u1", "{\"ssid\": \"Kav\\u00e1rna Fake\", \"clients\": 3}", Map.of(), new Redactor.Tally()));
+        assertEquals("connect to Kavárna Fake", redactor.restore("u1", "connect to <ssid_1>"));
+        assertEquals("{\"network\": \"<ssid_1>\"} and <ssid_1>",
+                redactor.filter("u1", "{\"network\": \"Kav\\u00e1rna Fake\"} and Kavárna Fake", Map.of(), new Redactor.Tally()),
+                "the same value, written either way");
+        assertEquals("\toption ssid '<ssid_2>'",
+                redactor.filter("u1", "\toption ssid 'Fake'\\''s Net'", Map.of(), new Redactor.Tally()));
+        assertEquals("Fake's Net", redactor.restore("u1", "<ssid_2>"));
+    }
+
+    @Test
+    @DisplayName("a placeholder that is a whole quoted string comes back between the other quotes when its value holds the one")
+    void restoredQuotesStayCode() {
+        var redactor = new Redactor(null);
+        redactor.filter("u1", "{\"ssid\": \"Fake Jana's WiFi\"}", Map.of(), new Redactor.Tally());
+        assertEquals("NETWORK = \"Fake Jana's WiFi\"", redactor.restore("u1", "NETWORK = '<ssid_1>'"));
+        assertEquals("NETWORK = \"Fake Jana's WiFi\"", redactor.restore("u1", "NETWORK = \"<ssid_1>\""));
+        assertEquals("on Fake Jana's WiFi.", redactor.restore("u1", "on <ssid_1>."));
+    }
+
+    @Test
+    @DisplayName("text in a placeholder's shape goes as a placeholder of its own, and a reply quoting it gets the text back")
+    void placeholderShapedTextRoundTrips() {
+        var redactor = new Redactor(null);
+        redactor.filter("u1", "Owner: owner@example.org", Map.of(), new Redactor.Tally());
+        var tally = new Redactor.Tally();
+        assertEquals("for example <text_1>.", redactor.filter("u1", "for example <email_1>.", Map.of(), tally));
+        assertFalse(tally.any(), "no identifier, no secret");
+        assertEquals("for example <email_1>.", redactor.restore("u1", "for example <text_1>."));
+        assertEquals("owner@example.org", redactor.restore("u1", "<email_1>"));
+    }
+
+    @Test
+    @DisplayName("a removed secret is found in a call's arguments, keys and values, at any depth")
+    void removedSecretsAreFound() {
+        assertTrue(Redactor.holdsRemovedSecret(Map.of("config", List.of("option key '" + Redactor.SECRET_REMOVED + "'"))));
+        assertTrue(Redactor.holdsRemovedSecret(Map.of("x", Map.of("«vault:ROUTER_PASS»", 1))));
+        assertTrue(Redactor.holdsRemovedSecret("pw = '«vault:ROUTER_PASS»'"));
+        assertFalse(Redactor.holdsRemovedSecret(Map.of("ssid", "Fake Home", "n", 3)));
     }
 
     @Test
@@ -233,6 +363,8 @@ class RedactorTest {
                 "nested", Map.of("note", "on <ssid_1>"), "n", 3);
         assertEquals(Map.of("ssid", "Fake Home", "macs", List.of("00:00:5e:00:53:01", "x"),
                 "nested", Map.of("note", "on Fake Home"), "n", 3), redactor.restoreTree("u1", args));
+        assertEquals(Map.of("vlan_by_mac", Map.of("00:00:5e:00:53:01", 20)),
+                redactor.restoreTree("u1", Map.of("vlan_by_mac", Map.of("<mac_1>", 20))), "keys too");
         Map<String, Object> plain = Map.of("q", "no placeholder", "list", List.of("a"));
         assertSame(plain, redactor.restoreTree("u1", plain));
     }
@@ -242,7 +374,8 @@ class RedactorTest {
     void linearTime() {
         var redactor = new Redactor(null);
         for (String unit : List.of("a@", "a:", "a=", "\"a\":", "1 ", "+1", "$1$", "eyJ", "DE89", "aa:bb:",
-                "1.1.1.", "-----BEGIN ", "'", "::", "f:")) {
+                "1.1.1.", "-----BEGIN ", "'", "::", "f:", "WIFI:S:", "a://b:", "--password ", "DHCPA(",
+                "a%40", "x (1.2.3.4) at ", "password=x ", "<a_1>", "bot1234567:")) {
             String text = unit.repeat(1_000_000 / unit.length());
             assertTimeoutPreemptively(Duration.ofSeconds(10),
                     () -> redactor.filter("u1", text, Map.of(), new Redactor.Tally()),
