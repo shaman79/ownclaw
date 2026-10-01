@@ -674,7 +674,8 @@ public class ThinkingEngine {
         sb.append("  as a description. It sees no other earlier result.\n");
         sb.append("  Best for: private data -- to read, summarise, search, compare or answer a\n");
         sb.append("  question about it -- and tool calls on this machine, the LAN and its servers.\n");
-        sb.append("  Nothing leaves the host.\n");
+        sb.append("  What it reads stays on this machine. Its answer comes back to you -- as a\n");
+        sb.append("  handle to pass on when it quotes private data.\n");
         sb.append("  Speed: it reads about 100 tokens a second and writes about 8, so reading a\n");
         sb.append("  long result or writing a long answer takes minutes.\n");
         sb.append("  goal* — what to achieve, stated fully, with the handle of each earlier\n");
@@ -720,6 +721,7 @@ public class ThinkingEngine {
         sb.append("- On failure: diagnose WHY, then try fundamentally different approach. Never repeat failed actions.\n");
         sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
         sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
+        sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders such as <email_1> or <ssid_2>. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
         sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
@@ -781,8 +783,9 @@ public class ThinkingEngine {
           .append("a text file is given to the local model whole; for one with no text read, name the ")
           .append("skill that reads it (if none does, skill_create one that parses it from ")
           .append("params._attached_files -- parsing is what a skill is for). The ")
-          .append("delegation's answer comes back as a handle; make that handle the whole of ")
-          .append("respond's message and its text is filled in on this machine for the user. ")
+          .append("delegation's answer comes back to you, or -- when it quotes the file -- as a ")
+          .append("handle: make that handle the whole of respond's message and its text is ")
+          .append("filled in on this machine for the user. ")
           .append("A file is handed only to this task: asking the user a question ends it, and ")
           .append("the reply is a new task without the file -- read it first.\n");
         return sb.toString();

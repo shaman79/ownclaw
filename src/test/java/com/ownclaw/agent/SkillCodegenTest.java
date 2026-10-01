@@ -305,7 +305,7 @@ class SkillCodegenTest {
         ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Skill error: [AUTHENTICATIONFAILED]\n"
                         + "Traceback (most recent call last):\n  File \"/skills/imap_fetch/skill.py\", line 12, "
                         + "in run\nimaplib.IMAP4.error: login refused for petr@example.org", false,
-                Artifact.labelFor(List.of("IMAP_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
         rig.cloud.codegen.add(finished(module("")));
         var spec = spec();
         spec.put("name", "web_fetch");

@@ -187,7 +187,7 @@ class ChatDeliveryTest {
         // The real queue: what breaks in a task comes back as its ERROR result, never as a
         // future completed exceptionally.
         var loop = new com.ownclaw.agent.AgentLoop(null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null) {
+                null, null, null, null, null, null, null, null, null, null, null) {
             @Override
             public AgentResult executeFull(String userId, String message, boolean unattended,
                                            String currentMessageId, List<String> attachmentIds,

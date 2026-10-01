@@ -24,12 +24,15 @@ public interface EgressLedger {
      * {@code stopReason} is why the provider's reply ended -- "end_turn", "max_tokens",
      * "refusal (cyber)" -- or null when there was no reply. A provider's refusal is recorded
      * there, not in {@code refusalRef}, which is the gateway's own: why it did not send, what its
-     * check observed, or how the call failed.
+     * check observed, or how the call failed. {@code secretsRemoved} and
+     * {@code identifiersReplaced} count what the privacy filter took out of the request and
+     * what it wrote as placeholders.
      */
     record Row(String userId, String taskId, String purpose, String provider, String model,
                Decision decision, List<Part> parts, long bytesOut, int toolCount,
                int promptTokens, int completionTokens, int cacheWriteTokens, int cacheReadTokens,
-               double costUsd, int scrubs, String refusalRef, String stopReason) {}
+               double costUsd, int secretsRemoved, int identifiersReplaced, String refusalRef,
+               String stopReason) {}
 
     void record(Row row);
 }

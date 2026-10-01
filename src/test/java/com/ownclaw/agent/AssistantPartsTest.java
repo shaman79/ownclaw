@@ -136,7 +136,7 @@ class AssistantPartsTest {
                 AgentObservation.success("plan_report", "noted", Map.of(), 5));
 
         var audit = ctx.addArtifact("router_audit", Map.of(), Map.of(), REPORT, true,
-                Artifact.labelFor(List.of("ROUTER_USER", "ROUTER_PASS"), List.of()));
+                Artifact.labelFor(true, List.of()));
         ctx.trajectory().record(new AgentAction("router_audit", Map.of(), "auditing"),
                 Artifact.asObservation(audit, ToolResult.success(REPORT), 10));
 
@@ -147,7 +147,7 @@ class AssistantPartsTest {
         resolved.put("content", REPORT);
         String preview = writerResult(resolved);
         var write = ctx.addArtifact("write_text_file_verbatim", written, resolved, preview, true,
-                Artifact.labelFor(List.of(), List.of(audit)));
+                Artifact.labelFor(false, List.of(audit)));
         ctx.trajectory().record(new AgentAction("write_text_file_verbatim", written, "saving it"),
                 Artifact.asObservation(write, ToolResult.success(preview), 10));
         assertTrue(audit.isPrivate() && write.isPrivate(), "both results are private");
@@ -266,7 +266,7 @@ class AssistantPartsTest {
         assertTrue(sent.stream().noneMatch(m -> m.content().contains(secret)), "the value never left");
         assertTrue(sent.stream().anyMatch(m -> m.role() == LlmMessage.Role.ASSISTANT
                 && m.content().contains("«vault:ROUTER_PASS»")));
-        assertTrue(rows.get(0).scrubs() >= 1);
+        assertTrue(rows.get(0).secretsRemoved() >= 1);
     }
 
     @Test
@@ -404,7 +404,8 @@ class AssistantPartsTest {
                 null, new SkillCuratorService(jdbc, null, null, null), new NoSkills(),
                 new DebugSessionService(), new TaskCancellationService(), null, null,
                 new LongRunningTaskManager(jdbc, emitter, events, config), null,
-                new TokenBudgetTracker(jdbc, config, emitter), events, null, null, null);
+                new TokenBudgetTracker(jdbc, config, emitter), events, null, null, null,
+                new com.ownclaw.privacy.Redactor(null));
     }
 
     @Test
@@ -413,6 +414,7 @@ class AssistantPartsTest {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         var config = new OwnClawConfig();
         config.getMentor().setProvider("anthropic");
+        config.getPrivacy().setPersonalSources(List.of("ROUTER_"));   // the audit stands for a private result
         var registry = new ToolRegistry(List.of(
                 tool("plan_report", List.of(), p -> "noted"),
                 tool("router_audit", List.of("ROUTER_USER", "ROUTER_PASS"), p -> REPORT),

@@ -66,7 +66,7 @@ class PrivateObservationRenderingTest {
     private static AgentContext taskWith(String tool, List<String> credentials, String output) {
         var ctx = new AgentContext("u1", "t1", "Summarise my mailbox and email me the result.");
         ctx.setUnattended(true);
-        var decision = Artifact.labelFor(credentials, List.of());
+        var decision = Artifact.labelFor(!credentials.isEmpty(), List.of());
         var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, decision);
         var obs = Artifact.asObservation(a, ToolResult.success(output), 10);
         ctx.trajectory().record(new AgentAction(tool, Map.of(), "fetching"), obs);
@@ -115,7 +115,7 @@ class PrivateObservationRenderingTest {
         }
         assertTrue(texts.stream().anyMatch(t -> t.contains("{{1}} imap_fetch")),
                 "and the descriptor IS there, so the cloud knows the result exists");
-        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (credentials (1))")));
+        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (personal source)")));
 
         // Independent: the real door, with the task's own index, sends every message.
         var rows = new ArrayList<EgressLedger.Row>();

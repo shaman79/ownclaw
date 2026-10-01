@@ -2,7 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
-import com.ownclaw.llm.CloudGateway;
+import com.ownclaw.privacy.Redactor;
 import com.ownclaw.llm.LlmException;
 import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
@@ -20,14 +20,15 @@ import java.util.function.BiConsumer;
 
 /**
  * The chat an attended task reports its progress in while it works: a message before each step
- * of the loop, one before each tool call of a delegation, and the local model's summary of each
+ * of the loop, one before each tool call of a delegation, one after a step whose result the
+ * privacy filter changes before the cloud model reads it, and the local model's summary of each
  * private result. Each is a row of role {@code progress} in the chat the task's own message was
  * saved in, never the answer, which is delivered as before.
  * <p>
  * A progress row is the owner's view of a task at work. No prompt reads one:
  * {@link ConversationService#contextOf} reads user and assistant rows only, and the full-text
  * index holds no other. Its content is what the cloud could be shown -- the code's header, the
- * cloud's own words beside its call, or a note that a summary exists -- and a summary of a
+ * cloud's own words beside its call, counts, or a note that a summary exists -- and a summary of a
  * private result, which only the owner may read, is the row's private content, which only the
  * owner's own chat reads back. A row is saved only while its chat exists: one a summary posts
  * after the owner deleted the chat is neither saved nor shown.
@@ -99,7 +100,7 @@ public final class TaskChat {
     void step(int step, AgentAction action, String narration) {
         if (sessionId == null) return;
         String words = narration == null ? "" : TaskRecord.inWords(
-                CloudGateway.scrub(narration, task.secretValues()).text()).strip();
+                Redactor.scrubVault(narration, task.secretValues()).text()).strip();
         post("**" + header(step, action, task.elapsedMs(), task.cloudCostUsd()) + "**"
                 + (words.isEmpty() ? "" : "\n\n" + words), null);
     }
@@ -119,6 +120,28 @@ public final class TaskChat {
     void localTurn(int turn, String tool) {
         if (sessionId == null) return;
         post("**Local model · turn " + turn + " · " + tool + "**", null);
+    }
+
+    /**
+     * After a step whose result the gateway's filter changes before the cloud model reads it:
+     * how many secrets it removes and identifiers it replaces -- counts, nothing of what they are.
+     */
+    void filtered(Redactor.Tally taken) {
+        if (sessionId == null || !taken.any()) return;
+        post("For the cloud model: " + described(taken) + ".", null);
+    }
+
+    /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
+    static String described(Redactor.Tally t) {
+        var parts = new java.util.ArrayList<String>();
+        if (t.secretsRemoved() > 0) {
+            parts.add(t.secretsRemoved() + (t.secretsRemoved() == 1 ? " secret" : " secrets") + " removed");
+        }
+        if (t.identifiersReplaced() > 0) {
+            parts.add(t.identifiersReplaced() + (t.identifiersReplaced() == 1 ? " identifier" : " identifiers")
+                    + " replaced");
+        }
+        return String.join(", ", parts);
     }
 
     /**
@@ -170,7 +193,7 @@ public final class TaskChat {
             why = failed(e);
         }
         String name = "**Result " + result.n() + " (" + result.tool() + ")**" + (ended
-                ? " of your message “" + CloudGateway.scrub(task.originalMessage(), task.secretValues()).text() + "”"
+                ? " of your message “" + Redactor.scrubVault(task.originalMessage(), task.secretValues()).text() + "”"
                 : "");
         if (why != null) {
             post(name + " — the local model could not summarise it: " + why + ".", null);
@@ -178,7 +201,7 @@ public final class TaskChat {
         }
         post(name + " — summarised by your local model; private, shown only to you.",
                 name + " — summarised by your local model, not seen by the cloud:\n\n"
-                        + CloudGateway.scrub(summary, task.secretValues()).text());
+                        + Redactor.scrubVault(summary, task.secretValues()).text());
     }
 
     /**

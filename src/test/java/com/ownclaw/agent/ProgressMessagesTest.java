@@ -39,8 +39,11 @@ class ProgressMessagesTest {
     static final String SUMMARY = "Zůstatek k 30. září je 48 213,07 Kč.";
 
     static final Tool PING = tool("ping", List.of(), p -> "pong");
-    /** A skill that needs a credential: what it returns is PRIVATE. */
-    static final Tool BANK = tool("bank_fetch", List.of("BANK_PASS"), p -> STATEMENT);
+    /**
+     * A skill that reads a personal source -- the statement from the mailbox it arrives in, with
+     * an IMAP credential: what it returns is PRIVATE.
+     */
+    static final Tool BANK = tool("bank_fetch", List.of("IMAP_PASS"), p -> STATEMENT);
 
     /** A local model answering every call with {@code answer}, keeping what it was asked. */
     static final class Local implements LlmProvider {
@@ -370,5 +373,16 @@ class ProgressMessagesTest {
         var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE).toList();
         assertEquals(1, live.size(), "the ops turn's is saved, and shown nowhere");
         assertEquals(Boolean.TRUE, live.get(0).data().get("telegram"));
+    }
+
+    @Test
+    @DisplayName("what the filter took from a result is said in counts, each part only when it is not zero")
+    void theFilterNote() {
+        var redactor = new com.ownclaw.privacy.Redactor(null);
+        assertEquals("2 secrets removed, 1 identifier replaced", TaskChat.described(redactor.count("u1",
+                "password=fake-pass-1\ntoken=fake-token-2\nmail alice@example.org", Map.of())));
+        assertEquals("1 secret removed", TaskChat.described(redactor.count("u1", "password=fake-pass-1", Map.of())));
+        assertEquals("3 identifiers replaced", TaskChat.described(redactor.count("u1",
+                "a@example.org b@example.org c@example.org", Map.of())));
     }
 }

@@ -32,7 +32,7 @@ class ArtifactRefTest {
 
     private static final List<Artifact> NAMESPACE = List.of(
             new Artifact(1, "imap_fetch", Map.of(), Map.of(), PRIVATE_JSON, true, Label.PRIVATE,
-                    List.of("credentials (1)")),
+                    List.of("personal source")),
             new Artifact(2, "daily_menu_fetcher", Map.of(), Map.of(),
                     "ERROR: Traceback: AttributeError: 'NoneType' object has no attribute 'text'",
                     false, Label.PUBLIC, List.of()));
@@ -98,7 +98,7 @@ class ArtifactRefTest {
         for (String v : ATTEMPTS) {
             var r = References.resolve(Map.of("body", v), NAMESPACE);
             if (!r.ok() || v.equals(r.params().get("body"))) continue;
-            assertEquals(Label.PRIVATE, Artifact.labelFor(List.of(), r.used()).label(),
+            assertEquals(Label.PRIVATE, Artifact.labelFor(false, r.used()).label(),
                     "private bytes moved and the result was labelled PUBLIC: " + v);
         }
     }
@@ -154,7 +154,7 @@ class ArtifactRefTest {
     void anOkFalseResultIsAFailure() {
         var smtpError = new Artifact(1, "smtp_send_email", Map.of(), Map.of(),
                 "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}", true,
-                Label.PRIVATE, List.of("credentials (1)"));
+                Label.PRIVATE, List.of("personal source"));
         assertFalse(smtpError.succeeded(), "the harness said success; the skill said it failed");
         assertFalse(References.resolve(Map.of("body", "{{1}}"), List.of(smtpError)).ok(),
                 "an error envelope is not something to send on");

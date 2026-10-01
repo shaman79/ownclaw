@@ -259,17 +259,21 @@ class AgentContextArtifactsTest {
     }
 
     @Test
-    @DisplayName("on a file task, a credentialed result gets the short descriptor too")
-    void credentialsOnAFileTaskKeepTheirDescriptor() {
-        var ctx = task("email this statement to my accountant");
+    @DisplayName("on a file task, a personal source's result gets the short descriptor too")
+    void personalSourcesOnAFileTaskKeepTheirDescriptor() {
+        var ctx = task("file this statement with the mail from my accountant");
         ctx.addFile("f1", "", PDF_WHY);
 
-        var d = ctx.decide(List.of("SMTP_PASS"), List.of(), false, "sent");
+        var d = ctx.decide(List.of("IMAP_PASS"), List.of(), false, "3 unread");
         assertEquals(Label.PRIVATE, d.label());
-        assertEquals(List.of("credentials (1)"), d.why());
+        assertEquals(List.of("personal source"), d.why());
         assertFalse(d.indexed(),
-                "every skill is handed the file, a credentialed one too, so its key names can be "
+                "every skill is handed the file, a mail reader too, so its key names can be "
                         + "the file's data");
+
+        // A credentialed skill that reads no personal source is the file rule's, like any other.
+        var sent = ctx.decide(List.of("SMTP_PASS"), List.of(), false, "sent");
+        assertEquals(List.of("given the file {{1}}"), sent.why());
     }
 
     @Test

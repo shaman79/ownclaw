@@ -88,7 +88,8 @@ class StopWithoutLocalModelTest {
             for (LlmProvider local : new LlmProvider[]{new Down(), null, wedged.provider()}) {
                 var loop = new AgentLoop(null, null, null, new ChatStatusEmitter(), config,
                         new LlmRouter(local, null, config, null), null, null, null, null, null, null,
-                        conversations, null, null, null, new EventLogService(jdbc), null, null, files);
+                        conversations, null, null, null, new EventLogService(jdbc), null, null, files,
+                        new com.ownclaw.privacy.Redactor(null));
                 String which = local == null ? "no local model"
                         : local instanceof Down ? "a local model that is down" : "a local server that never answers";
                 AgentResult r = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),

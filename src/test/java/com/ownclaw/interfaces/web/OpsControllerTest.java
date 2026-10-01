@@ -66,7 +66,7 @@ class OpsControllerTest {
 
         ScriptedLoop(JdbcTemplate jdbc) {
             super(null, null, null, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, null, null);
+                    null, null, null, null, null, null, null, null, null, null, null);
             this.jdbc = jdbc;
         }
 

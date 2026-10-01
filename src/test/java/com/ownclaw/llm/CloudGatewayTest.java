@@ -2,6 +2,7 @@ package com.ownclaw.llm;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.privacy.PrivateIndex;
+import com.ownclaw.privacy.Redactor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +14,7 @@ import java.util.Random;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The door, in order: refuse if unclassified, scrub, canary, send, record.
+ * The door, in order: refuse if unclassified, filter, canary, send, record, put the values back.
  * <p>
  * Each test names the step it pins and the mutation that would break it. The fake provider
  * records exactly what it was handed, because "the provider never saw it" is the claim.
@@ -246,12 +247,11 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("a vault value scrubbing could not reach refuses the call")
-    void secretsThatSurviveScrubbingAreRefused() {
-        // scrub() rewrites message text and tool DESCRIPTIONS. A schema is neither, so a secret
-        // sitting in one used to travel with a scrub count of zero and nothing to show for it.
-        // The marker itself was also unverified: a value of "redacted" would have been written
-        // out inside «vault:redacted». This is the post-condition rather than the promise.
+    @DisplayName("a vault value in a tool's schema is removed, as in every other part")
+    void schemasAreFiltered() {
+        // The scrub used to rewrite message text and tool DESCRIPTIONS only, so a secret sitting
+        // in a schema reached the post-condition below and refused the call. The filter now
+        // covers every part.
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var tool = new ToolSpec("fx_rates", "Rates.",
@@ -260,10 +260,25 @@ class CloudGatewayTest {
                 .withEgress(egress(new PrivateIndex(), Map.of("API_TOKEN", "hunter2secret"),
                         (h, w) -> false));
 
-        assertThrows(EgressRefused.class, () -> gw.chat(messages("go"), cfg));
+        gw.chat(messages("go"), cfg);
+        assertEquals("token=«vault:API_TOKEN»", provider.configs.get(0).tools().get(0).inputSchema().get("example"));
+        assertEquals(1, rows.last().secretsRemoved());
+    }
+
+    @Test
+    @DisplayName("a vault value its own marker carries refuses the call")
+    void secretsThatSurviveScrubbingAreRefused() {
+        // The marker is unverified: a value of "redacted" under a key that holds it is written
+        // out inside «vault:redacted». This is the post-condition rather than the promise.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var cfg = new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of("redacted", "redacted"), (h, w) -> false));
+
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("the word redacted"), cfg));
         assertTrue(provider.calls.isEmpty(), "checked before the socket opens");
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
-        assertTrue(rows.last().refusalRef().contains("API_TOKEN"), rows.last().refusalRef());
+        assertTrue(rows.last().refusalRef().contains("vault:redacted"), rows.last().refusalRef());
     }
 
     @Test
@@ -364,7 +379,7 @@ class CloudGatewayTest {
 
         String sent = provider.calls.get(0).get(1).content();
         assertEquals("log in with «vault:IMAP_PASS» on port 465 then «vault:IMAP_PASS» again", sent);
-        assertEquals(2, rows.last().scrubs());
+        assertEquals(2, rows.last().secretsRemoved());
         // Mutations: skip the scrub -> value sent; scrub every key -> "465" replaced.
     }
 
@@ -384,7 +399,7 @@ class CloudGatewayTest {
         // literal value "vault:PASS", so scrubbing it into its own key name would have sent the
         // secret in the shape of a redaction -- one scrub recorded, nothing actually withheld.
         assertEquals("the value is «vault:redacted» here", provider.calls.get(0).get(1).content());
-        assertEquals(1, rows.last().scrubs());
+        assertEquals(1, rows.last().secretsRemoved());
     }
 
     @Test
@@ -540,5 +555,107 @@ class CloudGatewayTest {
         String serialised = rows.last().toString();
         assertFalse(serialised.contains("quick brown fox"), "a ledger is not an audit copy");
         assertTrue(serialised.contains("chars=" + text.length()));
+    }
+
+    // ── the filter ──
+
+    @Test
+    @DisplayName("generated configs and logs: no planted secret leaves in any part, and every identifier leaves as a placeholder")
+    void nothingPlantedLeavesAnyPart() {
+        var random = new Random(20261001);
+        String[] resolvers = {"9.9.9.9", "1.1.1.1", "2606:4700:4700::1111"};
+        for (int n = 0; n < 150; n++) {
+            String vault = "FakeVault-" + n + "-" + Long.toString(random.nextLong() & 0xffffffffL, 36);
+            String key = "fake-wifi-key-" + random.nextInt(1_000_000);
+            String token = "fakeToken" + random.nextInt(1_000_000) + "x";
+            String pass = "fake-pass-" + random.nextInt(1_000_000);
+            String ssid = "Fake Net " + random.nextInt(1_000);
+            String host = "fake-host-" + random.nextInt(1_000);
+            String mail = "user" + random.nextInt(1_000) + "@example.org";
+            String mac = String.format("00:00:5e:00:53:%02x", random.nextInt(256));
+            String ip = resolvers[random.nextInt(resolvers.length)];
+            String[] lines = {
+                    "\toption ssid '" + ssid + "'", "\toption key '" + key + "'",
+                    "config host\n\toption name '" + host + "'\n\toption mac '" + mac + "'",
+                    "wpa_passphrase=" + pass, "{\"password\": \"" + pass + "\", \"ssid\": \"" + ssid + "\"}",
+                    "Authorization: Bearer " + token, "GET /api?token=" + token + "&q=1",
+                    "login root / " + vault, "mail from " + mail + " via " + ip,
+                    "1727777777 " + mac + " 10.0.0.9 " + host + " *", "upstream " + ip + " port 53",
+                    "\toption encryption 'psk2'", "uptime 12 days, load 0.10"};
+            var text = new StringBuilder();
+            for (int k = 0; k < 4 + random.nextInt(8); k++) text.append(lines[random.nextInt(lines.length)]).append('\n');
+            String t = text.toString();
+
+            var provider = new Recording(); var rows = new Rows();
+            var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+            var tool = new ToolSpec("router_read", "Reads the router. Example output:\n" + t,
+                    Map.of("type", "object", "properties", Map.of("q", Map.of("type", "string", "description", t))));
+            var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
+                    .withEgress(egress(new PrivateIndex(), Map.of("ROUTER_PASS", vault), (h, w) -> false));
+            gw.chat(List.of(LlmMessage.system(t), LlmMessage.user(t), LlmMessage.assistant(t)), cfg);
+
+            var sent = new ArrayList<String>();
+            for (LlmMessage m : provider.calls.get(0)) sent.add(m.content());
+            for (ToolSpec spec : provider.configs.get(0).tools()) {
+                sent.add(spec.description());
+                sent.add(String.valueOf(spec.inputSchema()));
+            }
+            assertEquals(5, sent.size());
+            for (String part : sent) {
+                for (String planted : List.of(vault, key, token, pass, ssid, host, mail, mac, ip)) {
+                    assertFalse(part.contains(planted), "[" + planted + "] left in: " + part);
+                }
+            }
+            var row = rows.last();
+            assertTrue(row.secretsRemoved() + row.identifiersReplaced() > 0, t);
+        }
+        // Mutation: filter only the messages, as the scrub once did -> the tool's parts carry them.
+    }
+
+    @Test
+    @DisplayName("the canary reads the filtered text, and still refuses a private result's bytes in a user part")
+    void theCanaryReadsTheFilteredText() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String mail = "From alice@example.org: " + prose(2_000, 21) + " -- call me on +1 202 555 0143";
+        var index = new PrivateIndex(); index.addPrivate(3, mail);
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
+
+        var refused = assertThrows(EgressRefused.class, () -> gw.chat(messages("the mail: " + mail), cfg));
+        assertTrue(refused.getMessage().contains("{{3}}"), refused.getMessage());
+        assertTrue(provider.calls.isEmpty());
+        assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
+        assertEquals(2, rows.last().identifiersReplaced(), "the address and the number, replaced before the check");
+    }
+
+    @Test
+    @DisplayName("a reply's placeholders are put back, in its text and in every tool call's arguments")
+    void aReplyIsRestored() {
+        var redactor = new Redactor(null);
+        var calls = new ArrayList<List<LlmMessage>>();
+        LlmProvider cloud = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                calls.add(m);
+                return Replies.of("Moving <mac_1> to <ssid_1>; <email_7> is unknown.", 10, 5, 0, 0, "tool_use",
+                        List.of(new ToolCall("c1", "wifi_set", Map.of("ssid", "<ssid_1>",
+                                "clients", List.of("<mac_1>")))));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+            public String model() { return "claude-opus-5"; }
+        };
+        var rows = new Rows();
+        var gw = new CloudGateway(cloud, cloud, config("anthropic", CloudGateway.Mode.ENFORCE), rows, null, redactor);
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+
+        var reply = gw.chat(messages("\toption ssid 'Fake Home'\nstation 00:00:5e:00:53:01 joined"), cfg);
+
+        assertEquals("\toption ssid '<ssid_1>'\nstation <mac_1> joined", calls.get(0).get(1).content());
+        assertEquals(2, rows.last().identifiersReplaced());
+        assertEquals("Moving 00:00:5e:00:53:01 to Fake Home; <email_7> is unknown.", reply.content());
+        assertEquals(Map.of("ssid", "Fake Home", "clients", List.of("00:00:5e:00:53:01")),
+                reply.toolCalls().get(0).arguments());
+        // Mutation: return the provider's reply as it came -> the tool runs with "<ssid_1>".
     }
 }

@@ -47,7 +47,10 @@ public class EventEgressLedger implements EgressLedger {
             d.put("cacheWriteTokens", r.cacheWriteTokens());
             d.put("cacheReadTokens", r.cacheReadTokens());
             d.put("costUsd", r.costUsd());
-            d.put("scrubs", r.scrubs());
+            // Under the name it had when vault values were the only secrets removed: rows from
+            // then and from now are read alike.
+            d.put("scrubs", r.secretsRemoved());
+            d.put("identifiers", r.identifiersReplaced());
             if (r.refusalRef() != null) d.put("refusal", r.refusalRef());
             if (r.stopReason() != null) d.put("stopReason", r.stopReason());
             d.put("parts", r.parts().stream().map(p -> {

@@ -206,7 +206,7 @@ class DelegationBehaviourTest {
         var page = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(pageText));
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_fetch", Map.of("url", "https://ufleku.example.org/menu")),
-                done("The mail says the wifi password is Kolibri-2291; the menu page is fetched."));
+                done("The mail is about the guest network; the menu page is fetched."));
 
         var ctx = task();
         var outcome = executor(llm, new Usage(), imap, page).execute(plan("check mail and the menu"), ctx, UNCOUNTED);
@@ -217,7 +217,9 @@ class DelegationBehaviourTest {
         assertNull(ctx.egress("test").index().firstLeakIn(pageText, (h, w) -> false),
                 "not indexed, so the cloud's own fetch of the same page is not refused");
         assertFalse(outcome.text().contains("Restaurant U Fleků"), "withheld from the cloud");
-        assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the model's summary");
+        assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the mail");
+        // The model's own answer quotes neither, so it is the cloud's to read (recordAnswer).
+        assertTrue(outcome.text().contains("The mail is about the guest network"), outcome.text());
     }
 
     @Test
@@ -301,30 +303,58 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("a goal that names a private result gives it to the local model whole; its answer stays private, and reading it was the work")
+    @DisplayName("a goal that names a private result gives it to the local model whole; an answer that quotes none of it goes to the cloud, and reading it was the work")
     void aGoalIsGivenThePrivateResultItNames() {
         var ctx = new AgentContext("u1", "t1", "What does the bank say my balance is?");
-        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), "Your balance is 48,213.07 CZK.", true,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+        String mail = "From the bank, 30 September: your balance is 48,213.07 CZK. Thank you for banking with us.";
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), mail, true,
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
         var llm = new Scripted(done("The bank says the balance is 48,213.07 CZK."));
 
         var outcome = executor(llm, new Usage()).execute(plan("Answer from {{1}}: what is the balance?"), ctx, UNCOUNTED);
 
         String system = llm.calls.get(0).get(0).content();
         assertTrue(system.contains("**Goal:** Answer from result 1: what is the balance?"), system);
-        assertTrue(system.contains("### result 1 (imap_fetch)\nYour balance is 48,213.07 CZK."),
-                "given whole, in the local model's prompt: " + system);
+        assertTrue(system.contains("### result 1 (imap_fetch)\n" + mail), "given whole, in the local model's prompt: " + system);
         assertTrue(outcome.ok(), "no tool ran, and none had to: " + outcome.text());
         assertTrue(llm.configs.get(0).withoutThinking(), "reading what it was handed: it answers straight away");
-        assertFalse(outcome.text().contains("48,213.07"), "the cloud is not shown what was read: " + outcome.text());
         assertTrue(ctx.localTierReadPrivate(), "what it does next is written after reading private data");
+        // Question and answer: the answer repeats no run of the mail, so it is the cloud's to
+        // read -- through the gateway's filter -- and nothing is kept beside it.
+        assertTrue(outcome.text().startsWith("The bank says the balance is 48,213.07 CZK."), outcome.text());
+        assertEquals(1, ctx.artifacts().size(), "no private answer kept: " + ctx.artifacts());
+        assertFalse(outcome.text().contains("Thank you for banking"), "the mail itself is not shown");
+        // Mutation: keep every answer written after a private read PRIVATE -> withheld.
+    }
+
+    @Test
+    @DisplayName("an answer that quotes 32 characters of a private result it read stays private, as a handle")
+    void anAnswerThatQuotesStaysPrivate() {
+        var ctx = new AgentContext("u1", "t1", "What does the bank say?");
+        String mail = "From the bank, 30 September: your balance is 48,213.07 CZK. Thank you for banking with us.";
+        ctx.addArtifact("imap_fetch", Map.of(), Map.of(), mail, true,
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
+        // 32 characters of the mail, word for word, in an answer of the model's own.
+        String quote = mail.substring(30, 62);
+        assertEquals(32, quote.length());
+        var llm = new Scripted(done("It reads [" + quote + "] and that is all."));
+
+        var outcome = executor(llm, new Usage()).execute(plan("Answer from {{1}}: what does it say?"), ctx, UNCOUNTED);
+
         Artifact answer = ctx.artifacts().get(1);
         assertEquals("local_answer", answer.tool());
         assertEquals(Label.PRIVATE, answer.label());
-        assertTrue(answer.why().get(0).endsWith("after reading {{1}}"), answer.why().toString());
-        assertTrue(outcome.text().contains("(The local model's answer is {{2}}: private"), outcome.text());
-        // Mutations: count only the delegation's own results as read -> the answer goes to the
-        // cloud as prose; require a tool to have run -> a failed delegation.
+        assertEquals(List.of("quotes {{1}}"), answer.why());
+        assertFalse(outcome.text().contains(quote), outcome.text());
+        assertTrue(outcome.text().startsWith("(The local model's answer is {{2}}: private, "), outcome.text());
+        // One character less and it is no window of the mail: released.
+        var shorter = new AgentContext("u1", "t2", "What does the bank say?");
+        shorter.addArtifact("imap_fetch", Map.of(), Map.of(), mail, true,
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
+        var outcome2 = executor(new Scripted(done("It reads [" + quote.substring(0, 31) + "] and that is all.")),
+                new Usage()).execute(plan("Answer from {{1}}: what does it say?"), shorter, UNCOUNTED);
+        assertTrue(outcome2.text().startsWith("It reads ["), outcome2.text());
+        // Mutation: release every answer -> the quote reaches the cloud.
     }
 
     @Test
@@ -333,7 +363,7 @@ class DelegationBehaviourTest {
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
         var ctx = new AgentContext("u1", "t1", "is the router up?");
         ctx.addArtifact("router_status", Map.of(), Map.of(), "up 12 days", true,
-                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
 
         var withTools = new Scripted(call("ping", Map.of()), done("it answers"));
         executor(withTools, new Usage(), ping).execute(
@@ -366,11 +396,12 @@ class DelegationBehaviourTest {
                 call("archive_text", Map.of("text", "{{1.body_text}}")), done("ok"));
         executor(llm, new Usage(), imap, archive).execute(plan("archive the mail"), ctx, UNCOUNTED);
 
-        // {{1}} the first fetch, {{2}} the first delegation's kept answer, {{3}} this fetch.
-        Artifact archived = ctx.artifacts().get(3);
+        // {{1}} the first fetch, {{2}} this fetch: the first delegation's answer quoted nothing,
+        // so none was kept.
+        Artifact archived = ctx.artifacts().get(2);
         assertEquals("archive_text", archived.tool());
         assertEquals(Label.PRIVATE, archived.label());
-        assertTrue(archived.why().contains("references {{3}}"),
+        assertTrue(archived.why().contains("references {{2}}"),
                 "named by its task handle: " + archived.why());
     }
 
@@ -1010,10 +1041,11 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("on a file task the local model's answer is kept as a private handle, not dropped")
-    void aFileTaskAnswersThroughAHandle() {
-        // Attended chat with a PDF: what the skill reads is withheld from the cloud, so the only
-        // answer there can be is the one the local model writes. It used to be withheld and lost.
+    @DisplayName("on a file task the local model's answer goes to the cloud when it quotes nothing of the file")
+    void aFileTaskAnswerThatQuotesNothingIsReleased() {
+        // Attended chat with a PDF: what the skill reads is withheld from the cloud, and is not
+        // in the canary's index -- the text read out of a PDF -- but the answer is checked
+        // against it all the same.
         var ctx = new AgentContext("u1", "t1", "summarise this statement");
         ctx.addFile("f1", "", PDF);
         var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success(STATEMENT));
@@ -1025,20 +1057,38 @@ class DelegationBehaviourTest {
         assertTrue(llm.allSeen().contains(STATEMENT),
                 "the local model answers from the whole of it, not a 400-character excerpt");
         Artifact fromFile = ctx.artifacts().get(1);
-        assertEquals("{{2}}", fromFile.handle());
         assertEquals(Label.PRIVATE, fromFile.label());
         assertFalse(fromFile.indexed());
+        assertEquals(2, ctx.artifacts().size(), "no private answer kept");
+        assertTrue(outcome.text().startsWith(SUMMARY), "the cloud reads the answer: " + outcome.text());
+        assertNull(windowOf(STATEMENT, outcome.text()), outcome.text());
+    }
+
+    @Test
+    @DisplayName("on a file task an answer that quotes the file is kept as a private handle, not dropped")
+    void aFileTaskAnswersThroughAHandle() {
+        // The only answer there can be is the one the local model writes. It used to be withheld
+        // and lost.
+        var ctx = new AgentContext("u1", "t1", "copy out the statement's first lines");
+        ctx.addFile("f1", "", PDF);
+        var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success(STATEMENT));
+        String copied = "The first lines: " + STATEMENT.substring(0, 120);
+        var llm = new Scripted(call("read_statement", Map.of()), done(copied));
+
+        var outcome = executor(llm, new Usage(), read).execute(plan("copy the file's start"), ctx, UNCOUNTED);
+
         Artifact answer = ctx.artifacts().get(2);
         assertEquals("local_answer", answer.tool());
         assertEquals(Label.PRIVATE, answer.label());
+        assertEquals(List.of("quotes {{2}}"), answer.why(), "the text read out of the file, unindexed as it is");
         assertTrue(answer.indexed());
-        assertNotNull(ctx.egress("test").index().firstLeakIn(SUMMARY, (h, w) -> false),
+        assertNotNull(ctx.egress("test").index().firstLeakIn(copied, (h, w) -> false),
                 "the canary looks for the answer in every later request of the task");
-        assertTrue(answer.output().startsWith(SUMMARY), answer.output());
+        assertTrue(answer.output().startsWith(copied), answer.output());
         assertTrue(outcome.produced().contains(answer), "the step and the task page show it");
         assertTrue(outcome.text().contains("{{3}}"), "the cloud is told the handle: " + outcome.text());
         assertNull(windowOf(STATEMENT, outcome.text()), outcome.text());
-        assertNull(windowOf(SUMMARY, outcome.text()), outcome.text());
+        // Mutation: check the answer against the canary's index only -> released, quote and all.
     }
 
     /** {@code length} characters with {@code marker} at {@code at}, and nothing else to find. */
@@ -1059,15 +1109,14 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("read_statement", Map.of("page", 1)),
                 call("read_statement", Map.of("page", 2)), done(SUMMARY));
 
-        executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx, UNCOUNTED);
+        var outcome = executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx, UNCOUNTED);
 
         // A file task's reader once had 16,000 characters for the whole delegation, and the
         // answer then covered the first pages only.
         assertTrue(llm.allSeen().contains(first), "the first page, whole");
         assertTrue(llm.allSeen().contains(second), "and the second: no allowance runs out");
-        Artifact answer = ctx.artifacts().get(3);
-        assertEquals("local_answer", answer.tool());
-        assertEquals(SUMMARY, answer.output(), "the model's answer, and nothing cut to note in it");
+        assertTrue(outcome.text().startsWith(SUMMARY + "\n\n---\n"),
+                "the model's answer, and nothing cut to note in it: " + outcome.text());
 
         // The same text, from a credentialed tool in a task with no file: shown whole too.
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"), p -> ToolResult.success(first));
@@ -1080,10 +1129,11 @@ class DelegationBehaviourTest {
     }
 
     @Test
-    @DisplayName("off a file task too, a summary written after a private read is kept as a handle")
+    @DisplayName("off a file task too, a summary that quotes the mail it read is kept as a handle")
     void aSummaryOfPrivateDataIsKept() {
         // A scheduled "summarise my new mail": the local model wrote the digest as its summary,
-        // and it was withheld from the cloud and then dropped -- nobody could ever read it.
+        // and it was withheld from the cloud and then dropped -- nobody could ever read it. This
+        // digest repeats a run of the mail ("the Q3 budget overview by Friday"), so it stays here.
         String mail = "{\"ok\":true,\"mails\":[{\"from\":\"boss@example.org\",\"subject\":"
                 + "\"Budget\",\"body\":\"I need the Q3 budget overview by Friday, please.\"}]}";
         String digest = "One new mail: your boss wants the Q3 budget overview by Friday.";
@@ -1119,10 +1169,11 @@ class DelegationBehaviourTest {
         var fetch = new FakeTool("web_fetch", false, List.of(),
                 p -> ToolResult.failure("HTTP 404 Not Found"));
         var imap = new FakeTool("imap_fetch", false, List.of("IMAP_PASS"),
-                p -> ToolResult.success("{\"ok\":true,\"body_text\":\"the budget is attached\"}"));
+                p -> ToolResult.success("{\"ok\":true,\"body_text\":\"the budget overview for the third quarter is attached\"}"));
         var ctx = task();
         var llm = new Scripted(call("web_fetch", Map.of("url", url)), call("imap_fetch", Map.of()),
-                done("The page " + url + " was not there; the mail says the budget is attached."));
+                done("The page " + url + " was not there; the mail says the budget overview for the "
+                        + "third quarter is attached."));
 
         var outcome = executor(llm, new Usage(), fetch, imap).execute(plan("find the budget"), ctx, UNCOUNTED);
 

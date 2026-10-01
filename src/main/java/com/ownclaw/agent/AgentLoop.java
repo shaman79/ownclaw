@@ -16,6 +16,7 @@ import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
 import com.ownclaw.observability.EventLogService;
 import com.ownclaw.observability.TaskTraceService;
+import com.ownclaw.privacy.Redactor;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.users.CredentialVault;
 import org.slf4j.Logger;
@@ -74,6 +75,8 @@ public class AgentLoop {
     private final ScheduledTaskService scheduledTaskService;
     private final LocalExecutor localExecutor;
     private final FileStorageService fileStorage;
+    /** The gateway's filter, asked what it takes out of each step's result (TaskChat#filtered). */
+    private final Redactor redactor;
     /** The local model as every task shares it: what a task waits on goes first. */
     private final LocalLane lane = new LocalLane();
 
@@ -97,7 +100,8 @@ public class AgentLoop {
             EventLogService eventLog,
             @Lazy ScheduledTaskService scheduledTaskService,
             LocalExecutor localExecutor,
-            FileStorageService fileStorage
+            FileStorageService fileStorage,
+            Redactor redactor
     ) {
         this.thinkingEngine = thinkingEngine;
         this.criticAgent = criticAgent;
@@ -120,6 +124,7 @@ public class AgentLoop {
         this.scheduledTaskService = scheduledTaskService;
         this.localExecutor = localExecutor;
         this.fileStorage = fileStorage;
+        this.redactor = redactor;
         // A Stop ends the model call a stopped task is waiting on at once: see interruptStopped.
         if (cancellationService != null) cancellationService.onRequest(this::interruptStopped);
     }
@@ -155,6 +160,7 @@ public class AgentLoop {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
+        context.setPersonalSources(config.getPrivacy().getPersonalSources());
 
         // The chat this task came from, whole, with the record of each finished task in it.
         loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage,
@@ -206,10 +212,11 @@ public class AgentLoop {
         try {
             List<String> keys = credentialVault.listCredentialKeys(userId);
             context.setCredentialKeys(keys);
-            // The secret ones, decrypted once. The gateway scrubs them from every cloud call;
+            // The secret ones, decrypted once. The gateway removes them from every cloud call;
             // decrypting per call would run PBKDF2 on every step. Keys that are not secrets --
-            // SMTP_HOST, SMTP_USER -- are not decrypted and not scrubbed, so a prompt can still
-            // say who the mail goes from.
+            // SMTP_HOST, SMTP_USER -- are not decrypted and not removed: a prompt can still say
+            // which server the mail goes through, and an address in one is an identifier, which
+            // the gateway's filter writes as a placeholder.
             List<String> secretKeys = keys.stream()
                     .filter(com.ownclaw.users.CredentialVault::isSecretKey).toList();
             if (!secretKeys.isEmpty()) {
@@ -515,10 +522,10 @@ public class AgentLoop {
      * Telegram an error notice -- and the text the model had written beside the call was lost; a
      * PDF's {{1}} is empty in the same way.
      * <p>
-     * On a task holding a file, the local model's answer reaches the owner even when the cloud
-     * does not place its handle -- "Done, see above" is a likely reply from a model that never
-     * saw the answer -- because relying on the cloud to remember is an instruction, and this is
-     * the one answer the task exists for.
+     * On a task holding a file, a private answer of the local model -- one that quotes the file
+     * -- reaches the owner even when the cloud does not place its handle: "Done, see above" is a
+     * likely reply from a model that never saw the answer, relying on the cloud to remember is
+     * an instruction, and this is the one answer the task exists for.
      * <p>
      * Every result an answer shows in full is marked on the context ({@link AgentContext#markShown}),
      * so the ending of a task that asked a question does not show it a second time.
@@ -560,9 +567,11 @@ public class AgentLoop {
     }
 
     /**
-     * On a task holding a file, every local answer the owner has not been given goes beneath the
-     * text, oldest first: two delegations can be two halves of the answer, and the cloud, which
-     * saw neither, cannot choose between them. The one it placed is not repeated.
+     * On a task holding a file, every private local answer the owner has not been given goes
+     * beneath the text, oldest first: two delegations can be two halves of the answer, and the
+     * cloud, which saw neither, cannot choose between them. The one it placed is not repeated.
+     * (A local answer is kept as a result only when it is private: one that quotes none of what
+     * the local model read went to the cloud in the delegation's report.)
      */
     static Answer withLocalAnswers(Answer a, Artifact placed, AgentContext ctx) {
         if (ctx.files().isEmpty()) return a;
@@ -1323,7 +1332,7 @@ public class AgentLoop {
         curatorService.recordUsage(action.tool(), context.userId(), context.taskId(),
                 result.success(), durationMs,
                 result.success() ? null : action.params(),
-                result.success() ? null : com.ownclaw.llm.CloudGateway.scrub(result.output(),
+                result.success() ? null : Redactor.scrubVault(result.output(),
                         context.secretValues()).text(), artifact.label());
 
         // If this tool was tracked as long-running, finalize it -- with the shaped text.
@@ -2416,7 +2425,8 @@ public class AgentLoop {
     /**
      * Record an observation in trajectory AND emit detail to the frontend (for live stats). The
      * one place a step's observation is recorded, so the one place the tool calls its reply made
-     * beyond the one that ran are added to it ({@link #callsNotRun}).
+     * beyond the one that ran are added to it ({@link #callsNotRun}), and the one place the
+     * owner's chat is told what the filter takes out of it ({@link TaskChat#filtered}).
      */
     private void recordAndEmitObservation(AgentContext context, AgentAction action,
                                            AgentObservation obs, int step) {
@@ -2428,6 +2438,9 @@ public class AgentLoop {
         context.trajectory().record(action, obs);
         emitObserveDetail(context.userId(), action, obs, step, context);
         persistStep(context, action, obs, step);
+        // What the gateway's filter takes out of this result before the cloud reads it, said in
+        // the owner's chat: the one place every step's result is recorded.
+        context.chat().filtered(redactor.count(context.userId(), obs.output(), context.secretValues()));
     }
 
     /**
@@ -2554,7 +2567,7 @@ public class AgentLoop {
         details.put("reportedFailure", reported);
         boolean privateText = withhold || claimed.map(Artifact::isPrivate).orElse(false);
         if ((!obs.success() || reported) && !privateText) {
-            String text = com.ownclaw.llm.CloudGateway.scrub(obs.output(), secrets).text();
+            String text = Redactor.scrubVault(obs.output(), secrets).text();
             details.put("reason", text == null ? "" : text);
         }
     }

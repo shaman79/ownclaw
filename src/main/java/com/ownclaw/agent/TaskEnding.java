@@ -1,7 +1,7 @@
 package com.ownclaw.agent;
 
 import com.ownclaw.agent.AgentResult.TerminationReason;
-import com.ownclaw.llm.CloudGateway;
+import com.ownclaw.privacy.Redactor;
 import com.ownclaw.llm.EgressRefused;
 import com.ownclaw.privacy.PrivateIndex;
 
@@ -184,6 +184,6 @@ final class TaskEnding {
 
     /** A result, or a finished answer: as it was written but for vault values. */
     private static String scrubbed(String text, AgentContext ctx) {
-        return text == null ? null : CloudGateway.scrub(text, ctx.secretValues()).text();
+        return text == null ? null : Redactor.scrubVault(text, ctx.secretValues()).text();
     }
 }

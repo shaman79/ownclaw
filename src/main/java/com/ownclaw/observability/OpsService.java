@@ -1042,6 +1042,7 @@ public class OpsService {
         var rows = jdbc.queryForList(
                 "SELECT details FROM events WHERE task_id = ? AND event_type = 'egress'", taskId);
         long calls = 0, bytes = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0, scrubs = 0;
+        long identifiers = 0;
         double cost = 0;
         var decisions = new java.util.TreeMap<String, Integer>();
         for (var r : rows) {
@@ -1054,6 +1055,7 @@ public class OpsService {
                 cacheRead += d.path("cacheReadTokens").asLong();
                 cacheWrite += d.path("cacheWriteTokens").asLong();
                 scrubs += d.path("scrubs").asLong();
+                identifiers += d.path("identifiers").asLong();
                 cost += d.path("costUsd").asDouble();
                 decisions.merge(d.path("decision").asText("?"), 1, Integer::sum);
             } catch (Exception ignored) {
@@ -1065,7 +1067,7 @@ public class OpsService {
         out.put("calls", calls); out.put("bytesOut", bytes);
         out.put("promptTokens", prompt); out.put("completionTokens", completion);
         out.put("cacheReadTokens", cacheRead); out.put("cacheWriteTokens", cacheWrite);
-        out.put("scrubs", scrubs); out.put("costUsd", Math.round(cost * 1_000_000) / 1_000_000.0);
+        out.put("scrubs", scrubs); out.put("identifiers", identifiers); out.put("costUsd", Math.round(cost * 1_000_000) / 1_000_000.0);
         out.put("decisions", decisions);
         return out;
     }

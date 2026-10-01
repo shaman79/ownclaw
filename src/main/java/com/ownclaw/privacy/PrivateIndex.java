@@ -9,7 +9,8 @@ import java.util.function.BiPredicate;
  * The canary: can this text contain a run of any PRIVATE artifact's bytes?
  * <p>
  * Every PRIVATE artifact of a task is indexed here as hashes of its 32-character windows, and
- * every outbound cloud body is checked against them before the socket opens -- all of it but
+ * every outbound cloud body, as the privacy filter (Redactor) left it, is checked against them
+ * before the socket opens -- all of it but
  * the replayed assistant turns, which hold nothing derived from a private input, and the tools'
  * descriptions and schemas, the registry's trusted text (see CloudGateway). That is what makes
  * privacy a property of the code path rather than of a prompt builder's carefulness: the

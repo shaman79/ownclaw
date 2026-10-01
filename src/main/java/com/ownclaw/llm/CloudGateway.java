@@ -3,6 +3,7 @@ package com.ownclaw.llm;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.privacy.PrivateIndex;
+import com.ownclaw.privacy.Redactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -21,10 +22,14 @@ import java.util.Map;
  * This is the only object in the application that can construct or call {@code AnthropicProvider}
  * or {@code OpenAiProvider}: they are not beans, their constructors are package-private, and a
  * test walks the source tree to keep it that way. Every call passes through {@link #chat} in a
- * fixed order — refuse if unclassified, scrub vault values, check the canary, send, record,
- * then hand back only a reply that is complete — so privacy is a property of the code path. A
- * prompt builder can be wrong about what it rendered and the call is still refused -- in every
- * message part but an assistant turn. Two kinds of part are not scanned (see the canary loop): an
+ * fixed order — refuse if unclassified, filter every part ({@link Redactor}: secrets removed,
+ * identifiers replaced by placeholders), check the canary, send, record, put the values back in
+ * the reply, then hand back only a reply that is complete — so privacy is a property of the code
+ * path. The filter applies to every part, assistant turns and the tools' descriptions and
+ * schemas included, and this is the only code that writes or reads a placeholder: what comes
+ * back holds the real values again, and every caller sees those. A prompt builder can be wrong
+ * about what it rendered and the call is still refused -- in every message part but an
+ * assistant turn. Two kinds of part are not scanned by the canary (see the canary loop): an
  * assistant turn, which replays the model's earlier turns and holds nothing derived from a tool
  * result or other private input; and the tools' descriptions and schemas, the registry's text,
  * which is trusted input -- a builder that rendered a result into one would not be refused. A
@@ -42,14 +47,12 @@ public final class CloudGateway implements LlmProvider {
     /** What the canary does on a hit. There is no OFF. */
     public enum Mode { ENFORCE, OBSERVE }
 
-    /** A vault value shorter than this is not scrubbed: it is too short to be a secret. */
-    static final int MIN_SECRET_LENGTH = 8;
-
     private final LlmProvider anthropic;
     private final LlmProvider openai;
     private final OwnClawConfig config;
     private final EgressLedger ledger;
     private final ObjectMapper mapper;
+    private final Redactor redactor;
 
     /**
      * Spring constructs the providers here, and nowhere else. Annotated because the class has a
@@ -57,19 +60,28 @@ public final class CloudGateway implements LlmProvider {
      * boot check found the application unable to start, which no unit test could have.
      */
     @org.springframework.beans.factory.annotation.Autowired
-    public CloudGateway(OwnClawConfig config, ObjectMapper mapper, EgressLedger ledger) {
+    public CloudGateway(OwnClawConfig config, ObjectMapper mapper, EgressLedger ledger,
+                        Redactor redactor) {
         this(new AnthropicProvider(config, mapper), new OpenAiProvider(config, mapper),
-                config, ledger, mapper);
+                config, ledger, mapper, redactor);
     }
 
     /** Public so a test in another package can put a fake provider behind the door. */
     public CloudGateway(LlmProvider anthropic, LlmProvider openai, OwnClawConfig config,
-                        EgressLedger ledger, ObjectMapper mapper) {
+                        EgressLedger ledger, ObjectMapper mapper, Redactor redactor) {
         this.anthropic = anthropic;
         this.openai = openai;
         this.config = config;
         this.ledger = ledger == null ? row -> { } : ledger;
         this.mapper = mapper == null ? new ObjectMapper() : mapper;
+        this.redactor = redactor;
+    }
+
+    /** {@link #CloudGateway(LlmProvider, LlmProvider, OwnClawConfig, EgressLedger, ObjectMapper,
+     *  Redactor)} with the placeholder table in memory, for a test that has no database. */
+    public CloudGateway(LlmProvider anthropic, LlmProvider openai, OwnClawConfig config,
+                        EgressLedger ledger, ObjectMapper mapper) {
+        this(anthropic, openai, config, ledger, mapper, new Redactor(null));
     }
 
     /**
@@ -100,34 +112,38 @@ public final class CloudGateway implements LlmProvider {
         // (a) Unclassified means denied.
         if (egress == null) {
             ledger.record(row(null, providerName, model, EgressLedger.Decision.REFUSED,
-                    List.of(), 0, null, List.of(), 0, "unclassified"));
+                    List.of(), new Redactor.Tally(), null, List.of(), 0, "unclassified"));
             throw new EgressRefused(providerName);
         }
 
-        // (b) Scrub: a vault value never leaves, whatever put it in the text.
-        int scrubs = 0;
-        var scrubbedMessages = new ArrayList<LlmMessage>(messages.size());
+        // (b) The filter, on every part: a vault value or a secret found by code never leaves,
+        // and an identifier leaves as its placeholder (Redactor). The tools' descriptions and
+        // schemas too: the registry's text is trusted by the canary, not by the filter.
+        String user = egress.userId();
+        Map<String, String> vault = egress.secretValues();
+        var tally = new Redactor.Tally();
+        var filteredMessages = new ArrayList<LlmMessage>(messages.size());
         for (LlmMessage m : messages) {
-            Scrubbed s = scrub(m.content(), egress.secretValues());
-            scrubs += s.count();
-            scrubbedMessages.add(s.count() == 0 ? m : new LlmMessage(m.role(), s.text()));
+            filteredMessages.add(new LlmMessage(m.role(), redactor.filter(user, m.content(), vault, tally)));
         }
         List<ToolSpec> tools = cfg.tools();
-        List<ToolSpec> scrubbedTools = null;
+        List<ToolSpec> filteredTools = null;
         if (tools != null) {
-            scrubbedTools = new ArrayList<>(tools.size());
+            filteredTools = new ArrayList<>(tools.size());
             for (ToolSpec t : tools) {
-                Scrubbed s = scrub(t.description(), egress.secretValues());
-                scrubs += s.count();
-                scrubbedTools.add(s.count() == 0 ? t
-                        : new ToolSpec(t.name(), s.text(), t.inputSchema()));
+                @SuppressWarnings("unchecked")
+                Map<String, Object> schema = (Map<String, Object>) redactor.filterTree(user,
+                        t.inputSchema(), vault, tally);
+                filteredTools.add(new ToolSpec(t.name(), redactor.filter(user, t.description(), vault, tally),
+                        schema));
             }
         }
 
-        // (c) The canary, before the socket opens: every part but the replayed assistant turns and
-        // the registry's tool and schema parts.
+        // (c) The canary, before the socket opens, over the text as filtered -- the last line for
+        // a PRIVATE result's bytes: every part but the replayed assistant turns and the
+        // registry's tool and schema parts.
         String observed = null;
-        List<Part> parts = parts(scrubbedMessages, scrubbedTools);
+        List<Part> parts = parts(filteredMessages, filteredTools);
         // A tool description or schema is authored by the cloud at skill_create or by the
         // owner, and it was in the prompt on every step before the artifact existed -- so a run
         // of it matching a later result is a collision, not a disclosure. Skills routinely
@@ -148,19 +164,19 @@ public final class CloudGateway implements LlmProvider {
         // renders artifact content INTO a tool description, this excuses it. The registry is
         // trusted input here; the canary's promise covers the message parts the model did not
         // write (see the assistant clause below).
-        // The scrubber's post-condition, checked rather than trusted, on every part -- assistant
-        // parts included. A marker is built from the key name and a value can be a substring of
-        // its own replacement, so the fallback marker was itself unverified -- a value of
-        // "redacted" would have been written out inside «vault:redacted». Whatever the markers
-        // are, no vault value survives this point.
-        for (var sv : egress.secretValues().entrySet()) {
+        // The filter's post-condition for vault values, checked rather than trusted, on every
+        // part -- assistant parts included. A marker is built from the key name and a value can
+        // be a substring of its own replacement, so the fallback marker was itself unverified --
+        // a value of "redacted" would have been written out inside «vault:redacted». Whatever the
+        // markers are, no vault value survives this point.
+        for (var sv : vault.entrySet()) {
             String value = sv.getValue();
-            if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
+            if (value == null || value.length() < Redactor.MIN_SECRET_LENGTH) continue;
             for (Part part : parts) {
                 int at = part.text() == null ? -1 : part.text().indexOf(value);
                 if (at < 0) continue;
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, scrubs, null, List.of(), 0, "vault:" + sv.getKey() + " survived scrubbing"));
+                        parts, tally, null, List.of(), 0, "vault:" + sv.getKey() + " survived scrubbing"));
                 log.error("Cloud call REFUSED for task {}: vault value {} survived scrubbing",
                         egress.taskId(), sv.getKey());
                 throw new EgressRefused(providerName, 0, "vault:" + sv.getKey(), part.index(),
@@ -203,7 +219,7 @@ public final class CloudGateway implements LlmProvider {
                         + ") at " + hit.offset();
                 if (mode() == Mode.ENFORCE) {
                     ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                            parts, scrubs, null, List.of(), 0, ref));
+                            parts, tally, null, List.of(), 0, ref));
                     log.error("Cloud call REFUSED for task {}: {}", egress.taskId(), ref);
                     throw new EgressRefused(providerName, hit.handle(),
                             egress.toolOf().apply(hit.handle()), part.index(), part.kind(), hit.offset());
@@ -223,7 +239,7 @@ public final class CloudGateway implements LlmProvider {
         // billed, no reply carries their counts, and they belong on this call's row.
         var billedWithoutReply = new ArrayList<LlmResponse.Usage>();
         LlmProgress hook = cfg.progress();
-        LlmRequestConfig outbound = (scrubbedTools == null ? cfg : cfg.withTools(scrubbedTools))
+        LlmRequestConfig outbound = (filteredTools == null ? cfg : cfg.withTools(filteredTools))
                 .withProgress(new LlmProgress() {
                     @Override public void onProgress() { hook.onProgress(); }
                     @Override public void calling(Runnable cancel) { hook.calling(cancel); }
@@ -234,13 +250,13 @@ public final class CloudGateway implements LlmProvider {
                 });
         LlmResponse response;
         try {
-            response = provider.chat(scrubbedMessages, outbound);
+            response = provider.chat(filteredMessages, outbound);
         } catch (RuntimeException e) {
             // The leak record survives a failing call. Consolidating to one row moved it after
             // the send, so a provider error used to discard it: the bytes had gone out and the
             // only note that they should not have went with the exception.
             ledger.record(row(egress, providerName, model, EgressLedger.Decision.ERROR, parts,
-                    scrubs, null, billedWithoutReply, tools == null ? 0 : tools.size(),
+                    tally, null, billedWithoutReply, tools == null ? 0 : tools.size(),
                     observed == null ? e.getClass().getSimpleName()
                             : observed + " (call then failed: " + e.getClass().getSimpleName() + ")"));
             throw e;
@@ -249,10 +265,28 @@ public final class CloudGateway implements LlmProvider {
         // request can be answered by Anthropic's fallback model.
         ledger.record(row(egress, providerName, response.model() != null ? response.model() : model,
                 observed == null ? EgressLedger.Decision.SENT : EgressLedger.Decision.OBSERVED_LEAK,
-                parts, scrubs, response, billedWithoutReply, tools == null ? 0 : tools.size(), observed));
-        // (e) Only then the check, so a refused or cut-off reply is on the ledger with its tokens
-        // and why it ended before its caller is told it is no answer.
-        return response.requireComplete(providerName);
+                parts, tally, response, billedWithoutReply, tools == null ? 0 : tools.size(), observed));
+        // (e) The values back where the reply names their placeholders, in its text and in every
+        // tool call's arguments: from here on nothing sees a placeholder. Then the check, so a
+        // refused or cut-off reply is on the ledger with its tokens and why it ended before its
+        // caller is told it is no answer -- and what it carries is restored like any reply.
+        return restored(user, response).requireComplete(providerName);
+    }
+
+    /** The reply with the user's placeholders put back to their values; the same reply when it names none. */
+    private LlmResponse restored(String user, LlmResponse r) {
+        String content = redactor.restore(user, r.content());
+        String invalid = redactor.restore(user, r.invalidToolCall());
+        boolean changed = content != r.content() || invalid != r.invalidToolCall();
+        var calls = new ArrayList<ToolCall>(r.toolCalls().size());
+        for (ToolCall c : r.toolCalls()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> args = (Map<String, Object>) redactor.restoreTree(user, c.arguments());
+            changed |= args != c.arguments();
+            calls.add(args == c.arguments() ? c : new ToolCall(c.id(), c.name(), args));
+        }
+        return !changed ? r : new LlmResponse(content, calls, invalid, r.stopReason(), r.stopDetail(),
+                r.model(), r.maxOutputTokens(), r.contextWindow(), r.usage());
     }
 
     // ── parts ──
@@ -285,45 +319,6 @@ public final class CloudGateway implements LlmProvider {
         return out;
     }
 
-    // ── scrubbing ──
-
-    public record Scrubbed(String text, int count) {}
-
-    /**
-     * Replace every occurrence of a secret vault value with {@code «vault:KEY»}. Deterministic,
-     * so the Anthropic prefix stays byte-stable across steps. Values shorter than
-     * {@link #MIN_SECRET_LENGTH} are left: they are too short to be secrets and long enough to
-     * be words.
-     */
-    public static Scrubbed scrub(String text, Map<String, String> secrets) {
-        if (text == null || text.isEmpty() || secrets == null || secrets.isEmpty()) {
-            return new Scrubbed(text, 0);
-        }
-        String out = text;
-        int count = 0;
-        for (var e : secrets.entrySet()) {
-            String value = e.getValue();
-            if (value == null || value.length() < MIN_SECRET_LENGTH) continue;
-            String marker = "«vault:" + e.getKey() + "»";
-            // A key whose name embeds the value -- or a value that is literally "vault:PASS" --
-            // would leave the secret inside its own replacement. Fall back to a marker that
-            // cannot contain it.
-            if (marker.contains(value)) marker = "«vault:redacted»";
-            // Scan forward from after each replacement. Restarting from zero never terminated
-            // when the value was a substring of its own marker -- a vault value of "vault:pass"
-            // rewrote itself for ever and hung the call, holding the task's only worker thread.
-            var sb = new StringBuilder();
-            int from = 0, at;
-            while ((at = out.indexOf(value, from)) >= 0) {
-                sb.append(out, from, at).append(marker);
-                from = at + value.length();
-                count++;
-            }
-            if (from > 0) out = sb.append(out.substring(from)).toString();
-        }
-        return new Scrubbed(out, count);
-    }
-
     // ── the row ──
 
     /**
@@ -334,7 +329,7 @@ public final class CloudGateway implements LlmProvider {
      */
     private static EgressLedger.Row row(EgressContext egress, String provider, String model,
                                         EgressLedger.Decision decision, List<Part> parts,
-                                        int scrubs, LlmResponse response,
+                                        Redactor.Tally tally, LlmResponse response,
                                         List<LlmResponse.Usage> billedWithoutReply, int toolCount,
                                         String refusalRef) {
         long bytes = 0;
@@ -360,7 +355,8 @@ public final class CloudGateway implements LlmProvider {
                 // Bytes that LEFT. A refused call sent none, and counting its payload as egress
                 // is the one arithmetic error that would make the ledger overstate exposure.
                 decision == EgressLedger.Decision.REFUSED ? 0 : bytes,
-                toolCount, pt, ct, cw, cr, cost, scrubs, refusalRef,
+                toolCount, pt, ct, cw, cr, cost, tally.secretsRemoved(), tally.identifiersReplaced(),
+                refusalRef,
                 response == null ? null : response.stopDescription());
     }
 

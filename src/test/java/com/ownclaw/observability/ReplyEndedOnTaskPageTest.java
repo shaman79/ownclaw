@@ -30,7 +30,7 @@ class ReplyEndedOnTaskPageTest {
         };
         new EventEgressLedger(events, new ObjectMapper()).record(new EgressLedger.Row("u1", "t1",
                 "think", "anthropic", "claude-opus-5", EgressLedger.Decision.SENT, List.of(), 66_522,
-                34, 284, 0, 1830, 29072, 0.03, 0, null, stopReason));
+                34, 284, 0, 1830, 29072, 0.03, 0, 0, null, stopReason));
 
         var row = new LinkedHashMap<String, Object>();
         row.put("id", 1L);

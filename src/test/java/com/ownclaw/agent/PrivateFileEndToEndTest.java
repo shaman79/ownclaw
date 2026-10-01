@@ -49,8 +49,12 @@ class PrivateFileEndToEndTest {
     static final String NAME = "vypis_123456789.csv";
     static final String STATEMENT = "date,amount,counterparty\n" + DelegationBehaviourTest.statement(3_000)
             + "\n2026-09-30,closing,balance 48213.07 KV-7f3a9c21\n";
-    static final String SUMMARY = "Your closing balance was 48,213.07 CZK (reference KV-7f3a9c21); "
-            + "card spending ran through the whole month.";
+    /**
+     * The local model's answer, quoting the statement's last line: so it stays private. One that
+     * quotes none of the file goes to the cloud (DelegationBehaviourTest).
+     */
+    static final String SUMMARY = "Your closing balance was 48,213.07 CZK; the statement ends with "
+            + "2026-09-30,closing,balance 48213.07 KV-7f3a9c21 -- card spending ran through the whole month.";
 
     /** A skill that reads the files it is handed, as a generated one does. */
     static final class ReadsFiles implements Tool {
