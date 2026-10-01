@@ -301,9 +301,10 @@ public class TelegramBotService {
         String currentMessageId =
                 conversationService.saveMessage(userId, currentSessionId, "user", text);
 
-        // To the task running in this chat, or a task of its own (TaskQueue#send), whose answer is
-        // saved and sent here. It came from Telegram, so a task of its own shows its progress
-        // messages in Telegram too (forTelegram).
+        // To the task running in this chat when it was asked from Telegram too, whose answer comes
+        // here; otherwise a task of its own (TaskQueue#send), whose answer is saved and sent here.
+        // It came from Telegram, so a task of its own shows its progress messages in Telegram too
+        // (forTelegram).
         var sent = new UserMessage(userId, currentSessionId, currentMessageId, text, List.of(),
                 TaskChat.Channel.TELEGRAM, result -> {
             // Saved as the web chat saves an answer: the web chat shows it on reload, the private

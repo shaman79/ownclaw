@@ -295,11 +295,13 @@ public class ConversationService {
      * The one reader of private_content: a private answer shows here as it did live, and
      * nowhere else. A row without one, including every row from before the column, shows its
      * content. A progress row comes with its header as data ({@link #saveProgress}), as it came
-     * live; one from before the header was kept has none, and shows its content as it is.
+     * live; one from before the header was kept has none, and shows its content as it is. Each
+     * row comes with its id, as a live frame names it: the page marks a message the running task
+     * has read, or handed on, by its row.
      */
     public List<Map<String, Object>> getSessionMessages(String userId, String sessionId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT role, COALESCE(private_content, content) AS content, timestamp,
+            SELECT id, role, COALESCE(private_content, content) AS content, timestamp,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.progress') END AS progress
             FROM conversations

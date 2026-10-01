@@ -1910,9 +1910,9 @@ public class AgentLoop {
 
     /** Build structured token data for status messages. */
     private Map<String, Object> tokenData(AgentContext context) {
-        int totalSteps = context.trajectory().size();
-        int successes = (int) context.trajectory().turns().stream()
-                .filter(t -> t.observation().success()).count();
+        var steps = context.trajectory().steps();
+        int totalSteps = steps.size();
+        int successes = (int) steps.stream().filter(t -> t.observation().success()).count();
         return Map.of(
                 "cloudTokens", context.cloudTokens(),
                 "localTokens", context.localTokens(),
@@ -2647,9 +2647,9 @@ public class AgentLoop {
         detail.put("output", obs.output());
 
         // Stats snapshot
-        int totalSteps = context.trajectory().size();
-        int successes = (int) context.trajectory().turns().stream()
-                .filter(t -> t.observation().success()).count();
+        var steps = context.trajectory().steps();
+        int totalSteps = steps.size();
+        int successes = (int) steps.stream().filter(t -> t.observation().success()).count();
         detail.put("totalSteps", totalSteps);
         detail.put("successCount", successes);
         detail.put("cloudTokens", context.cloudTokens());

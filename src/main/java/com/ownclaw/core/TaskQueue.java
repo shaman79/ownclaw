@@ -17,6 +17,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -34,8 +35,9 @@ import java.util.Map;
  * after the other.
  * <p>
  * A message the owner sends in a chat while a task of that chat runs goes to that task
- * ({@link #send}), which reads it before its next step; what the task has not read when it ends
- * is queued here, in order, as tasks of their own ({@link #runChat}).
+ * ({@link #send}), which reads it before its next step -- when it came from where the task did
+ * ({@link Inbox#offer}); what the task has not read when it ends is queued here as tasks of their
+ * own, each in the place it took when it was sent ({@link #runChat}).
  */
 @Service
 public class TaskQueue {
@@ -62,15 +64,19 @@ public class TaskQueue {
     private final AtomicInteger queueSize = new AtomicInteger(0);
     /** Count, not a flag: with two lanes there can be two tasks in flight. */
     private final AtomicInteger running = new AtomicInteger(0);
-    /** The order tasks were added in: of two with the same priority and time, the first runs first. */
+    /**
+     * The order work was sent in: of two tasks with the same priority, the one sent first runs
+     * first -- a message handed to a running task that ended without reading it too, in the
+     * place it took when it was sent ({@link #steer}).
+     */
     private final AtomicLong added = new AtomicLong();
     private final boolean separateBackgroundLane;
     private ExecutorService workerPool;
 
     /**
      * The inbox of each chat task running now, by its chat ({@link #runChat}): where a message
-     * sent in that chat goes ({@link #steer}). By user and chat both, so no message reaches
-     * another user's task.
+     * sent in that chat goes, if the task takes it ({@link #steer}). By user and chat both, so no
+     * message reaches another user's task.
      */
     private final Map<Chat, Inbox> inboxes = new ConcurrentHashMap<>();
 
@@ -86,7 +92,9 @@ public class TaskQueue {
         /** Queued behind work that runs or waits: a task of its own, after that work. */
         QUEUED("Queued: it runs as a task of its own after the work ahead of it."),
         /** Nothing ran or waited, and its task starts now: there is nothing to say. */
-        STARTED(null);
+        STARTED(null),
+        /** The queue was full: its answer says so, and there is nothing more to say. */
+        REFUSED(null);
 
         private final String line;
 
@@ -100,7 +108,7 @@ public class TaskQueue {
         }
     }
 
-    /** What the sender of a message the task did not read is told: the status that queues it. */
+    /** What the sender of a message the task did not read is told, once it is queued. */
     static final String UNREAD = "The task ended before it read your message: it runs as a task of its own.";
 
     public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
@@ -169,39 +177,45 @@ public class TaskQueue {
      * What a message the owner sends in a chat becomes -- the one decision, for the web chat and
      * Telegram: given to the task running in its chat ({@link #steer}), unless he asked for it to
      * be queued; otherwise queued as a task of its own, answered through
-     * {@link UserMessage#answer}. Its user row is saved before this is asked.
+     * {@link UserMessage#answer} -- by "System busy" at once when the queue is full. Its user row
+     * is saved before this is asked.
      *
      * @param queue the sender asked for a task of its own, after the work ahead of it
      */
     public Fate send(UserMessage message, boolean queue) {
         if (!queue && steer(message)) return Fate.STEERED;
         boolean behind = isBusyFor(message.userId());
-        enqueue(message);
+        if (!enqueue(message, added.incrementAndGet())) return Fate.REFUSED;
         return behind ? Fate.QUEUED : Fate.STARTED;
     }
 
     /**
-     * Give a message to the task running in its chat, which reads it before its next step.
+     * Give a message to the task running in its chat, which reads it before its next step. It
+     * takes its place in the queue now, which it keeps if the task ends without reading it.
      * <p>
-     * False when no task of this user runs in that chat, when the one that did has just ended --
-     * the caller then runs the message as a task of its own -- and for a message with files:
-     * those become a task's private files when it starts, and added to a running task they would
-     * make its later results private part-way through, past the check a task holding files
-     * starts with ({@code AgentLoop.stopWithoutLocalModel}). Such a message is a task of its own.
+     * False -- the caller then runs the message as a task of its own -- when no task of this user
+     * runs in that chat, when the one that did has just ended, and when the task does not take
+     * it ({@link Inbox#offer}): a message from another channel than the task's, or with files,
+     * and any sent after one of those.
      */
     public boolean steer(UserMessage message) {
-        if (!message.attachmentIds().isEmpty()) return false;
         Inbox inbox = inboxes.get(new Chat(message.userId(), message.sessionId()));
-        return inbox != null && inbox.offer(message);
+        return inbox != null && inbox.offer(message, added.incrementAndGet());
     }
 
-    /** Queue a chat message as a task of its own, after the work queued before it. */
-    private void enqueue(UserMessage message) {
-        add(new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
-                added.incrementAndGet(), result -> answer(message, result), message));
+    /**
+     * Queue a chat message as a task of its own, in its place among the work queued.
+     *
+     * @param order its place: taken when it was sent
+     * @return false when the queue was full: it has been answered so
+     */
+    private boolean enqueue(UserMessage message, long order) {
+        return add(new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
+                order, result -> answer(message, result), message));
     }
 
-    private void add(QueuedTask task) {
+    /** @return false when the queue was full: the task has been answered so, and is not queued */
+    private boolean add(QueuedTask task) {
         if (queueSize.get() >= maxQueuedTasks) {
             eventLog.warn(task.userId(), null, "queue.full", "Queue full, task rejected");
             // An outcome, not a sentence. Returned as a bare string, "System busy" was
@@ -209,7 +223,7 @@ public class TaskQueue {
             // stored it as that run's result.
             task.done().accept(AgentResult.error(
                     "System busy — please try again later.", new AgentTrajectory(), 0));
-            return;
+            return false;
         }
 
         // With lanes off, background work stays in the interactive queue and the behaviour is
@@ -225,23 +239,24 @@ public class TaskQueue {
 
         eventLog.info(task.userId(), null, "task.queued",
                 "Priority P" + task.priority() + ", queue size " + pos);
+        return true;
     }
 
     /**
      * Run the task of a chat message on this thread and deliver its answer: the queue's worker
      * runs a queued message here, and the ops API a chat turn. While it runs, what is sent in its
-     * chat goes to it ({@link #steer}); once it has ended, however it ended, and its answer has
-     * been delivered, what it did not read is queued, in order, as tasks of their own -- each
-     * answering its own row, its sender told -- so each finds that answer in the chat it reads.
-     * Queued then, they are not work a Stop that ended the task finds waiting: no message sent
-     * to a task is lost with it.
+     * chat goes to it, if it takes it ({@link #steer}); once it has ended, however it ended, and
+     * its answer has been delivered, what it did not read is queued as tasks of their own, each in
+     * the place it took when it was sent -- each answering its own row, its sender told -- so each
+     * finds that answer in the chat it reads. Queued then, they are not work a Stop that ended the
+     * task finds waiting: no message sent to a task is lost with it.
      *
      * @throws RuntimeException what the task threw, once "Internal error" has been delivered as
      *                          its answer
      */
     public AgentResult runChat(UserMessage message) {
         Chat chat = new Chat(message.userId(), message.sessionId());
-        Inbox inbox = new Inbox();
+        Inbox inbox = new Inbox(message.channel());
         inboxes.put(chat, inbox);
         try {
             AgentResult result;
@@ -255,8 +270,14 @@ public class TaskQueue {
             answer(message, result);
             return result;
         } finally {
+            // Closed before it leaves the map: a sender who still finds it is refused once what
+            // the task did not read is queued, and one who does not find it comes after that.
+            var queued = new ArrayList<UserMessage>();
+            inbox.close((unread, order) -> {
+                if (enqueue(unread, order)) queued.add(unread);
+            });
             inboxes.remove(chat, inbox);
-            for (UserMessage unread : inbox.close(this::enqueue)) {
+            for (UserMessage unread : queued) {
                 statusEmitter.emit(unread.userId(), StatusMessage.Type.QUEUED, UNREAD,
                         Map.of("requeued", unread.messageId()));
             }
@@ -377,8 +398,8 @@ public class TaskQueue {
     /**
      * A task waiting in the priority queue.
      *
-     * @param enqueuedAt when it was queued: its place, and what a Stop is measured against
-     * @param order      which was added first, of two with the same priority and time
+     * @param enqueuedAt when it was queued: what a Stop is measured against
+     * @param order      its place among the work of its priority: when it was sent ({@link #added})
      * @param done       what its result is handed to: the submitter's future, or the chat
      *                   message's answer
      * @param chat       the chat message it runs, or null for a task that comes from no chat
@@ -397,9 +418,7 @@ public class TaskQueue {
         public int compareTo(QueuedTask other) {
             // Lower priority number = higher priority
             int cmp = Integer.compare(this.priority, other.priority);
-            if (cmp != 0) return cmp;
-            // Same priority: FIFO
-            cmp = Long.compare(this.enqueuedAt, other.enqueuedAt);
+            // Same priority: in the order sent
             return cmp != 0 ? cmp : Long.compare(this.order, other.order);
         }
     }

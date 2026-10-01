@@ -143,8 +143,8 @@ class ChatPageTest {
         String thinking = page.substring(page.indexOf("function setThinking(on) {"));
         thinking = thinking.substring(0, thinking.indexOf("function resetThinkingSafetyTimer()"));
         assertFalse(thinking.contains("sendBtn.disabled"), "Send is never disabled: " + thinking);
-        assertTrue(thinking.contains("stopBtn.classList.toggle('visible', on); queueBtn.classList.toggle('visible', on);"),
-                "Stop and Queue show while it runs: " + thinking);
+        assertTrue(thinking.contains("stopBtn.classList.toggle('visible', on);") && thinking.contains("updateComposer(); }"),
+                "Stop shows while it runs, and Queue where Send reaches it: " + thinking);
         assertFalse(page.contains("busy"), "nothing holds back Enter while a task runs");
         assertTrue(page.contains("sendBtn.addEventListener('click', function() { send(false); });")
                 && page.contains("queueBtn.addEventListener('click', function() { send(true); });"));
@@ -174,6 +174,38 @@ class ChatPageTest {
                 "a message the task ended without reading says it runs as its own task");
         assertTrue(page.contains("if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;"),
                 "a typed /queue is drawn by the server's echo, and its fate goes under that");
+    }
+
+    @Test
+    @DisplayName("Send promises the running task, and Queue shows, only in the chat where the server said Send reaches it")
+    void steeringIsPromisedOnlyWhereItHappens() {
+        String composer = page.substring(page.indexOf("function updateComposer() {"));
+        composer = composer.substring(0, composer.indexOf("function resetThinkingSafetyTimer()"));
+        assertTrue(composer.contains("var steering = thinkingEl.classList.contains('active') "
+                        + "&& steeredChatId !== null && steeredChatId === displayedSessionId; "
+                        + "queueBtn.classList.toggle('visible', steering); inputEl.placeholder = steering "
+                        + "? 'Send to the running task, or Queue it for after...' : idlePlaceholder;"),
+                "while a task runs elsewhere, or takes nothing from here, nothing is promised: " + composer);
+        assertTrue(page.contains("if (data.fate === 'started' || data.fate === 'steered') steeredChatId = data.sessionId; "
+                        + "else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null; updateComposer();"),
+                "the fate of a message names the chat where Send reaches the task, or says it takes nothing more");
+        assertTrue(page.contains("if (!on) { stopPressed = false; steeredChatId = null; }"), "and no task runs once it ends");
+        assertTrue(page.contains("if (listed) listed.classList.remove('unread'); updateComposer();"),
+                "opening another chat says what Send does there");
+        assertTrue(page.contains("displayedSessionId = null; updateComposer();"), "as New Chat does");
+        // Mutation: show Queue whenever a task runs -> in another chat, Send queues while the
+        // composer says it goes to the running task.
+    }
+
+    @Test
+    @DisplayName("a message drawn from the history is named by its row, so a task still running marks it read after a reload")
+    void historyBubblesAreNamedByTheirRows() {
+        assertTrue(page.contains("var drawn = addMsg(type, m.content, m.task_id);"), "the bubble a reload draws");
+        assertTrue(page.contains("if (type === 'user') drawn.dataset.messageId = m.id;"),
+                "named as bubbleOf finds it");
+        assertTrue(page.contains("'.msg.user[data-message-id=\"' + CSS.escape(messageId) + '\"]'"));
+        // Mutation: draw the history's bubbles unnamed -> after a reload no read or requeued frame
+        // finds its message, and none says what became of it.
     }
 
     @Test

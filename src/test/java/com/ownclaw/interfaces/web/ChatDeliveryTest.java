@@ -355,6 +355,9 @@ class ChatDeliveryTest {
         assertEquals("steered", fate.path("fate").asText());
         assertEquals(TaskQueue.Fate.STEERED.line(), fate.path("content").asText(), "the line the page shows");
         assertEquals("m7", fate.path("clientId").asText());
+        assertEquals(jdbc.queryForObject("SELECT session_id FROM conversations WHERE role = 'user'", String.class),
+                fate.path("sessionId").asText(), "the chat where Send reached the task: where the page offers it again");
+        assertFalse(fate.path("queue").asBoolean(true), "sent with Send");
         String row = jdbc.queryForObject("SELECT id FROM conversations WHERE role = 'user'", String.class);
         assertEquals(row, fate.path("messageId").asText(), "its row, which the read progress row will name");
         assertEquals(List.of(false), queue.queued, "sent to the running task, not queued");
@@ -379,6 +382,7 @@ class ChatDeliveryTest {
         assertEquals("/queue check the scanner", echo.path("content").asText(), "the page draws no slash text itself");
         assertEquals("m2", echo.path("clientId").asText());
         assertEquals("m2", frames("fate").getLast().path("clientId").asText());
+        assertTrue(frames("fate").getLast().path("queue").asBoolean(), "queued as asked: it says nothing of the running task");
         assertEquals(List.of("check the printer", "check the scanner"), jdbc.queryForList(
                 "SELECT content FROM conversations WHERE role = 'user' ORDER BY rowid", String.class),
                 "the message is saved, without the command");

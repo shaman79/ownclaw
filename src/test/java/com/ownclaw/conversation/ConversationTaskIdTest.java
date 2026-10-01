@@ -11,7 +11,10 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** A chat answer remembers which task produced it, so the link survives a reload. */
+/**
+ * A chat row comes back on reload with what links it: an answer the task that produced it, and
+ * every row the id a live frame names it by.
+ */
 class ConversationTaskIdTest {
 
     @Test
@@ -36,5 +39,20 @@ class ConversationTaskIdTest {
         assertEquals("a1b2c3d4", byContent.get("the menu"));
         assertNull(byContent.get("old answer"));
         assertNull(byContent.get("odd"), "only a well-formed task id is stored");
+    }
+
+    @Test
+    @DisplayName("each row comes back with the id it was saved under")
+    void rowsComeBackWithTheirIds(@TempDir Path tmp) throws Exception {
+        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
+        String chat = conversations.createSession("u1", "Network");
+        String asked = conversations.saveMessage("u1", chat, "user", "use the backup link");
+        String answered = conversations.saveMessage("u1", chat, "assistant", "Switched.", List.of(), "a1b2c3d4");
+        // Saved in one second, they share a timestamp: matched by content, not by position.
+        var ids = new java.util.HashMap<Object, Object>();
+        conversations.getSessionMessages("u1", chat).forEach(m -> ids.put(m.get("content"), m.get("id")));
+        assertEquals(java.util.Map.of("use the backup link", asked, "Switched.", answered), ids,
+                "what the page names a bubble by, as the read frame names it");
+        // Mutation: leave the id out -> a bubble drawn after a reload is never marked read.
     }
 }

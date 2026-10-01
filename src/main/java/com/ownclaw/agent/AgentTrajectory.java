@@ -93,6 +93,17 @@ public class AgentTrajectory {
     }
 
     /**
+     * The task's steps, in order: every turn but the messages the user sent it while it worked
+     * ({@link AgentLoop#FROM_THE_OWNER_STEP}), which are his words, not steps it took. What the
+     * task is said to have taken -- its result's step count, the counts its statuses carry --
+     * counts these.
+     */
+    public List<Turn> steps() {
+        return turns.stream().filter(t -> t.action() == null
+                || !AgentLoop.FROM_THE_OWNER_STEP.equals(t.action().tool())).toList();
+    }
+
+    /**
      * The steps the model took, in order: every turn but the ones the loop recorded itself
      * ({@link Turn#byTheLoop}). What looks back for a run of failed, empty or repeated steps
      * reads these, so a reflection the loop injects between two failures neither adds to the run

@@ -40,6 +40,9 @@ class SteeringTest {
         final BlockingQueue<String> events = new LinkedBlockingQueue<>();
         final List<String> ran = new CopyOnWriteArrayList<>();
         final List<String> rows = new CopyOnWriteArrayList<>();
+        final List<TaskChat.Channel> channels = new CopyOnWriteArrayList<>();
+        /** The inbox of the last task that had one. */
+        volatile Inbox inbox;
 
         Driven() {
             super(null, null, null, null, null, null, null, null, null, null,
@@ -52,6 +55,8 @@ class SteeringTest {
                                        TaskChat.Channel channel, Inbox inbox) {
             ran.add(message);
             rows.add(String.valueOf(currentMessageId));
+            channels.add(channel);
+            if (inbox != null) this.inbox = inbox;
             events.add("started " + message + (inbox == null ? " (no inbox)" : ""));
             while (true) {
                 String command;
@@ -73,6 +78,7 @@ class SteeringTest {
     }
 
     final Driven loop = new Driven();
+    final OwnClawConfig config = new OwnClawConfig();
     final TaskCancellationService cancellation = new TaskCancellationService();
     final List<StatusMessage> statuses = new CopyOnWriteArrayList<>();
     final AtomicInteger rows = new AtomicInteger();
@@ -82,7 +88,7 @@ class SteeringTest {
         var emitter = new ChatStatusEmitter();
         emitter.subscribe("u1", this, statuses::add);
         queue = new TaskQueue(loop, new EventLogService(MigratedDatabase.at(tmp.resolve("t.db"))), emitter,
-                new OwnClawConfig(), cancellation);
+                config, cancellation);
         queue.start();
     }
 
@@ -93,7 +99,11 @@ class SteeringTest {
 
     /** A message as a chat sends it, its row saved: its answer, when it gets one, is an event. */
     UserMessage message(String user, String chat, String text, List<String> files) {
-        return new UserMessage(user, chat, "row" + rows.incrementAndGet(), text, files, TaskChat.Channel.WEB,
+        return message(user, chat, text, files, TaskChat.Channel.WEB);
+    }
+
+    UserMessage message(String user, String chat, String text, List<String> files, TaskChat.Channel channel) {
+        return new UserMessage(user, chat, "row" + rows.incrementAndGet(), text, files, channel,
                 r -> loop.events.add("answered " + text + ": " + r.response()));
     }
 
@@ -245,5 +255,142 @@ class SteeringTest {
                 "sent to the task, it was no waiting work: it is queued when the task ends, and runs");
         assertEquals("answered unread when it stopped: done: unread when it stopped", next());
         idle();
+    }
+
+    @Test
+    @DisplayName("a message the task did not read runs in the place it took when sent: before one queued after it")
+    void anUnreadMessageKeepsItsPlace(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        queue.send(message("A", "check the routers"), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.STEERED, queue.send(message("A", "FIRST: use the backup link"), false));
+        assertEquals(Fate.QUEUED, queue.send(message("A", "SECOND: then check the printer"), true));
+        for (int i = 0; i < 3; i++) loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("started FIRST: use the backup link", next(), "sent first, it runs first");
+        assertEquals("answered FIRST: use the backup link: done: FIRST: use the backup link", next());
+        assertEquals("started SECOND: then check the printer", next());
+        assertEquals("answered SECOND: then check the printer: done: SECOND: then check the printer", next());
+        idle();
+        // Mutation: queue it in a new place when the task ends -> SECOND runs first, and its task
+        // reads FIRST as a question asked before the answer it came after.
+    }
+
+    @Test
+    @DisplayName("a message sent just as a chat turn's task ends runs after what that task did not read: its inbox closes before it is let go")
+    void aMessageSentAsTheTaskEndsRunsAfterWhatItDidNotRead(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        // A chat turn of the ops API runs on its caller's thread, beside the queue's worker, which
+        // waits idle and takes what is queued at once.
+        var turn = Thread.ofPlatform().start(() -> queue.runChat(message("A", "check the routers")));
+        assertEquals("started check the routers", next());
+        Inbox inbox = loop.inbox;
+        assertEquals(Fate.STEERED, queue.send(message("A", "FIRST: use the backup link"), false));
+        synchronized (inbox) {
+            // The task ends, and waits to close its inbox, which this thread holds.
+            loop.commands.add("end");
+            assertEquals("answered check the routers: done: check the routers", next());
+            for (int i = 0; i < 1000 && turn.getState() != Thread.State.BLOCKED; i++) Thread.sleep(2);
+            assertEquals(Thread.State.BLOCKED, turn.getState(), "the ending task waits on its inbox");
+            queue.send(message("A", "SECOND: then the printer"), false);
+            assertNull(loop.events.poll(200, TimeUnit.MILLISECONDS),
+                    "nothing starts before what the task did not read is queued");
+        }
+        loop.commands.add("end");
+        loop.commands.add("end");
+        assertEquals("started FIRST: use the backup link", next());
+        assertEquals("answered FIRST: use the backup link: done: FIRST: use the backup link", next());
+        assertEquals("started SECOND: then the printer", next());
+        assertEquals("answered SECOND: then the printer: done: SECOND: then the printer", next());
+        turn.join(10_000);
+        idle();
+        // Mutation: let the inbox go before closing it -> SECOND finds no inbox, is queued at
+        // once, and the idle worker runs it before FIRST is handed on.
+    }
+
+    @Test
+    @DisplayName("after a message with files is queued, what follows it in the chat queues behind it: the running task never reads it first")
+    void aFollowUpWaitsForTheFile(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        queue.send(message("A", "check the routers"), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.QUEUED, queue.send(message("u1", "A", "FIRST: here is the router config", List.of("f1")), false));
+        assertEquals(Fate.QUEUED, queue.send(message("A", "SECOND: compare it with the running one"), false));
+        loop.commands.add("step");
+        assertEquals("read []", next(), "not read without the file it is about");
+        for (int i = 0; i < 3; i++) loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("started FIRST: here is the router config", next());
+        assertEquals("answered FIRST: here is the router config: done: FIRST: here is the router config", next());
+        assertEquals("started SECOND: compare it with the running one", next());
+        assertEquals("answered SECOND: compare it with the running one: done: SECOND: compare it with the running one",
+                next());
+        idle();
+        // Mutation: refuse only the message with files -> the follow-up is read by the running
+        // task, without the file, and the file's task runs without the follow-up.
+    }
+
+    @Test
+    @DisplayName("a message from another channel than the running task's is a task of its own, answered where it came from")
+    void anotherChannelIsATaskOfItsOwn(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        queue.send(message("A", "check the routers"), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.QUEUED, queue.send(
+                message("u1", "A", "is the printer working?", List.of(), TaskChat.Channel.TELEGRAM), false),
+                "the web task's answer goes to the page alone");
+        assertEquals(Fate.QUEUED, queue.send(message("A", "and the scanner?"), false), "sent after it, it runs after it");
+        loop.commands.add("step");
+        assertEquals("read []", next());
+        for (int i = 0; i < 3; i++) loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("started is the printer working?", next());
+        assertEquals("answered is the printer working?: done: is the printer working?", next(),
+                "answered by a task of its own, whose answer goes to Telegram");
+        assertEquals(TaskChat.Channel.TELEGRAM, loop.channels.get(1));
+        assertEquals("started and the scanner?", next());
+        assertEquals("answered and the scanner?: done: and the scanner?", next());
+        idle();
+
+        queue.send(message("u1", "A", "check the routers", List.of(), TaskChat.Channel.TELEGRAM), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.STEERED, queue.send(
+                message("u1", "A", "use the backup link", List.of(), TaskChat.Channel.TELEGRAM), false));
+        assertEquals(Fate.QUEUED, queue.send(message("A", "and the printer?"), false),
+                "a Telegram task's answer does not reach the page");
+        loop.commands.add("step");
+        assertEquals("read [use the backup link]", next());
+        loop.commands.add("end");
+        loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("started and the printer?", next());
+        assertEquals("answered and the printer?: done: and the printer?", next());
+        idle();
+        // Mutation: steer whatever channel it came from -> the Telegram question is read by the
+        // web task, and Telegram is told only that the task got it.
+    }
+
+    @Test
+    @DisplayName("a full queue refuses a message the task did not read: it is answered so, and its sender is not told it runs")
+    void aFullQueueRefusesTheHandOn(@TempDir Path tmp) throws Exception {
+        config.getQueue().setMaxQueuedTasks(1);
+        start(tmp);
+        queue.send(message("A", "check the routers"), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.QUEUED, queue.send(message("B", "waiting in B"), false));
+        assertEquals(Fate.STEERED, queue.send(message("A", "use the backup link"), false));
+        assertEquals(Fate.REFUSED, queue.send(message("C", "one too many"), false), "not queued: no line says it is");
+        assertEquals("answered one too many: System busy — please try again later.", next());
+        loop.commands.add("end");
+        loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("answered use the backup link: System busy — please try again later.", next());
+        assertEquals("started waiting in B", next());
+        assertEquals("answered waiting in B: done: waiting in B", next());
+        idle();
+        assertTrue(statuses.stream().noneMatch(s -> TaskQueue.UNREAD.equals(s.text())),
+                "nothing says it runs as a task of its own: " + statuses);
+        // Mutation: tell the sender of every message handed on -> "it runs as a task of its own"
+        // beside "System busy".
     }
 }

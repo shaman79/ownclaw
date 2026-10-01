@@ -133,10 +133,12 @@ public class OpsController {
                         "agent/run with sessionId is a chat turn, saved to that chat the way the web "
                                 + "chat saves one (\"new\" starts a chat titled Ops check, which does "
                                 + "not become the owner's open chat); the response names the chat. "
-                                + "While a task runs in that chat, the turn is handed to it instead "
-                                + "(202, steered: true): the task reads it before its next step, or, "
-                                + "ending first, runs it as a task of its own whose answer is saved "
-                                + "in the chat.",
+                                + "While another such turn runs in that chat, the turn is handed to "
+                                + "it instead (202, steered: true): the task reads it before its next "
+                                + "step, or, ending first, runs it as a task of its own whose answer "
+                                + "is saved in the chat. A task asked from the web chat or Telegram "
+                                + "takes no turn: one sent in its chat runs beside it, and what is "
+                                + "sent there after it is queued.",
                         "Every call is logged, including the SQL text.")));
     }
 
@@ -440,9 +442,10 @@ public class OpsController {
      * web-chat task is handed, so AgentLoop loads its conversation the way it does for one --
      * and the answer is saved after it, as the web chat saves one. Its progress messages are
      * saved in that chat as the task goes, and sent nowhere ({@code TaskChat.Channel.OPS}).
-     * While it runs, what is sent in that chat goes to it, as in the web chat; and a turn sent
-     * while a task runs in its chat goes to that task ({@link TaskQueue#steer}) and starts no
-     * run.
+     * While it runs, another turn sent in that chat goes to it, as a message sent in the web
+     * chat goes to a task asked there ({@link TaskQueue#steer}), and starts no run. A task asked
+     * from the web chat or Telegram takes no turn ({@link com.ownclaw.core.Inbox#offer}): one sent
+     * in its chat runs beside it.
      */
     @PostMapping("/agent/run")
     public ResponseEntity<?> runAgent(@RequestBody Map<String, Object> body) {
@@ -500,9 +503,9 @@ public class OpsController {
             steered.put("steered", true);
             steered.put("sessionId", turn.sessionId());
             steered.put("messageId", turn.messageId());
-            steered.put("note", "A task is running in this chat: the message was handed to it, and it reads "
-                    + "it before its next step. If the task ends first, the message runs as a task of its "
-                    + "own, and its answer is saved in the chat.");
+            steered.put("note", "A chat turn of this API is running in this chat: the message was handed to "
+                    + "it, and it reads it before its next step. If the task ends first, the message runs as "
+                    + "a task of its own, and its answer is saved in the chat.");
             return ResponseEntity.accepted().body(steered);
         }
 

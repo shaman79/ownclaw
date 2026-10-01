@@ -366,7 +366,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);
 
-        // To the task running in this chat, or a task of its own (TaskQueue#send).
+        // To the task running in this chat when it was asked from the web chat too, whose answer
+        // comes here; otherwise a task of its own (TaskQueue#send).
         //
         // Deliberately NOT capturing `session` in the answer. A task takes minutes, and any laptop
         // sleep, Wi-Fi blip or proxy idle-timeout closes the socket that arrived with the
@@ -410,12 +411,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // ran only on an Error thrown while an answer was sent, and saved that line beside it.
         TaskQueue.Fate fate = taskQueue.send(sent, queue);
 
-        // What became of it, for the page to say under the bubble it drew.
+        // What became of it, for the page to say under the bubble it drew -- with its chat and
+        // whether it was sent to be queued, from which the page reads where Send reaches the
+        // running task: in the chat a message started or reached it in, until one sent there
+        // without Queue is not taken.
         var said = new LinkedHashMap<String, Object>();
         said.put("type", "fate");
         said.put("fate", fate.name().toLowerCase(java.util.Locale.ROOT));
         if (fate.line() != null) said.put("content", fate.line());
         said.put("messageId", currentMessageId);
+        said.put("sessionId", currentSessionId);
+        said.put("queue", queue);
         if (clientId != null) said.put("clientId", clientId);
         send(session, said);
     }

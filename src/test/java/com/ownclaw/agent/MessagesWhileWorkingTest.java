@@ -34,11 +34,11 @@ class MessagesWhileWorkingTest {
     record Run(LoopRig rig, Inbox inbox, String chat, String asked, String steering) {}
 
     static Run run(Path tmp, String provider) throws Exception {
-        var inbox = new Inbox();
+        var inbox = new Inbox(TaskChat.Channel.WEB);
         String[] steering = new String[1];
         var rig = new LoopRig(tmp, List.of(
                 AssistantPartsTest.tool("router_status", List.of(), p -> {
-                    inbox.offer(owner(steering[0], STEER));
+                    inbox.offer(owner(steering[0], STEER), 2);
                     return "main link down";
                 }),
                 AssistantPartsTest.tool("backup_link", List.of(), p -> "backup link up")));
@@ -88,6 +88,12 @@ class MessagesWhileWorkingTest {
 
         assertEquals(List.of("router_status", AgentLoop.FROM_THE_OWNER_STEP, "backup_link"),
                 r.trajectory().turns().stream().map(t -> t.action().tool()).toList());
+        assertEquals(2, r.totalSteps(), "his message is no step of the task's");
+        var done = statuses.stream().filter(s -> s.type() == StatusMessage.Type.COMPLETED).toList().getLast();
+        assertTrue(done.text().startsWith("2 steps · "), done.text());
+        assertEquals(2, done.data().get("totalSteps"), "the count Telegram shows");
+        assertEquals(2, done.data().get("successCount"));
+        // Mutation: count every turn -> "3 steps", one of them his message.
 
         List<String> progress = run.rig().jdbc.queryForList(
                 "SELECT content FROM conversations WHERE session_id = ? AND role = 'progress' ORDER BY rowid",
@@ -122,11 +128,11 @@ class MessagesWhileWorkingTest {
     @Test
     @DisplayName("a message quoting a private result is the owner's own words: the request carrying it is sent, the result still is not")
     void quotingAPrivateResultIsHisToDo(@TempDir Path tmp) throws Exception {
-        var inbox = new Inbox();
+        var inbox = new Inbox(TaskChat.Channel.WEB);
         String line = "wireless.default_radio0.key='x7Qp-2Lm-9Rt-Wq4z'";
         String quote = "Keep " + line + " as it is.";
         var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("router_audit", List.of("ROUTER_PASS"), p -> {
-            inbox.offer(owner("r2", quote));
+            inbox.offer(owner("r2", quote), 2);
             return AssistantPartsTest.REPORT;
         })));
         rig.cloud.think.add(call("router_audit", Map.of()));

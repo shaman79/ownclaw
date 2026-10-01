@@ -2717,6 +2717,7 @@
             clearMessages();
             // No chat is on screen until the server names the new one (session_info).
             displayedSessionId = null;
+            updateComposer();
             resetActivity();
             sidebar.classList.remove('mobile-open');
         }
@@ -2841,6 +2842,7 @@
         delete unreadSessions[sessionId];
         var listed = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
         if (listed) listed.classList.remove('unread');
+        updateComposer();
         // Show loading spinner in messages area
         clearMessages();
         var loader = document.createElement('div');
@@ -2862,7 +2864,10 @@
                 if (m.task_id) lastTask = m.task_id;
                 if (m.role === 'progress') { addProgress(m.content, m.progress); return; }
                 var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
-                addMsg(type, m.content, m.task_id);
+                var drawn = addMsg(type, m.content, m.task_id);
+                // Named by its row, as a bubble drawn live is once its fate comes: a task still
+                // running marks it read, or handed on, after a reload or a switch back too.
+                if (type === 'user') drawn.dataset.messageId = m.id;
             });
             if (lastTask) restoreTaskStats(lastTask, sessionId);
         })
@@ -5530,6 +5535,12 @@
                     delete sentBubbles[data.clientId];
                     if (sentBubble && data.messageId) sentBubble.dataset.messageId = data.messageId;
                     markFate(sentBubble, content);
+                    // And where Send reaches the running task: the chat this message started or
+                    // reached it in. Sent there without Queue and not taken, it says that task
+                    // takes nothing more from here.
+                    if (data.fate === 'started' || data.fate === 'steered') steeredChatId = data.sessionId;
+                    else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
+                    updateComposer();
                 } else if (type === 'status') {
                     var sub = data.status || '';
                     var detail = data.data && data.data.category ? data.data : null;
@@ -5660,15 +5671,13 @@
 
     /**
      * The working state. Send stays enabled in it: what is sent while a task runs goes to that
-     * task, which reads it before its next step -- or, with Queue, runs as a task of its own after
-     * it. Stop stays beside them.
+     * task where the task takes it, and the task reads it before its next step -- or, with Queue,
+     * it runs as a task of its own after it (updateComposer). Stop stays beside them.
      */
     function setThinking(on) {
-        if (!on) stopPressed = false;
+        if (!on) { stopPressed = false; steeredChatId = null; }
         if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
         stopBtn.classList.toggle('visible', on);
-        queueBtn.classList.toggle('visible', on);
-        inputEl.placeholder = on ? 'Send to the running task, or Queue it for after...' : idlePlaceholder;
         if (on) {
             thinkingEl.classList.add('active');
             scrollBottom();
@@ -5687,6 +5696,27 @@
             thinkingStartedAt = null;
             stopElapsedTimer();
         }
+        updateComposer();
+    }
+
+    /**
+     * The chat where Send reaches the running task, once the server has said so: the fate of a
+     * message this page sent there names it. Null while nothing says so -- the task takes
+     * nothing from this page (one asked from Telegram, a scheduled run, /bg), or was not reached
+     * from it yet -- and while no task runs.
+     */
+    var steeredChatId = null;
+
+    /**
+     * Promise only what Send does: the running task, with Queue beside Send, only in the chat
+     * where Send is known to reach it. Anywhere else nothing is promised, and the line under the
+     * bubble says what became of the message.
+     */
+    function updateComposer() {
+        var steering = thinkingEl.classList.contains('active')
+                && steeredChatId !== null && steeredChatId === displayedSessionId;
+        queueBtn.classList.toggle('visible', steering);
+        inputEl.placeholder = steering ? 'Send to the running task, or Queue it for after...' : idlePlaceholder;
     }
 
     function resetThinkingSafetyTimer() {

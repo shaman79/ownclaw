@@ -11,7 +11,8 @@ package com.ownclaw.agent;
  *                       task dropped before it started, a run that failed outside the loop, a
  *                       full queue -- are whole sentences the queue writes
  * @param trajectory     the full execution trajectory
- * @param totalSteps     number of action-observation cycles
+ * @param totalSteps     the steps the task took ({@link AgentTrajectory#steps}): its
+ *                       action-observation cycles, not the messages the user sent it
  * @param totalDurationMs wall-clock time of the entire execution
  * @param terminationReason why the agent stopped
  * @param ownerText      what the owner's own screen shows in place of {@code response}, or null
@@ -70,24 +71,24 @@ public record AgentResult(
     }
 
     public static AgentResult completed(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(true, response, trajectory, trajectory.size(), durationMs, TerminationReason.COMPLETED);
+        return new AgentResult(true, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.COMPLETED);
     }
 
     public static AgentResult cancelled(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.CANCELLED);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.CANCELLED);
     }
 
     public static AgentResult stalled(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.STALLED);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.STALLED);
     }
 
     public static AgentResult error(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.ERROR);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.ERROR);
     }
 
     /** The model refused what it was given as longer than its context window. */
     public static AgentResult contextWindow(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.CONTEXT_WINDOW);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.CONTEXT_WINDOW);
     }
 
     /**
@@ -98,7 +99,7 @@ public record AgentResult(
      * and rendering it as a failure is the opposite error to the one this reason fixes.
      */
     public static AgentResult needsInput(String question, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, question, trajectory, trajectory.size(), durationMs, TerminationReason.NEEDS_INPUT);
+        return new AgentResult(false, question, trajectory, trajectory.steps().size(), durationMs, TerminationReason.NEEDS_INPUT);
     }
 
     /**
@@ -144,11 +145,11 @@ public record AgentResult(
     }
 
     public static AgentResult failureLimit(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.FAILURE_LIMIT);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.FAILURE_LIMIT);
     }
 
     /** The gateway refused to send. Not a success, and not a reasoning failure either. */
     public static AgentResult privacyBlocked(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.PRIVACY_BLOCKED);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.PRIVACY_BLOCKED);
     }
 }

@@ -17,34 +17,58 @@ import static org.junit.jupiter.api.Assertions.*;
 class InboxTest {
 
     static UserMessage message(String text) {
-        return new UserMessage("u1", "chat", "row-" + text, text, List.of(), TaskChat.Channel.WEB, r -> { });
+        return message(text, TaskChat.Channel.WEB, List.of());
+    }
+
+    static UserMessage message(String text, TaskChat.Channel channel, List<String> files) {
+        return new UserMessage("u1", "chat", "row-" + text, text, files, channel, r -> { });
     }
 
     @Test
-    @DisplayName("the task reads what was offered, in order, once; the close hands on the rest and takes nothing more")
+    @DisplayName("the task reads what was offered, in order, once; the close hands on the rest, each with its place, and takes nothing more")
     void readOnceThenHandedOn() {
-        var inbox = new Inbox();
-        assertTrue(inbox.offer(message("a")));
-        assertTrue(inbox.offer(message("b")));
+        var inbox = new Inbox(TaskChat.Channel.WEB);
+        assertTrue(inbox.offer(message("a"), 1));
+        assertTrue(inbox.offer(message("b"), 2));
         assertEquals(List.of("a", "b"), inbox.drain().stream().map(UserMessage::text).toList());
         assertEquals(List.of(), inbox.drain(), "read once");
 
-        assertTrue(inbox.offer(message("c")));
-        assertTrue(inbox.offer(message("d")));
+        assertTrue(inbox.offer(message("c"), 5));
+        assertTrue(inbox.offer(message("d"), 7));
         var handedOn = new ArrayList<String>();
-        List<UserMessage> unread = inbox.close(m -> handedOn.add(m.text()));
-        assertEquals(List.of("c", "d"), handedOn, "what the task did not read, in order");
-        assertEquals(List.of("c", "d"), unread.stream().map(UserMessage::text).toList());
-        assertFalse(inbox.offer(message("e")), "an ended task takes nothing: the caller queues it");
+        inbox.close((m, order) -> handedOn.add(m.text() + "@" + order));
+        assertEquals(List.of("c@5", "d@7"), handedOn, "what the task did not read, in order, in the places they took when sent");
+        assertFalse(inbox.offer(message("e"), 8), "an ended task takes nothing: the caller queues it");
         assertEquals(List.of(), inbox.drain());
-        assertEquals(List.of(), inbox.close(m -> fail("handed on twice: " + m.text())));
+        inbox.close((m, order) -> fail("handed on twice: " + m.text()));
+    }
+
+    @Test
+    @DisplayName("a message from another channel, or with files, is not taken -- nor is anything after it -- and the task still reads what came before")
+    void whatItCannotTakeEndsItsTaking() {
+        for (UserMessage refused : List.of(message("from the phone", TaskChat.Channel.TELEGRAM, List.of()),
+                message("from the ops API", TaskChat.Channel.OPS, List.of()),
+                message("read this file", TaskChat.Channel.WEB, List.of("f1")))) {
+            var inbox = new Inbox(TaskChat.Channel.WEB);
+            assertTrue(inbox.offer(message("before"), 1));
+            assertFalse(inbox.offer(refused, 2), refused.text() + ": its answer would not reach its sender, or its files the task");
+            assertFalse(inbox.offer(message("compare it with the running one"), 3),
+                    "after " + refused.text() + ": queued behind it, not read before it runs");
+            assertEquals(List.of("before"), inbox.drain().stream().map(UserMessage::text).toList());
+            inbox.close((m, order) -> fail("nothing left to hand on: " + m.text()));
+        }
+        var telegram = new Inbox(TaskChat.Channel.TELEGRAM);
+        assertTrue(telegram.offer(message("use the backup link", TaskChat.Channel.TELEGRAM, List.of()), 1),
+                "a task asked from Telegram takes what is sent from there");
+        // Mutation: take a message from any channel -> a Telegram question read by a web task is
+        // answered on the web page only, and Telegram never gets its answer.
     }
 
     @Test
     @DisplayName("offers racing the close on other threads: every message is read, or queued, exactly once, each sender's in order")
     void offerRacesClose() throws Exception {
         for (int round = 0; round < 2_000; round++) {
-            var inbox = new Inbox();
+            var inbox = new Inbox(TaskChat.Channel.WEB);
             var read = Collections.synchronizedList(new ArrayList<String>());
             // What runs as a task of its own, in the order it was queued: handed on by the close
             // (under the inbox's lock), or queued by a sender whose offer came after it.
@@ -58,7 +82,7 @@ class InboxTest {
                     await(go);
                     for (int i = 0; i < each; i++) {
                         UserMessage m = message(who + ":" + i);
-                        if (!inbox.offer(m)) queued.add(m.text());
+                        if (!inbox.offer(m, i)) queued.add(m.text());
                     }
                 }));
             }
@@ -66,7 +90,7 @@ class InboxTest {
             threads.add(Thread.ofPlatform().start(() -> {
                 await(go);
                 for (int i = 0; i < stopAfter; i++) inbox.drain().forEach(m -> read.add(m.text()));
-                inbox.close(m -> queued.add(m.text()));
+                inbox.close((m, order) -> queued.add(m.text()));
             }));
             go.countDown();
             for (Thread t : threads) t.join(10_000);
