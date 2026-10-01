@@ -10,6 +10,7 @@ import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.ResultDelivery;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.UserMessage;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.skillrunner.SkillInteractionHandler;
@@ -49,30 +50,42 @@ class ChatDeliveryTest {
 
     static final String USER = "u1";
 
-    /** Hands out futures the test completes; runs nothing. */
+    /**
+     * Hands out futures the test completes, each delivering to its message's answer; runs nothing.
+     * A chat message's fate is the one the test sets.
+     */
     static final class Queue extends TaskQueue {
         final List<String> messages = new ArrayList<>();
         final List<com.ownclaw.agent.TaskChat.Channel> channels = new ArrayList<>();
+        final List<UserMessage> sent = new ArrayList<>();
+        /** Whether each chat message was sent to be queued. */
+        final List<Boolean> queued = new ArrayList<>();
         final List<CompletableFuture<AgentResult>> futures = new ArrayList<>();
+        volatile Fate fate = Fate.STARTED;
 
         Queue() {
             super(null, null, null, new OwnClawConfig(), null);
         }
 
         @Override
-        public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds,
-                                                     com.ownclaw.agent.TaskChat.Channel channel) {
-            messages.add(message);
-            channels.add(channel);
+        public Fate send(UserMessage message, boolean queue) {
+            messages.add(message.text());
+            channels.add(message.channel());
+            sent.add(message);
+            queued.add(queue);
             var future = new CompletableFuture<AgentResult>();
+            future.thenAccept(message.answer());
             futures.add(future);
-            return future;
+            return fate;
         }
 
         @Override
         public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
-            return submit(userId, message, priority, null, List.of(), null);
+            messages.add(message);
+            channels.add(null);
+            var future = new CompletableFuture<AgentResult>();
+            futures.add(future);
+            return future;
         }
     }
 
@@ -191,7 +204,8 @@ class ChatDeliveryTest {
             @Override
             public AgentResult executeFull(String userId, String message, boolean unattended,
                                            String currentMessageId, List<String> attachmentIds,
-                                           com.ownclaw.agent.TaskChat.Channel channel) {
+                                           com.ownclaw.agent.TaskChat.Channel channel,
+                                           com.ownclaw.core.Inbox inbox) {
                 throw new IllegalStateException("database is locked");
             }
         };
@@ -315,6 +329,65 @@ class ChatDeliveryTest {
         assertTrue(progress.get(1).path("progress").isMissingNode(), "none when the message carries none");
         assertTrue(frames("status").stream().noneMatch(f -> f.path("content").asText().contains("Step 1 · ping")),
                 "not an entry of the activity strip");
+
+        emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
+                "☁️ Step 2 · your message · 3.0s · $0.01\n\nRead your message: part of the task from this step on.",
+                Map.of("sessionId", "s1", "progress", header, "read", List.of("row7")));
+        assertEquals("row7", frames("progress").getLast().path("read").path(0).asText(),
+                "the rows the task read, for the page to mark under their bubbles");
+    }
+
+    /** What the page sends for a message: the text, the name it gave the bubble, and queue when asked. */
+    private void sendFromPage(String text, String clientId, boolean queued) throws Exception {
+        var json = new java.util.LinkedHashMap<String, Object>(Map.of("message", text, "clientId", clientId));
+        if (queued) json.put("queue", true);
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(json)));
+    }
+
+    @Test
+    @DisplayName("what became of a message is sent back under the page's name for its bubble, with its row; nothing is run twice")
+    void theFateComesBackToItsBubble(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        queue.fate = TaskQueue.Fate.STEERED;
+        sendFromPage("use the backup link", "m7", false);
+
+        var fate = frames("fate").getLast();
+        assertEquals("steered", fate.path("fate").asText());
+        assertEquals(TaskQueue.Fate.STEERED.line(), fate.path("content").asText(), "the line the page shows");
+        assertEquals("m7", fate.path("clientId").asText());
+        String row = jdbc.queryForObject("SELECT id FROM conversations WHERE role = 'user'", String.class);
+        assertEquals(row, fate.path("messageId").asText(), "its row, which the read progress row will name");
+        assertEquals(List.of(false), queue.queued, "sent to the running task, not queued");
+        assertEquals(row, queue.sent.getFirst().messageId(), "saved first, then sent");
+
+        queue.fate = TaskQueue.Fate.STARTED;
+        sendFromPage("hello", "m8", false);
+        assertTrue(frames("fate").getLast().path("content").isMissingNode(), "nothing to say when it just starts");
+    }
+
+    @Test
+    @DisplayName("Queue asks for a task of its own; so does a typed /queue, drawn by the server's echo under the page's name")
+    void queueAsksForATaskOfItsOwn(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        queue.fate = TaskQueue.Fate.QUEUED;
+        sendFromPage("check the printer", "m1", true);
+        sendFromPage("/queue check the scanner", "m2", false);
+
+        assertEquals(List.of("check the printer", "check the scanner"), queue.messages);
+        assertEquals(List.of(true, true), queue.queued);
+        var echo = frames("user").getLast();
+        assertEquals("/queue check the scanner", echo.path("content").asText(), "the page draws no slash text itself");
+        assertEquals("m2", echo.path("clientId").asText());
+        assertEquals("m2", frames("fate").getLast().path("clientId").asText());
+        assertEquals(List.of("check the printer", "check the scanner"), jdbc.queryForList(
+                "SELECT content FROM conversations WHERE role = 'user' ORDER BY rowid", String.class),
+                "the message is saved, without the command");
+
+        sendFromPage("/queue", "m3", false);
+        sendFromPage("/queue /cred set SMTP_PASS hunter2", "m4", false);
+        assertEquals(2, queue.messages.size(), "neither is a message to run: " + queue.messages);
+        assertTrue(frames("system").stream().anyMatch(f -> f.path("content").asText().startsWith("Usage: `/queue <message>`")));
+        assertTrue(sent.stream().noneMatch(f -> f.toString().contains("hunter2")), "a command where the message goes is not repeated");
     }
 
     @Test

@@ -132,6 +132,9 @@ public class CommandHandler {
                 yield Optional.of(String.format("%s\nCloud: %,d  |  Local: %,d", budget, cloud, local));
             }
             case "/history" -> Optional.of(handleHistory(userId));
+            // A /queue with a message is no command here: the chat queues the message (queued).
+            // One with nothing to run is told how to use it.
+            case "/queue" -> Optional.of(QUEUE_USAGE);
             default -> {
                 if (command.equals("/new") || command.startsWith("/new ")) {
                     yield Optional.of(handleNew(userId, message.trim()));
@@ -192,6 +195,28 @@ public class CommandHandler {
     private static final Pattern SECRET_COMMAND = Pattern.compile(
             "(/cred\\s+set|/user\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** {@code /queue <message>}: its message, read once (group 1). */
+    private static final Pattern QUEUE_COMMAND = Pattern.compile("/queue(?:\\s+(.*))?",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** What a bare {@code /queue} is answered. */
+    static final String QUEUE_USAGE = "Usage: `/queue <message>` — runs the message as a task of its own "
+            + "after the work ahead of it, instead of handing it to the task running in this chat.";
+
+    /**
+     * The message of a {@code /queue <message>} command -- which a chat saves and queues as its
+     * own task, after the work ahead of it, instead of handing it to the running task -- or null
+     * when the text is no such command. One with nothing to run, or with a command where the
+     * message goes, is none: a command is not sent to the agent as a message, and {@link #handle}
+     * answers a bare {@code /queue} with its usage.
+     */
+    public static String queued(String text) {
+        Matcher m = text == null ? null : QUEUE_COMMAND.matcher(text.strip());
+        if (m == null || !m.matches() || m.group(1) == null) return null;
+        String message = m.group(1).strip();
+        return message.isEmpty() || message.startsWith("/") ? null : message;
+    }
 
     /** What a chat shows for an unknown command. The text itself is not repeated: it may hold a secret. */
     public static final String UNKNOWN_COMMAND = "Unknown command. Try /help";
@@ -306,6 +331,7 @@ public class CommandHandler {
                 - `/tokens` — Token budget summary
                 - `/skills` — List available tools
                 - `/bg <task>` — Run it in the background; the result comes back when ready
+                - `/queue <message>` — Run it as a task of its own after the running one, instead of sending it to that task (the web chat's Queue button)
                 - `/files` — List uploaded files (`/files rm <id>` to delete one)
                 - `/debug` — Toggle debug mode
                 - `/cancel` — Cancel the running task

@@ -220,6 +220,8 @@ The local model runs on one Ollama server, and its GPU is the scarce resource. T
 
 **This means**: with the background lane on, while one task waits on the local model, the other can be running a skill or waiting on a cloud call. The queue runs one task per lane. The local model's summaries of an attended task's private results are background work (`LocalLane`): written one at a time, after their task has ended too, and a summary under way makes way for a task's local work and is written again afterwards. Nothing else serializes local calls: the Ollama server decides how many of its own inferences run at once.
 
+**Messages while a task runs.** A chat task (web chat, Telegram, an ops chat turn; never a scheduled or `/bg` run) has an inbox while it runs, keyed by its user and chat. A message the owner sends in that chat goes to it (`TaskQueue.send`): its row is saved first, as always, and the task reads it before its next step -- after a delegation under way has returned -- as a step of its own in the prompt, in its place, so the prompt only grows at its end; the chat records that the task read it. A message with files, one sent with Queue (`/queue <message>`), and one sent in another chat run as tasks of their own after the work ahead of them. When the task ends, however it ends, what it did not read is queued then, in order, each a task answering its own row; the inbox closes under the lock its offers take, so each message is read or queued, once.
+
 ### 3.4 Async & Long-Running Tasks
 
 Not all tasks complete within a single request-response cycle. The queue supports:

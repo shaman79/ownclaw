@@ -138,6 +138,55 @@ class ChatPageTest {
     }
 
     @Test
+    @DisplayName("while a task runs Send stays enabled -- Enter too -- with Queue and Stop beside it")
+    void sendStaysEnabledWhileATaskRuns() {
+        String thinking = page.substring(page.indexOf("function setThinking(on) {"));
+        thinking = thinking.substring(0, thinking.indexOf("function resetThinkingSafetyTimer()"));
+        assertFalse(thinking.contains("sendBtn.disabled"), "Send is never disabled: " + thinking);
+        assertTrue(thinking.contains("stopBtn.classList.toggle('visible', on); queueBtn.classList.toggle('visible', on);"),
+                "Stop and Queue show while it runs: " + thinking);
+        assertFalse(page.contains("busy"), "nothing holds back Enter while a task runs");
+        assertTrue(page.contains("sendBtn.addEventListener('click', function() { send(false); });")
+                && page.contains("queueBtn.addEventListener('click', function() { send(true); });"));
+        assertTrue(page.contains("if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) { e.preventDefault(); "
+                + "// What Send does, in every state: while a task runs, the message goes to it. send(false); }"));
+        assertTrue(page.contains("<button id=\"queue\""), "the Queue button");
+        String send = page.substring(page.indexOf("function send(queued) {"));
+        send = send.substring(0, send.indexOf("function markFate("));
+        assertTrue(send.contains("var payload = { message: text, clientId: clientId }; if (queued) payload.queue = true;"), send);
+        assertTrue(send.contains("if (!thinkingEl.classList.contains('active')) {"),
+                "a message sent while a task runs keeps that task's trace: " + send);
+        // Mutation: disable Send in setThinking again -> nothing can be sent while a task runs.
+    }
+
+    @Test
+    @DisplayName("a message sent while a task runs says under its bubble what became of it: handed to the task, read, or queued")
+    void theBubbleSaysWhatBecameOfIt() {
+        assertTrue(page.contains("} else if (type === 'fate') {"), "a frame of its own");
+        String fate = page.substring(page.indexOf("} else if (type === 'fate') {"));
+        fate = fate.substring(0, fate.indexOf("} else if (type === 'status') {"));
+        assertTrue(fate.contains("var sentBubble = sentBubbles[data.clientId];")
+                && fate.contains("sentBubble.dataset.messageId = data.messageId;")
+                && fate.contains("markFate(sentBubble, content);"), "the server's line, under the page's bubble: " + fate);
+        assertTrue(page.contains("(data.read || []).forEach(function(id) { markFate(bubbleOf(id), 'Read by the task.'); });"),
+                "the progress row that says the task read it marks it read");
+        assertTrue(page.contains("if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);"),
+                "a message the task ended without reading says it runs as its own task");
+        assertTrue(page.contains("if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;"),
+                "a typed /queue is drawn by the server's echo, and its fate goes under that");
+    }
+
+    @Test
+    @DisplayName("a queued task that starts after the running one gets its own trace; a command's reply leaves a running task's working state")
+    void aQueuedTaskStartsItsOwnTrace() {
+        assertTrue(page.contains("if (traceTaskId && traceTaskId !== data.taskId) resetActivity(); "
+                + "activeTaskId = traceTaskId = data.taskId;"), "claimed with a fresh trace");
+        assertTrue(page.contains("function resetActivity() { traceTaskId = null;"));
+        assertTrue(page.contains("if (type === 'response' || (type === 'system' && !activeTaskId)) { setThinking(false);"),
+                "a command typed while a task runs is answered, and the task goes on");
+    }
+
+    @Test
     @DisplayName("the task page shows a delegation's goal, which the chat no longer does")
     void theTaskPageShowsTheGoal() {
         assertTrue(page.contains("if (s.goal) { d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do')); "

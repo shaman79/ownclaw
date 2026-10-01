@@ -28,7 +28,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,10 +59,9 @@ class PrivateAnswerInTheWebChatTest {
         }
 
         @Override
-        public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds,
-                                                     com.ownclaw.agent.TaskChat.Channel channel) {
-            return CompletableFuture.completedFuture(privateAnswer());
+        public Fate send(com.ownclaw.core.UserMessage message, boolean queue) {
+            message.answer().accept(privateAnswer());
+            return Fate.STARTED;
         }
     }
 

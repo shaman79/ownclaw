@@ -7,6 +7,7 @@ import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.UserMessage;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.DebugSessionService;
@@ -161,6 +162,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 if (msg.data() != null && msg.data().get("progress") != null) {
                     payload.put("progress", msg.data().get("progress"));
                 }
+                // The owner's rows a task has just read (TaskChat#read), for the page to mark.
+                if (msg.data() != null && msg.data().get("read") != null) {
+                    payload.put("read", msg.data().get("read"));
+                }
                 send(session, payload);
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
@@ -226,13 +231,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String payload = received == null ? message.getPayload() : received.append(message.getPayload()).toString();
         String userMessage;
 
-        // Accept plain text or JSON {"message": "...", "type": "...", "attachmentIds": [...]}
+        // Accept plain text or JSON {"message": "...", "type": "...", "attachmentIds": [...],
+        // "queue": true, "clientId": "..."}: queue asks for a task of its own instead of the
+        // running one (TaskQueue#send), and clientId is the page's name for the bubble it drew,
+        // which the frame saying what became of the message carries back.
         String messageType = "message";
         java.util.List<String> attachmentIds = java.util.List.of();
+        boolean queue = false;
+        String clientId = null;
         try {
             JsonNode json = mapper.readTree(payload);
             messageType = json.has("type") ? json.path("type").asText("message") : "message";
             userMessage = json.has("message") ? json.path("message").asText() : payload;
+            queue = json.path("queue").asBoolean(false);
+            clientId = json.hasNonNull("clientId") ? json.path("clientId").asText() : null;
             if (json.has("attachmentIds") && json.get("attachmentIds").isArray()) {
                 var ids = new java.util.ArrayList<String>();
                 for (JsonNode id : json.get("attachmentIds")) {
@@ -295,6 +307,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        // "/queue <message>" queues its message, as the page's Queue button does. The page draws
+        // no slash text: this is its bubble, as typed, under the page's name for it.
+        String queued = CommandHandler.queued(userMessage);
+        if (queued != null) {
+            var bubble = new LinkedHashMap<String, Object>();
+            bubble.put("type", "user");
+            bubble.put("content", userMessage.trim());
+            if (clientId != null) bubble.put("clientId", clientId);
+            send(session, bubble);
+            userMessage = queued;
+            queue = true;
+        }
+
         // A question waiting for an answer -- the setup wizard's -- takes this message.
         //
         // Asking "does it start with /" first would turn an answer that happens to begin with a
@@ -302,8 +327,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // it is not a recognised one and a question is waiting, it is the answer. That keeps
         // real commands working while a question waits, without deciding by punctuation what
         // the user meant.
-        boolean waiting = interactionHandler.hasPending(userId);
-        if (userMessage.startsWith("/")) {
+        boolean waiting = queued == null && interactionHandler.hasPending(userId);
+        if (queued == null && userMessage.startsWith("/")) {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
@@ -341,9 +366,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);
 
-        // Submit to task queue.
+        // To the task running in this chat, or a task of its own (TaskQueue#send).
         //
-        // Deliberately NOT capturing `session` here. A task takes minutes, and any laptop
+        // Deliberately NOT capturing `session` in the answer. A task takes minutes, and any laptop
         // sleep, Wi-Fi blip or proxy idle-timeout closes the socket that arrived with the
         // request. The client reconnects within seconds and registers a *new* session under
         // the same userId, but the old object stays closed forever -- so delivering to the
@@ -353,8 +378,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // answer simply never arrived. It is persisted just above, so the only way to see it
         // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
         // sendSystemToUser already does.
-        taskQueue.submit(userId, userMessage, 1, currentMessageId, attachmentIds, TaskChat.Channel.WEB)
-                .thenAccept(result -> {
+        var sent = new UserMessage(userId, currentSessionId, currentMessageId, userMessage, attachmentIds,
+                TaskChat.Channel.WEB, result -> {
                     // Two texts. The history every later prompt is built from gets the safe one;
                     // a private answer is kept beside it, for this chat and its reload only.
                     // Saving is one half of delivering it, and failing it must not also lose the
@@ -379,10 +404,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         log.warn("Could not tell {}'s windows the chat list changed: {}", userId, e.getMessage());
                     }
                 });
-        // No failure arrives on the future: the queue returns what breaks in a task as the task's
-        // ERROR result, answered above like any other, and saving and sending an answer catch the
+        // No failure arrives here: the queue answers what breaks in a task with the task's ERROR
+        // result, answered above like any other, and saving and sending an answer catch the
         // exceptions they throw. A handler for a failed future, writing "Something went wrong",
         // ran only on an Error thrown while an answer was sent, and saved that line beside it.
+        TaskQueue.Fate fate = taskQueue.send(sent, queue);
+
+        // What became of it, for the page to say under the bubble it drew.
+        var said = new LinkedHashMap<String, Object>();
+        said.put("type", "fate");
+        said.put("fate", fate.name().toLowerCase(java.util.Locale.ROOT));
+        if (fate.line() != null) said.put("content", fate.line());
+        said.put("messageId", currentMessageId);
+        if (clientId != null) said.put("clientId", clientId);
+        send(session, said);
     }
 
     @Override

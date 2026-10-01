@@ -19,8 +19,9 @@ public class AgentTrajectory {
     public record Turn(AgentAction action, AgentObservation observation) {
         /**
          * Whether the loop recorded this step itself rather than the model taking it: a reply
-         * that produced nothing to run ({@code _thinking}) or a reflection the loop injected
-         * ({@code _reflection}). The model did not write such a step, so no prompt shows it as
+         * that produced nothing to run ({@code _thinking}), a reflection the loop injected
+         * ({@code _reflection}), or a message the user sent while the task worked
+         * ({@code _message}). The model did not write such a step, so no prompt shows it as
          * the model's -- only what the model was told. No tool the model can run starts with an
          * underscore (skill names begin with a letter; the special actions are words), so these
          * steps are the ones whose tool does.

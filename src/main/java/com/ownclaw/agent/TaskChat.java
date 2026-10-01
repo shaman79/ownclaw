@@ -24,8 +24,9 @@ import java.util.function.BiConsumer;
 
 /**
  * The chat an attended task reports its progress in while it works: a message before each step
- * of the loop, one before each tool call of a delegation, and the local model's summary of each
- * private result the cloud's own calls produced. Each is a row of role {@code progress} in the
+ * of the loop, one before each tool call of a delegation, the local model's summary of each
+ * private result the cloud's own calls produced, and one when the task reads what the owner sent
+ * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
  * <p>
  * Every row opens with its {@link Header}: who acts -- the cloud or the local model -- and where
@@ -193,6 +194,22 @@ public final class TaskChat {
     }
 
     /**
+     * Before a step of the loop: the task has read the messages the owner sent it while it worked
+     * ({@code TaskQueue#steer}), which are part of it from this step on. The row quotes none of
+     * them -- each is in the chat already, as his own row -- and its live frame names their rows,
+     * so the page can mark them read.
+     *
+     * @param local whether the local model does the step, as {@link #step} says
+     */
+    void read(int step, List<String> messageIds, boolean local) {
+        if (sessionId == null) return;
+        int n = messageIds.size();
+        post(header(local ? Actor.LOCAL : Actor.CLOUD, "step", step, "your message", null),
+                (n == 1 ? "Read your message" : "Read your " + n + " messages")
+                        + ": part of the task from this step on.", null, messageIds);
+    }
+
+    /**
      * A private result of the cloud's own call: the local model summarises it for the owner, as
      * background work in the order asked ({@link LocalLane}), and the summary is posted when it
      * is written -- or, when it cannot be, why not. The cloud's words cannot describe a private
@@ -356,6 +373,11 @@ public final class TaskChat {
      * the task has ended.
      */
     private void post(Header header, String body, String ownerBody) {
+        post(header, body, ownerBody, null);
+    }
+
+    /** @param read the owner's rows the task has just read ({@link #read}), named in the live frame; or null */
+    private void post(Header header, String body, String ownerBody, List<String> read) {
         String content = header.line() + (body.isEmpty() ? "" : "\n\n" + body);
         String ownerText = ownerBody == null ? null : header.line() + "\n\n" + ownerBody;
         synchronized (this) {
@@ -373,6 +395,7 @@ public final class TaskChat {
             data.put("sessionId", sessionId);
             data.put("progress", header.data());
             if (ownerText != null) data.put("ownerText", ownerText);
+            if (read != null) data.put("read", read);
             if (channel == Channel.TELEGRAM) data.put("telegram", true);
             emitter.emitForTask(task.userId(), task.taskId(), StatusMessage.Type.PROGRESS_MESSAGE, content, data);
         }

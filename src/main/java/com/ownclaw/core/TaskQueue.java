@@ -3,7 +3,6 @@ package com.ownclaw.core;
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
-import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -16,7 +15,10 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The task queue: tasks are submitted and run asynchronously, in priority order, one at a time
@@ -30,6 +32,10 @@ import java.util.List;
  * Ollama probe, the setup benchmark -- can call it beside a task. Nothing else serializes local
  * calls: the Ollama server decides whether requests that arrive together run side by side or one
  * after the other.
+ * <p>
+ * A message the owner sends in a chat while a task of that chat runs goes to that task
+ * ({@link #send}), which reads it before its next step; what the task has not read when it ends
+ * is queued here, in order, as tasks of their own ({@link #runChat}).
  */
 @Service
 public class TaskQueue {
@@ -45,6 +51,9 @@ public class TaskQueue {
     /** Priority 2 and above is background work — the scheduler and /bg submit at 2. */
     public static final int BACKGROUND_PRIORITY = 2;
 
+    /** A message sent in a chat: interactive work. */
+    private static final int CHAT_PRIORITY = 1;
+
     /** Interactive work. When lanes are off, everything goes here and nothing changes. */
     private final PriorityBlockingQueue<QueuedTask> interactiveQueue = new PriorityBlockingQueue<>();
     /** Background work, drained by its own thread only when lanes are enabled. */
@@ -53,8 +62,46 @@ public class TaskQueue {
     private final AtomicInteger queueSize = new AtomicInteger(0);
     /** Count, not a flag: with two lanes there can be two tasks in flight. */
     private final AtomicInteger running = new AtomicInteger(0);
+    /** The order tasks were added in: of two with the same priority and time, the first runs first. */
+    private final AtomicLong added = new AtomicLong();
     private final boolean separateBackgroundLane;
     private ExecutorService workerPool;
+
+    /**
+     * The inbox of each chat task running now, by its chat ({@link #runChat}): where a message
+     * sent in that chat goes ({@link #steer}). By user and chat both, so no message reaches
+     * another user's task.
+     */
+    private final Map<Chat, Inbox> inboxes = new ConcurrentHashMap<>();
+
+    private record Chat(String userId, String sessionId) {}
+
+    /**
+     * What became of a message sent in a chat ({@link #send}), with the line its sender is shown:
+     * on the web page under his message, on Telegram as a reply.
+     */
+    public enum Fate {
+        /** Given to the task running in its chat, which reads it before its next step. */
+        STEERED("→ To the running task: it reads your message when its current step finishes."),
+        /** Queued behind work that runs or waits: a task of its own, after that work. */
+        QUEUED("Queued: it runs as a task of its own after the work ahead of it."),
+        /** Nothing ran or waited, and its task starts now: there is nothing to say. */
+        STARTED(null);
+
+        private final String line;
+
+        Fate(String line) {
+            this.line = line;
+        }
+
+        /** The line shown to the sender, or null when there is nothing to say. */
+        public String line() {
+            return line;
+        }
+    }
+
+    /** What the sender of a message the task did not read is told: the status that queues it. */
+    static final String UNREAD = "The task ended before it read your message: it runs as a task of its own.";
 
     public TaskQueue(AgentLoop agentLoop, EventLogService eventLog,
                      ChatStatusEmitter statusEmitter, OwnClawConfig config,
@@ -99,7 +146,7 @@ public class TaskQueue {
     }
 
     /**
-     * Submit a task to the queue.
+     * Submit a task that comes from no chat: a scheduled run, or /bg.
      *
      * @param userId  user who submitted the task
      * @param message the user's message
@@ -107,46 +154,9 @@ public class TaskQueue {
      * @return a future that will contain the response (or an error message)
      */
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
-        return submit(userId, message, priority, null, List.of(), null);
-    }
-
-    /**
-     * @param currentMessageId the chat row this task answers, so the loop can skip exactly it
-     *                         and no other; null for a scheduled or background run
-     * @param attachmentIds    the files sent with the message, bound to this task explicitly
-     *                         rather than guessed from the newest chat row
-     * @param channel          where that row came from, so the task's progress messages are
-     *                         shown there too; null for a scheduled or background run
-     */
-    public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                 String currentMessageId, List<String> attachmentIds,
-                                                 TaskChat.Channel channel) {
-        if (queueSize.get() >= maxQueuedTasks) {
-            eventLog.warn(userId, null, "queue.full", "Queue full, task rejected");
-            // An outcome, not a sentence. Returned as a bare string, "System busy" was
-            // indistinguishable from an answer: the scheduler filed the run as completed and
-            // stored it as that run's result.
-            return CompletableFuture.completedFuture(AgentResult.error(
-                    "System busy — please try again later.", new AgentTrajectory(), 0));
-        }
-
         CompletableFuture<AgentResult> future = new CompletableFuture<>();
-        QueuedTask task = new QueuedTask(userId, message, priority, System.currentTimeMillis(), future,
-                currentMessageId, attachmentIds == null ? List.of() : List.copyOf(attachmentIds), channel);
-        // With lanes off, background work stays in the interactive queue and the behaviour is
-        // byte-for-byte what it was: one queue, one thread, priority order within it.
-        boolean background = separateBackgroundLane && priority >= BACKGROUND_PRIORITY;
-        (background ? backgroundQueue : interactiveQueue).add(task);
-        int pos = queueSize.incrementAndGet();
-
-        if (pos > 1) {
-            statusEmitter.emit(userId, StatusMessage.Type.QUEUED,
-                    "Task queued (position " + pos + ")");
-        }
-
-        eventLog.info(userId, null, "task.queued",
-                "Priority P" + priority + ", queue size " + pos);
-
+        add(new QueuedTask(userId, message, priority, System.currentTimeMillis(), added.incrementAndGet(),
+                future::complete, null));
         return future;
     }
 
@@ -156,16 +166,123 @@ public class TaskQueue {
     }
 
     /**
-     * Returns true if a task is currently being processed or waiting in the queue.
-     * Used by the deploy script to avoid restarting during active work.
+     * What a message the owner sends in a chat becomes -- the one decision, for the web chat and
+     * Telegram: given to the task running in its chat ({@link #steer}), unless he asked for it to
+     * be queued; otherwise queued as a task of its own, answered through
+     * {@link UserMessage#answer}. Its user row is saved before this is asked.
+     *
+     * @param queue the sender asked for a task of its own, after the work ahead of it
      */
+    public Fate send(UserMessage message, boolean queue) {
+        if (!queue && steer(message)) return Fate.STEERED;
+        boolean behind = isBusyFor(message.userId());
+        enqueue(message);
+        return behind ? Fate.QUEUED : Fate.STARTED;
+    }
+
+    /**
+     * Give a message to the task running in its chat, which reads it before its next step.
+     * <p>
+     * False when no task of this user runs in that chat, when the one that did has just ended --
+     * the caller then runs the message as a task of its own -- and for a message with files:
+     * those become a task's private files when it starts, and added to a running task they would
+     * make its later results private part-way through, past the check a task holding files
+     * starts with ({@code AgentLoop.stopWithoutLocalModel}). Such a message is a task of its own.
+     */
+    public boolean steer(UserMessage message) {
+        if (!message.attachmentIds().isEmpty()) return false;
+        Inbox inbox = inboxes.get(new Chat(message.userId(), message.sessionId()));
+        return inbox != null && inbox.offer(message);
+    }
+
+    /** Queue a chat message as a task of its own, after the work queued before it. */
+    private void enqueue(UserMessage message) {
+        add(new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
+                added.incrementAndGet(), result -> answer(message, result), message));
+    }
+
+    private void add(QueuedTask task) {
+        if (queueSize.get() >= maxQueuedTasks) {
+            eventLog.warn(task.userId(), null, "queue.full", "Queue full, task rejected");
+            // An outcome, not a sentence. Returned as a bare string, "System busy" was
+            // indistinguishable from an answer: the scheduler filed the run as completed and
+            // stored it as that run's result.
+            task.done().accept(AgentResult.error(
+                    "System busy — please try again later.", new AgentTrajectory(), 0));
+            return;
+        }
+
+        // With lanes off, background work stays in the interactive queue and the behaviour is
+        // byte-for-byte what it was: one queue, one thread, priority order within it.
+        boolean background = separateBackgroundLane && task.priority() >= BACKGROUND_PRIORITY;
+        (background ? backgroundQueue : interactiveQueue).add(task);
+        int pos = queueSize.incrementAndGet();
+
+        if (pos > 1) {
+            statusEmitter.emit(task.userId(), StatusMessage.Type.QUEUED,
+                    "Task queued (position " + pos + ")");
+        }
+
+        eventLog.info(task.userId(), null, "task.queued",
+                "Priority P" + task.priority() + ", queue size " + pos);
+    }
+
+    /**
+     * Run the task of a chat message on this thread and deliver its answer: the queue's worker
+     * runs a queued message here, and the ops API a chat turn. While it runs, what is sent in its
+     * chat goes to it ({@link #steer}); once it has ended, however it ended, and its answer has
+     * been delivered, what it did not read is queued, in order, as tasks of their own -- each
+     * answering its own row, its sender told -- so each finds that answer in the chat it reads.
+     * Queued then, they are not work a Stop that ended the task finds waiting: no message sent
+     * to a task is lost with it.
+     *
+     * @throws RuntimeException what the task threw, once "Internal error" has been delivered as
+     *                          its answer
+     */
+    public AgentResult runChat(UserMessage message) {
+        Chat chat = new Chat(message.userId(), message.sessionId());
+        Inbox inbox = new Inbox();
+        inboxes.put(chat, inbox);
+        try {
+            AgentResult result;
+            try {
+                result = agentLoop.executeFull(message.userId(), message.text(), false, message.messageId(),
+                        message.attachmentIds(), message.channel(), inbox);
+            } catch (RuntimeException e) {
+                answer(message, AgentResult.error("Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
+                throw e;
+            }
+            answer(message, result);
+            return result;
+        } finally {
+            inboxes.remove(chat, inbox);
+            for (UserMessage unread : inbox.close(this::enqueue)) {
+                statusEmitter.emit(unread.userId(), StatusMessage.Type.QUEUED, UNREAD,
+                        Map.of("requeued", unread.messageId()));
+            }
+        }
+    }
+
+    /**
+     * Hand a chat message's task its result. Whatever the delivery throws costs this answer and
+     * nothing else: the delivery used to be a stage of the task's future, which kept what it
+     * threw to itself, and here it would end the worker thread and every task after this one.
+     */
+    private static void answer(UserMessage message, AgentResult result) {
+        try {
+            message.answer().accept(result);
+        } catch (Throwable t) {
+            log.warn("The answer to a message of {} could not be delivered: {}", message.userId(), t.toString());
+        }
+    }
+
     /**
      * Whether this user has work running or waiting.
      * <p>
      * Needed because a browser that reconnects mid-task has no way to know one is in flight:
      * status messages are live-only and are not replayed, so a reload during a six-minute task
-     * showed a completely idle chat with an enabled Send button, and the obvious conclusion was
-     * that the request had been lost.
+     * showed a completely idle chat, and the obvious conclusion was that the request had been
+     * lost.
      */
     public boolean isBusyFor(String userId) {
         if (userId == null) return false;
@@ -181,6 +298,10 @@ public class TaskQueue {
     private final java.util.Set<String> runningUsers =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /**
+     * Returns true if a task is currently being processed or waiting in the queue.
+     * Used by the deploy script to avoid restarting during active work.
+     */
     public boolean isBusy() {
         return running.get() > 0 || queueSize.get() > 0;
     }
@@ -201,30 +322,31 @@ public class TaskQueue {
                     if (stoppedBy != null) {
                         log.info("Dropping a queued task of {}, waiting when it was stopped: {}",
                                 task.userId(), stoppedBy);
-                        task.future().complete(AgentResult.cancelled(
+                        task.done().accept(AgentResult.cancelled(
                                 "**Stopped:** " + stoppedBy + ", while it was still waiting in the "
                                         + "queue: it never started.", new AgentTrajectory(), 0));
                         continue;
                     }
 
-                    // Priority is the origin signal: the scheduler and /bg submit at 2,
-                    // a chat message at 1. Nobody is waiting on the former.
+                    if (task.chat() != null) {
+                        try {
+                            runChat(task.chat());
+                        } catch (RuntimeException e) {
+                            failed(task, laneName, e);   // runChat has answered it, the error too
+                        }
+                        continue;
+                    }
+                    // Priority is the origin signal: the scheduler and /bg submit at 2, and
+                    // nobody is waiting on that.
                     boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
                     // The whole result, not only its text: the scheduler once kept only the
                     // response string, and so could not tell a finished job from one that gave
                     // up and recorded every run as completed.
-                    task.future().complete(
-                            agentLoop.executeFull(task.userId(), task.message(), unattended,
-                                    task.currentMessageId(), task.attachmentIds(), task.channel()));
+                    task.done().accept(
+                            agentLoop.executeFull(task.userId(), task.message(), unattended, null, List.of(), null));
                 } catch (Exception e) {
-                    log.error("Task processing failed on the {} lane for user {}: {}",
-                            laneName, task.userId(), e.getMessage(), e);
-                    // executeFull turns what fails inside the loop into the task's ending; what
-                    // fails before the loop starts reaches here, and without this notice a crash
-                    // would go unannounced.
-                    statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED,
-                            "An unexpected error occurred.");
-                    task.future().complete(AgentResult.error(
+                    failed(task, laneName, e);
+                    task.done().accept(AgentResult.error(
                             "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
                 } finally {
                     running.decrementAndGet();
@@ -237,22 +359,38 @@ public class TaskQueue {
         }
     }
 
+    /**
+     * Log a task that threw, and tell its user. executeFull turns what fails inside the loop into
+     * the task's ending; what fails before the loop starts reaches here, and without this notice
+     * a crash would go unannounced.
+     */
+    private void failed(QueuedTask task, String laneName, Exception e) {
+        log.error("Task processing failed on the {} lane for user {}: {}",
+                laneName, task.userId(), e.getMessage(), e);
+        statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED, "An unexpected error occurred.");
+    }
+
     public int getQueueSize() {
         return queueSize.get();
     }
 
     /**
      * A task waiting in the priority queue.
+     *
+     * @param enqueuedAt when it was queued: its place, and what a Stop is measured against
+     * @param order      which was added first, of two with the same priority and time
+     * @param done       what its result is handed to: the submitter's future, or the chat
+     *                   message's answer
+     * @param chat       the chat message it runs, or null for a task that comes from no chat
      */
     private record QueuedTask(
             String userId,
             String message,
             int priority,
             long enqueuedAt,
-            CompletableFuture<AgentResult> future,
-            String currentMessageId,
-            List<String> attachmentIds,
-            TaskChat.Channel channel
+            long order,
+            Consumer<AgentResult> done,
+            UserMessage chat
     ) implements Comparable<QueuedTask> {
 
         @Override
@@ -261,7 +399,8 @@ public class TaskQueue {
             int cmp = Integer.compare(this.priority, other.priority);
             if (cmp != 0) return cmp;
             // Same priority: FIFO
-            return Long.compare(this.enqueuedAt, other.enqueuedAt);
+            cmp = Long.compare(this.enqueuedAt, other.enqueuedAt);
+            return cmp != 0 ? cmp : Long.compare(this.order, other.order);
         }
     }
 }

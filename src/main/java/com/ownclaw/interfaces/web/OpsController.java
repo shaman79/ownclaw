@@ -2,11 +2,12 @@ package com.ownclaw.interfaces.web;
 
 import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
-import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.agent.TaskChat;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
+import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.UserMessage;
 import com.ownclaw.observability.OpsService;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
@@ -48,6 +49,8 @@ public class OpsController {
     private final com.ownclaw.agent.SkillMaintenanceService skillMaintenance;
     private final com.ownclaw.config.OwnClawConfig config;
     private final ConversationService conversations;
+    /** Where a chat turn goes: to the task running in its chat, or run as one ({@link #runTask}). */
+    private final TaskQueue taskQueue;
     /** Milliseconds now: what async runs are timed and aged by. */
     private final LongSupplier clock;
 
@@ -56,9 +59,9 @@ public class OpsController {
                          DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
                          com.ownclaw.agent.SkillMaintenanceService skillMaintenance,
                          com.ownclaw.config.OwnClawConfig config,
-                         ConversationService conversations) {
+                         ConversationService conversations, TaskQueue taskQueue) {
         this(ops, agentLoop, authService, skillRegistry, cancellation, skillMaintenance, config,
-                conversations, System::currentTimeMillis);
+                conversations, taskQueue, System::currentTimeMillis);
     }
 
     /** With the clock async runs are timed and aged by, so a test can move it. */
@@ -66,7 +69,7 @@ public class OpsController {
                   DynamicSkillRegistry skillRegistry, TaskCancellationService cancellation,
                   com.ownclaw.agent.SkillMaintenanceService skillMaintenance,
                   com.ownclaw.config.OwnClawConfig config,
-                  ConversationService conversations, LongSupplier clock) {
+                  ConversationService conversations, TaskQueue taskQueue, LongSupplier clock) {
         this.ops = ops;
         this.agentLoop = agentLoop;
         this.authService = authService;
@@ -75,6 +78,7 @@ public class OpsController {
         this.skillMaintenance = skillMaintenance;
         this.config = config;
         this.conversations = conversations;
+        this.taskQueue = taskQueue;
         this.clock = clock;
     }
 
@@ -128,7 +132,11 @@ public class OpsController {
                                 + "counts rows, so rows added or deleted between two pages shift it.",
                         "agent/run with sessionId is a chat turn, saved to that chat the way the web "
                                 + "chat saves one (\"new\" starts a chat titled Ops check, which does "
-                                + "not become the owner's open chat); the response names the chat.",
+                                + "not become the owner's open chat); the response names the chat. "
+                                + "While a task runs in that chat, the turn is handed to it instead "
+                                + "(202, steered: true): the task reads it before its next step, or, "
+                                + "ending first, runs it as a task of its own whose answer is saved "
+                                + "in the chat.",
                         "Every call is logged, including the SQL text.")));
     }
 
@@ -421,8 +429,8 @@ public class OpsController {
      * <p>
      * This is the loop that makes autonomous development possible: send a prompt, read the
      * result, then read {@code /logs?grep=Task+<id>} for the step trail. It runs outside the task
-     * queue -- on the calling thread, or on a thread of its own when async -- so it does not wait
-     * behind other work, and for the same reason it bypasses the queue's lanes: avoid running
+     * queue's lanes -- on the calling thread, or on a thread of its own when async -- so it does
+     * not wait behind other work, and for the same reason nothing serializes it: avoid running
      * several at once against one Ollama instance.
      * <p>
      * Defaults to the owner's account so context, memory and credentials match normal use.
@@ -432,6 +440,9 @@ public class OpsController {
      * web-chat task is handed, so AgentLoop loads its conversation the way it does for one --
      * and the answer is saved after it, as the web chat saves one. Its progress messages are
      * saved in that chat as the task goes, and sent nowhere ({@code TaskChat.Channel.OPS}).
+     * While it runs, what is sent in that chat goes to it, as in the web chat; and a turn sent
+     * while a task runs in its chat goes to that task ({@link TaskQueue#steer}) and starts no
+     * run.
      */
     @PostMapping("/agent/run")
     public ResponseEntity<?> runAgent(@RequestBody Map<String, Object> body) {
@@ -483,7 +494,17 @@ public class OpsController {
                         + " has no chat " + sessionId + ". Pass \"new\" to start one."));
             }
         }
-        ChatTurn turn = sessionId == null ? null : startTurn(userId, sessionId, message);
+        UserMessage turn = sessionId == null ? null : startTurn(userId, sessionId, message);
+        if (turn != null && taskQueue.steer(turn)) {
+            var steered = new LinkedHashMap<String, Object>();
+            steered.put("steered", true);
+            steered.put("sessionId", turn.sessionId());
+            steered.put("messageId", turn.messageId());
+            steered.put("note", "A task is running in this chat: the message was handed to it, and it reads "
+                    + "it before its next step. If the task ends first, the message runs as a task of its "
+                    + "own, and its answer is saved in the chat.");
+            return ResponseEntity.accepted().body(steered);
+        }
 
         if (Boolean.TRUE.equals(body.get("async"))) {
             return ResponseEntity.accepted().body(startAsyncRun(userId, message, unattended, turn));
@@ -505,47 +526,36 @@ public class OpsController {
     /** The {@code sessionId} that starts a fresh chat for the turn. */
     private static final String NEW_CHAT = "new";
 
-    /** A run that is a chat turn: the chat, and the user row the task answers. */
-    private record ChatTurn(String sessionId, String messageId) {}
-
     /**
      * The user's half of a chat turn, saved as the web chat saves it: the chat titled from the
      * message if it is still "New Chat", then the user row -- before the task runs, so the task
-     * finds it as the message it answers.
+     * finds it as the message it answers. Its answer is saved in the chat as the web chat saves
+     * one: the answer of the task it runs, or -- handed to a running task that ended before it
+     * read it -- of the task it then runs on the queue.
      */
-    private ChatTurn startTurn(String userId, String sessionId, String message) {
+    private UserMessage startTurn(String userId, String sessionId, String message) {
         // A fresh chat is never made the open one: the web page files what the owner types next
         // in the open chat, and an ops check must not move his conversation.
         String chat = NEW_CHAT.equals(sessionId)
                 ? conversations.createSessionWithoutOpening(userId, "Ops check") : sessionId;
         conversations.autoTitleIfNeeded(userId, chat, message);
-        return new ChatTurn(chat, conversations.saveMessage(userId, chat, "user", message, List.of()));
+        return new UserMessage(userId, chat, conversations.saveMessage(userId, chat, "user", message, List.of()),
+                message, List.of(), TaskChat.Channel.OPS, result -> conversations.saveAnswer(userId, chat, result));
     }
 
     /**
-     * Run the task. A chat turn runs attended, with its user row as the current message, and
-     * its answer is saved as the web chat saves one -- also when the task throws: the web chat's
-     * task runs on TaskQueue, which answers one that throws with this internal error, and that
-     * is saved as the answer. The exception still reaches the caller.
+     * Run the task. A chat turn runs attended on the queue's chat path ({@link TaskQueue#runChat}),
+     * with its user row as the current message, and its answer is saved as the web chat saves
+     * one -- also when the task throws: then "Internal error" is its answer, and the exception
+     * still reaches the caller.
      */
-    private AgentResult runTask(String userId, String message, boolean unattended, ChatTurn turn) {
-        AgentResult result;
-        try {
-            result = agentLoop.executeFull(userId, message, unattended,
-                    turn == null ? null : turn.messageId(), List.of(), TaskChat.Channel.OPS);
-        } catch (RuntimeException e) {
-            if (turn != null) {
-                conversations.saveAnswer(userId, turn.sessionId(), AgentResult.error(
-                        "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
-            }
-            throw e;
-        }
-        if (turn != null) conversations.saveAnswer(userId, turn.sessionId(), result);
-        return result;
+    private AgentResult runTask(String userId, String message, boolean unattended, UserMessage turn) {
+        return turn != null ? taskQueue.runChat(turn)
+                : agentLoop.executeFull(userId, message, unattended, null, List.of(), TaskChat.Channel.OPS);
     }
 
     /** Everything the caller is told about a finished run. Shared by the sync and async paths. */
-    private Map<String, Object> describeRun(String userId, AgentResult result, ChatTurn chat, long t0) {
+    private Map<String, Object> describeRun(String userId, AgentResult result, UserMessage chat, long t0) {
         {
             String taskId = result.taskId();
 
@@ -637,7 +647,7 @@ public class OpsController {
             });
 
     private Map<String, Object> startAsyncRun(String userId, String message, boolean unattended,
-                                              ChatTurn turn) {
+                                              UserMessage turn) {
         String runId = java.util.UUID.randomUUID().toString().substring(0, 8);
         AsyncRun run = new AsyncRun(userId, turn == null ? null : turn.sessionId(), clock.getAsLong());
         asyncRuns().put(runId, run);

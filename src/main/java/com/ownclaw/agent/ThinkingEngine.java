@@ -282,7 +282,8 @@ public class ThinkingEngine {
      * <p>
      * A step the loop took itself ({@link AgentTrajectory.Turn#byTheLoop}) has no assistant turn:
      * the model did not write it. What the model was told about it -- a reply that could not be
-     * used, a reflection -- joins the user turn it follows, in its place, and the roles alternate
+     * used, a reflection, a message the user sent while the task worked -- joins the user turn it
+     * follows, in its place, and the roles alternate
      * as the Messages API requires. So an assistant turn holds what the model wrote, with one
      * exception that byTheLoop names: the skill_create the loop runs at step 1 when
      * CapabilityResolver finds a missing capability is replayed as an action, and its arguments

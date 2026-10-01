@@ -48,7 +48,7 @@ class StopSaysWhoTest {
         commands.handle("u2", "/cancel");
         assertEquals("you sent /cancel", cancellation.why("u2", "t1", running));
 
-        var ops = new OpsController(null, null, null, null, cancellation, null, null, null);
+        var ops = new OpsController(null, null, null, null, cancellation, null, null, null, null);
         ops.cancel("u3", "abcd1234");
         assertEquals("a stop request from the ops API", cancellation.why("u3", "abcd1234", System.currentTimeMillis()));
         assertNull(cancellation.why("u3", "other000", running), "one task named, one task stopped");

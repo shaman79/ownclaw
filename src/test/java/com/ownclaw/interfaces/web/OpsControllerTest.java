@@ -73,7 +73,8 @@ class OpsControllerTest {
         @Override
         public AgentResult executeFull(String userId, String message, boolean unattended,
                                        String currentMessageId, List<String> attachmentIds,
-                                           com.ownclaw.agent.TaskChat.Channel channel) {
+                                       com.ownclaw.agent.TaskChat.Channel channel,
+                                       com.ownclaw.core.Inbox inbox) {
             this.unattended.add(unattended);
             currentMessageIds.add(String.valueOf(currentMessageId));
             channels.add(String.valueOf(channel));
@@ -99,7 +100,7 @@ class OpsControllerTest {
     }
 
     record Setup(JdbcTemplate jdbc, ScriptedLoop loop, ConversationService conversations, AtomicLong clock,
-                 OpsController ops) {}
+                 OpsController ops, TaskQueue queue) {}
 
     /** The controller over a migrated database and the real OpsService, on a clock the test moves. */
     static Setup setup(Path tmp) throws Exception {
@@ -115,11 +116,15 @@ class OpsControllerTest {
         var clock = new AtomicLong(T0);
         var auth = new AuthService(jdbc, new UserRepository(jdbc), new OwnClawConfig());
         // A queue that is never started: tasks() reads only its counters. No local model is probed.
+        // A chat turn runs through the other one (TaskQueue#runChat), started by a test that needs it.
         var service = new OpsService(new OwnClawConfig(), jdbc, null, null,
                 new TaskQueue(null, null, null, new OwnClawConfig(), null),
                 auth, null, new ObjectMapper(), null);
+        var queue = new TaskQueue(loop, new com.ownclaw.observability.EventLogService(jdbc),
+                new com.ownclaw.observability.ChatStatusEmitter(), new OwnClawConfig(),
+                new com.ownclaw.core.TaskCancellationService());
         return new Setup(jdbc, loop, conversations, clock,
-                new OpsController(service, loop, auth, null, null, null, null, conversations, clock::get));
+                new OpsController(service, loop, auth, null, null, null, null, conversations, queue, clock::get), queue);
     }
 
     @Test
@@ -185,6 +190,39 @@ class OpsControllerTest {
         assertEquals(0, s.jdbc().queryForObject("SELECT COUNT(*) FROM active_session", Integer.class));
         assertEquals(List.of(chat), s.jdbc().queryForList("SELECT id FROM chat_sessions", String.class),
                 "the ops check's chat alone: no empty chat was made to be the open one");
+    }
+
+    @Test
+    @DisplayName("a chat turn sent while a task runs in its chat is handed to that task: 202, steered, no run of its own")
+    void aTurnWhileATaskRunsSteersIt(@TempDir Path tmp) throws Exception {
+        var s = setup(tmp);
+        s.loop().hold = new CountDownLatch(1);
+        String runId = (String) body(s.ops().runAgent(
+                Map.of("message", "remember 7", "userId", "u1", "sessionId", "new", "async", true))).get("runId");
+        String chat = (String) body(s.ops().asyncRunResult(runId)).get("sessionId");
+        for (int i = 0; i < 200 && s.loop().unattended.isEmpty(); i++) Thread.sleep(10);
+
+        ResponseEntity<?> steered = s.ops().runAgent(Map.of("message", "make it 8", "userId", "u1", "sessionId", chat));
+        assertEquals(202, steered.getStatusCode().value(), String.valueOf(body(steered)));
+        assertEquals(true, body(steered).get("steered"));
+        assertEquals(chat, body(steered).get("sessionId"));
+        assertEquals(List.of("user", "user"), roles(s.jdbc(), chat), "saved first, as every turn is");
+        assertEquals(1, s.loop().unattended.size(), "it started no run");
+
+        // This loop reads nothing it is sent: the task ends without it, and it runs as a task of
+        // its own, its answer saved in the chat.
+        s.queue().start();
+        try {
+            s.loop().hold.countDown();
+            assertEquals("done", collect(s.ops(), runId).get("status"));
+            for (int i = 0; i < 200 && roles(s.jdbc(), chat).size() < 4; i++) Thread.sleep(10);
+            assertEquals(List.of("user", "user", "assistant", "assistant"), roles(s.jdbc(), chat));
+            assertEquals(List.of("Noted: remember 7", "Noted: make it 8"), s.jdbc().queryForList(
+                    "SELECT content FROM conversations WHERE session_id = ? AND role = 'assistant' ORDER BY rowid",
+                    String.class, chat));
+        } finally {
+            s.queue().stop();
+        }
     }
 
     @Test

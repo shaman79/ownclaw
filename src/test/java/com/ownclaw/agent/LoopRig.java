@@ -62,6 +62,8 @@ final class LoopRig {
         final Deque<Reply> think = new ConcurrentLinkedDeque<>();
         final Deque<Reply> codegen = new ConcurrentLinkedDeque<>();
         volatile boolean available = true;
+        /** The provider's name, which decides how the think prompt renders the steps so far. */
+        volatile String name = "anthropic";
 
         @Override
         public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig config) {
@@ -84,7 +86,7 @@ final class LoopRig {
 
         @Override public boolean isAvailable() { return available; }
         @Override public boolean supportsTools() { return true; }
-        @Override public String name() { return "anthropic"; }
+        @Override public String name() { return name; }
         @Override public String model() { return "claude-opus-5"; }
     }
 
@@ -146,6 +148,8 @@ final class LoopRig {
     final ChatStatusEmitter emitter = new ChatStatusEmitter();
     final DebugSessionService debug = new DebugSessionService();
     final AgentLoop loop;
+    /** The task queue over this loop, not started: a test starts it when it runs queued work. */
+    final com.ownclaw.core.TaskQueue queue;
 
     LoopRig(Path dir, List<Tool> tools) throws Exception {
         this(dir, tools, 600);
@@ -192,6 +196,7 @@ final class LoopRig {
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null,
                 new LocalExecutor(router, registry, emitter, curator), files);
+        queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);
     }
 
     /** A chat turn, saved the way the web chat saves one; the session is created on first use. */

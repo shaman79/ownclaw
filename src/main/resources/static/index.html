@@ -319,6 +319,15 @@
         .msg.user:not(.first-in-run) .bubble {
             border-radius: var(--r-md) 6px 4px var(--r-md);
         }
+        /* What became of a message sent while a task ran: handed to it, read by it, or queued. */
+        .msg.user .msg-fate {
+            display: block;
+            margin-top: 4px;
+            font-size: 11.5px;
+            line-height: 1.4;
+            opacity: .8;
+            white-space: normal;
+        }
 
         /* ───── AI / assistant message ───── */
         .msg.response,
@@ -803,13 +812,28 @@
         }
         #send:hover { background: var(--accent-hi); transform: scale(1.04) }
         #send:active { transform: scale(.96) }
-        #send:disabled {
-            background: var(--surface);
-            color: var(--text-3);
-            cursor: not-allowed;
-            transform: none;
-        }
         #send svg { width: 16px; height: 16px; fill: currentColor }
+
+        /* While a task runs: Send hands the message to it, Queue runs it as a task of its own after it. */
+        #queue {
+            height: 36px;
+            margin: 6px 8px 6px 0;
+            padding: 0 10px;
+            flex-shrink: 0;
+            background: var(--surface);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 12.5px;
+            font-family: var(--font);
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            transition: opacity .15s, transform .1s;
+        }
+        #queue.visible { display: flex; }
+        #queue:hover { opacity: .85; transform: scale(1.04) }
+        #queue:active { transform: scale(.96) }
 
         #stop {
             width: 36px; height: 36px;
@@ -2569,6 +2593,7 @@
         <button id="send" title="Send (Enter)" aria-label="Send (Enter)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
+        <button id="queue" title="Queue: run this as a task of its own after the running one" aria-label="Queue: run this as a task of its own after the running one">Queue</button>
         <button id="stop" title="Stop task" aria-label="Stop task">
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
@@ -2616,6 +2641,8 @@
     var inputEl         = document.getElementById('input');
     var sendBtn         = document.getElementById('send');
     var stopBtn         = document.getElementById('stop');
+    var queueBtn        = document.getElementById('queue');
+    var idlePlaceholder = inputEl.placeholder;
     var attachBtn       = document.getElementById('attach-btn');
     var fileInput       = document.getElementById('file-input');
     var fileChips       = document.getElementById('file-chips');
@@ -2657,7 +2684,6 @@
     // "what is it doing" was hidden behind a click nobody knew to make.
     var activityOpen = true;
     var ws;
-    var busy = false;
     var lastMsgSender = null;
     var heartbeatTimer = null;
     var thinkingSafetyTimer = null;
@@ -2860,6 +2886,7 @@
     function clearMessages() {
         messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view, .skills-view').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
+        sentBubbles = {};
     }
 
     function renderSessionList(sessions, currentActiveId) {
@@ -5166,6 +5193,7 @@
      * the union of both, and there is only one of it.
      */
     function resetActivity() {
+        traceTaskId = null;
         activityWrap.style.display = 'none';
         activitySpinner.classList.remove('done');
         activityLabel.textContent = 'Working...';
@@ -5495,18 +5523,29 @@
                         activeSessionId = content;
                         updateSidebarActive(content);
                     }
+                } else if (type === 'fate') {
+                    // What became of a message this page sent: handed to the running task, or
+                    // queued. Said under its bubble, which is named by its row from now on.
+                    var sentBubble = sentBubbles[data.clientId];
+                    delete sentBubbles[data.clientId];
+                    if (sentBubble && data.messageId) sentBubble.dataset.messageId = data.messageId;
+                    markFate(sentBubble, content);
                 } else if (type === 'status') {
                     var sub = data.status || '';
                     var detail = data.data && data.data.category ? data.data : null;
+                    // Claim this window's working state for the first task we hear from. A task
+                    // that was queued behind the one whose trace is shown starts a trace of its own.
+                    if (data.taskId && !activeTaskId
+                            && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
+                        if (traceTaskId && traceTaskId !== data.taskId) resetActivity();
+                        activeTaskId = traceTaskId = data.taskId;
+                    }
                     // Update token counter whenever data.data has token info
                     if (data.data) updateTokens(data.data);
                     // Update stats bar whenever data.data carries stats fields
                     if (data.data && data.data.totalSteps != null) updateStats(data.data);
-                    // Claim this window's working state for the first task we hear from.
-                    if (data.taskId && !activeTaskId
-                            && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
-                        activeTaskId = data.taskId;
-                    }
+                    // A message the running task ended without reading: it runs as its own task.
+                    if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);
                     if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
                             || sub === 'need_input') {
                         // Only the task we are actually following may end the working state.
@@ -5526,9 +5565,8 @@
                         // has already delivered its result, and budget warnings arrive whenever a
                         // threshold is crossed. Both fell into the catch-all below, which calls
                         // setThinking(true) -- so the spinner restarted with nothing left to stop
-                        // it and Send stayed disabled for the full 15-minute safety timeout, while
-                        // Enter (which gates on `busy`, never set on this path) still worked. Two
-                        // controls disagreeing, after every single recurring task.
+                        // it, for the full 15-minute safety timeout, after every single recurring
+                        // task.
                         resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
                         showActivity(content, detail);
                     } else if (sub === 'progress') {
@@ -5542,9 +5580,8 @@
                         showActivity(content, detail);
                     }
                 } else if (type === 'input_request') {
-                    // A skill is blocked waiting for an answer. Clear the working state: it
-                    // disables the send button, so until now the only way to reply was the
-                    // Enter handler, which happens not to check it. Clicking Send did nothing.
+                    // A task is waiting for an answer: the working state is over. It used to
+                    // disable the Send button, and clicking Send did nothing.
                     // doneActivity() as well as setThinking(false): without it the activity
                     // strip kept a spinner turning above a task that had already stopped and was
                     // waiting on the user, which reads as "still working, do not touch it".
@@ -5563,14 +5600,14 @@
                     if (currentView === 'chat' && data.sessionId === displayedSessionId) {
                         addProgress(content, data.progress);
                     }
+                    // The row that says the task read messages sent while it worked names them.
+                    (data.read || []).forEach(function(id) { markFate(bubbleOf(id), 'Read by the task.'); });
                 } else if (type === 'pong' || type === 'ping') {
                     // heartbeat
                 } else {
-                    // 'system' is how a slash-command result comes back. send() sets busy and
-                    // starts the spinner for every message including commands, and nothing here
-                    // cleared it: /help answered instantly and then left the composer dead for
-                    // fifteen minutes -- Send greyed out while Enter, which gates on `busy`,
-                    // still worked.
+                    // 'system' is how a slash-command result comes back. send() starts the spinner
+                    // for every message including commands, and nothing here cleared it: /help
+                    // answered instantly and then left the working state on for fifteen minutes.
                     // 'result' is the output of work nobody was waiting for -- a scheduled run
                     // or /bg. It must read as an assistant message but must NOT end whatever the
                     // user is currently watching, so it is deliberately absent from the list
@@ -5601,11 +5638,17 @@
                         if (type === 'response') { setThinking(false); doneActivity(); }
                         return;
                     }
-                    if (type === 'response' || type === 'system') {
+                    // A command's reply ends the working state its own sending started -- not a
+                    // task's: a command typed while a task runs is answered at once, and the task
+                    // goes on, as it does after Stop is acknowledged.
+                    if (type === 'response' || (type === 'system' && !activeTaskId)) {
                         setThinking(false);
                         doneActivity();
                     }
-                    addMsg(type, content, data.taskId);
+                    var drawnMsg = addMsg(type, content, data.taskId);
+                    // The server's echo of a slash text this page sent: "/queue ..." is a message,
+                    // and what became of it is said under this bubble.
+                    if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;
                 }
             } catch(ex) {
                 setThinking(false);
@@ -5615,13 +5658,19 @@
         };
     }
 
+    /**
+     * The working state. Send stays enabled in it: what is sent while a task runs goes to that
+     * task, which reads it before its next step -- or, with Queue, runs as a task of its own after
+     * it. Stop stays beside them.
+     */
     function setThinking(on) {
         if (!on) stopPressed = false;
         if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
+        stopBtn.classList.toggle('visible', on);
+        queueBtn.classList.toggle('visible', on);
+        inputEl.placeholder = on ? 'Send to the running task, or Queue it for after...' : idlePlaceholder;
         if (on) {
             thinkingEl.classList.add('active');
-            sendBtn.disabled = true;
-            stopBtn.classList.add('visible');
             scrollBottom();
             // Start elapsed timer
             if (!thinkingStartedAt) {
@@ -5635,9 +5684,6 @@
             }, 900000);
         } else {
             thinkingEl.classList.remove('active');
-            sendBtn.disabled = false;
-            stopBtn.classList.remove('visible');
-            busy = false;
             thinkingStartedAt = null;
             stopElapsedTimer();
         }
@@ -5688,6 +5734,9 @@
      */
     var activeTaskId = null;
 
+    /** The task whose trace the activity strip shows, which stays there after it ends. */
+    var traceTaskId = null;
+
     function addMsg(type, text, taskId) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
@@ -5736,6 +5785,7 @@
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
         scrollBottom(type === 'user');
+        return div;
     }
 
     /**
@@ -5980,7 +6030,19 @@
     }
 
     //  Send 
-    function send() {
+    /**
+     * The bubbles this page drew for messages it sent, by the name it gave each, until the server
+     * says what became of the message (a 'fate' frame naming it).
+     */
+    var sentBubbles = {};
+    var sentCount = 0;
+
+    /**
+     * Send what is typed. While a task runs it goes to that task, which reads it before its next
+     * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
+     * and says which under the bubble.
+     */
+    function send(queued) {
         var text = inputEl.value.trim();
         if (!text) return;
         // Say so instead of doing nothing. The socket can be closed for up to 30 seconds while
@@ -6011,9 +6073,12 @@
         }
         // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
         // back with the value masked (CommandHandler.displayed). Drawn here it stayed as typed.
-        if (text.charAt(0) !== '/') addMsg('user', display);
+        var clientId = 'm' + (++sentCount);
+        var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;
+        if (drawn) sentBubbles[clientId] = drawn;
 
-        var payload = { message: text };
+        var payload = { message: text, clientId: clientId };
+        if (queued) payload.queue = true;
         if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;
         ws.send(JSON.stringify(payload));
 
@@ -6022,11 +6087,28 @@
         inputEl.style.height = 'auto';
         pendingFiles = [];
         fileChips.innerHTML = '';
-        busy = true;
-        // This message's task has no id yet; the first status carrying one claims it.
-        activeTaskId = null;
-        resetActivity();
+        // Sent while a task runs, it does not start a trace of its own: that task's goes on, and
+        // a queued task's starts when it does (see the claim in the status handler).
+        if (!thinkingEl.classList.contains('active')) {
+            // This message's task has no id yet; the first status carrying one claims it.
+            activeTaskId = null;
+            resetActivity();
+        }
         setThinking(true);
+    }
+
+    /** Say under a bubble this page drew what became of its message. */
+    function markFate(bubble, text) {
+        if (!bubble || !text) return;
+        var inner = bubble.querySelector('.bubble') || bubble;
+        var line = inner.querySelector('.msg-fate');
+        if (!line) { line = node('span', 'msg-fate'); inner.appendChild(line); }
+        line.textContent = text;
+    }
+
+    /** The bubble of the message saved as this row, when this page drew it and the server named it. */
+    function bubbleOf(messageId) {
+        return messageId ? messagesEl.querySelector('.msg.user[data-message-id="' + CSS.escape(messageId) + '"]') : null;
     }
 
     /**
@@ -6060,20 +6142,13 @@
     inputEl.addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) {
             e.preventDefault();
-            // Respect the same state as the Send button. `busy` was set and cleared but never
-            // read, so Enter submitted regardless while Send sat disabled — two controls for
-            // the same action behaving differently. Tasks run on a single worker for minutes,
-            // so the second message queued silently behind the first and the reply arrived
-            // much later, looking like the app had ignored the input.
-            //
-            // A pending skill question is not this case: that path calls setThinking(false)
-            // precisely so the answer can be sent, which clears busy.
-            if (busy) return;
-            send();
+            // What Send does, in every state: while a task runs, the message goes to it.
+            send(false);
         }
     });
 
-    sendBtn.addEventListener('click', send);
+    sendBtn.addEventListener('click', function() { send(false); });
+    queueBtn.addEventListener('click', function() { send(true); });
 
     /** Set when Stop has been pressed once and we are waiting for the task to notice. */
     var stopPressed = false;
@@ -6094,9 +6169,8 @@
         // Cancellation is cooperative: the task checks a flag at its next checkpoint, and a tool
         // call or a local model call already in flight has to return first, which can be a
         // minute or more. Clearing immediately told the owner it had stopped when it had not --
-        // so he retyped the request, it was accepted because `busy` was false, and it queued
-        // behind the task still running. The real terminal status arrives when it actually
-        // stops and clears this properly.
+        // so he retyped the request, and it queued behind the task still running. The real
+        // terminal status arrives when it actually stops and clears this properly.
         stopPressed = true;
         showActivity('Stopping — waiting for the current step to finish…', null);
     });

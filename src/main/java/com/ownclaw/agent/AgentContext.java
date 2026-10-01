@@ -301,6 +301,12 @@ public class AgentContext {
     public TaskChat chat() { return chat; }
     public void setChat(TaskChat chat) { this.chat = chat == null ? TaskChat.NONE : chat; }
 
+    /** What the owner sends in this task's chat while it runs; null when nobody can write to it. */
+    private volatile com.ownclaw.core.Inbox inbox;
+
+    public com.ownclaw.core.Inbox inbox() { return inbox; }
+    public void setInbox(com.ownclaw.core.Inbox inbox) { this.inbox = inbox; }
+
     /**
      * What the model is told of the tool calls its last reply made beyond the one a step runs,
      * or null: the loop sets it after the step is decided and adds it to the observation the
@@ -566,14 +572,27 @@ public class AgentContext {
         if (text != null && !text.isEmpty()) fromEarlierTasks.add(text);
     }
 
+    /** See {@link #fromTheOwner}. */
+    private final List<String> fromTheOwner = new java.util.ArrayList<>();
+
+    /**
+     * A message the owner sent while the task worked, which the task has read: his own words, a
+     * source of {@link Excuses} like the task's message. Quoting a private result in it is his to
+     * do, as it is in the message that started the task.
+     */
+    public synchronized void fromTheOwner(String text) {
+        if (text != null && !text.isEmpty()) fromTheOwner.add(text);
+    }
+
     /**
      * Whether a stretch of normalised text the canary matched is material the cloud was already
      * given, and may go: true when one source below holds the whole of it. The label asks it of a
      * result ({@link #firstLeakIn}) and the gateway of each part it scans ({@link #egress}).
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
-     * the preferences — and what earlier tasks gave the cloud that this one hands it again
-     * ({@link #givenEarlier}). The output of every PUBLIC artifact recorded BEFORE the private
+     * the preferences — with what the owner sent it while it worked ({@link #fromTheOwner}), and
+     * what earlier tasks gave the cloud that this one hands it again ({@link #givenEarlier}). The
+     * output of every PUBLIC artifact recorded BEFORE the private
      * one that hit; the order matters there. What the CLOUD itself wrote —
      * its own tool-call arguments and reasoning, as typed, where they reach a part the gateway
      * scans: a result that echoes an argument it was given (which would otherwise make the next
@@ -617,6 +636,9 @@ public class AgentContext {
                     if (holds(given, stretch)) return true;
                 }
                 for (String given : fromEarlierTasks) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (String given : fromTheOwner) {
                     if (holds(given, stretch)) return true;
                 }
                 for (Artifact a : artifacts) {

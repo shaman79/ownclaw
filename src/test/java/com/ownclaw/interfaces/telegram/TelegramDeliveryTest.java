@@ -8,6 +8,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.TaskQueue.Fate;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -21,7 +22,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.file.Path;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -37,10 +37,16 @@ class TelegramDeliveryTest {
     static final long ME = 4242L;
     static final ObjectMapper JSON = new ObjectMapper();
 
-    /** Answers every message with the given result; runs nothing. */
+    /**
+     * Answers every message with the given result, unless the fate the test sets hands it to a
+     * running task, which answers it with its own; runs nothing.
+     */
     static final class Answering extends TaskQueue {
         final AgentResult answer;
         final List<com.ownclaw.agent.TaskChat.Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<String> texts = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<Boolean> queued = new java.util.concurrent.CopyOnWriteArrayList<>();
+        volatile Fate fate = Fate.STARTED;
 
         Answering(AgentResult answer) {
             super(null, null, null, new OwnClawConfig(), null);
@@ -48,11 +54,12 @@ class TelegramDeliveryTest {
         }
 
         @Override
-        public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds,
-                                                     com.ownclaw.agent.TaskChat.Channel channel) {
-            channels.add(channel);
-            return CompletableFuture.completedFuture(answer);
+        public Fate send(com.ownclaw.core.UserMessage message, boolean queue) {
+            channels.add(message.channel());
+            texts.add(message.text());
+            queued.add(queue);
+            if (fate != Fate.STEERED) message.answer().accept(answer);
+            return fate;
         }
     }
 
@@ -122,6 +129,32 @@ class TelegramDeliveryTest {
         assertEquals("[Private answer]", row.get("content"), "what later prompts read");
         assertEquals("Closing balance 48,213.07 CZK", row.get("private_content"), "what the web chat shows");
         assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "what links it to what the task did");
+    }
+
+    @Test
+    @DisplayName("a message while a task runs goes to it, and Telegram says so in a line; /queue queues, and says so")
+    void steerAndQueueSayWhatBecameOfIt(@TempDir Path tmp) throws Exception {
+        start(tmp, "The router is up.");
+        queue.fate = Fate.STEERED;
+        receive("use the backup link");
+        FakeTelegram.drain(bot);
+        assertEquals(List.of(Fate.STEERED.line()), sentTexts(), "one line, and no answer: the running task answers");
+        assertEquals(List.of(false), queue.queued);
+
+        queue.fate = Fate.QUEUED;
+        receive("/queue check the printer");
+        FakeTelegram.drain(bot);
+        assertEquals(List.of("use the backup link", "check the printer"), queue.texts, "the message, without the command");
+        assertEquals(List.of(false, true), queue.queued);
+        assertEquals(List.of(Fate.STEERED.line(), "The router is up.", Fate.QUEUED.line()), sentTexts(),
+                "its answer, and the line saying it was queued");
+        assertEquals(List.of("use the backup link", "check the printer"), jdbc.queryForList(
+                "SELECT content FROM conversations WHERE role = 'user' ORDER BY rowid", String.class));
+
+        receive("/queue");
+        FakeTelegram.drain(bot);
+        assertEquals(2, queue.texts.size(), "nothing to run");
+        assertTrue(sentTexts().getLast().startsWith("Usage: <code>/queue &lt;message&gt;</code>"), sentTexts().getLast());
     }
 
     @Test

@@ -127,7 +127,7 @@ class ChatSecretTest {
             page = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         }
         // No JS engine in the suite, so the one line of send() that draws the user's bubble.
-        assertTrue(page.contains("if (text.charAt(0) !== '/') addMsg('user', display);"),
+        assertTrue(page.contains("var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;"),
                 "send() must leave a slash text to the echo, which masks what CommandHandler stores");
         assertFalse(page.contains("\n        addMsg('user', display);"), "send() draws every text as typed");
     }

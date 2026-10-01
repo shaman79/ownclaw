@@ -7,6 +7,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.UserMessage;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.DebugSessionService;
@@ -253,8 +254,13 @@ public class TelegramBotService {
             return;
         }
 
+        // "/queue <message>" queues its message instead of handing it to the running task, as the
+        // web chat's Queue button does.
+        String queued = CommandHandler.queued(text);
+        if (queued != null) text = queued;
+
         // Handle slash commands consistently with the Web UI
-        if (text.startsWith("/")) {
+        if (queued == null && text.startsWith("/")) {
             // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
             // on, unless it is removed -- asked for first, whatever storing it then does.
             if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
@@ -279,7 +285,7 @@ public class TelegramBotService {
 
         // A question waiting for an answer -- the setup wizard's -- takes this message instead
         // of a new task.
-        if (interactionHandler.hasPending(userId)) {
+        if (queued == null && interactionHandler.hasPending(userId)) {
             boolean handled = interactionHandler.provideInput(userId, text);
             if (!handled) {
                 sendMessage(chatId, "No pending input request.");
@@ -295,10 +301,11 @@ public class TelegramBotService {
         String currentMessageId =
                 conversationService.saveMessage(userId, currentSessionId, "user", text);
 
-        // The task runs on the queue; its answer is saved and sent here. It came from Telegram,
-        // so its progress messages go to Telegram too (forTelegram).
-        var telegram = TaskChat.Channel.TELEGRAM;
-        taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of(), telegram).thenAccept(result -> {
+        // To the task running in this chat, or a task of its own (TaskQueue#send), whose answer is
+        // saved and sent here. It came from Telegram, so a task of its own shows its progress
+        // messages in Telegram too (forTelegram).
+        var sent = new UserMessage(userId, currentSessionId, currentMessageId, text, List.of(),
+                TaskChat.Channel.TELEGRAM, result -> {
             // Saved as the web chat saves an answer: the web chat shows it on reload, the private
             // answer included, and links it to what the task did. Saving is one half of
             // delivering it, and failing it must not also lose the other: it is still sent.
@@ -312,6 +319,9 @@ public class TelegramBotService {
             // safe text. What is stored above for later turns is the safe text either way.
             sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response());
         });
+        // What became of it, in a line, when there is anything to say.
+        String fate = taskQueue.send(sent, queued != null).line();
+        if (fate != null) sendMessage(chatId, fate);
     }
 
     /**
@@ -629,6 +639,7 @@ public class TelegramBotService {
             var commands = List.of(
                     Map.of("command", "new",     "description", "Start a new chat session"),
                     Map.of("command", "cancel",  "description", "Cancel the running task"),
+                    Map.of("command", "queue",   "description", "Run a message after the running task, not in it"),
                     Map.of("command", "debug",   "description", "Toggle debug mode"),
                     Map.of("command", "history", "description", "List your chat sessions"),
                     Map.of("command", "help",    "description", "Show available commands"),

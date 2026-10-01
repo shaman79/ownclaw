@@ -152,9 +152,20 @@ public class AgentLoop {
     public AgentResult executeFull(String userId, String message, boolean unattended,
                                    String currentMessageId, List<String> attachmentIds,
                                    TaskChat.Channel channel) {
+        return executeFull(userId, message, unattended, currentMessageId, attachmentIds, channel, null);
+    }
+
+    /**
+     * @param inbox what the owner sends in the task's chat while it runs, read before each step
+     *              ({@link #readMessages}); null for a task nobody can write to
+     */
+    public AgentResult executeFull(String userId, String message, boolean unattended,
+                                   String currentMessageId, List<String> attachmentIds,
+                                   TaskChat.Channel channel, com.ownclaw.core.Inbox inbox) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
+        context.setInbox(inbox);
 
         // The chat this task came from, whole, with the record of each finished task in it.
         loadConversationContext(context, userId, currentMessageId, conversationService, fileStorage,
@@ -684,6 +695,7 @@ public class AgentLoop {
             // === THINK ===
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
+            readMessages(context, step + 1, local);
             String providerLabel = local ? "local" : provider.name();
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Step " + (step + 1) + " · " + providerLabel,
@@ -1753,6 +1765,38 @@ public class AgentLoop {
         AgentAction reflectionAction = new AgentAction("_reflection", Map.of(), "System-injected reflection");
         AgentObservation reflectionObs = AgentObservation.failure("_reflection", reflectionHint, 0);
         context.trajectory().record(reflectionAction, reflectionObs);
+    }
+
+    /** The tool a message the owner sent while the task worked is recorded under: a step of the loop's own. */
+    static final String FROM_THE_OWNER_STEP = "_message";
+
+    /** What the model reads for a message the owner sent while the task worked: this, then his words whole. */
+    static final String FROM_THE_OWNER = "Message from the user while you were working:\n";
+
+    /**
+     * Read what the owner sent in the task's chat since the last step ({@code TaskQueue#steer}),
+     * before a step's think call -- so a message sent during a delegation is read once the
+     * delegation has returned. Each message becomes a step the loop records itself, after
+     * everything before it ({@link AgentTrajectory.Turn#byTheLoop}): every provider's prompt shows
+     * it where it came, as {@link #FROM_THE_OWNER} and his words whole, and grows only at its end,
+     * so what the provider cached of it stays cached. The canary takes his words as his own, as
+     * it takes the task's message ({@link AgentContext#fromTheOwner}), and his chat records that
+     * the task read them ({@link TaskChat#read}).
+     */
+    private void readMessages(AgentContext context, int step, boolean local) {
+        com.ownclaw.core.Inbox inbox = context.inbox();
+        List<com.ownclaw.core.UserMessage> read = inbox == null ? List.of() : inbox.drain();
+        if (read.isEmpty()) return;
+        for (var m : read) {
+            context.fromTheOwner(m.text());
+            context.trajectory().record(
+                    new AgentAction(FROM_THE_OWNER_STEP, Map.of(), "A message the user sent while the task worked"),
+                    AgentObservation.success(FROM_THE_OWNER_STEP, FROM_THE_OWNER + m.text(), Map.of(), 0));
+        }
+        context.markProgress();
+        context.chat().read(step, read.stream().map(com.ownclaw.core.UserMessage::messageId).toList(), local);
+        log.info("Task {} step {}: read {} message(s) the user sent while it worked",
+                context.taskId(), step, read.size());
     }
 
     /**

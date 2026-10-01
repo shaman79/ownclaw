@@ -164,7 +164,7 @@ class TaskEndToEndTest {
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
         var ops = new com.ownclaw.interfaces.web.OpsController(null, rig.loop,
                 new com.ownclaw.users.AuthService(rig.jdbc, new com.ownclaw.users.UserRepository(rig.jdbc), rig.config),
-                null, rig.cancellation, null, rig.config, rig.chat);
+                null, rig.cancellation, null, rig.config, rig.chat, rig.queue);
 
         rig.cloud.think.add(call("noop", Map.of()));
         rig.cloud.think.add(respond("Noted: seven."));
