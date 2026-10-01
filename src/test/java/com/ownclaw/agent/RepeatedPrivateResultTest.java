@@ -144,7 +144,7 @@ class RepeatedPrivateResultTest {
                 var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
                 boolean refused;
                 try {
-                    gateway.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think")));
+                    gateway.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think")));
                     refused = false;
                 } catch (EgressRefused e) {
                     refused = true;
@@ -332,7 +332,7 @@ class RepeatedPrivateResultTest {
             var cloud = new AssistantPartsTest.Scripted(List.of(AssistantPartsTest.call("respond", Map.of("message", "ok"))));
             var messages = AssistantPartsTest.render(ctx);
             assertDoesNotThrow(() -> AssistantPartsTest.gateway(cloud, new ArrayList<>())
-                    .chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                    .chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         });
     }
 
@@ -382,7 +382,7 @@ class RepeatedPrivateResultTest {
         var egress = ctx.egress("think");
         AssistantPartsTest.gateway(cloud, new ArrayList<>()).chat(List.of(LlmMessage.system("S"),
                 LlmMessage.user("[skill_manage] OK (3ms)\n" + source), LlmMessage.user("Fix it.")),
-                LlmRequestConfig.DEFAULT.withEgress(egress));
+                new LlmRequestConfig(null, null, false).withEgress(egress));
         assertArrayEquals(new int[] {1, 1}, reads, "each source read once for the call");
     }
 
@@ -462,7 +462,7 @@ class RepeatedPrivateResultTest {
                 DelegationBehaviourTest.done("summarised"));
 
         DelegationBehaviourTest.executor(llm, new DelegationBehaviourTest.Usage(), cat, search)
-                .execute(DelegationBehaviourTest.plan("summarise the audit"), ctx);
+                .execute(DelegationBehaviourTest.plan("summarise the audit"), ctx, DelegationBehaviourTest.UNCOUNTED);
 
         var read = ctx.artifacts().get(1);
         assertEquals(Label.PRIVATE, read.label());

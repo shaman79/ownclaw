@@ -72,7 +72,7 @@ class LocalLogPrivacyTest {
         try {
             var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
             var llm = new Scripted(call("read_statement", Map.of()), "Your " + SECRET + ".", done("Your " + SECRET));
-            DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask());
+            DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask(), DelegationBehaviourTest.UNCOUNTED);
             String log = logged(appender);
             assertTrue(log.contains("no tool call in the local LLM's text"), "the prose reply was seen: " + log);
             assertFalse(log.contains("48,213.07"), log);
@@ -88,7 +88,7 @@ class LocalLogPrivacyTest {
         try {
             var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success("text: " + SECRET));
             var llm = new Scripted(call("read_statement", Map.of()), "{\"tool\": CZ6508000000192000145399}", done("done"));
-            DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask());
+            DelegationBehaviourTest.executor(llm, new Usage(), read).execute(plan("summarise the statement"), fileTask(), DelegationBehaviourTest.UNCOUNTED);
             String log = logged(appender);
             assertTrue(log.contains("no tool call in the local LLM's text"), "the bad reply was seen: " + log);
             assertFalse(log.contains("CZ6508000000192000145399"), log);
@@ -114,7 +114,7 @@ class LocalLogPrivacyTest {
             };
             var executor = new LocalExecutor(new LlmRouter(llm, null, null, null),
                     new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage());
-            var outcome = executor.execute(plan("summarise the statement"), fileTask());
+            var outcome = executor.execute(plan("summarise the statement"), fileTask(), DelegationBehaviourTest.UNCOUNTED);
             assertFalse(outcome.text().contains("48,213.07"), outcome.text());
             assertTrue(outcome.text().contains("Local LLM call failed"), outcome.text());
             assertFalse(logged(appender).contains("48,213.07"), logged(appender));
@@ -137,15 +137,16 @@ class LocalLogPrivacyTest {
             public boolean isAvailable() { return true; }
             public String name() { return "full"; }
         };
-        var ctx = fileTask();
+        var billed = new java.util.ArrayList<LlmResponse>();
         var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
                 new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
-                .execute(plan("summarise the statement"), ctx);
+                .execute(plan("summarise the statement"), fileTask(), (provider, reply) -> billed.add(reply));
 
         assertTrue(outcome.text().contains("Local LLM call failed: [ollama] the conversation is longer "
                 + "than the model's 262,144-token context window"), outcome.text());
         assertFalse(outcome.ok(), "a failed delegation: the cloud takes the work back");
-        assertEquals(2 + 262_144, ctx.localTokens(), "the cut-off reply was generated, and is counted");
+        assertEquals(List.of(2, 262_144), billed.stream().map(LlmResponse::totalTokens).toList(),
+                "the cut-off reply was generated, and the task's account is handed it");
     }
 
     @Test
@@ -165,7 +166,7 @@ class LocalLogPrivacyTest {
         try {
             var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
                     new ToolRegistry(List.of(ping)), new ChatStatusEmitter(), new Usage())
-                    .execute(plan("ping the NAS"), DelegationBehaviourTest.task());
+                    .execute(plan("ping the NAS"), DelegationBehaviourTest.task(), DelegationBehaviourTest.UNCOUNTED);
             assertTrue(outcome.text().contains("nas.example.org"), "the cloud is told what went wrong: " + outcome.text());
             String log = logged(appender);
             assertTrue(log.contains("a tool call that cannot be run ("), log);
@@ -194,15 +195,16 @@ class LocalLogPrivacyTest {
         };
         var appender = capture();
         try {
-            var ctx = fileTask();
+            var billed = new java.util.ArrayList<LlmResponse>();
             var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
                     new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
-                    .execute(plan("summarise the statement"), ctx);
+                    .execute(plan("summarise the statement"), fileTask(), (provider, reply) -> billed.add(reply));
 
             assertFalse(outcome.text().contains(SECRET), outcome.text());
             assertTrue(outcome.text().contains("MalformedToolCall (its text is kept out"), outcome.text());
             assertFalse(logged(appender).contains(SECRET), "nor in the log");
-            assertEquals(2 + 940, ctx.localTokens(), "the reply was generated, and is counted");
+            assertEquals(List.of(2, 940), billed.stream().map(LlmResponse::totalTokens).toList(),
+                    "the reply was generated, and the task's account is handed it");
         } finally {
             release(appender);
         }

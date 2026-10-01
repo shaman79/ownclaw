@@ -92,7 +92,8 @@ ownclaw:
 
   privacy:
     # The canary: every outbound cloud body is checked, byte-wise, against the task's PRIVATE
-    # artifacts before the socket opens. ENFORCE refuses a hit and ends the task
+    # artifacts before the socket opens -- all of it but the replayed assistant turns and the
+    # tools' descriptions and schemas (see CloudGateway). ENFORCE refuses a hit and ends the task
     # PRIVACY_BLOCKED; OBSERVE sends it and records OBSERVED_LEAK. There is no off: the door
     # being the only path to a provider, labels at source, descriptors for private results,
     # secrets scrubbed and every call ledgered are not policies. Expected hits in normal

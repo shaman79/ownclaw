@@ -83,13 +83,11 @@ class ModelPricingTest {
     }
 
     @Test
-    @DisplayName("an unknown Claude keeps the mid-tier fallback; an unknown model costs nothing and says so")
+    @DisplayName("an unknown Claude keeps the mid-tier fallback; an unknown model costs nothing")
     void unknown() {
         assertEquals(3.00, input("claude-opus-4-1"), 1e-9);
-        assertTrue(ModelPricing.isKnown("claude-opus-4-1"));
         assertEquals(0.0, ModelPricing.costUsd("local-model:q4", 1000, 1000, 0, 0), 1e-12);
-        assertFalse(ModelPricing.isKnown("local-model:q4"));
-        assertFalse(ModelPricing.isKnown(null));
+        assertEquals(0.0, ModelPricing.costUsd(null, 1000, 1000, 0, 0), 1e-12);
     }
 
     @Test

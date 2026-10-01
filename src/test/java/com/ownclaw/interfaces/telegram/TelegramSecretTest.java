@@ -133,7 +133,7 @@ class TelegramSecretTest {
         List<String> answers = new ArrayList<>();
         bot = botWith(new SkillInteractionHandler() {
             @Override public boolean hasPending(String userId) { return true; }
-            @Override public boolean provideInput(String userId, String taskId, String input) {
+            @Override public boolean provideInput(String userId, String input) {
                 answers.add(input);
                 return true;
             }
@@ -153,7 +153,7 @@ class TelegramSecretTest {
         bot = botWith(interactions);
         var waiting = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
             try {
-                return "answered " + interactions.requestInputSilent(owner, "setup");
+                return "answered " + interactions.requestInputSilent(owner);
             } catch (Exception e) {
                 return "ended by " + e.getClass().getSimpleName();
             }

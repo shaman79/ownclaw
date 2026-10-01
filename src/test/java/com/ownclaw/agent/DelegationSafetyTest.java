@@ -72,8 +72,8 @@ class DelegationSafetyTest {
         var sent = step("smtp_send_email", Map.of("to", "petr@example.com", "subject", "Digest"),
                 "Sent, message id 42");
         var done = List.of(sent, step("daily_news_digest", Map.of(), "...headlines..."));
-        assertSame(sent, LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
-                        Map.of("to", "petr@example.com", "subject", "Digest"), done),
+        assertSame(sent, LocalExecutor.priorSideEffect(sideEffecting("smtp_send_email"),
+                        Map.of("to", "petr@example.com", "subject", "Digest"), done, true),
                 "not only the immediately preceding call: re-sending the same email with one "
                         + "unrelated call in between is still sending it twice");
     }
@@ -82,8 +82,8 @@ class DelegationSafetyTest {
     @DisplayName("different arguments are a different call")
     void differentArgumentsAreNotARepeat() {
         var done = List.of(step("smtp_send_email", Map.of("to", "a@example.com"), "ok"));
-        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
-                        Map.of("to", "b@example.com"), done),
+        assertNull(LocalExecutor.priorSideEffect(sideEffecting("smtp_send_email"),
+                        Map.of("to", "b@example.com"), done, true),
                 "two recipients is two emails, which is the goal, not a mistake");
     }
 
@@ -91,15 +91,15 @@ class DelegationSafetyTest {
     @DisplayName("no arguments and null arguments are the same call")
     void nullParamsMatchEmptyParams() {
         var done = List.of(step("publish_report", Map.of(), "published"));
-        assertNotNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("publish_report"), null, done),
+        assertNotNull(LocalExecutor.priorSideEffect(sideEffecting("publish_report"), null, done, true),
                 "a model that omits an empty argument object has not made a different call");
     }
 
     @Test
     @DisplayName("a call that never happened is not suppressed, and neither is a read")
     void freshCallIsAllowed() {
-        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
-                Map.of("to", "a@example.com"), List.of()));
+        assertNull(LocalExecutor.priorSideEffect(sideEffecting("smtp_send_email"),
+                Map.of("to", "a@example.com"), List.of(), true));
         var read = new com.ownclaw.agent.tools.Tool() {
             public String name() { return "web_fetch"; }
             public String description() { return "read"; }
@@ -107,8 +107,8 @@ class DelegationSafetyTest {
             public com.ownclaw.agent.tools.ToolResult execute(Map<String, Object> p,
                     com.ownclaw.agent.tools.ToolExecutionContext c) { return null; }
         };
-        assertNull(LocalExecutor.sideEffectAlreadyDone(read, Map.of(),
-                List.of(step("web_fetch", Map.of(), "page"))), "a second read costs only time");
+        assertNull(LocalExecutor.priorSideEffect(read, Map.of(),
+                List.of(step("web_fetch", Map.of(), "page")), true), "a second read costs only time");
     }
 
     @Test
@@ -120,8 +120,8 @@ class DelegationSafetyTest {
         var failedSend = step("smtp_send_email", Map.of("to", "petr@example.com"),
                 "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}");
         assertFalse(failedSend.succeeded());
-        assertNull(LocalExecutor.sideEffectAlreadyDone(sideEffecting("smtp_send_email"),
-                Map.of("to", "petr@example.com"), List.of(failedSend)));
+        assertNull(LocalExecutor.priorSideEffect(sideEffecting("smtp_send_email"),
+                Map.of("to", "petr@example.com"), List.of(failedSend), true));
     }
 
     // ── a claim of completion needs evidence ──
@@ -130,7 +130,7 @@ class DelegationSafetyTest {
     @DisplayName("finishing without running anything is not a success")
     void zeroStepsIsNotSuccess() {
         var outcome = LocalExecutor.completed(
-                "I have fetched today's headlines and emailed the digest.", "send the digest", List.of());
+                "I have fetched today's headlines and emailed the digest.", "send the digest", List.of(), null);
 
         assertFalse(outcome.ok(),
                 "the summary reads like a delivered job; nothing ran. With the registry "
@@ -145,7 +145,7 @@ class DelegationSafetyTest {
     void successCarriesEvidence() {
         var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
                 step("daily_news_digest", Map.of(), "...headlines..."),
-                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")));
+                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")), null);
 
         assertTrue(outcome.ok());
         assertEquals(2, outcome.stepCount());
@@ -461,7 +461,7 @@ class DelegationSafetyTest {
                 step("daily_news_digest", Map.of(), "...digest..."),
                 step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent, id 42"),
                 new Artifact("verify_delivery", Map.of(), "ERROR: no such tool",
-                        false)));
+                        false)), null);
 
         assertFalse(outcome.ok(), "a failed step still hands the registry back");
         assertTrue(outcome.text().startsWith("ALREADY DONE"),
@@ -478,7 +478,7 @@ class DelegationSafetyTest {
     @DisplayName("a clean delegation is not prefixed with a warning about itself")
     void successHasNoAlreadyDoneHeader() {
         var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
-                step("smtp_send_email", Map.of(), "Sent")));
+                step("smtp_send_email", Map.of(), "Sent")), null);
         assertTrue(outcome.ok());
         assertTrue(outcome.text().startsWith("Digest sent."));
     }
@@ -487,7 +487,7 @@ class DelegationSafetyTest {
     @DisplayName("a failure with nothing successful carries no misleading header")
     void allFailedHasNoHeader() {
         var outcome = LocalExecutor.completed("Nothing worked.", "send it", List.of(
-                new Artifact("x", Map.of(), "ERROR: boom", false)));
+                new Artifact("x", Map.of(), "ERROR: boom", false)), null);
         assertFalse(outcome.text().startsWith("ALREADY DONE"));
     }
 
@@ -504,7 +504,7 @@ class DelegationSafetyTest {
         var broken = new Artifact(2, "web_fetch_and_parse", Map.of(), Map.of(), trace, false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-        var outcome = LocalExecutor.completed("Fetched.", "fetch", List.of(fetched, broken));
+        var outcome = LocalExecutor.completed("Fetched.", "fetch", List.of(fetched, broken), null);
 
         assertTrue(big.length() > 20_000 && trace.length() > 20_000);
         assertTrue(outcome.text().contains(big),
@@ -525,7 +525,7 @@ class DelegationSafetyTest {
         var priv = privateStep(2, "smtp_send_email", "Sent, message id 42", true);
 
         var outcome = LocalExecutor.completed("Local prose about the mailbox", "send it",
-                List.of(pub, priv));
+                List.of(pub, priv), null);
 
         assertTrue(outcome.ok());
         assertTrue(outcome.text().contains("📰 Digest — 2026-09-23"), "the public result, in full");
@@ -545,7 +545,7 @@ class DelegationSafetyTest {
     void allPublicIsUnchanged() {
         var outcome = LocalExecutor.completed("Digest sent.", "send it", List.of(
                 step("daily_news_digest", Map.of(), "the digest"),
-                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")));
+                step("smtp_send_email", Map.of("to", "petr@example.com"), "Sent")), null);
 
         assertTrue(outcome.text().startsWith("Digest sent."));
         assertTrue(outcome.text().contains("the digest"));
@@ -560,7 +560,7 @@ class DelegationSafetyTest {
                 Map.of("url", "https://x"), "Traceback: KeyError 'menu'", false,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
 
-        var outcome = LocalExecutor.completed("", "fetch", List.of(priv, pub));
+        var outcome = LocalExecutor.completed("", "fetch", List.of(priv, pub), null);
 
         assertFalse(outcome.text().contains("petr@x"));
         assertTrue(outcome.text().contains("{{1}}"));
@@ -609,7 +609,7 @@ class DelegationSafetyTest {
         var send = new Artifact(3, "smtp_send_email", Map.of(), Map.of(),
                 "{\"ok\": false, \"error\": \"timed out\"}", true,
                 com.ownclaw.privacy.Label.PRIVATE, List.of("credentials (1)"));
-        var outcome = LocalExecutor.completed("sent", "send", List.of(send));
+        var outcome = LocalExecutor.completed("sent", "send", List.of(send), null);
         assertTrue(outcome.text().contains("{{3}} smtp_send_email FAILED"), outcome.text());
         assertFalse(outcome.ok());
     }
@@ -619,7 +619,7 @@ class DelegationSafetyTest {
     void theSummaryIsRenumbered() {
         var digest = new Artifact(7, "daily_news_digest", Map.of(), Map.of(), "digest", true,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
-        var outcome = LocalExecutor.completed("Forwarded {{1}} to Petr.", "send it", List.of(digest));
+        var outcome = LocalExecutor.completed("Forwarded {{1}} to Petr.", "send it", List.of(digest), null);
         assertTrue(outcome.text().startsWith("Forwarded {{7}} to Petr."), outcome.text());
     }
 
@@ -653,11 +653,11 @@ class DelegationSafetyTest {
         var failed = new Artifact(4, "smtp_send_email", args, args, "ERROR: 421", false,
                 com.ownclaw.privacy.Label.PRIVATE, List.of());
 
-        assertSame(sent, LocalExecutor.sideEffectAlreadyDone(smtp, args, List.of(failed, sent)));
-        assertNull(LocalExecutor.sideEffectAlreadyDone(smtp, args, List.of(failed)),
+        assertSame(sent, LocalExecutor.priorSideEffect(smtp, args, List.of(failed, sent), true));
+        assertNull(LocalExecutor.priorSideEffect(smtp, args, List.of(failed), true),
                 "a send that failed is exactly what a retry is for");
-        assertNull(LocalExecutor.sideEffectAlreadyDone(smtp,
-                Map.of("to", "someone@else.cz", "body", "menu"), List.of(sent)),
+        assertNull(LocalExecutor.priorSideEffect(smtp,
+                Map.of("to", "someone@else.cz", "body", "menu"), List.of(sent), true),
                 "different arguments are a different change");
     }
 
@@ -665,7 +665,7 @@ class DelegationSafetyTest {
     @DisplayName("a failed tool is named as failed in the ledger")
     void failuresAreVisibleInTheLedger() {
         var outcome = LocalExecutor.completed("Done.", "send it", List.of(
-                new Artifact("smtp_send_email", Map.of(), "ERROR: auth", false)));
+                new Artifact("smtp_send_email", Map.of(), "ERROR: auth", false)), null);
 
         assertTrue(outcome.text().contains("smtp_send_email FAILED"),
                 "a summary that says 'Done.' over a failed send is exactly what the ledger is "

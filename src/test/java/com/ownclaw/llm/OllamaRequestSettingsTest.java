@@ -89,7 +89,7 @@ class OllamaRequestSettingsTest {
         config.getExecutor().setModel(MODEL);
         var check = new LocalModelCheck(config, JSON);
 
-        var answer = new OllamaProvider(config, JSON, check).chat(List.of(LlmMessage.user("hello")), LlmRequestConfig.DEFAULT);
+        var answer = new OllamaProvider(config, JSON, check).chat(List.of(LlmMessage.user("hello")), new LlmRequestConfig(null, null, false));
         var probe = new OpsService(config, null, null, null, null, null, null, JSON, check).ollama();
         var welcome = new SetupWizardService(null, config, JSON, null, null, check).processStep(0, null);
 

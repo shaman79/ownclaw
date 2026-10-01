@@ -180,7 +180,7 @@ class AnthropicStreamingTest {
         var http = api(stream);
         var seen = new AtomicInteger();
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(seen::incrementAndGet));
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(seen::incrementAndGet));
 
         assertEquals("The router answers on 192.0.2.1.", r.content());
         assertFalse(r.hasToolCalls());
@@ -202,7 +202,7 @@ class AnthropicStreamingTest {
     @DisplayName("what goes out: the model's own maximum, a stream, fallbacks with their beta, eager tool input")
     void theRequest() throws Exception {
         var http = api(start("claude-opus-5", 1, 0, 0) + text(0, "ok") + end("end_turn", null, 1));
-        provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(TOOLS));
+        provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withTools(TOOLS));
 
         var sent = http.to(MESSAGES).get(0);
         assertEquals(AnthropicProvider.FALLBACK_BETA + "," + AnthropicProvider.CONTEXT_WINDOW_BETA,
@@ -226,7 +226,7 @@ class AnthropicStreamingTest {
                         "eout\": 30, \"env\": {\"A\": [1, 2]}}")
                 + end("tool_use", null, 20));
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(TOOLS));
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withTools(TOOLS));
 
         assertEquals("Checking.", r.content());
         assertEquals(1, r.toolCalls().size());
@@ -243,7 +243,7 @@ class AnthropicStreamingTest {
     @DisplayName("a tool call with no input streamed at all has empty arguments")
     void emptyToolInput() {
         var http = api(start("claude-opus-5", 10, 0, 0) + tool(0, "toolu_2", "respond") + end("tool_use", null, 5));
-        assertEquals(Map.of(), provider(http).chat(ASK, LlmRequestConfig.DEFAULT).toolCalls().get(0).arguments());
+        assertEquals(Map.of(), provider(http).chat(ASK, new LlmRequestConfig(null, null, false)).toolCalls().get(0).arguments());
     }
 
     @Test
@@ -251,7 +251,7 @@ class AnthropicStreamingTest {
     void malformedToolInput() {
         var http = api(start("claude-opus-5", 10, 0, 0)
                 + tool(0, "toolu_3", "shell_exec", "{\"command\": \"say \"hi\"\"}") + end("tool_use", null, 9));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertFalse(r.hasToolCalls(), "never a call with guessed arguments");
         var e = assertThrows(MalformedToolCall.class, () -> r.requireComplete("anthropic"));
         assertTrue(e.getMessage().contains("'shell_exec'"), e.getMessage());
@@ -261,7 +261,7 @@ class AnthropicStreamingTest {
         var trailing = api(start("claude-opus-5", 10, 0, 0)
                 + tool(0, "toolu_5", "shell_exec", "{\"command\": \"ls\"} {\"command\": \"rm -rf /srv\"}")
                 + end("tool_use", null, 9));
-        LlmResponse t = provider(trailing).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse t = provider(trailing).chat(ASK, new LlmRequestConfig(null, null, false));
         assertFalse(t.hasToolCalls());
         assertThrows(MalformedToolCall.class, () -> t.requireComplete("anthropic"));
     }
@@ -272,7 +272,7 @@ class AnthropicStreamingTest {
         var http = api(start("claude-opus-5", 10, 0, 0)
                 + tool(0, "toolu_4", "write_file", "{\"path\": \"/tmp/x\", \"content\": \"line 1\\nline")
                 + end("max_tokens", null, 128_000));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertFalse(r.hasToolCalls(), "a half-written call is never offered to be run");
         var e = assertThrows(OutputTruncated.class, () -> r.requireComplete("anthropic"));
         assertEquals(OutputTruncated.Limit.MAX_OUTPUT, e.limit());
@@ -285,7 +285,7 @@ class AnthropicStreamingTest {
     @DisplayName("a refusal keeps its reason and category, and is never taken for an answer")
     void refusal() {
         var http = api(start("claude-opus-5", 0, 0, 0) + end("refusal", "cyber", 0));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
 
         assertTrue(r.refused());
         assertEquals("cyber", r.stopDetail());
@@ -293,15 +293,15 @@ class AnthropicStreamingTest {
         var e = assertThrows(ProviderRefused.class, () -> r.requireComplete("anthropic"));
         assertEquals("refusal", e.stopReason());
         assertEquals("cyber", e.category());
-        assertEquals("[anthropic] the model declined this request (stop reason: refusal, category: cyber)",
-                e.getMessage());
+        assertEquals("[anthropic] the model declined this request (stop reason: refusal (cyber))",
+                e.getMessage(), "the stop said as the ledger and the task page say it");
     }
 
     @Test
     @DisplayName("a refusal with no category is still a refusal")
     void refusalWithoutCategory() {
         var http = api(start("claude-opus-5", 0, 0, 0) + end("refusal", null, 0));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertEquals("refusal", r.stopDescription());
         assertNull(assertThrows(ProviderRefused.class, () -> r.requireComplete("anthropic")).category());
     }
@@ -310,7 +310,7 @@ class AnthropicStreamingTest {
     @DisplayName("the context window filling up is named as the window, with its size")
     void contextWindowExceeded() {
         var http = api(start("claude-opus-5", 999_000, 0, 0) + text(0, "partial") + end("model_context_window_exceeded", null, 1000));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         var e = assertThrows(OutputTruncated.class, () -> r.requireComplete("anthropic"));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals("[anthropic] the conversation is longer than the model's 1,000,000-token context window",
@@ -323,7 +323,7 @@ class AnthropicStreamingTest {
         var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MESSAGES, 400,
                 "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
                         + "\"message\":\"prompt is too long: 1000512 tokens > 1000000 maximum\"}}");
-        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals(1_000_000, e.tokens());
         assertNull(e.reply(), "refused before any reply");
@@ -335,7 +335,7 @@ class AnthropicStreamingTest {
         var http = new FakeHttp().json(MODELS, 200, LIMITS).json(MESSAGES, 413,
                 "{\"type\":\"error\",\"error\":{\"type\":\"request_too_large\","
                         + "\"message\":\"Request exceeds the maximum allowed number of bytes.\"}}");
-        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals("[anthropic] the conversation is longer than the model's 1,000,000-token context window",
                 e.getMessage());
@@ -357,7 +357,7 @@ class AnthropicStreamingTest {
                 + tool(4, "toolu_fallback", "shell_exec", "{\"command\": \"journalctl -n 50\"}")
                 + end("tool_use", null, 60));
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
 
         assertEquals("Here is the plan: first check the logs.", r.content(),
                 "the fallback model continues the declined model's text");
@@ -370,7 +370,7 @@ class AnthropicStreamingTest {
     @DisplayName("a turn Anthropic sends straight to the fallback model (sticky routing) has no fallback block: message_start names the model")
     void stickyTurn() {
         var http = api(start("claude-opus-4-8", 50, 0, 0) + text(0, "answer") + end("end_turn", null, 3));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertEquals("answer", r.content());
         assertEquals("claude-opus-4-8", r.model(), "not the requested claude-opus-5");
         assertEquals(List.of(usage("claude-opus-4-8", 50, 3)), r.usage(), "billed to the model that ran it");
@@ -386,7 +386,7 @@ class AnthropicStreamingTest {
                 + blockStart(1, fallbackBlock("claude-opus-5", "claude-opus-4-8")) + blockStop(1)
                 + text(2, "the plan.") + stop(JSON.createObjectNode().put("stop_reason", "end_turn"), total));
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
 
         assertEquals("Here is the plan.", r.content());
         assertEquals("claude-opus-4-8", r.model());
@@ -406,7 +406,7 @@ class AnthropicStreamingTest {
                 + blockStart(0, fallbackBlock("claude-opus-5", "claude-opus-4-8")) + blockStop(0)
                 + text(1, "answer") + stop(JSON.createObjectNode().put("stop_reason", "end_turn"), total));
         assertEquals(List.of(usage("claude-opus-4-8", 412, 264)),
-                provider(http).chat(ASK, LlmRequestConfig.DEFAULT).usage());
+                provider(http).chat(ASK, new LlmRequestConfig(null, null, false)).usage());
     }
 
     @Test
@@ -414,18 +414,18 @@ class AnthropicStreamingTest {
     void aRefusalBeforeAnyOutputIsBilledByItsCategory() {
         for (String category : new String[] {"cyber", "general_harms", null}) {
             LlmResponse r = provider(api(start("claude-opus-5", 412, 0, 0)
-                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, LlmRequestConfig.DEFAULT);
+                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, new LlmRequestConfig(null, null, false));
             assertTrue(r.refused());
             assertEquals(List.of(), r.usage(), category + " is not billed before any output");
             assertEquals(0, r.promptTokens());
         }
         for (String category : new String[] {"bio", "frontier_llm", "reasoning_extraction"}) {
             LlmResponse r = provider(api(start("claude-opus-5", 412, 0, 0)
-                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, LlmRequestConfig.DEFAULT);
+                    + stop(refusal(category, null), outputTokens(0)))).chat(ASK, new LlmRequestConfig(null, null, false));
             assertEquals(List.of(usage("claude-opus-5", 412, 0)), r.usage(), category + " is billed");
         }
         LlmResponse midStream = provider(api(start("claude-opus-5", 412, 0, 0) + text(0, "Sure, the")
-                + stop(refusal("cyber", null), outputTokens(7)))).chat(ASK, LlmRequestConfig.DEFAULT);
+                + stop(refusal("cyber", null), outputTokens(7)))).chat(ASK, new LlmRequestConfig(null, null, false));
         assertEquals(List.of(usage("claude-opus-5", 412, 7)), midStream.usage(),
                 "output streamed before a refusal is billed, whatever the category");
     }
@@ -446,7 +446,7 @@ class AnthropicStreamingTest {
                 .on(MESSAGES, 200, "text/event-stream", answered);
         var seen = new AtomicInteger();
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(TOOLS)
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withTools(TOOLS)
                 .withProgress(seen::incrementAndGet));
 
         assertEquals("tool_use", r.stopReason());
@@ -473,7 +473,7 @@ class AnthropicStreamingTest {
     void aRefusalThatNamesNoModelStands() {
         var http = api(start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
                 + stop(refusal("cyber", null), outputTokens(3)));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertTrue(r.refused());
         assertEquals(1, http.to(MESSAGES).size());
         assertThrows(ProviderRefused.class, () -> r.requireComplete("anthropic"));
@@ -487,7 +487,7 @@ class AnthropicStreamingTest {
                         + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3)))
                 .on(MESSAGES, 200, "text/event-stream", start("claude-opus-4-8", 900, 0, 0) + text(0, "I")
                         + stop(refusal("cyber", "claude-opus-4-7"), outputTokens(1)));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertTrue(r.refused());
         assertEquals("claude-opus-4-8", r.model());
         assertEquals(2, http.to(MESSAGES).size(), "not a third time, though the second refusal names a model too");
@@ -501,7 +501,7 @@ class AnthropicStreamingTest {
                 .on(MESSAGES, 200, "text/event-stream", start("claude-opus-5", 900, 0, 0) + text(0, "Sure, the")
                         + stop(refusal("cyber", "claude-opus-4-8"), outputTokens(3)))
                 .json(MESSAGES, 400, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"no\"}}");
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertTrue(r.refused(), "the decline is why there is no answer");
         assertEquals("claude-opus-5", r.model());
         assertEquals(List.of(usage("claude-opus-5", 900, 3)), r.usage());
@@ -519,7 +519,7 @@ class AnthropicStreamingTest {
         var stop = new Stopped();
         var seen = new AtomicInteger();
         int firstOfTheRetry = events(declined) + 1;
-        var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT
+        var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)
                 .withProgress(() -> { if (seen.incrementAndGet() == firstOfTheRetry) throw stop; })));
         assertSame(stop, thrown, "not taken for a failed retry");
         assertEquals(http.opened.get(), http.closed.get());
@@ -532,7 +532,7 @@ class AnthropicStreamingTest {
                 + "\"delta\":{\"type\":\"text_del\n\n";
         var http = api(start("claude-opus-5", 5, 0, 0) + text(0, "one ") + cut + text(2, "three")
                 + end("end_turn", null, 3));
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("not JSON"), e.getMessage());
     }
 
@@ -541,7 +541,7 @@ class AnthropicStreamingTest {
     void aLastEventCutOffIsIncomplete() {
         String whole = start("claude-opus-5", 5, 0, 0) + text(0, "all of it") + end("end_turn", null, 3);
         var http = api(whole.substring(0, whole.length() - 1));   // no blank line after message_stop
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("before message_stop"), e.getMessage());
     }
 
@@ -553,7 +553,7 @@ class AnthropicStreamingTest {
         fallback.putObject("to").put("model", "claude-opus-4-8");
         var http = api(start("claude-opus-4-8", 50, 0, 0) + blockStart(0, fallback) + blockStop(0)
                 + text(1, "answer") + end("end_turn", null, 3));
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertEquals("answer", r.content());
         assertEquals("claude-opus-4-8", r.model());
     }
@@ -567,7 +567,7 @@ class AnthropicStreamingTest {
         var seen = new AtomicInteger();
 
         var e = assertThrows(LlmException.class,
-                () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(seen::incrementAndGet)));
+                () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(seen::incrementAndGet)));
 
         assertEquals(400, e.getHttpStatus());
         assertTrue(e.getMessage().contains("invalid_request_error: bad block"), e.getMessage());
@@ -590,7 +590,7 @@ class AnthropicStreamingTest {
     @DisplayName("a stream that stops before message_stop is incomplete, not a short answer")
     void cutStream() {
         var http = api(start("claude-opus-5", 5, 0, 0) + text(0, "half an ans"));
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("before message_stop"), e.getMessage());
     }
 
@@ -607,7 +607,7 @@ class AnthropicStreamingTest {
             if (seen.incrementAndGet() == 4) throw stop;
         };
 
-        var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+        var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
 
         assertSame(stop, thrown, "not wrapped, not replaced");
         assertEquals(4, seen.get(), "nothing was read after it");
@@ -626,13 +626,13 @@ class AnthropicStreamingTest {
                 .on(MESSAGES, 200, "text/event-stream", stream);
         var provider = provider(http);
 
-        var e = assertThrows(LlmException.class, () -> provider.chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider.chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(404, e.getHttpStatus());
         assertTrue(e.getMessage().contains("Models API"), e.getMessage());
         assertTrue(http.to(MESSAGES).isEmpty(), "no call is made without the model's limits");
 
-        assertEquals("ok", provider.chat(ASK, LlmRequestConfig.DEFAULT).content(), "the next call asks again");
-        assertEquals("ok", provider.chat(ASK, LlmRequestConfig.DEFAULT).content());
+        assertEquals("ok", provider.chat(ASK, new LlmRequestConfig(null, null, false)).content(), "the next call asks again");
+        assertEquals("ok", provider.chat(ASK, new LlmRequestConfig(null, null, false)).content());
         assertEquals(2, http.to(MODELS).size(), "and once it has an answer, keeps it");
         assertEquals(2, http.to(MESSAGES).size());
     }
@@ -641,7 +641,7 @@ class AnthropicStreamingTest {
     @DisplayName("a Models API answer without the limits fails the call: there is no table to guess from")
     void modelsLookupWithoutLimits() {
         var http = new FakeHttp().json(MODELS, 200, "{\"id\":\"claude-opus-5\"}");
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("max_tokens"), e.getMessage());
     }
 
@@ -678,7 +678,7 @@ class AnthropicStreamingTest {
         var stop = new Stopped();
         var hook = new StopsAt(4, stop);
 
-        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook))));
+        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook))));
 
         assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 120_000, 1, 0, 80_000)), hook.billed,
                 "the prompt message_start said was read, and the output counted so far -- once");
@@ -694,19 +694,19 @@ class AnthropicStreamingTest {
         for (String stream : List.of(start("claude-opus-5", 5, 0, 7) + text(0, "half an ans"),
                 start("claude-opus-5", 5, 0, 7) + text(0, "par") + ev(error))) {
             var hook = new StopsAt(0, null);
-            assertThrows(LlmException.class, () -> provider(api(stream)).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+            assertThrows(LlmException.class, () -> provider(api(stream)).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
             assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 5, 1, 0, 7)), hook.billed);
         }
 
         var whole = new StopsAt(0, null);
         LlmResponse r = provider(api(start("claude-opus-5", 5, 0, 7) + text(0, "all") + end("end_turn", null, 3)))
-                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(whole));
+                .chat(ASK, new LlmRequestConfig(null, null, false).withProgress(whole));
         assertEquals(List.of(new LlmResponse.Usage("claude-opus-5", 5, 3, 0, 7)), r.usage());
         assertTrue(whole.billed.isEmpty(), "its counts are the reply's, and counted once, from it");
 
         var early = new StopsAt(1, new Stopped());
         assertThrows(Stopped.class, () -> provider(api(start("claude-opus-5", 5, 0, 7) + text(0, "x")
-                + end("end_turn", null, 1))).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(early)));
+                + end("end_turn", null, 1))).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(early)));
         assertTrue(early.billed.isEmpty(), "stopped before message_start: the stream had said nothing");
     }
 
@@ -722,7 +722,7 @@ class AnthropicStreamingTest {
         var stop = new Stopped();
         var hook = new StopsAt(events(declined) + 2, stop);   // just after the retry's message_start
 
-        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook))));
+        assertSame(stop, assertThrows(Stopped.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook))));
 
         assertEquals(List.of(usage("claude-opus-4-8", 900, 1), usage("claude-opus-5", 900, 3)), hook.billed,
                 "the retry's counts so far, then the refusal the stop took with it");

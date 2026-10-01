@@ -38,7 +38,6 @@ public class LlmException extends RuntimeException {
     public LlmResponse reply() { return reply; }
 
     public boolean isRateLimit() { return httpStatus == 429; }
-    public boolean isAuthError() { return httpStatus == 401 || httpStatus == 403; }
 
     /**
      * Anthropic's "overloaded" response. It is capacity pressure, not a fault in the request.

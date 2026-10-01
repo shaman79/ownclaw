@@ -279,7 +279,7 @@ public class TelegramBotService {
         // A question waiting for an answer -- the setup wizard's -- takes this message instead
         // of a new task.
         if (interactionHandler.hasPending(userId)) {
-            boolean handled = interactionHandler.provideInput(userId, userId, text);
+            boolean handled = interactionHandler.provideInput(userId, text);
             if (!handled) {
                 sendMessage(chatId, "No pending input request.");
             }

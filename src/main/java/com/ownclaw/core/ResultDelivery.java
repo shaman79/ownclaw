@@ -45,6 +45,12 @@ public class ResultDelivery {
 
     /**
      * Deliver a finished task's outcome, phrased according to how it ended.
+     * <p>
+     * A task that did not finish is delivered as its ending, which says why it stopped and lists
+     * every result it produced ({@code TaskEnding}): the header says only that it did not finish,
+     * and {@link #withheldLine} goes under a finished answer alone, which lists no results. Under
+     * an ending the line was a second count, beneath a list of every result, and it counted fewer;
+     * the header named the reason the ending's first line gives.
      *
      * @param chat  the chat it is saved into, as {@link #deliver(String, Supplier, String, String,
      *              String, String)} takes it
@@ -58,9 +64,9 @@ public class ResultDelivery {
         } else if (result.awaitingUser()) {
             header = label + " — needs an answer before it can go on";
         } else {
-            header = label + " — did not finish (" + result.terminationReason() + ")";
+            header = label + " — did not finish";
         }
-        String withheld = withheldLine(result);
+        String withheld = result.success() ? withheldLine(result) : "";
         deliver(userId, chat, header, result.response() + withheld, result.taskId(),
                 result.ownerText() == null ? null : result.ownerText() + withheld);
     }

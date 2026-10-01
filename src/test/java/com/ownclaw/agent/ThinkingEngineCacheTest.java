@@ -56,7 +56,7 @@ class ThinkingEngineCacheTest {
                 List.class, com.ownclaw.llm.LlmRequestConfig.class, String.class, int.class);
         requestBody.setAccessible(true);
         var body = (com.fasterxml.jackson.databind.JsonNode) requestBody.invoke(provider, messages,
-                com.ownclaw.llm.LlmRequestConfig.DEFAULT, "claude-opus-5", 128_000);
+                new com.ownclaw.llm.LlmRequestConfig(null, null, false), "claude-opus-5", 128_000);
         var first = body.path("messages").get(0).path("content");
         assertTrue(first.isArray(), "split into two blocks: " + first);
         String joined = first.get(0).path("text").asText() + first.get(1).path("text").asText();
@@ -84,7 +84,7 @@ class ThinkingEngineCacheTest {
         var mode = new ThinkingEngine.StepMode(true, false);
         var ctx = new AgentContext("u1", "t1", "audit the routers and write the report");
         var t = ctx.trajectory();
-        String told = "Your previous reply was empty (stop_reason: end_turn): no text and no tool "
+        String told = "Your previous reply was empty (stop reason: end_turn): no text and no tool "
                 + "call, so nothing was run.\n\nContinue from where the task stands.";
         // Every kind of step the loop records, in an order that crosses each boundary: a reply
         // that could not be used before any action, a result far larger than any old ceiling,

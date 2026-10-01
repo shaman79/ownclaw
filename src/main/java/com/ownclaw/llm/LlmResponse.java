@@ -162,9 +162,4 @@ public record LlmResponse(
     public int billedInputTokens() {
         return promptTokens() + cacheCreationTokens() + cacheReadTokens();
     }
-
-    /** True when this call touched a prompt cache in either direction. */
-    public boolean usedCache() {
-        return cacheCreationTokens() > 0 || cacheReadTokens() > 0;
-    }
 }

@@ -287,7 +287,7 @@ class StepModeGateTest {
         assertEquals("think", e.purpose());
         assertEquals("t1", e.taskId());
         assertEquals("u1", e.userId());
-        assertSame(ctx.privateIndex(), e.index(), "the task's own index, not an empty one");
+        assertSame(ctx.egress("think").index(), e.index(), "the task's own index, not an empty one");
     }
 
     @Test

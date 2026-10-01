@@ -260,7 +260,6 @@ public class AgentContext {
     public void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
     public int localTokens() { return localTokens; }
     public int cloudTokens() { return cloudTokens; }
-    public int totalTokens() { return localTokens + cloudTokens; }
 
     // ── File attachments ──
 
@@ -464,16 +463,14 @@ public class AgentContext {
     /** Whether the task's answer or question shows this result in full. See {@link #markShown}. */
     public boolean isShown(Artifact a) { return shown.contains(a.n()); }
 
-    public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }
-
     public Map<String, String> secretValues() { return secretValues; }
     public void setSecretValues(Map<String, String> values) {
         this.secretValues = values == null ? Map.of() : Map.copyOf(values);
     }
 
     /**
-     * The first run of an indexed PRIVATE artifact in a result that {@link #isAllowedLeak} does
-     * not excuse, or null -- what the gateway would refuse to send. One question, over one index
+     * The first run of an indexed PRIVATE artifact in a result that {@link Excuses} does not
+     * excuse, or null -- what the gateway would refuse to send. One question, over one index
      * and one set of excuses: {@link #decide} asks it of every result before it is labelled, and
      * the gateway of each part it scans, with what {@link #egress} hands it.
      * <p>
@@ -501,7 +498,7 @@ public class AgentContext {
      * Text an earlier task gave the cloud, which this task is handing it again: the past tasks
      * memory_manage recall returns -- a task's message and its response, the cloud's copy and
      * never the owner's private one -- and a skill's recorded PUBLIC failures, in the request for
-     * its repair. A source of {@link #isAllowedLeak} like the message: a past answer or a past
+     * its repair. A source of {@link Excuses} like the message: a past answer or a past
      * public traceback that shares a run with a private result of this task was the cloud's to
      * read before this task began. "Traceback (most recent call last" is a window of every Python
      * traceback, so once a credentialed skill had failed with one, recalling a task that had
@@ -514,7 +511,8 @@ public class AgentContext {
 
     /**
      * Whether a stretch of normalised text the canary matched is material the cloud was already
-     * given, and may go: true when one source below holds the whole of it.
+     * given, and may go: true when one source below holds the whole of it. The label asks it of a
+     * result ({@link #firstLeakIn}) and the gateway of each part it scans ({@link #egress}).
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
      * the preferences — and what earlier tasks gave the cloud that this one hands it again
@@ -535,19 +533,12 @@ public class AgentContext {
      * exists to refuse.
      * <p>
      * A scan asks once per stretch, not once per window ({@code PrivateIndex.firstLeakIn}), and
-     * reads each source normalised once for all the stretches it asks about ({@code Excuses}).
-     * Normalising every source again for every window made labelling a quoted public digest
-     * quadratic in its length.
-     */
-    public boolean isAllowedLeak(int hitHandle, String normalisedStretch) {
-        return new Excuses().test(hitHandle, normalisedStretch);
-    }
-
-    /**
-     * The sources {@link #isAllowedLeak} reads, each normalised the first time it is needed and
-     * kept after that. One is made per label and per request to the cloud, so a source costs one
-     * normalisation per request, not one per window. Kept by identity, since nothing recorded
-     * changes while a request is made; what is recorded later is read when it is first met.
+     * reads each source normalised once for all the stretches it asks about: each is normalised
+     * the first time it is needed and kept after that. An Excuses is made per label and per
+     * request to the cloud, so a source costs one normalisation per request, not one per window.
+     * Kept by identity, since nothing recorded changes while a request is made; what is recorded
+     * later is read when it is first met. Normalising every source again for every window made
+     * labelling a quoted public digest quadratic in its length.
      */
     private final class Excuses implements java.util.function.BiPredicate<Integer, String> {
         private final Map<Object, String> normalised = new java.util.IdentityHashMap<>();

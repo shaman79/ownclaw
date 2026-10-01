@@ -80,7 +80,7 @@ class OllamaStreamingTest {
     @DisplayName("what goes out: the model's own context window, truncate and shift off, and no num_predict")
     void theRequest() throws Exception {
         var http = ollama(line("4", null) + last("stop", 20, 1));
-        provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT);
+        provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false));
 
         JsonNode body = JSON.readTree(http.to(CHAT).get(0).body());
         assertTrue(body.path("stream").asBoolean());
@@ -101,7 +101,7 @@ class OllamaStreamingTest {
         var http = ollama(stream);
         var seen = new AtomicInteger();
 
-        LlmResponse r = provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(seen::incrementAndGet));
+        LlmResponse r = provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(seen::incrementAndGet));
 
         assertEquals("The answer is 4.", r.content());
         assertEquals(26, r.promptTokens());
@@ -118,7 +118,7 @@ class OllamaStreamingTest {
     @DisplayName("tool calls arrive whole, as objects, and pass the same strict parse")
     void toolCalls() {
         var http = ollama(toolLine("shell_exec", Map.of("command", "uptime")) + last("stop", 30, 8));
-        LlmResponse r = provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertEquals(1, r.toolCalls().size());
         assertEquals("shell_exec", r.toolCalls().get(0).name());
         assertEquals(Map.of("command", "uptime"), r.toolCalls().get(0).arguments());
@@ -129,7 +129,7 @@ class OllamaStreamingTest {
     void lengthIsTheWindow() {
         var http = ollama(line("", "thinking and thinking") + last("length", 200_000, 62_144));
         var e = assertThrows(OutputTruncated.class,
-                () -> provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT));
+                () -> provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals(262_144, e.tokens());
         assertEquals("[ollama] the conversation is longer than the model's 262,144-token context window",
@@ -143,24 +143,24 @@ class OllamaStreamingTest {
                 "{\"error\":\"exceed_context_size_error: request (270000 tokens) exceeds the available context "
                         + "size (262144 tokens)\"}");
         var e = assertThrows(OutputTruncated.class,
-                () -> provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT));
+                () -> provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(262_144, e.tokens());
 
         var other = new FakeHttp().json(SHOW, 200, show("qwen35moe", 262_144)).json(CHAT, 400,
                 "{\"error\":\"the input length exceeds the context length\"}");
-        assertThrows(OutputTruncated.class, () -> provider(config(), other).chat(ASK, LlmRequestConfig.DEFAULT));
+        assertThrows(OutputTruncated.class, () -> provider(config(), other).chat(ASK, new LlmRequestConfig(null, null, false)));
     }
 
     @Test
     @DisplayName("an error line mid-stream is an LlmException, and a stream with no last line is incomplete")
     void brokenStreams() {
         var http = ollama(line("par", null) + "{\"error\":\"model runner has unexpectedly stopped\"}\n");
-        var e = assertThrows(LlmException.class, () -> provider(config(), http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("unexpectedly stopped"), e.getMessage());
         assertFalse(e instanceof OutputTruncated);
 
         var cut = ollama(line("half", null));
-        var e2 = assertThrows(LlmException.class, () -> provider(config(), cut).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e2 = assertThrows(LlmException.class, () -> provider(config(), cut).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e2.getMessage().contains("\"done\": true"), e2.getMessage());
     }
 
@@ -173,7 +173,7 @@ class OllamaStreamingTest {
         var stop = new Stopped();
         var seen = new AtomicInteger();
         var thrown = assertThrows(Stopped.class, () -> provider(config(), http).chat(ASK,
-                LlmRequestConfig.DEFAULT.withProgress(() -> { if (seen.incrementAndGet() == 2) throw stop; })));
+                new LlmRequestConfig(null, null, false).withProgress(() -> { if (seen.incrementAndGet() == 2) throw stop; })));
         assertSame(stop, thrown);
         assertEquals(2, seen.get());
         assertEquals(http.opened.get(), http.closed.get(), "the /api/show answer and the stream, both closed");
@@ -188,9 +188,9 @@ class OllamaStreamingTest {
                 .on(CHAT, 200, "application/x-ndjson", line("ok", null) + last("stop", 1, 1));
         var provider = provider(config(), http);
 
-        provider.chat(ASK, LlmRequestConfig.DEFAULT);
+        provider.chat(ASK, new LlmRequestConfig(null, null, false));
         provider.chat(ASK, new LlmRequestConfig("small-model:latest", null, false));
-        provider.chat(ASK, LlmRequestConfig.DEFAULT);
+        provider.chat(ASK, new LlmRequestConfig(null, null, false));
 
         var chats = http.to(CHAT);
         assertEquals(262_144, JSON.readTree(chats.get(0).body()).path("options").path("num_ctx").asInt());
@@ -208,13 +208,13 @@ class OllamaStreamingTest {
                 .on(CHAT, 200, "application/x-ndjson", line("ok", null) + last("stop", 1, 1));
         var provider = provider(config(), http);
 
-        var e = assertThrows(LlmException.class, () -> provider.chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider.chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("context window"), e.getMessage());
         assertTrue(http.to(CHAT).isEmpty(), "nothing is sent without the window");
-        assertEquals("ok", provider.chat(ASK, LlmRequestConfig.DEFAULT).content());
+        assertEquals("ok", provider.chat(ASK, new LlmRequestConfig(null, null, false)).content());
 
         var noLength = new FakeHttp().json(SHOW, 200, "{\"template\":\"{{ .Messages }}\",\"model_info\":{}}");
-        var e2 = assertThrows(LlmException.class, () -> provider(config(), noLength).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e2 = assertThrows(LlmException.class, () -> provider(config(), noLength).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e2.getMessage().contains("no context length"), e2.getMessage());
     }
 
@@ -231,7 +231,7 @@ class OllamaStreamingTest {
         check.check();
         assertEquals("good:latest", config.getExecutor().getModel());
 
-        new OllamaProvider(config, JSON, check, http.client()).chat(ASK, LlmRequestConfig.DEFAULT);
+        new OllamaProvider(config, JSON, check, http.client()).chat(ASK, new LlmRequestConfig(null, null, false));
 
         JsonNode body = JSON.readTree(http.to(CHAT).get(0).body());
         assertEquals("good:latest", body.path("model").asText());
@@ -253,7 +253,7 @@ class OllamaStreamingTest {
         assertTrue(status.ok(), status.detail());
         var provider = new OllamaProvider(config, JSON, check, http.client());
         assertTrue(provider.isAvailable());
-        assertEquals("ok", provider.chat(ASK, LlmRequestConfig.DEFAULT).content());
+        assertEquals("ok", provider.chat(ASK, new LlmRequestConfig(null, null, false)).content());
         assertEquals(List.of("/api/tags", "/api/show", "/api/tags", "/api/chat"),
                 http.sent.stream().map(s -> s.request().url().encodedPath()).toList());
 

@@ -73,14 +73,6 @@ public class FileStorageService {
     }
 
     /**
-     * Link a file to a conversation message.
-     */
-    public void attachToMessage(String messageId, String fileId) {
-        jdbc.update("INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
-                messageId, fileId);
-    }
-
-    /**
      * Get metadata for a file by ID. Returns null if not found.
      */
     public Map<String, Object> getFileInfo(String fileId) {
@@ -114,15 +106,6 @@ public class FileStorageService {
             SELECT id, original_name, content_type, size_bytes, uploaded_at
             FROM file_attachments WHERE user_id = ? ORDER BY uploaded_at DESC
             """, userId);
-    }
-
-    /**
-     * List file attachment IDs for a specific conversation message.
-     */
-    public List<String> getMessageAttachments(String messageId) {
-        return jdbc.queryForList(
-                "SELECT file_id FROM message_attachments WHERE message_id = ?",
-                String.class, messageId);
     }
 
     /**

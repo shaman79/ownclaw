@@ -135,16 +135,8 @@ class LocalFirstUnattendedTest {
                 "it must still know the skill exists, or it will rebuild it with skill_create");
         assertTrue(delegateSpec.contains("cannot run skills yourself"),
                 "knowing a skill exists and being able to call it are different things");
-        assertFalse(text.contains("## Skills on this machine"),
+        assertFalse(text.contains("Fetch and format a news digest."),
                 "and not a second copy in the message: " + text);
-
-        // Without an array there is no other copy, so the message carries it.
-        // StepMode is (nativeTools, localFirst) — the text protocol, still local-first.
-        String textNoTools = prompt(engine, unattended(), new ThinkingEngine.StepMode(false, true));
-        assertTrue(textNoTools.contains("## Skills on this machine"),
-                "on the text protocol the message is the only place it can be");
-        assertTrue(textNoTools.contains("Fetch and format a news digest."),
-                "and it carries the descriptions, not just the names");
     }
 
     @Test

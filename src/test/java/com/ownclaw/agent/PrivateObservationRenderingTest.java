@@ -122,7 +122,7 @@ class PrivateObservationRenderingTest {
         var gw = gateway(rows);
         for (String provider : List.of("anthropic", "openai")) {
             var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
-            assertDoesNotThrow(() -> gw.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))),
+            assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))),
                     provider + ": the gateway found private bytes the renderer test did not");
         }
         assertTrue(rows.stream().allMatch(r -> r.decision() == EgressLedger.Decision.SENT));
@@ -143,7 +143,7 @@ class PrivateObservationRenderingTest {
         var rows = new ArrayList<EgressLedger.Row>();
         var gw = gateway(rows);
         var messages = engine(registry).buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
-        assertDoesNotThrow(() -> gw.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+        assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
     }
 
     @Test
@@ -156,7 +156,7 @@ class PrivateObservationRenderingTest {
         var leaking = List.of(LlmMessage.system("S"), LlmMessage.user("Mailbox: " + secret.substring(500, 900)));
 
         var ex = assertThrows(EgressRefused.class,
-                () -> gw.chat(leaking, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                () -> gw.chat(leaking, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(1, ex.handle(), "{{1}} is the artifact whose bytes were found");
     }
 }

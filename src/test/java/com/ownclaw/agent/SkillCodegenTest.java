@@ -183,7 +183,7 @@ class SkillCodegenTest {
         var declined = task();
         assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), declined).error().startsWith(
                 "ERROR: the model declined to write the code for 'openwrt_audit' ([anthropic] the model "
-                        + "declined this request (stop reason: refusal, category: cyber))"));
+                        + "declined this request (stop reason: refusal (cyber)))"));
         assertEquals(2_300, declined.cloudTokens(), "a declined reply was billed, so it is counted");
 
         rig.cloud.codegen.add(c -> { throw new com.ownclaw.llm.EgressRefused("anthropic", 2, "openwrt_audit", 1, "user", 10); });

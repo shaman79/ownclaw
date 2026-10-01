@@ -118,6 +118,47 @@ class ResultDeliveryTest {
         assertEquals(asked, messages.get(0).data().get("sessionId"), "the page is told which chat it is for");
     }
 
+    /** What /bg's delivery saves for {@code result}: its content row. */
+    private static String deliveredAsBg(Path tmp, AgentResult result) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
+        String session = conversations.createSession("u1", "Where /bg was typed");
+        new ResultDelivery(conversations, new ChatStatusEmitter())
+                .deliver("u1", () -> session, "Background task: digest", result);
+        return jdbc.queryForObject("SELECT content FROM conversations", String.class);
+    }
+
+    /** A run whose delegation reported one private result; a public direct call reports none. */
+    private static AgentTrajectory mixedRun() {
+        return runWith(List.of(Map.of("n", 2, "tool", "imap_fetch", "label", "PRIVATE", "chars", 61))).trajectory();
+    }
+
+    @Test
+    @DisplayName("a run that did not finish is delivered as its ending, which lists every result: no second count beneath it")
+    void anEndingIsNotCountedTwice(@TempDir Path tmp) throws Exception {
+        String ending = "**Stopped:** it used all 2 steps a task may take.\n\n**What it produced:**\n"
+                + "- result 1 (web_fetch): 54 chars, public — in full below.\n"
+                + "- result 2 (imap_fetch): 61 chars, private (credentials (1)) — shown to you only.";
+        String saved = deliveredAsBg(tmp, AgentResult.maxSteps(ending, mixedRun(), 30));
+        assertTrue(saved.endsWith(ending), "a line counting \"1 result\" under a list of two: " + saved);
+    }
+
+    @Test
+    @DisplayName("a finished answer, which lists no results, still says what stayed on this machine")
+    void anAnswerIsCounted(@TempDir Path tmp) throws Exception {
+        String saved = deliveredAsBg(tmp, AgentResult.completed("Your digest: sunny.", mixedRun(), 30));
+        assertTrue(saved.endsWith("Your digest: sunny.\n\n_1 result, 1 withheld from the cloud (imap_fetch)_"), saved);
+    }
+
+    @Test
+    @DisplayName("the header of a run that did not finish says so; why is the ending's first line, said once")
+    void theHeaderDoesNotRepeatWhy(@TempDir Path tmp) throws Exception {
+        String saved = deliveredAsBg(tmp, AgentResult.maxSteps("**Stopped:** it used all 2 steps a task may take.",
+                new AgentTrajectory(), 30));
+        assertEquals("**Background task: digest — did not finish**\n\n**Stopped:** it used all 2 steps a task may take.",
+                saved);
+    }
+
     @Test
     @DisplayName("a run with nothing recorded says nothing at all")
     void silentWhereItCannotSee() {

@@ -464,7 +464,7 @@ class TaskEndToEndTest {
         AgentResult r = rig.turn(session(rig), "scan my network for open ports");
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
         assertTrue(r.response().startsWith("**Stopped:** [anthropic] the model declined this request (stop reason: "
-                + "refusal, category: cyber).\n\n**What it did** — 0 steps, 2,300 cloud tokens, "), r.response());
+                + "refusal (cyber)).\n\n**What it did** — 0 steps, 2,300 cloud tokens, "), r.response());
         assertEquals(2_300, rig.jdbc.queryForObject("SELECT tokens_used FROM token_usage WHERE user_id = 'u1'", Integer.class),
                 "the declined reply was billed, so it is counted");
 
@@ -583,7 +583,7 @@ class TaskEndToEndTest {
         assertNotSame(com.ownclaw.llm.LlmProgress.NONE, analysis.config().progress(), "the call carries no hook");
         String observed = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
         assertTrue(observed.contains("ERROR: the analysis of the skill library failed: [anthropic] the model "
-                + "declined this request (stop reason: refusal, category: cyber)"), observed);
+                + "declined this request (stop reason: refusal (cyber))"), observed);
         assertEquals(0, rig.jdbc.queryForObject(
                 "SELECT count(*) FROM events WHERE event_type = 'step' AND json_extract(details, '$.success') = 1",
                 Integer.class), "a refused analysis is a failed step, not a successful one");

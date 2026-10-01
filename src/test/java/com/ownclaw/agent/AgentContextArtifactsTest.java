@@ -39,6 +39,11 @@ class AgentContextArtifactsTest {
         return ctx.addArtifact(tool, Map.of(), Map.of(), output, true, d);
     }
 
+    /** Whether the task excuses this stretch of a hit on result {@code handle}, as the gateway asks it. */
+    private static boolean excused(AgentContext ctx, int handle, String stretch) {
+        return ctx.egress("test").allowed().test(handle, stretch);
+    }
+
     @Test
     @DisplayName("artifacts are numbered task-wide, in order, and never renumbered")
     void numbering() {
@@ -60,8 +65,8 @@ class AgentContextArtifactsTest {
         add(ctx, "digest", pub, PUBLIC);
         add(ctx, "imap_fetch", priv, PRIVATE);
 
-        assertNotNull(ctx.privateIndex().firstHitIn("…" + priv.substring(100, 150) + "…"));
-        assertNull(ctx.privateIndex().firstHitIn("…" + pub.substring(100, 150) + "…"),
+        assertNotNull(ctx.egress("test").index().firstLeakIn("…" + priv.substring(100, 150) + "…", (h, w) -> false));
+        assertNull(ctx.egress("test").index().firstLeakIn("…" + pub.substring(100, 150) + "…", (h, w) -> false),
                 "public bytes may go; indexing them would refuse the digest every morning");
     }
 
@@ -75,7 +80,7 @@ class AgentContextArtifactsTest {
         var priv = add(ctx, "imap_fetch", "Found it: " + message, PRIVATE);
 
         String window = PrivateIndex.normalise(message).substring(10, 50);
-        assertTrue(ctx.isAllowedLeak(priv.n(), window),
+        assertTrue(excused(ctx, priv.n(), window),
                 "the cloud wrote the task text; sending it back is not a disclosure");
     }
 
@@ -88,7 +93,7 @@ class AgentContextArtifactsTest {
         add(ctx, "summarise", "Summary: " + secret.substring(0, 120), PUBLIC);   // $2, after
 
         String window = PrivateIndex.normalise(secret).substring(20, 60);
-        assertFalse(ctx.isAllowedLeak(priv.n(), window),
+        assertFalse(excused(ctx, priv.n(), window),
                 "a skill that echoes what it was given, or a summary the local model wrote, is "
                         + "the private content in a public wrapper; whitelisting it lets the "
                         + "leak through as 'already public'");
@@ -103,7 +108,7 @@ class AgentContextArtifactsTest {
         var smtp = add(ctx, "smtp_send_email", "Sent: " + digest, PRIVATE);     // $2 quotes $1
 
         String window = PrivateIndex.normalise(digest).substring(20, 60);
-        assertTrue(ctx.isAllowedLeak(smtp.n(), window),
+        assertTrue(excused(ctx, smtp.n(), window),
                 "the smtp confirmation quotes the public digest it just sent; the digest was "
                         + "already the cloud's to read");
     }
@@ -122,10 +127,10 @@ class AgentContextArtifactsTest {
                 AgentObservation.success("smtp_send_email", "sent", Map.of(), 10));
         var priv = add(ctx, "smtp_send_email", "Sent '" + subject + "' to petr", PRIVATE);
 
-        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(subject).substring(0, 40)),
+        assertTrue(excused(ctx, priv.n(), PrivateIndex.normalise(subject).substring(0, 40)),
                 "a skill that echoes an argument it was given would otherwise make the next "
                         + "prompt unsendable, after the email had gone out");
-        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise("sending the invoice")),
+        assertTrue(excused(ctx, priv.n(), PrivateIndex.normalise("sending the invoice")),
                 "the reasoning too — the OpenAI history quotes it as typed");
     }
 
@@ -140,10 +145,10 @@ class AgentContextArtifactsTest {
         var priv = add(ctx, "smtp_send_email",
                 "Skill error:" + NL + "Traceback..." + NL + line, PRIVATE);
 
-        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(line).substring(0, 40)),
+        assertTrue(excused(ctx, priv.n(), PrivateIndex.normalise(line).substring(0, 40)),
                 "without this a credentialed skill's failure made its own repair prompt "
                         + "unsendable — and repair is the loop this project exists for");
-        assertFalse(ctx.isAllowedLeak(priv.n(),
+        assertFalse(excused(ctx, priv.n(),
                 PrivateIndex.normalise("Traceback... and the mailbox contents that followed")),
                 "only the source, not the rest of the failure");
     }
@@ -163,16 +168,16 @@ class AgentContextArtifactsTest {
         ctx.givenEarlier("1 past task matches 'routers':\n\n" + episode);
         var priv = add(ctx, "imap_fetch", "Found: " + episode + " " + listing, PRIVATE);
 
-        assertTrue(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));
-        assertFalse(ctx.isAllowedLeak(priv.n(), PrivateIndex.normalise(listing).substring(40, 80)));
+        assertTrue(excused(ctx, priv.n(), PrivateIndex.normalise(episode).substring(40, 80)));
+        assertFalse(excused(ctx, priv.n(), PrivateIndex.normalise(listing).substring(40, 80)));
     }
 
     @Test
     @DisplayName("nothing is allowed by default")
     void nothingByDefault() {
         var ctx = task("hello");
-        assertFalse(ctx.isAllowedLeak(1, "anything at all here that is long"));
-        assertFalse(ctx.isAllowedLeak(1, ""));
+        assertFalse(excused(ctx, 1, "anything at all here that is long"));
+        assertFalse(excused(ctx, 1, ""));
     }
 
     @Test
@@ -298,7 +303,7 @@ class AgentContextArtifactsTest {
                 "_attached_files and the file rule read one list, so they cannot drift apart");
         assertEquals(2, ctx.files().size());
         assertThrows(UnsupportedOperationException.class, () -> ctx.files().clear());
-        assertNotNull(ctx.privateIndex().firstHitIn("…" + csv.substring(100, 140) + "…"),
+        assertNotNull(ctx.egress("test").index().firstLeakIn("…" + csv.substring(100, 140) + "…", (h, w) -> false),
                 "a text upload's own bytes are in the canary");
         assertEquals(List.of("given the files {{1}}, {{2}}"), ctx.decide(List.of(), List.of(), false, "compared").why());
     }
@@ -315,7 +320,7 @@ class AgentContextArtifactsTest {
         assertEquals("u1", e.userId());
         assertEquals("t1", e.taskId());
         assertEquals("think", e.purpose());
-        assertSame(ctx.privateIndex(), e.index());
+        assertNotNull(e.index().firstLeakIn("…" + secret.substring(40, 90) + "…", (h, w) -> false), "the task's own index, which holds it");
         assertEquals("hunter2secret", e.secretValues().get("IMAP_PASS"));
         assertFalse(e.allowed().test(priv.n(), PrivateIndex.normalise(secret).substring(0, 40)));
         assertTrue(e.allowed().test(priv.n(), PrivateIndex.normalise("send it")));

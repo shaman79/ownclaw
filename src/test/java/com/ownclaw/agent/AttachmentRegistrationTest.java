@@ -77,7 +77,7 @@ class AttachmentRegistrationTest {
         assertEquals(Label.PRIVATE, a.label(), "PRIVATE whoever is watching");
         assertTrue(a.indexed());
         assertEquals(statement, a.output());
-        assertNotNull(ctx.privateIndex().firstHitIn("…" + statement.substring(20, 60) + "…"),
+        assertNotNull(ctx.egress("test").index().firstLeakIn("…" + statement.substring(20, 60) + "…", (handle, stretch) -> false),
                 "a text upload is in the canary");
 
         for (String part : List.of(a.tool(), String.valueOf(a.why()), String.valueOf(a.written()),

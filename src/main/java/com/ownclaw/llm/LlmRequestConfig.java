@@ -45,9 +45,6 @@ public record LlmRequestConfig(
         this(model, temperature, jsonMode, tools, null, null);
     }
 
-    /** Use all defaults from the provider config. */
-    public static final LlmRequestConfig DEFAULT = new LlmRequestConfig(null, null, false);
-
     /** This request, but offering the model these tools natively. */
     public LlmRequestConfig withTools(List<ToolSpec> toolSpecs) {
         return new LlmRequestConfig(model, temperature, jsonMode, toolSpecs, egress, progress);

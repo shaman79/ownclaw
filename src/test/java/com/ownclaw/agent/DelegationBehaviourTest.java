@@ -114,6 +114,9 @@ class DelegationBehaviourTest {
                 new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage);
     }
 
+    /** The task's account, for a delegation whose tokens the test does not count. */
+    static final java.util.function.BiConsumer<LlmProvider, LlmResponse> UNCOUNTED = (provider, reply) -> { };
+
     static DelegationPlan plan(String goal) {
         return new DelegationPlan(goal, List.of(), List.of(), 6);
     }
@@ -140,12 +143,12 @@ class DelegationBehaviourTest {
         var ctx = task();
 
         var first = new Scripted(call("daily_menu_fetcher", Map.of()), done("fetch failed"));
-        executor(first, new Usage(), fetch, smtp).execute(plan("fetch today's menu"), ctx);
+        executor(first, new Usage(), fetch, smtp).execute(plan("fetch today's menu"), ctx, UNCOUNTED);
 
         var second = new Scripted(call("daily_menu_fetcher", Map.of()),
                 call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}")),
                 done("menu emailed"));
-        executor(second, new Usage(), fetch, smtp).execute(plan("fetch the menu and email it"), ctx);
+        executor(second, new Usage(), fetch, smtp).execute(plan("fetch the menu and email it"), ctx, UNCOUNTED);
 
         assertEquals(1, smtp.calls.size());
         assertEquals("Polévka: česneková. Hlavní: guláš.", smtp.calls.get(0).get("body"),
@@ -162,7 +165,7 @@ class DelegationBehaviourTest {
                 call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1}}")),
                 done("gave up"));
 
-        executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+        executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task(), UNCOUNTED);
 
         assertTrue(smtp.calls.isEmpty(), "a traceback never goes out as the email");
         assertTrue(llm.allSeen().contains("FAILED"), "and the model is told why");
@@ -177,9 +180,9 @@ class DelegationBehaviourTest {
         var ctx = task();
 
         executor(new Scripted(call("smtp_send_email", args), done("sent")), new Usage(), smtp)
-                .execute(plan("email the menu"), ctx);
+                .execute(plan("email the menu"), ctx, UNCOUNTED);
         var second = new Scripted(call("smtp_send_email", args), done("sent"));
-        executor(second, new Usage(), smtp).execute(plan("email the menu"), ctx);
+        executor(second, new Usage(), smtp).execute(plan("email the menu"), ctx, UNCOUNTED);
 
         assertEquals(1, smtp.calls.size(), "the owner gets one email");
         assertFalse(second.allSeen().contains("SECRET-MID-771"),
@@ -204,12 +207,12 @@ class DelegationBehaviourTest {
                 done("The mail says the wifi password is Kolibri-2291; the menu page is fetched."));
 
         var ctx = task();
-        var outcome = executor(llm, new Usage(), imap, page).execute(plan("check mail and the menu"), ctx);
+        var outcome = executor(llm, new Usage(), imap, page).execute(plan("check mail and the menu"), ctx, UNCOUNTED);
 
         Artifact fetched = ctx.artifacts().get(1);
         assertEquals(Label.PRIVATE, fetched.label());
         assertTrue(fetched.why().contains("after private data in this delegation"), fetched.why().toString());
-        assertNull(ctx.privateIndex().firstHitIn(pageText),
+        assertNull(ctx.egress("test").index().firstLeakIn(pageText, (h, w) -> false),
                 "not indexed, so the cloud's own fetch of the same page is not refused");
         assertFalse(outcome.text().contains("Restaurant U Fleků"), "withheld from the cloud");
         assertFalse(outcome.text().contains("Kolibri-2291"), "and so is the model's summary");
@@ -227,7 +230,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_search", Map.of("q", "reset card PIN 4711")), done("done"));
 
-        var outcome = executor(llm, new Usage(), imap, echo).execute(plan("sort the mail"), task());
+        var outcome = executor(llm, new Usage(), imap, echo).execute(plan("sort the mail"), task(), UNCOUNTED);
 
         assertFalse(outcome.text().contains("4711"), outcome.text());
     }
@@ -243,7 +246,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("web_search", Map.of("q", "reset card PIN 4711")), done("done"));
 
-        var outcome = executor(llm, usage, imap, search).execute(plan("sort the mail"), task());
+        var outcome = executor(llm, usage, imap, search).execute(plan("sort the mail"), task(), UNCOUNTED);
 
         assertFalse(outcome.text().contains("4711"), outcome.text());
         assertEquals(List.of(Label.PRIVATE), usage.failedLabels,
@@ -260,7 +263,7 @@ class DelegationBehaviourTest {
         var usage = new Usage();
         var llm = new Scripted(call("web_search", Map.of("q", "prague weather")), done("done"));
 
-        var outcome = executor(llm, usage, search).execute(plan("weather"), task());
+        var outcome = executor(llm, usage, search).execute(plan("weather"), task(), UNCOUNTED);
 
         assertTrue(outcome.text().contains("prague weather"), outcome.text());
         assertEquals(Map.of("q", "prague weather"), usage.failedArgs.get(0));
@@ -277,7 +280,7 @@ class DelegationBehaviourTest {
         var usage = new Usage();
 
         executor(new Scripted(call("openwrt_audit", Map.of()), done("the audit failed")), usage, audit)
-                .execute(plan("audit the router"), ctx);
+                .execute(plan("audit the router"), ctx, UNCOUNTED);
 
         assertEquals(List.of("ERROR: Skill error: Command 'sshpass -p «vault:OPENWRT_PASS» ssh root@192.0.2.1 uci show' "
                 + "returned non-zero exit status 5."), usage.failedErrors);
@@ -287,7 +290,7 @@ class DelegationBehaviourTest {
     @DisplayName("a goal that names an earlier result has the reference removed, and the cloud is told")
     void aGoalCannotReachEarlierResults() {
         var llm = new Scripted(done("nothing to do"));
-        var outcome = executor(llm, new Usage()).execute(plan("Email {{3.body_text}} to Petr"), task());
+        var outcome = executor(llm, new Usage()).execute(plan("Email {{3.body_text}} to Petr"), task(), UNCOUNTED);
 
         assertFalse(llm.allSeen().contains("{{3"),
                 "the local model would read {{3}} as its own third step");
@@ -303,10 +306,10 @@ class DelegationBehaviourTest {
         var ctx = task();
         // A fresh delegation, so taint is not what decides: the reference is.
         executor(new Scripted(call("imap_fetch", Map.of()), done("ok")), new Usage(), imap)
-                .execute(plan("fetch"), ctx);
+                .execute(plan("fetch"), ctx, UNCOUNTED);
         var llm = new Scripted(call("imap_fetch", Map.of()),
                 call("archive_text", Map.of("text", "{{1.body_text}}")), done("ok"));
-        executor(llm, new Usage(), imap, archive).execute(plan("archive the mail"), ctx);
+        executor(llm, new Usage(), imap, archive).execute(plan("archive the mail"), ctx, UNCOUNTED);
 
         // {{1}} the first fetch, {{2}} the first delegation's kept answer, {{3}} this fetch.
         Artifact archived = ctx.artifacts().get(3);
@@ -329,9 +332,9 @@ class DelegationBehaviourTest {
         var args = Map.<String, Object>of("to", "petr@example.com", "body", "Dnešní menu");
         var ctx = task();
         executor(new Scripted(call("smtp_send_email", args), done("sent")), new Usage(), smtp)
-                .execute(plan("email the menu"), ctx);
+                .execute(plan("email the menu"), ctx, UNCOUNTED);
         executor(new Scripted(call("smtp_send_email", args), done("sent")), new Usage(), smtp)
-                .execute(plan("email the menu"), ctx);
+                .execute(plan("email the menu"), ctx, UNCOUNTED);
 
         assertEquals(2, smtp.calls.size(), "the retry goes out, as it does on main");
     }
@@ -347,7 +350,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("smtp_send_email", Map.of("to", "petr@example.com", "body", "x")),
                 done("sent"));
 
-        var outcome = executor(llm, usage, smtp).execute(plan("email it"), task());
+        var outcome = executor(llm, usage, smtp).execute(plan("email it"), task(), UNCOUNTED);
 
         assertFalse(outcome.ok(), "a failed delegation is what opens the fallback");
         assertTrue(llm.allSeen().contains("[smtp_send_email] FAILED"), "the model is told the truth");
@@ -365,7 +368,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("smtp_send_email", args), call("smtp_send_email", args),
                 call("smtp_send_email", args), done("gave up"));
 
-        executor(llm, new Usage(), smtp).execute(plan("email it"), task());
+        executor(llm, new Usage(), smtp).execute(plan("email it"), task(), UNCOUNTED);
 
         assertEquals(1, smtp.calls.size());
         assertTrue(llm.allSeen().contains("attempted once per delegation"));
@@ -383,10 +386,10 @@ class DelegationBehaviourTest {
         var ctx = task();
         executor(new Scripted(call("imap_fetch", Map.of()),
                         call("write_file", Map.of("path", "/tmp/n", "content", "card PIN 4711")), done("ok")),
-                new Usage(), imap, write).execute(plan("note the PIN"), ctx);
+                new Usage(), imap, write).execute(plan("note the PIN"), ctx, UNCOUNTED);
 
         var outcome = executor(new Scripted(call("read_file", Map.of("path", "/tmp/n")),
-                done("The note says card PIN 4711")), new Usage(), read).execute(plan("read the note"), ctx);
+                done("The note says card PIN 4711")), new Usage(), read).execute(plan("read the note"), ctx, UNCOUNTED);
 
         assertEquals(Label.PRIVATE, ctx.artifacts().get(2).label());
         assertFalse(outcome.text().contains("4711"), outcome.text());
@@ -401,14 +404,14 @@ class DelegationBehaviourTest {
         var fetch = new FakeTool("web_fetch", false, List.of(), p -> ToolResult.success(page));
         var ctx = task();
         executor(new Scripted(call("imap_fetch", Map.of()), call("web_fetch", Map.of("url", "u")),
-                done("ok")), new Usage(), imap, fetch).execute(plan("mail then menu"), ctx);
+                done("ok")), new Usage(), imap, fetch).execute(plan("mail then menu"), ctx, UNCOUNTED);
         // The cloud forwards the hidden page into a public tool of its own.
         var fetched = ctx.artifacts().get(1);
         var d = ctx.decide(List.of(), List.of(fetched), false, page);
 
         assertFalse(fetched.indexed());
         assertFalse(d.indexed(), "one hop on it is still the same public page");
-        assertNull(ctx.privateIndex().firstHitIn(page));
+        assertNull(ctx.egress("test").index().firstLeakIn(page, (h, w) -> false));
         assertFalse(fetched.describe().contains("title"),
                 "a key name can be what the model typed: " + fetched.describe());
     }
@@ -421,7 +424,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("ping", Map.of()),
                 call("smtp_send_email", Map.of("body", "{{5.reply}}")), done("ok"));
 
-        executor(llm, new Usage(), ping, smtp).execute(plan("ping and send"), task());
+        executor(llm, new Usage(), ping, smtp).execute(plan("ping and send"), task(), UNCOUNTED);
 
         assertTrue(llm.allSeen().contains("Results you can reference: {{1}} = ping (ok; fields: reply)"),
                 llm.allSeen());
@@ -441,7 +444,7 @@ class DelegationBehaviourTest {
                 call("smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1.body_text}}")),
                 done("sent"));
 
-        executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+        executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task(), UNCOUNTED);
 
         assertTrue(llm.allSeen().contains("Tool result {{1}} [daily_menu_fetcher] SUCCESS:\n" + menu),
                 "the model reads the whole of what it is forwarding");
@@ -487,7 +490,7 @@ class DelegationBehaviourTest {
                         new ToolCall("c", "smtp_send_email", send)),
                 turn(new ToolCall("d", "done", Map.of("summary", "menu emailed"))));
 
-        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task(), UNCOUNTED);
 
         assertEquals(1, fetch.calls.size());
         assertEquals(1, smtp.calls.size(), "the same send twice in one turn is still twice");
@@ -511,7 +514,7 @@ class DelegationBehaviourTest {
                         new ToolCall("b", "done", Map.of("summary", "fetched, probably"))),
                 turn(new ToolCall("c", "done", Map.of("summary", "Fetched: soup and goulash."))));
 
-        var outcome = executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task());
+        var outcome = executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task(), UNCOUNTED);
 
         assertEquals(1, fetch.calls.size(), "the call beside it ran");
         assertTrue(llm.toldAfter(0).contains("[call 2 of 2: done] Not taken"), llm.toldAfter(0));
@@ -531,7 +534,7 @@ class DelegationBehaviourTest {
                                 Map.of("to", "petr@example.com", "body", "{{1.body_text}}"))),
                 turn(new ToolCall("d", "done", Map.of("summary", "Menu emailed to Petr."))));
 
-        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task(), UNCOUNTED);
 
         assertEquals(1, smtp.calls.size(), "taking the done would have dropped the send unrun and unsaid");
         assertTrue(llm.toldAfter(1).contains("[call 1 of 2: done] Not taken"), llm.toldAfter(1));
@@ -552,7 +555,7 @@ class DelegationBehaviourTest {
                         1, 1),
                 turn(new ToolCall("d", "done", Map.of("summary", "menu emailed"))));
 
-        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task());
+        var outcome = executor(llm, new Usage(), fetch, smtp).execute(plan("email the menu"), task(), UNCOUNTED);
 
         assertEquals(1, fetch.calls.size());
         assertEquals(List.of(Map.of("to", "petr@example.com", "body", "Polévka: česneková. Hlavní: guláš.")),
@@ -575,7 +578,7 @@ class DelegationBehaviourTest {
         var llm = new NativeTurns(Replies.of(text, 1, 1),
                 turn(new ToolCall("c", "done", Map.of("summary", "fetched both"))));
 
-        executor(llm, new Usage(), fetch).execute(plan("fetch both pages"), task());
+        executor(llm, new Usage(), fetch).execute(plan("fetch both pages"), task(), UNCOUNTED);
 
         assertEquals(List.of(Map.of("url", "https://example.org/a"), Map.of("url", "https://example.org/b")),
                 fetch.calls);
@@ -589,7 +592,7 @@ class DelegationBehaviourTest {
                         + call("daily_menu_fetcher", Map.of()), 1, 1),
                 turn(new ToolCall("c", "done", Map.of("summary", "fetched"))));
 
-        executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task());
+        executor(llm, new Usage(), fetch).execute(plan("fetch the menu"), task(), UNCOUNTED);
 
         assertEquals(1, fetch.calls.size(), llm.toldAfter(0));
         assertTrue(llm.toldAfter(0).startsWith("Tool result {{1}} [daily_menu_fetcher] SUCCESS"),
@@ -620,7 +623,7 @@ class DelegationBehaviourTest {
                         new ToolCall("i", "smtp_send_email", mailY)),
                 turn(new ToolCall("j", "done", Map.of("summary", "sent both pages"))));
 
-        var outcome = executor(llm, new Usage(), search, fetch, smtp).execute(plan("mail both pages"), task());
+        var outcome = executor(llm, new Usage(), search, fetch, smtp).execute(plan("mail both pages"), task(), UNCOUNTED);
 
         String told = llm.toldAfter(1);
         assertTrue(told.contains("[call 1 of 4: web_fetch] Not run: the value of 'url'"), told);
@@ -647,7 +650,7 @@ class DelegationBehaviourTest {
                 call("smtp_send_email", Map.of("to", "jana@example.com", "subject", subject, "body", "Good morning.")),
                 done("sent the digest to both"));
 
-        executor(llm, new Usage(), smtp).execute(plan("email the digest to Petr and Jana"), task());
+        executor(llm, new Usage(), smtp).execute(plan("email the digest to Petr and Jana"), task(), UNCOUNTED);
 
         assertEquals(2, smtp.calls.size(), llm.allSeen());
     }
@@ -666,7 +669,7 @@ class DelegationBehaviourTest {
         var llm = new NativeTurns(turn(new ToolCall("a", "net_scan", Map.of()),
                 new ToolCall("b", "smtp_send_email", Map.of("to", "petr@example.com", "body", "{{1}}"))));
 
-        var outcome = executor(llm, new Usage(), scan, smtp).execute(plan("scan and email"), ctx);
+        var outcome = executor(llm, new Usage(), scan, smtp).execute(plan("scan and email"), ctx, UNCOUNTED);
 
         assertEquals(1, scan.calls.size());
         assertTrue(smtp.calls.isEmpty(), "the send ran after Stop: " + outcome.text());
@@ -690,7 +693,7 @@ class DelegationBehaviourTest {
         });
         var llm = new NativeTurns(turn(new ToolCall("a", "scan_a", Map.of()), new ToolCall("b", "scan_b", Map.of())));
 
-        executor(llm, new Usage(), first, second).execute(plan("scan both subnets"), ctx);
+        executor(llm, new Usage(), first, second).execute(plan("scan both subnets"), ctx, UNCOUNTED);
 
         assertTrue(quietAtSecond[0] >= 0 && quietAtSecond[0] < 150, "the watchdog counted the first "
                 + "call's 300 ms as silence: " + quietAtSecond[0] + " ms");
@@ -719,7 +722,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("net_scan", Map.of()), done("scanned"));
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of(scan)), emitter,
-                new Usage()).execute(plan("scan"), ctx);
+                new Usage()).execute(plan("scan"), ctx, UNCOUNTED);
 
         assertTrue(lines.contains("Delegate: net_scan: Scanning 1/3 (33%)"), lines.toString());
         assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0], quiet[0] + " then " + quiet[1] + " ms");
@@ -738,7 +741,7 @@ class DelegationBehaviourTest {
                 call("smtp_send_email", Map.of("to", "petr@example.com", "body", composed)),
                 done("sent a note"));
 
-        executor(llm, new Usage(), news, smtp).execute(plan("email a note about the news"), task());
+        executor(llm, new Usage(), news, smtp).execute(plan("email a note about the news"), task(), UNCOUNTED);
 
         assertEquals(1, smtp.calls.size());
         assertEquals(composed, smtp.calls.get(0).get("body"));
@@ -755,7 +758,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(script.toArray(String[]::new));
 
         executor(llm, new Usage(), ping).execute(
-                new DelegationPlan("ping seven times", List.of(), List.of(), 10), task());
+                new DelegationPlan("ping seven times", List.of(), List.of(), 10), task(), UNCOUNTED);
 
         List<LlmMessage> last = llm.calls.get(llm.calls.size() - 1);
         assertEquals(2 + 2 * 7, last.size(), "system, opening, and every call with its result");
@@ -770,7 +773,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("daily_news_digest", Map.of()));
 
         var outcome = executor(llm, new Usage(), news).execute(
-                new DelegationPlan("the digest", List.of(), List.of(), 1), task());
+                new DelegationPlan("the digest", List.of(), List.of(), 1), task(), UNCOUNTED);
 
         assertFalse(outcome.ok());
         assertTrue(outcome.text().startsWith("Delegation incomplete: Delegation reached max steps (1)"));
@@ -786,7 +789,7 @@ class DelegationBehaviourTest {
                 turn(new ToolCall("a", "ping", Map.of())),
                 turn(new ToolCall("b", "done", Map.of("summary", "pinged"))));
 
-        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), task());
+        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), task(), UNCOUNTED);
 
         assertEquals(1, ping.calls.size(), "the delegation did not end on it");
         assertTrue(outcome.ok(), outcome.text());
@@ -825,7 +828,7 @@ class DelegationBehaviourTest {
         };
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
 
-        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), ctx);
+        var outcome = executor(llm, new Usage(), ping).execute(plan("ping"), ctx, UNCOUNTED);
 
         assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0],
                 "a long generation is not a stall: " + quiet[0] + " then " + quiet[1] + " ms");
@@ -854,7 +857,7 @@ class DelegationBehaviourTest {
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
         long t0 = System.currentTimeMillis();
         stopper.start();
-        var outcome = executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), ctx);
+        var outcome = executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), ctx, UNCOUNTED);
         stopper.join();
 
         assertTrue(System.currentTimeMillis() - t0 < 5_000, "the silence was waited out after Stop");
@@ -872,7 +875,7 @@ class DelegationBehaviourTest {
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
         try (var ollama = new com.ownclaw.llm.WedgedOllama()) {
             var outcome = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
-                    () -> executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), task()),
+                    () -> executor(ollama.provider(), new Usage(), ping).execute(plan("ping"), task(), UNCOUNTED),
                     "the probe waited on the wedged server as a chat waits for its first line");
             assertFalse(outcome.ok());
             assertTrue(outcome.text().contains("Local LLM (Ollama) is not available"), outcome.text());
@@ -893,7 +896,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(done("nothing to do"));
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
-                new Usage()).execute(plan(goal), task());
+                new Usage()).execute(plan(goal), task(), UNCOUNTED);
 
         assertTrue(lines.contains("Delegating to local LLM: " + goal), lines.toString());
     }
@@ -936,7 +939,7 @@ class DelegationBehaviourTest {
         var read = new FakeTool("read_statement", false, List.of(), p -> ToolResult.success(STATEMENT));
         var llm = new Scripted(call("read_statement", Map.of()), done(SUMMARY));
 
-        var outcome = executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx);
+        var outcome = executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx, UNCOUNTED);
 
         assertEquals(List.of(List.of("f1")), read.handed, "the skill is handed the file");
         assertTrue(llm.allSeen().contains(STATEMENT),
@@ -949,7 +952,7 @@ class DelegationBehaviourTest {
         assertEquals("local_answer", answer.tool());
         assertEquals(Label.PRIVATE, answer.label());
         assertTrue(answer.indexed());
-        assertNotNull(ctx.privateIndex().firstHitIn(SUMMARY),
+        assertNotNull(ctx.egress("test").index().firstLeakIn(SUMMARY, (h, w) -> false),
                 "the canary looks for the answer in every later request of the task");
         assertTrue(answer.output().startsWith(SUMMARY), answer.output());
         assertTrue(outcome.produced().contains(answer), "the step and the task page show it");
@@ -976,7 +979,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("read_statement", Map.of("page", 1)),
                 call("read_statement", Map.of("page", 2)), done(SUMMARY));
 
-        executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx);
+        executor(llm, new Usage(), read).execute(plan("summarise the file"), ctx, UNCOUNTED);
 
         // A file task's reader once had 16,000 characters for the whole delegation, and the
         // answer then covered the first pages only.
@@ -991,7 +994,7 @@ class DelegationBehaviourTest {
         var plain = new AgentContext("u1", "t2", "what came in the mail?");
         var llm2 = new Scripted(call("imap_fetch", Map.of()), done(SUMMARY));
 
-        executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain);
+        executor(llm2, new Usage(), imap).execute(plan("read the mail"), plain, UNCOUNTED);
 
         assertTrue(llm2.allSeen().contains(first), "whole, where it was 400 characters and 150 more");
     }
@@ -1009,7 +1012,7 @@ class DelegationBehaviourTest {
         var ctx = task();
         var llm = new Scripted(call("imap_unread_summarizer", Map.of()), done(digest));
 
-        var outcome = executor(llm, new Usage(), imap).execute(plan("summarise my new mail"), ctx);
+        var outcome = executor(llm, new Usage(), imap).execute(plan("summarise my new mail"), ctx, UNCOUNTED);
 
         Artifact answer = ctx.artifacts().get(1);
         assertEquals("local_answer", answer.tool());
@@ -1041,13 +1044,14 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("web_fetch", Map.of("url", url)), call("imap_fetch", Map.of()),
                 done("The page " + url + " was not there; the mail says the budget is attached."));
 
-        var outcome = executor(llm, new Usage(), fetch, imap).execute(plan("find the budget"), ctx);
+        var outcome = executor(llm, new Usage(), fetch, imap).execute(plan("find the budget"), ctx, UNCOUNTED);
 
         Artifact answer = ctx.artifacts().get(2);
         assertEquals("local_answer", answer.tool());
         assertFalse(answer.indexed(), "like every result the local model makes after a private read");
         assertTrue(outcome.text().contains(url), "the failed call's arguments, as the report prints them");
-        assertNull(ctx.privateIndex().firstLeakIn(outcome.text(), ctx::isAllowedLeak),
+        var door = ctx.egress("think");
+        assertNull(door.index().firstLeakIn(outcome.text(), door.allowed()),
                 "the door would refuse the report: " + outcome.text());
     }
 
@@ -1057,7 +1061,7 @@ class DelegationBehaviourTest {
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
         var llm = new Scripted(call("ping", Map.of()), call("ping", Map.of("n", 2)), done("ok"));
 
-        executor(llm, new Usage(), ping).execute(plan("ping twice"), task());
+        executor(llm, new Usage(), ping).execute(plan("ping twice"), task(), UNCOUNTED);
 
         String seen = llm.allSeen();
         assertTrue(seen.contains("Tool result {{1}} [ping]"), "a short result used to arrive unnamed");

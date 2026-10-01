@@ -89,12 +89,27 @@ class EmptyReplyTest {
             AgentAction a = think(new Script(tools, empty())).action();
 
             assertEquals(ThinkingEngine.THINKING, a.tool(), "nothing is run for it");
-            assertTrue(a.reasoning().startsWith("Your previous reply was empty (stop_reason: end_turn)"),
+            assertTrue(a.reasoning().startsWith("Your previous reply was empty (stop reason: end_turn)"),
                     a.reasoning());
             assertFalse(a.reasoning().contains("PARSE ERROR") || a.reasoning().contains("format"),
                     "nothing came back, so there is no format it broke: " + a.reasoning());
             assertEquals(Map.of(), a.params(), "and no sentence invented to stand for the reply");
         }
+    }
+
+    @Test
+    @DisplayName("a delegation's local model is told of an empty reply in the same words as the cloud model")
+    void bothLoopsSayItAlike() {
+        String told = think(new Script(true, empty())).action().reasoning();
+        String sentence = told.substring(0, told.indexOf("nothing was run.") + "nothing was run.".length());
+
+        var ping = new DelegationBehaviourTest.FakeTool("ping", false, List.of(), p -> com.ownclaw.agent.tools.ToolResult.success("pong"));
+        var local = new DelegationBehaviourTest.NativeTurns(empty(),
+                DelegationBehaviourTest.turn(new ToolCall("a", "done", Map.of("summary", "nothing to do"))));
+        DelegationBehaviourTest.executor(local, new DelegationBehaviourTest.Usage(), ping)
+                .execute(DelegationBehaviourTest.plan("ping"), DelegationBehaviourTest.task(), DelegationBehaviourTest.UNCOUNTED);
+
+        assertTrue(local.toldAfter(0).startsWith(sentence), sentence + " / " + local.toldAfter(0));
     }
 
     @Test
@@ -202,7 +217,7 @@ class EmptyReplyTest {
         assertTrue(second.stream().noneMatch(m -> m.role() == LlmMessage.Role.ASSISTANT),
                 "there is no reply to replay: " + second);
         assertTrue(second.get(second.size() - 1).content()
-                .contains("Your previous reply was empty (stop_reason: end_turn)"));
+                .contains("Your previous reply was empty (stop reason: end_turn)"));
     }
 
     @Test

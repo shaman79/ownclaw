@@ -51,7 +51,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * input is put into an assistant part -- the model's words as it wrote them, and at step 1 the
  * skill_create the loop builds from CapabilityResolver's constants -- which is what these tests
  * pin, through the real renderer, the real gateway, and once through the real loop. Every other
- * part is still scanned.
+ * message part is still scanned; the tools' descriptions and schemas, the registry's text, never
+ * were (CloudGatewayTest).
  */
 class AssistantPartsTest {
 
@@ -172,17 +173,17 @@ class AssistantPartsTest {
         // The premise, so this cannot pass by accident: the replay really does hold a run of the
         // private preview, and nothing but the assistant-part rule lets it through.
         String replay = firstAssistant(messages).content();
-        PrivateIndex.Hit hit = ctx.privateIndex().firstHitIn(replay);
+        PrivateIndex.Hit hit = ctx.egress("test").index().firstLeakIn(replay, (h, w) -> false);
         assertNotNull(hit, "the replayed spec carries a run of the private preview");
         assertEquals(2, hit.handle(), "the preview, which holds the headings escaped as JSON");
         String window = PrivateIndex.normalise(replay).substring(hit.offset(), hit.offset() + hit.length());
-        assertFalse(ctx.isAllowedLeak(hit.handle(), window),
+        assertFalse(ctx.egress("test").allowed().test(hit.handle(), window),
                 "the allowance compares the argument as typed, so it cannot excuse the escaped replay");
 
         var rows = new ArrayList<EgressLedger.Row>();
         var cloud = new Scripted(List.of(call("respond", Map.of("message", "done"))));
         assertDoesNotThrow(() -> gateway(cloud, rows).chat(messages,
-                LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(EgressLedger.Decision.SENT, rows.get(0).decision());
         // Mutation: scan assistant parts again -> EgressRefused on {{2}} in part 2 (assistant).
     }
@@ -197,7 +198,7 @@ class AssistantPartsTest {
         var rows = new ArrayList<EgressLedger.Row>();
         var cloud = new Scripted(List.of(call("respond", Map.of("message", "done"))));
         var refused = assertThrows(EgressRefused.class, () -> gateway(cloud, rows).chat(asUser,
-                LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(2, refused.handle());
         assertEquals(LlmMessage.Role.USER, asUser.get(refused.partIndex()).role());
         assertTrue(cloud.requests.isEmpty(), "nothing was sent");
@@ -205,7 +206,7 @@ class AssistantPartsTest {
     }
 
     @Test
-    @DisplayName("the same bytes in a system part are refused too: assistant parts are the only ones not scanned")
+    @DisplayName("the same bytes in a system part are refused too: assistant parts are the only messages not scanned")
     void theSameBytesInASystemPartAreRefused() {
         var ctx = theRun();
         String replay = firstAssistant(render(ctx)).content();
@@ -214,7 +215,7 @@ class AssistantPartsTest {
         var rows = new ArrayList<EgressLedger.Row>();
         var cloud = new Scripted(List.of(call("respond", Map.of("message", "done"))));
         var refused = assertThrows(EgressRefused.class, () -> gateway(cloud, rows).chat(asSystem,
-                LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(2, refused.handle());
         assertEquals(LlmMessage.Role.SYSTEM, asSystem.get(refused.partIndex()).role());
         assertTrue(rows.get(0).refusalRef().contains("(system)"), rows.get(0).refusalRef());
@@ -238,7 +239,7 @@ class AssistantPartsTest {
         var rows = new ArrayList<EgressLedger.Row>();
         var cloud = new Scripted(List.of(call("respond", Map.of("message", "done"))));
         var refused = assertThrows(EgressRefused.class, () -> gateway(cloud, rows).chat(messages,
-                LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(LlmMessage.Role.ASSISTANT, messages.get(refused.partIndex()).role());
         assertTrue(cloud.requests.isEmpty(), "nothing was sent");
         assertEquals(EgressLedger.Decision.REFUSED, rows.get(0).decision());
@@ -259,7 +260,7 @@ class AssistantPartsTest {
 
         var rows = new ArrayList<EgressLedger.Row>();
         var cloud = new Scripted(List.of(call("respond", Map.of("message", "done"))));
-        gateway(cloud, rows).chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think")));
+        gateway(cloud, rows).chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think")));
 
         var sent = cloud.requests.get(0);
         assertTrue(sent.stream().noneMatch(m -> m.content().contains(secret)), "the value never left");

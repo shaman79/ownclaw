@@ -380,7 +380,7 @@ class TaskEndingTest {
         var gateway = new CloudGateway(cloud, cloud, config, null, null);
         var refused = assertThrows(EgressRefused.class, () -> gateway.chat(
                 List.of(LlmMessage.system("S"), LlmMessage.user("here it is: " + AUDIT.substring(0, 120))),
-                LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(2, refused.handle());
         assertEquals("openwrt_audit", refused.tool(), "the tool, not the literal \"artifact\"");
         assertEquals("user", refused.partKind());

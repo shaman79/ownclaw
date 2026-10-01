@@ -44,7 +44,7 @@ class PrivateIndexTest {
         String disguised = "Here is what I found:\n\n  " + slice.toUpperCase()
                 .replace(" ", "\n\t ") + "\n\nRegards";
 
-        var hit = idx.firstHitIn(disguised);
+        var hit = idx.firstLeakIn(disguised, (h, w) -> false);
         assertNotNull(hit, "casing and wrapping are the two things a renderer changes");
         assertEquals(3, hit.handle(), "and it names which artifact leaked");
     }
@@ -56,7 +56,7 @@ class PrivateIndexTest {
         var idx = new PrivateIndex();
         idx.addPrivate(1, secret);
 
-        assertNull(idx.firstHitIn("quote: " + secret.substring(1_000, 1_020) + " end"),
+        assertNull(idx.firstLeakIn("quote: " + secret.substring(1_000, 1_020) + " end", (h, w) -> false),
                 "below the window a coincidence is more likely than a leak; a balance, a name "
                         + "or a date inside a long artifact is deliberately not protected here");
     }
@@ -68,11 +68,11 @@ class PrivateIndexTest {
         idx.addPrivate(2, "Sent, message id 42");   // 19 chars: the smtp confirmation
         idx.addPrivate(4, "ok=1");                    // 4 chars: nothing worth protecting
 
-        var hit = idx.firstHitIn("The tool returned: sent, MESSAGE id 42.");
+        var hit = idx.firstLeakIn("The tool returned: sent, MESSAGE id 42.", (h, w) -> false);
         assertNotNull(hit, "a 32-char window never fires on a 19-char confirmation, so short "
                 + "registrations are matched as whole strings");
         assertEquals(2, hit.handle());
-        assertNull(idx.firstHitIn("status ok=1 today"), "four characters is not a secret");
+        assertNull(idx.firstLeakIn("status ok=1 today", (h, w) -> false), "four characters is not a secret");
     }
 
     @Test
@@ -81,7 +81,7 @@ class PrivateIndexTest {
         var idx = new PrivateIndex();
         idx.addPrivate(5, "─".repeat(40) + "\n" + "=".repeat(40));
 
-        assertNull(idx.firstHitIn("═══════════════════════════════════════\n" + "─".repeat(40)),
+        assertNull(idx.firstLeakIn("═══════════════════════════════════════\n" + "─".repeat(40), (h, w) -> false),
                 "a rule line in a menu is not the menu");
     }
 
@@ -108,7 +108,7 @@ class PrivateIndexTest {
         idx.addPrivate(2, "Sent, message id 42");
 
         String part = "sent, message id 42 — then: " + a.substring(0, 60);
-        var hit = idx.firstHitIn(part);
+        var hit = idx.firstLeakIn(part, (h, w) -> false);
         assertNotNull(hit);
         assertEquals(2, hit.handle());
         assertEquals(0, hit.offset());
@@ -122,7 +122,7 @@ class PrivateIndexTest {
         idx.addPrivate(8, big);
 
         int at = 1_234_567;
-        assertNotNull(idx.firstHitIn("…" + big.substring(at, at + 47) + "…"),
+        assertNotNull(idx.firstLeakIn("…" + big.substring(at, at + 47) + "…", (h, w) -> false),
                 "at stride 16 a run of 47 characters always covers one indexed window");
     }
 
@@ -137,7 +137,7 @@ class PrivateIndexTest {
         idx.addPrivate(1, "ORDER-4471/BQ");
         idx.addPrivate(2, "ORDER-4471/BQ petr@example.com");
 
-        var hit = idx.firstHitIn("see ORDER-4471/BQ petr@example.com now");
+        var hit = idx.firstLeakIn("see ORDER-4471/BQ petr@example.com now", (h, w) -> false);
         assertNotNull(hit);
         assertEquals(2, hit.handle(),
                 "the earliest offset is the same for both; length breaks the tie");
@@ -156,7 +156,7 @@ class PrivateIndexTest {
             var idx = new PrivateIndex();
             idx.addPrivate(6, data);
             assertFalse(idx.isEmpty(), "not indexed at all: " + data);
-            assertNotNull(idx.firstHitIn("the statement shows " + data + " twice"),
+            assertNotNull(idx.firstLeakIn("the statement shows " + data + " twice", (h, w) -> false),
                     "quoted verbatim and not caught: " + data);
         }
 

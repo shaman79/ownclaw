@@ -51,7 +51,7 @@ class ReplyCompletenessTest {
         var config = new OwnClawConfig();
         config.getMentor().setProvider("anthropic");
         var gateway = new CloudGateway(provider, provider, config, rows::add, null);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(
                 new EgressContext("u1", "t1", "think", new PrivateIndex(), Map.of(), (h, w) -> false, null));
         try {
             outcome.add(gateway.chat(List.of(LlmMessage.system("S"), LlmMessage.user("hello")), cfg));

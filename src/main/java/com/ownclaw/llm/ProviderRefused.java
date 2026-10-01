@@ -15,10 +15,12 @@ package com.ownclaw.llm;
  */
 public final class ProviderRefused extends LlmException {
 
-    /** @param reply the refused reply: its stop reason is "refusal" or "content_filter" */
+    /**
+     * @param reply the refused reply: its stop reason is "refusal" or "content_filter". Said as
+     *              {@link LlmResponse#stopDescription} says it, as the ledger and the task page do
+     */
     public ProviderRefused(String provider, LlmResponse reply) {
-        super(provider, "the model declined this request (stop reason: " + reply.stopReason()
-                + (reply.stopDetail() == null ? "" : ", category: " + reply.stopDetail()) + ")",
+        super(provider, "the model declined this request (stop reason: " + reply.stopDescription() + ")",
                 0, null, reply);
     }
 

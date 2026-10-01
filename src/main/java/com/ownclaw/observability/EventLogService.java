@@ -91,16 +91,6 @@ public class EventLogService {
             """, userId, limit, offset);
     }
 
-    /** Token usage summary for a user (today). */
-    public Map<String, Object> tokenUsageToday(String userId) {
-        return jdbc.queryForMap("""
-            SELECT COALESCE(SUM(tokens_used), 0) AS total_tokens,
-                   COUNT(*) AS total_events
-            FROM events
-            WHERE user_id = ? AND timestamp >= date('now')
-            """, userId);
-    }
-
     /**
      * Detailed token usage for today, broken down by cloud vs local from task_completed events.
      */
@@ -113,14 +103,6 @@ public class EventLogService {
             FROM events
             WHERE user_id = ? AND event_type = 'task_completed' AND timestamp >= date('now')
             """, userId);
-    }
-
-    /**
-     * Get cloud/local token breakdown from the most recent task_completed event for a user.
-     * Returns a two-element array [cloudTokens, localTokens], or [0, 0] if not found.
-     */
-    public long[] lastCompletedTaskTokens(String userId) {
-        return completedTaskTokens(userId, null);
     }
 
     /**

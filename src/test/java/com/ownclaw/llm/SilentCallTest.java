@@ -93,7 +93,7 @@ class SilentCallTest {
     private static void endsWithTheHooksStop(int calls, Function<LlmRequestConfig, LlmResponse> call) {
         var hook = new StopsTheCall();
         long t0 = System.currentTimeMillis();
-        assertThrows(Stopped.class, () -> call.apply(LlmRequestConfig.DEFAULT.withProgress(hook)),
+        assertThrows(Stopped.class, () -> call.apply(new LlmRequestConfig(null, null, false).withProgress(hook)),
                 "the call ends with what the hook throws, not a connection failure");
         assertTrue(System.currentTimeMillis() - t0 < 5_000, "ended when cancelled, not at a timeout");
         var expected = new ArrayList<String>();
@@ -145,7 +145,7 @@ class SilentCallTest {
             @Override public void onProgress() { }
         };
         var e = assertThrows(LlmException.class,
-                () -> OpenAiStreamingTest.provider(http).chat(AnthropicStreamingTest.ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+                () -> OpenAiStreamingTest.provider(http).chat(AnthropicStreamingTest.ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
         assertTrue(e.getMessage().startsWith("[openai] Connection failed"), e.getMessage());
     }
 
@@ -163,7 +163,7 @@ class SilentCallTest {
         long t0 = System.currentTimeMillis();
         hook.stopIn(1_000);
         assertTimeoutPreemptively(Duration.ofSeconds(20),
-                () -> assertThrows(Stopped.class, () -> call.apply(LlmRequestConfig.DEFAULT.withProgress(hook))),
+                () -> assertThrows(Stopped.class, () -> call.apply(new LlmRequestConfig(null, null, false).withProgress(hook))),
                 "a Stop during the wait was heard only when the wait was over");
         assertTrue(System.currentTimeMillis() - t0 < 5_000, "ended at the Stop, not at the end of the wait");
         assertEquals(1, http.to(path).size(), "and nothing was sent again");
@@ -199,7 +199,7 @@ class SilentCallTest {
         hook.stopIn(500);
         var e = assertTimeoutPreemptively(Duration.ofSeconds(20),
                 () -> assertThrows(LlmException.class, () -> AnthropicStreamingTest.provider(http)
-                        .chat(AnthropicStreamingTest.ASK, LlmRequestConfig.DEFAULT.withProgress(hook))),
+                        .chat(AnthropicStreamingTest.ASK, new LlmRequestConfig(null, null, false).withProgress(hook))),
                 "the wait ran to its end");
         assertTrue(e.isOverloaded(), e.getMessage());
         assertEquals(1, http.to(AnthropicStreamingTest.MESSAGES).size(), "no retry after the wait was ended");

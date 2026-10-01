@@ -21,7 +21,7 @@ import java.util.function.IntFunction;
  * @param allowed      whether a stretch of hits (handle, normalised text: one window, or several
  *                     running on) is material the cloud was already given -- the task's text, a
  *                     PUBLIC artifact recorded before the private one, the rest that
- *                     {@code AgentContext.isAllowedLeak} lists -- and may go
+ *                     AgentContext's {@code Excuses} lists -- and may go
  * @param toolOf       the tool that produced a result, by handle -- null for a handle it does
  *                     not know -- so a refusal names the result it found
  */

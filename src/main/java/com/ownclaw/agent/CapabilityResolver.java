@@ -499,37 +499,6 @@ public class CapabilityResolver {
             this(category, suggestedName, description, systemPackages, pipPackages,
                     parametersJson, timeout, List.of());
         }
-        /**
-         * Render this hint as a directive for the LLM system prompt.
-         * This is designed to be a clear, unambiguous instruction that even
-         * a small model will follow correctly.
-         */
-        public String toPromptDirective() {
-            var sb = new StringBuilder();
-            sb.append("## ACTION REQUIRED\n");
-            sb.append("Missing ").append(category.replace('_', ' ')).append(" capability. Use skill_create FIRST:\n\n");
-            sb.append("{tool: skill_create, params: {");
-            sb.append("name: \"").append(suggestedName).append("\", ");
-            sb.append("description: \"").append(description).append("\", ");
-            sb.append("parameters: '").append(parametersJson).append("'");
-            if (!systemPackages.isEmpty()) {
-                sb.append(", system_packages: \"").append(String.join(" ", systemPackages)).append("\"");
-            }
-            if (!pipPackages.isEmpty()) {
-                sb.append(", requirements: \"").append(String.join("\n", pipPackages)).append("\"");
-            }
-            if (!credentials.isEmpty()) {
-                sb.append(", credentials: \"").append(String.join(",", credentials)).append("\"");
-            }
-            sb.append(", timeout: ").append(timeout);
-            sb.append("}}\n\n");
-            sb.append("Do NOT refuse. ");
-            if (!systemPackages.isEmpty()) {
-                sb.append("system_packages auto-installed in Docker. ");
-            }
-            sb.append("Execute now.\n");
-            return sb.toString();
-        }
     }
 
     /**

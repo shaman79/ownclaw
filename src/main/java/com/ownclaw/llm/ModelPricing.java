@@ -22,8 +22,9 @@ import java.util.Map;
  * </ul>
  * Rates are USD per million tokens. They are published prices that change, so this is a
  * best-effort estimate rather than a bill: treat the number as a strong relative signal for
- * comparing routes, not as accounting. An unknown model returns 0 and logs nothing — a silent
- * zero is what produced the current situation, so callers should check {@link #isKnown}.
+ * comparing routes, not as accounting. An unknown model costs 0 and logs nothing: a local model
+ * is not in the table, and its tokens are free -- and a cloud model missing from it would be
+ * priced at 0 without a word.
  */
 public final class ModelPricing {
 
@@ -62,11 +63,6 @@ public final class ModelPricing {
     }
 
     private ModelPricing() {}
-
-    /** Whether we have a rate for this model, as opposed to silently charging nothing. */
-    public static boolean isKnown(String model) {
-        return lookup(model) != null;
-    }
 
     private static Rates lookup(String model) {
         if (model == null || model.isBlank()) return null;

@@ -122,4 +122,21 @@ class CancelEndsTheWizardTest {
         // Mutations: /cancel without cancelPending -> the wizard takes the question as the API
         // key; the wait cancelled as a CancellationException -> the wizard ends without a word.
     }
+
+    @Test
+    @DisplayName("a message typed while the wizard waits is its answer, whatever else the frame names; the next is a message")
+    void aTypedMessageIsTheAnswer(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        assertTrue(within(() -> interactions.hasPending("owner")), "the wizard asks: " + sent);
+
+        chat.handleMessage(socket, new TextMessage(new ObjectMapper().writeValueAsString(
+                Map.of("message", "sk-test-key", "taskId", "something else"))));
+
+        assertTrue(within(() -> wizard.answers.equals(List.of("sk-test-key"))), "the wizard's answer: " + wizard.answers);
+        assertTrue(within(() -> !interactions.hasPending("owner")), "and it asks nothing more");
+        assertEquals(List.of(), queue.messages, "not run as a message");
+
+        type("what is the weather tomorrow?");
+        assertEquals(List.of("what is the weather tomorrow?"), queue.messages, "the next one is a message");
+    }
 }

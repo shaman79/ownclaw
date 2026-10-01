@@ -31,8 +31,10 @@ public class SkillInteractionHandler {
     private static final int INPUT_TIMEOUT_SEC = 600;
 
     /**
-     * Pending input requests, keyed by "userId:taskId".
-     * Each entry is a CompletableFuture that will complete when the user responds.
+     * The question each user's next message answers, by user. One waits at a time -- the wizard
+     * asks none while another waits -- so a user's message is its answer. Keyed by what was
+     * asking too, it was found by the user all the same: neither the page nor Telegram knows
+     * what is asking.
      */
     private final Map<String, CompletableFuture<String>> pendingInputs = new ConcurrentHashMap<>();
 
@@ -41,27 +43,24 @@ public class SkillInteractionHandler {
      * shown its own question.
      *
      * @param userId ID of the user who should respond
-     * @param taskId what is asking, so the reply is routed to it
      * @return the user's response text
      * @throws TimeoutException if the user doesn't respond within the timeout
      * @throws InterruptedException if the waiting thread is interrupted
      * @throws ExecutionException if the wait was cancelled ({@link #cancelPending})
      */
-    public String requestInputSilent(String userId, String taskId)
+    public String requestInputSilent(String userId)
             throws TimeoutException, InterruptedException, ExecutionException {
-        String key = userId + ":" + taskId;
-
         CompletableFuture<String> future = new CompletableFuture<>();
-        pendingInputs.put(key, future);
-        log.info("Awaiting user input: user={} taskId={}", userId, taskId);
+        pendingInputs.put(userId, future);
+        log.info("Awaiting user input: user={}", userId);
 
         try {
             return future.get(INPUT_TIMEOUT_SEC, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            log.warn("User input timed out after {}s for key={}", INPUT_TIMEOUT_SEC, key);
+            log.warn("User input timed out after {}s for user={}", INPUT_TIMEOUT_SEC, userId);
             throw e;
         } finally {
-            pendingInputs.remove(key);
+            pendingInputs.remove(userId, future);
         }
     }
 
@@ -70,64 +69,36 @@ public class SkillInteractionHandler {
      * Called from the WebSocket and Telegram handlers when a message answers a waiting question.
      *
      * @param userId the responding user's ID
-     * @param taskId the task ID (must match the pending request)
      * @param input  the user's input text
      * @return true if a pending request was found and completed, false otherwise
      */
-    public boolean provideInput(String userId, String taskId, String input) {
-        String key = userId + ":" + taskId;
-        CompletableFuture<String> future = pendingInputs.get(key);
-
-        if (future != null) {
-            future.complete(input);
-            log.info("User input received for key={}", key);
-            return true;
+    public boolean provideInput(String userId, String input) {
+        CompletableFuture<String> future = pendingInputs.get(userId);
+        if (future == null) {
+            log.warn("No pending input request for user={}", userId);
+            return false;
         }
-
-        // Try userId-only key (when taskId is not known by the client)
-        String fallbackKey = findPendingKeyForUser(userId);
-        if (fallbackKey != null) {
-            CompletableFuture<String> fallbackFuture = pendingInputs.get(fallbackKey);
-            if (fallbackFuture != null) {
-                fallbackFuture.complete(input);
-                log.info("User input received via fallback for key={}", fallbackKey);
-                return true;
-            }
-        }
-
-        log.warn("No pending input request for key={}", key);
-        return false;
+        future.complete(input);
+        log.info("User input received for user={}", userId);
+        return true;
     }
 
     /**
      * Check if there's a pending input request for a user.
      */
     public boolean hasPending(String userId) {
-        return pendingInputs.keySet().stream().anyMatch(k -> k.startsWith(userId + ":"));
+        return pendingInputs.containsKey(userId);
     }
 
     /**
-     * Cancel all pending input requests for a user (e.g., on disconnect).
+     * Cancel a user's pending input request (e.g., on disconnect).
      * <p>
      * Ended as a failure, not as a cancellation: {@code get()} throws a CancellationException as
      * it is, past the waiting wizard's catch of ExecutionException, and the wizard ended without
      * a word.
      */
     public void cancelPending(String userId) {
-        pendingInputs.entrySet().removeIf(entry -> {
-            if (entry.getKey().startsWith(userId + ":")) {
-                entry.getValue().completeExceptionally(
-                        new IllegalStateException("the question was cancelled"));
-                return true;
-            }
-            return false;
-        });
-    }
-
-    private String findPendingKeyForUser(String userId) {
-        return pendingInputs.keySet().stream()
-                .filter(k -> k.startsWith(userId + ":"))
-                .findFirst()
-                .orElse(null);
+        CompletableFuture<String> future = pendingInputs.remove(userId);
+        if (future != null) future.completeExceptionally(new IllegalStateException("the question was cancelled"));
     }
 }

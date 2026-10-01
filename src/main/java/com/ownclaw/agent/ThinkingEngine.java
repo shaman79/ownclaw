@@ -142,11 +142,7 @@ public class ThinkingEngine {
             // not reported as a parse failure -- that told a model holding a tools array it had
             // broken the text envelope -- and no sentence is invented to stand for the reply.
             if (text.isBlank()) {
-                String stop = response.stopDescription();
-                return new ThinkResult(unusable("", "Your previous reply was empty"
-                                + (stop == null ? "" : " (stop_reason: " + stop + ")")
-                                + ": no text and no tool call, so nothing was run.",
-                                "Continue from where the task stands."),
+                return new ThinkResult(unusable("", emptyReply(response), "Continue from where the task stands."),
                         messages, text, response);
             }
 
@@ -185,6 +181,18 @@ public class ThinkingEngine {
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),
                     null, e.getMessage());
         }
+    }
+
+    /**
+     * What a model is told of a reply with no text and no tool call: nothing was run, and how the
+     * reply ended -- a thinking model can spend its turn reasoning and then stop. One sentence for
+     * both loops that ask a model: a step of the task here, a turn of a delegation in
+     * {@link LocalExecutor}.
+     */
+    static String emptyReply(LlmResponse reply) {
+        String stop = reply.stopDescription();
+        return "Your previous reply was empty" + (stop == null ? "" : " (stop reason: " + stop + ")")
+                + ": no text and no tool call, so nothing was run.";
     }
 
     /**
@@ -546,28 +554,16 @@ public class ThinkingEngine {
         // a second time, and the worse copy: the array is inside the Anthropic cache prefix and
         // is read at a tenth of the price, while this hangs off the newest message and is paid
         // in full on every single step. Sending both was costing the manifest twice per step.
-        if (mode.localFirst()) {
-            // ...and only when the array is NOT being sent. With native tools, delegate's own
-            // description already carries this catalogue (see the specs builder above), and the
-            // paragraph the comment above makes about cost is the smaller half of it: rendering
-            // the same text into a tool part AND into the newest user message forced the canary
-            // to choose between refusing a copy the cloud is receiving anyway and excusing text
-            // across parts. Excusing across parts turned out to be a leak — a short private
-            // artifact quoted anywhere went out as soon as it appeared in some skill's example.
-            // One copy, and the question does not arise.
-            if (!mode.nativeTools()) {
-                // Knowledge without capability. The cloud still needs to know a skill exists --
-                // otherwise it reaches for skill_create to rebuild one it already owns -- but it
-                // is not told it can call it, which is what made the prompt argue with the array.
-                sb.append("## Skills on this machine\n");
-                String catalogue = skillCatalogue();
-                sb.append(catalogue.isBlank() ? "(none yet — use skill_create)\n" : catalogue + "\n");
-                sb.append("You cannot call these yourself on this task. 'delegate' reaches all of "
-                        + "them: state the goal in full and name the ones it needs in 'tools'.\n");
-            }
-        } else if (!mode.nativeTools()) {
+        // On local-first work, which only native tools can be (stepMode), the array withholds
+        // the skills, and delegate's own description carries their catalogue (see toolsFor):
+        // not here as well. Rendering the same text into a tool part AND into the newest user
+        // message forced the canary to choose between refusing a copy the cloud is receiving
+        // anyway and excusing text across parts. Excusing across parts turned out to be a leak —
+        // a short private artifact quoted anywhere went out as soon as it appeared in some
+        // skill's example. One copy, and the question does not arise.
+        if (!mode.nativeTools()) {
             sb.append(toolsSection(context));
-        } else if (toolRegistry.all().isEmpty()) {
+        } else if (!mode.localFirst() && toolRegistry.all().isEmpty()) {
             sb.append("No tools yet — use skill_create.\n");
         }
 

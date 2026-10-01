@@ -25,7 +25,7 @@ class EventLogPrivacyTest {
         var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(EventLogService.class);
         logger.addAppender(appender);
         try {
-            String summary = "Task #3 failed: MAX_STEPS after 30 steps: the balance is 48,213.07 CZK. "
+            String summary = "Task #3 failed: **Stopped:** it used all 20 steps; the balance is 48,213.07 CZK. "
                     + "and more ".repeat(100);
             var events = new EventLogService(jdbc);
             // task_completed, logged at info, carries the owner's own message.

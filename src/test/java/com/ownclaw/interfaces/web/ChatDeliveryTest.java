@@ -85,6 +85,10 @@ class ChatDeliveryTest {
     private Function<JdbcTemplate, ConversationService> store = db -> new ConversationService(db);
     /** Frames the socket refuses, as Tomcat's does: with an IllegalStateException. */
     private Predicate<JsonNode> refused = frame -> false;
+    /** Frames whose send throws an Error, which no catch of an Exception stops. */
+    private Predicate<JsonNode> crashes = frame -> false;
+    /** The task queue the chat is given: the one above, unless a test hands it the real one. */
+    private Function<JdbcTemplate, TaskQueue> tasks = db -> queue;
     /** Called with each frame as the socket is sending it, before it is taken. */
     private Consumer<JsonNode> whileSending = frame -> {};
     /** Set while the socket is sending a frame: a second send then is refused, as Tomcat refuses it. */
@@ -93,6 +97,7 @@ class ChatDeliveryTest {
     private void connect(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         conversations = store.apply(jdbc);
+        TaskQueue taskQueue = tasks.apply(jdbc);
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override public Optional<String> validateToken(String token) { return Optional.of(USER); }
         };
@@ -100,9 +105,9 @@ class ChatDeliveryTest {
             @Override public boolean isSetupNeeded() { return false; }
         };
         var interactions = new SkillInteractionHandler();
-        var commands = new CommandHandler(null, conversations, null, null, null, null, queue, null, null, null,
+        var commands = new CommandHandler(null, conversations, null, null, null, null, taskQueue, null, null, null,
                 null, null, new ResultDelivery(conversations, emitter), interactions);
-        chat = new ChatWebSocketHandler(queue, null, conversations, emitter, commands, wizard, auth,
+        chat = new ChatWebSocketHandler(taskQueue, null, conversations, emitter, commands, wizard, auth,
                 interactions, null, null, mapper);
         Map<String, Object> attributes = new HashMap<>();
         socket = (WebSocketSession) Proxy.newProxyInstance(getClass().getClassLoader(),
@@ -121,6 +126,7 @@ class ChatDeliveryTest {
                                 throw new IllegalStateException("The remote endpoint was in state "
                                         + "[TEXT_FULL_WRITING] which is an invalid state for called method");
                             }
+                            if (crashes.test(frame)) throw new StackOverflowError();
                             whileSending.accept(frame);
                             sent.add(frame);
                         } finally {
@@ -141,6 +147,12 @@ class ChatDeliveryTest {
 
     private List<JsonNode> frames(String type) {
         return sent.stream().filter(f -> type.equals(f.path("type").asText())).toList();
+    }
+
+    /** The chat's rows, as "role: content", in order. */
+    private List<String> rows(String session) {
+        return jdbc.queryForList("SELECT role || ': ' || content FROM conversations WHERE session_id = ? ORDER BY rowid",
+                String.class, session);
     }
 
     @Test
@@ -169,18 +181,52 @@ class ChatDeliveryTest {
     @Test
     @DisplayName("a task that breaks is answered in its chat, and the answer is kept for the reload")
     void aBrokenTaskIsAnsweredAndKept(@TempDir Path tmp) throws Exception {
+        // The real queue: what breaks in a task comes back as its ERROR result, never as a
+        // future completed exceptionally.
+        var loop = new com.ownclaw.agent.AgentLoop(null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null) {
+            @Override
+            public AgentResult executeFull(String userId, String message, boolean unattended,
+                                           String currentMessageId, List<String> attachmentIds) {
+                throw new IllegalStateException("database is locked");
+            }
+        };
+        var real = new ArrayList<TaskQueue>();
+        tasks = db -> {
+            var q = new TaskQueue(loop, new com.ownclaw.observability.EventLogService(db), emitter,
+                    new OwnClawConfig(), new com.ownclaw.core.TaskCancellationService());
+            real.add(q);
+            return q;
+        };
+        connect(tmp);
+        real.getFirst().start();
+        try {
+            type("check the router");
+            String asked = conversations.getCurrentSession(USER);
+            for (int i = 0; i < 100 && frames("response").isEmpty(); i++) Thread.sleep(50);
+
+            var reply = frames("response").getLast();
+            assertEquals("Internal error: database is locked", reply.path("content").asText(), reply.toString());
+            assertEquals(asked, reply.path("sessionId").asText(), "sent with its chat");
+            assertEquals(List.of("user: check the router", "assistant: Internal error: database is locked"),
+                    rows(asked), "kept, once, so a reload still shows why there is no answer");
+        } finally {
+            real.getFirst().stop();
+        }
+    }
+
+    @Test
+    @DisplayName("an answer whose sending breaks with an Error is kept once, and nothing says the task failed")
+    void anErrorWhileSendingAddsNoFailure(@TempDir Path tmp) throws Exception {
         connect(tmp);
         type("check the router");
         String asked = conversations.getCurrentSession(USER);
+        crashes = frame -> "response".equals(frame.path("type").asText());
 
-        queue.futures.getFirst().completeExceptionally(new IllegalStateException("database is locked"));
+        queue.futures.getFirst().complete(AgentResult.completed("the real answer", new AgentTrajectory(), 1));
 
-        var reply = frames("response").getLast();
-        assertTrue(reply.path("content").asText().startsWith("Something went wrong: "), reply.toString());
-        assertEquals(asked, reply.path("sessionId").asText(), "sent with its chat");
-        assertEquals(List.of(reply.path("content").asText()), jdbc.queryForList(
-                "SELECT content FROM conversations WHERE role = 'assistant' AND session_id = ?", String.class, asked),
-                "kept, so a reload still shows why there is no answer");
+        assertEquals(List.of("user: check the router", "assistant: the real answer"), rows(asked),
+                "the task did not fail: its answer is saved, and nothing beside it says it did");
     }
 
     @Test

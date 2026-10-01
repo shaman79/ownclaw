@@ -174,7 +174,7 @@ class ChatSecretTest {
         List<String> answers = new ArrayList<>();
         ws = chatWith(new SkillInteractionHandler() {
             @Override public boolean hasPending(String userId) { return true; }
-            @Override public boolean provideInput(String userId, String taskId, String input) {
+            @Override public boolean provideInput(String userId, String input) {
                 answers.add(input);
                 return true;
             }

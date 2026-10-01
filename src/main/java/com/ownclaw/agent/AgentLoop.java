@@ -1022,7 +1022,7 @@ public class AgentLoop {
                         context.taskId(), step + 1, truncate(plan.goal(), 100),
                         plan.steps().size(), plan.maxSteps());
 
-                LocalExecutor.Outcome outcome = localExecutor.execute(plan, context);
+                LocalExecutor.Outcome outcome = localExecutor.execute(plan, context, accountOf(context));
                 long durationMs = System.currentTimeMillis() - startMs;
                 String result = outcome.text();
                 // Zero tools ran is not a success, whatever the summary says. A local model that
@@ -1313,7 +1313,7 @@ public class AgentLoop {
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
             case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress(),
-                    (provider, reply) -> account(context, llmRouter.isLocal(provider), provider, reply));
+                    accountOf(context));
             default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
     }
@@ -2070,10 +2070,11 @@ public class AgentLoop {
     }
 
     /**
-     * What one model call made for this task was billed for, counted once: the think, code and
-     * analysis calls all come here, with their reply or with the one the exception that ended the
-     * call carries ({@code LlmException.reply()}) -- and so, as it ends, does each of their
-     * attempts that ended without a reply ({@link AgentContext#setBilledWithoutReply}). Billed
+     * What one model call made for this task was billed for, counted once: the think, code,
+     * analysis and delegation calls all come here -- the last two through {@link #accountOf} --
+     * with their reply or with the one the exception that ended the call carries
+     * ({@code LlmException.reply()}); and so, as it ends, does each of their attempts that ended
+     * without a reply ({@link AgentContext#setBilledWithoutReply}). Billed
      * means input with the prompt cache's reads and writes -- Anthropic reports those apart from
      * {@code input_tokens}, and with the static system prompt cached they are most of the input --
      * plus output. The tokens go to the counter of the tier that did the work, and a cloud call's
@@ -2100,6 +2101,15 @@ public class AgentLoop {
                     ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply));
         }
         return billed;
+    }
+
+    /**
+     * The task's {@link #account}, for code outside this class that calls a model on the task's
+     * behalf -- the library analysis and a delegation's local calls -- and hands it each reply
+     * with the provider that served it.
+     */
+    private java.util.function.BiConsumer<LlmProvider, LlmResponse> accountOf(AgentContext context) {
+        return (provider, reply) -> account(context, llmRouter.isLocal(provider), provider, reply);
     }
 
     /**

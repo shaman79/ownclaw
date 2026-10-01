@@ -18,8 +18,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.List;
 
 /**
- * Priority-based task queue that serializes Ollama access across users.
- * Tasks are submitted and processed asynchronously in priority order.
+ * The task queue: tasks are submitted and run asynchronously, in priority order, one at a time
+ * per lane -- one lane, unless {@code separate-background-lane} gives background work a second.
+ * <p>
+ * It serializes tasks, not Ollama. With one lane no two queued tasks run at once, so neither do
+ * their local calls; with two, an interactive and a background task can both call Ollama. Work
+ * outside the queue -- an agent run from the ops or debug API, the ops Ollama probe, the setup
+ * benchmark -- can call it beside a task. Nothing else serializes local calls: the Ollama server
+ * decides whether requests that arrive together run side by side or one after the other.
  */
 @Service
 public class TaskQueue {
@@ -62,10 +68,8 @@ public class TaskQueue {
         // One thread per lane. The original comment here said tasks are serialized because
         // "Ollama is the bottleneck" — that stopped being true when routing moved to
         // cloud-first, and the cost of keeping it was that a background task running for
-        // minutes blocked every interactive message behind it on the same thread.
-        //
-        // Nothing here serializes Ollama: two lanes can both call it, and the Ollama server
-        // decides whether the two requests run side by side or one after the other.
+        // minutes blocked every interactive message behind it on the same thread. What that
+        // leaves serialized is in the class comment.
         int threads = separateBackgroundLane ? 2 : 1;
         var counter = new AtomicInteger();
         workerPool = Executors.newFixedThreadPool(threads, r -> {

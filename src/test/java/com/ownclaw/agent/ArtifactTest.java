@@ -322,7 +322,7 @@ class ArtifactTest {
                 new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
 
         String d = a.describe();
-        assertNull(ctx.privateIndex().firstHitIn(d), "the canary finds its own window in: " + d);
+        assertNull(ctx.egress("test").index().firstLeakIn(d, (h, w) -> false), "the canary finds its own window in: " + d);
         assertTrue(d.contains("use: {{1}}, {{1.ok}}, {{1.#2}}"), d);
 
         // A ligature unfolds the same way: sixteen of them are a window, fifteen are not.
@@ -356,7 +356,7 @@ class ArtifactTest {
             Artifact a = mailSummary(ctx, "{\"ok\": true, \"" + key + "\": 5, \"summary\": \"" + c[1] + "\"}");
 
             String d = a.describe();
-            assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), key + ": the door refuses " + d);
+            assertNull(ctx.firstLeakIn(d), key + ": the door refuses " + d);
             assertFalse(d.contains(key), d);
             // Around bob.brook@... the run holds "ok" too, inside "brook": only the longest name
             // in a run is withheld.
@@ -371,12 +371,12 @@ class ArtifactTest {
         // field, a boolean, which ends the descriptor.
         var ctx = new AgentContext("u1", "t1", "who wrote to me?");
         String d = mailSummary(ctx, "{\"nas-backup-01.home.example.org\": 2, \"last\": \"From: nas-backup-01.home.example.org\"}").describe();
-        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+        assertNull(ctx.firstLeakIn(d), d);
         assertTrue(d.contains("fields: #1 (number), last (string, "), d);
         ctx = new AgentContext("u1", "t1", "block the sender");
         d = mailSummary(ctx, "{\"ok\": false, \"error\": \"blocked alice.novak@example-company.org today\", "
                 + "\"alice.novak@example-company.org\": true}").describe();
-        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+        assertNull(ctx.firstLeakIn(d), d);
         assertTrue(d.contains(" · ok=false · #3=true · fields: ok, error (string, ") && d.endsWith(" chars), #3"), d);
 
         // A run that holds no whole name: "s: " and the first 29 characters of a host the text
@@ -385,7 +385,7 @@ class ArtifactTest {
         String listed = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10), () -> mailSummary(hosts,
                 "{\"server-01.rack-12.dc-east.lan1\": \"up\", \"note\": \"Hosts: server-01.rack-12.dc-east.lan2 is down\"}")
                 .describe());
-        assertNull(hosts.privateIndex().firstLeakInResult(listed, hosts::isAllowedLeak), listed);
+        assertNull(hosts.firstLeakIn(listed), listed);
         assertTrue(listed.contains("fields: #1 (string, 2 chars), #2 (string, "), listed);
     }
 
@@ -396,7 +396,7 @@ class ArtifactTest {
         String d = mailSummary(ctx, "{\"alice.novak@example-company.org\": 5, "
                 + "\"summary\": \"5 new messages, the newest <alice.novak@example-company.org>\"}").describe();
         assertTrue(d.contains("use: {{1}}, {{1.alice.novak@example-company.org}}, {{1.summary}} — "), d);
-        assertNull(ctx.privateIndex().firstLeakInResult(d, ctx::isAllowedLeak), d);
+        assertNull(ctx.firstLeakIn(d), d);
     }
 
     @Test

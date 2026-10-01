@@ -83,7 +83,7 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
         var resp = gw.chat(messages("What is the capital of France?"), cfg);
 
         assertEquals("ok", resp.content());
@@ -109,7 +109,7 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        assertThrows(EgressRefused.class, () -> gw.chat(messages("hello"), LlmRequestConfig.DEFAULT));
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("hello"), new LlmRequestConfig(null, null, false)));
         assertTrue(provider.calls.isEmpty(), "unclassified means denied, not scanned against nothing");
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
         assertEquals("unclassified", rows.last().refusalRef());
@@ -124,7 +124,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 1);
         var index = new PrivateIndex(); index.addPrivate(3, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
         var ex = assertThrows(EgressRefused.class,
                 () -> gw.chat(messages("Here is what the mailbox held: " + secret.substring(1000, 1040)), cfg));
 
@@ -151,7 +151,7 @@ class CloudGatewayTest {
         var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + output.substring(200, 240),
                 Map.of("type", "object"));
 
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
         gw.chat(messages("send it"), cfg);
 
@@ -178,7 +178,7 @@ class CloudGatewayTest {
         String described = output.substring(200, 240);
         var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + described,
                 Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         gw.chat(messages("send the invoice"), cfg);
@@ -209,7 +209,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(4, iban);
         var tool = new ToolSpec("fx_rates", "Rates. Example account: " + iban,
                 Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         var ex = assertThrows(EgressRefused.class,
@@ -233,7 +233,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(2, shortOutput);
         var tool = new ToolSpec("smtp_send_email",
                 "Sends mail. Returns " + shortOutput + " on success.", Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         assertDoesNotThrow(() -> gw.chat(messages("send it"), cfg),
@@ -256,7 +256,7 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var tool = new ToolSpec("fx_rates", "Rates.",
                 Map.of("type", "object", "example", "token=hunter2secret"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(new PrivateIndex(), Map.of("API_TOKEN", "hunter2secret"),
                         (h, w) -> false));
 
@@ -278,7 +278,7 @@ class CloudGatewayTest {
                 config("anthropic", CloudGateway.Mode.OBSERVE), rows, null);
         String output = prose(5_000, 7);
         var index = new PrivateIndex(); index.addPrivate(4, output);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
 
         assertThrows(IllegalStateException.class,
                 () -> gw.chat(messages("the mailbox said: " + output.substring(900, 1200)), cfg));
@@ -304,7 +304,7 @@ class CloudGatewayTest {
 
         // The first run is allowed (it is the public digest); the tail is not.
         String allowed = PrivateIndex.normalise(publicPart);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(),
                 (h, w) -> allowed.contains(w)));
 
         var ex = assertThrows(EgressRefused.class,
@@ -325,7 +325,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex();
         index.addPrivate(2, digest + " sent to owner@example.org");
         String allowed = PrivateIndex.normalise(digest);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(),
                 (h, w) -> allowed.contains(w)));
 
         var ex = assertThrows(EgressRefused.class,
@@ -344,7 +344,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 3);
         var index = new PrivateIndex(); index.addPrivate(2, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> h == 2));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> h == 2));
         gw.chat(messages("quoting the task text: " + secret.substring(0, 40)), cfg);
 
         assertEquals(1, provider.calls.size());
@@ -358,7 +358,7 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(),
                 Map.of("IMAP_PASS", "hunter2secret", "SMTP_PORT", "465"), (h, w) -> false));
         gw.chat(messages("log in with hunter2secret on port 465 then hunter2secret again"), cfg);
 
@@ -375,7 +375,7 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         // "vault:PASS" appears inside «vault:PASS», so restarting the search from zero rewrote
         // its own replacement for ever, holding the task's only worker thread.
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(),
                 Map.of("PASS", "vault:PASS"), (h, w) -> false));
 
         assertTimeoutPreemptively(java.time.Duration.ofSeconds(5),
@@ -397,7 +397,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(1, secret);
 
         assertThrows(EgressRefused.class, () -> gw.chat(messages("leak: " + secret.substring(0, 40)),
-                LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false))));
+                new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false))));
 
         assertEquals(0, rows.last().bytesOut(),
                 "counting a refused payload as egress is the one arithmetic error that would "
@@ -411,7 +411,7 @@ class CloudGatewayTest {
         provider.failWith = new LlmException("anthropic", "429 rate limited", 429, null);
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
         assertThrows(LlmException.class, () -> gw.chat(messages("hi"), cfg));
         assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
         assertEquals("LlmException", rows.last().refusalRef());
@@ -426,7 +426,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 4);
         var index = new PrivateIndex(); index.addPrivate(5, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
         gw.chat(messages("leak: " + secret.substring(300, 340)), cfg);
 
         assertEquals(1, provider.calls.size());
@@ -453,7 +453,7 @@ class CloudGatewayTest {
             @Override public void onProgress() { throw stop; }
             @Override public void calling(Runnable cancel) { handed.add(cancel); }
         };
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
                 .withProgress(hook);
 
         assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)),
@@ -479,7 +479,7 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var billed = new ArrayList<LlmResponse.Usage>();
         var stop = new IllegalStateException("stopped by the owner");
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
                 .withProgress(new LlmProgress() {
                     @Override public void onProgress() { }
                     @Override public void billed(LlmResponse.Usage usage) { billed.add(usage); }
@@ -535,7 +535,7 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         String text = "the quick brown fox and a long line of ordinary text that must not be stored";
 
-        gw.chat(messages(text), LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
+        gw.chat(messages(text), new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
 
         String serialised = rows.last().toString();
         assertFalse(serialised.contains("quick brown fox"), "a ledger is not an audit copy");

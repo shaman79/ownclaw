@@ -213,15 +213,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String payload = received == null ? message.getPayload() : received.append(message.getPayload()).toString();
         String userMessage;
 
-        // Accept plain text or JSON {"message": "...", "type": "...", "taskId": "...", "attachmentIds": [...]}
+        // Accept plain text or JSON {"message": "...", "type": "...", "attachmentIds": [...]}
         String messageType = "message";
-        String taskId = null;
         java.util.List<String> attachmentIds = java.util.List.of();
         try {
             JsonNode json = mapper.readTree(payload);
             messageType = json.has("type") ? json.path("type").asText("message") : "message";
             userMessage = json.has("message") ? json.path("message").asText() : payload;
-            taskId = json.has("taskId") ? json.path("taskId").asText(null) : null;
             if (json.has("attachmentIds") && json.get("attachmentIds").isArray()) {
                 var ids = new java.util.ArrayList<String>();
                 for (JsonNode id : json.get("attachmentIds")) {
@@ -311,7 +309,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Not a command, and something is waiting for an answer: it is the answer.
         }
         if (waiting) {
-            boolean handled = interactionHandler.provideInput(userId, taskId, userMessage);
+            boolean handled = interactionHandler.provideInput(userId, userMessage);
             if (!handled) {
                 sendToSession(session, "system", "No pending input request.");
             }
@@ -367,23 +365,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     } catch (Exception e) {
                         log.warn("Could not tell {}'s windows the chat list changed: {}", userId, e.getMessage());
                     }
-                })
-                // Only the task's own failure arrives here. Saving and sending its answer cannot
-                // throw (send() catches what a socket throws), so an answer that is already saved
-                // is never followed by a second one saying the task went wrong.
-                .exceptionally(ex -> {
-                    log.error("Task failed for {}: {}", userId, ex.getMessage());
-                    String reply = "Something went wrong: " + ex.getMessage();
-                    // Saved and sent with its chat, like any answer: pushed only, it was gone on
-                    // the next reload, and a window showing another chat appended it there.
-                    try {
-                        conversationService.saveMessage(userId, currentSessionId, "assistant", reply);
-                    } catch (Exception e) {
-                        log.warn("Could not save the failure reply for {}: {}", userId, e.getMessage());
-                    }
-                    sendToUser(userId, "response", reply, currentSessionId);
-                    return null;
                 });
+        // No failure arrives on the future: the queue returns what breaks in a task as the task's
+        // ERROR result, answered above like any other, and saving and sending an answer catch the
+        // exceptions they throw. A handler for a failed future, writing "Something went wrong",
+        // ran only on an Error thrown while an answer was sent, and saved that line beside it.
     }
 
     @Override
@@ -490,9 +476,6 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void runSetupWizardConversation(String userId) {
-        // A stable taskId so user replies can be routed without the client knowing it.
-        String taskId = "setup";
-
         int step = 0;
         var current = setupWizard.processStep(step, null);
         if (current.message() != null) {
@@ -502,7 +485,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         while (!current.complete()) {
             String input;
             try {
-                input = interactionHandler.requestInputSilent(userId, taskId);
+                input = interactionHandler.requestInputSilent(userId);
             } catch (TimeoutException e) {
                 sendSystemToUser(userId, "Setup wizard timed out waiting for input. Run `/setup` to try again.");
                 return;

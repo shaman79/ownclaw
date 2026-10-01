@@ -631,13 +631,11 @@ public class ScheduledTaskService {
     }
 
     /**
-     * Why a scheduled run did not deliver, in a line the owner can act on, followed by the run's
-     * whole ending.
-     * <p>
-     * The reason alone ("MAX_STEPS") does not say what it was trying to do, and the response
-     * alone reads like an answer. Both together are the only honest summary — and a question
-     * from unattended work is worth naming as such, because the fix is to give the task enough
-     * detail up front rather than to retry it unchanged.
+     * Why a scheduled run did not deliver: the run's whole ending, which says why it stopped and
+     * what it did ({@code TaskEnding}) -- said once, there. Prefixed with the reason and a step
+     * count, it said both twice, and the count disagreed with the ending's own: it counted the
+     * loop's reflection turns as steps. A question from unattended work is named as such, because
+     * the fix is to give the task enough detail up front rather than to retry it unchanged.
      *
      * @param ending the run's response, or the owner's private text in its place
      */
@@ -646,7 +644,7 @@ public class ScheduledTaskService {
             return "The task stopped to ask a question, and scheduled runs have nobody to answer: "
                     + ending;
         }
-        return result.terminationReason() + " after " + result.totalSteps() + " steps: " + ending;
+        return ending;
     }
 
     /** The failure as the owner is shown it, with his private text, or null if the run has none. */

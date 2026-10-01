@@ -92,7 +92,7 @@ class OpenAiStreamingTest {
         var http = api(stream);
         var seen = new AtomicInteger();
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(seen::incrementAndGet));
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(seen::incrementAndGet));
 
         assertEquals("Hello, world", r.content());
         assertEquals(176, r.promptTokens(), "uncached only");
@@ -110,7 +110,7 @@ class OpenAiStreamingTest {
     @DisplayName("what goes out: a stream with usage, and no output limit at all")
     void theRequest() throws Exception {
         var http = api(content("ok") + finish("stop") + usage(1, 1, 0) + DONE);
-        provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         JsonNode body = JSON.readTree(http.to(COMPLETIONS).get(0).body());
         assertTrue(body.path("stream").asBoolean());
         assertTrue(body.path("stream_options").path("include_usage").asBoolean());
@@ -127,7 +127,7 @@ class OpenAiStreamingTest {
                 + toolFragment(0, null, null, ": \"/srv\"}")
                 + finish("tool_calls") + usage(10, 5, 0) + DONE);
 
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
 
         assertEquals(1, r.toolCalls().size());
         ToolCall call = r.toolCalls().get(0);
@@ -141,7 +141,7 @@ class OpenAiStreamingTest {
     void malformedArguments() {
         var http = api(toolFragment(0, "call_1", "shell_exec", "{\"command\": ")
                 + toolFragment(0, null, null, "ls -la}") + finish("tool_calls") + usage(10, 5, 0) + DONE);
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertFalse(r.hasToolCalls(), "not a call with empty arguments");
         var e = assertThrows(MalformedToolCall.class, () -> r.requireComplete("openai"));
         assertTrue(e.getMessage().contains("'shell_exec'"), e.getMessage());
@@ -154,7 +154,7 @@ class OpenAiStreamingTest {
     @DisplayName("finish_reason length: cut off at the model's output limit, whose size OpenAI does not state")
     void length() {
         var http = api(content("a long answer tha") + finish("length") + usage(10, 5, 0) + DONE);
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         var e = assertThrows(OutputTruncated.class, () -> r.requireComplete("openai"));
         assertEquals(OutputTruncated.Limit.MAX_OUTPUT, e.limit());
         assertNull(e.tokens());
@@ -165,7 +165,7 @@ class OpenAiStreamingTest {
     @DisplayName("finish_reason content_filter is a refusal")
     void contentFilter() {
         var http = api(finish("content_filter") + usage(10, 0, 0) + DONE);
-        LlmResponse r = provider(http).chat(ASK, LlmRequestConfig.DEFAULT);
+        LlmResponse r = provider(http).chat(ASK, new LlmRequestConfig(null, null, false));
         assertTrue(r.refused());
         var e = assertThrows(ProviderRefused.class, () -> r.requireComplete("openai"));
         assertEquals("content_filter", e.stopReason());
@@ -178,7 +178,7 @@ class OpenAiStreamingTest {
         ObjectNode error = JSON.createObjectNode();
         error.putObject("error").put("message", "the stream broke").put("type", "invalid_request_error");
         var http = api(content("par") + data(error));
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("invalid_request_error: the stream broke"), e.getMessage());
         assertFalse(e.isRetryable());
     }
@@ -187,7 +187,7 @@ class OpenAiStreamingTest {
     @DisplayName("a stream that ends before [DONE] is incomplete")
     void cutStream() {
         var http = api(content("half"));
-        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(LlmException.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertTrue(e.getMessage().contains("before [DONE]"), e.getMessage());
     }
 
@@ -200,15 +200,15 @@ class OpenAiStreamingTest {
             @Override public void billed(LlmResponse.Usage usage) { billed.add(usage); }
         };
         assertThrows(LlmException.class, () -> provider(api(content("Hello") + finish("stop") + usage(1200, 30, 1024)))
-                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+                .chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
         assertEquals(List.of(new LlmResponse.Usage(SERVED, 176, 30, 0, 1024)), billed,
                 "priced as a reply's counts are: the cached prompt apart");
         // Mutation: report nothing from a stream that ends without a reply -> billed is empty.
 
         billed.clear();
-        assertThrows(LlmException.class, () -> provider(api(content("half"))).chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook)));
+        assertThrows(LlmException.class, () -> provider(api(content("half"))).chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook)));
         LlmResponse whole = provider(api(content("Hello") + finish("stop") + usage(1200, 30, 1024) + DONE))
-                .chat(ASK, LlmRequestConfig.DEFAULT.withProgress(hook));
+                .chat(ASK, new LlmRequestConfig(null, null, false).withProgress(hook));
         assertEquals(List.of(new LlmResponse.Usage(SERVED, 176, 30, 0, 1024)), whole.usage());
         assertTrue(billed.isEmpty(), "no counts had come; and a whole reply carries its own");
     }
@@ -218,7 +218,7 @@ class OpenAiStreamingTest {
     void contextLengthExceeded() {
         var http = new FakeHttp().json(COMPLETIONS, 400, "{\"error\":{\"message\":\"This model's maximum context "
                 + "length is 400000 tokens.\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}");
-        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, LlmRequestConfig.DEFAULT));
+        var e = assertThrows(OutputTruncated.class, () -> provider(http).chat(ASK, new LlmRequestConfig(null, null, false)));
         assertEquals(OutputTruncated.Limit.CONTEXT_WINDOW, e.limit());
         assertEquals("[openai] the conversation is longer than the model's context window", e.getMessage());
     }
@@ -232,7 +232,7 @@ class OpenAiStreamingTest {
         var stop = new Stopped();
         var seen = new AtomicInteger();
         var thrown = assertThrows(Stopped.class, () -> provider(http).chat(ASK,
-                LlmRequestConfig.DEFAULT.withProgress(() -> { if (seen.incrementAndGet() == 2) throw stop; })));
+                new LlmRequestConfig(null, null, false).withProgress(() -> { if (seen.incrementAndGet() == 2) throw stop; })));
         assertSame(stop, thrown);
         assertEquals(2, seen.get());
         assertEquals(1, http.opened.get());
@@ -243,7 +243,7 @@ class OpenAiStreamingTest {
     @DisplayName("the tools are offered one call at a time, as before")
     void tools() throws Exception {
         var http = api(finish("stop") + usage(1, 1, 0) + DONE);
-        provider(http).chat(ASK, LlmRequestConfig.DEFAULT.withTools(List.of(
+        provider(http).chat(ASK, new LlmRequestConfig(null, null, false).withTools(List.of(
                 new ToolSpec("shell_exec", "run", Map.of("type", "object")))));
         JsonNode body = JSON.readTree(http.to(COMPLETIONS).get(0).body());
         assertEquals("shell_exec", ((ArrayNode) body.path("tools")).get(0).path("function").path("name").asText());

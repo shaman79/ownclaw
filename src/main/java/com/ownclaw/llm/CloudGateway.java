@@ -24,9 +24,11 @@ import java.util.Map;
  * fixed order — refuse if unclassified, scrub vault values, check the canary, send, record,
  * then hand back only a reply that is complete — so privacy is a property of the code path. A
  * prompt builder can be wrong about what it rendered and the call is still refused -- in every
- * part but an assistant turn, which replays the model's earlier turns, holds nothing derived from
- * a tool result or other private input, and is not scanned (see the canary loop); a new call site
- * next month either carries a context or does not get through.
+ * message part but an assistant turn. Two kinds of part are not scanned (see the canary loop): an
+ * assistant turn, which replays the model's earlier turns and holds nothing derived from a tool
+ * result or other private input; and the tools' descriptions and schemas, the registry's text,
+ * which is trusted input -- a builder that rendered a result into one would not be refused. A
+ * new call site next month either carries a context or does not get through.
  * <p>
  * Deliberately not a policy engine. There is one mode switch, {@code ENFORCE} or {@code OBSERVE},
  * and OBSERVE changes exactly one thing: a canary hit is sent and recorded as such instead of
@@ -122,7 +124,8 @@ public final class CloudGateway implements LlmProvider {
             }
         }
 
-        // (c) The canary: every part but the replayed assistant turns, before the socket opens.
+        // (c) The canary, before the socket opens: every part but the replayed assistant turns and
+        // the registry's tool and schema parts.
         String observed = null;
         List<Part> parts = parts(scrubbedMessages, scrubbedTools);
         // A tool description or schema is authored by the cloud at skill_create or by the

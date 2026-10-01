@@ -136,15 +136,19 @@ public class LocalExecutor {
      *
      * @param plan          the structured plan from the cloud LLM
      * @param parentContext the parent agent context (for userId, taskId, cancellation)
+     * @param billed        the asking task's account, handed each reply the local model was
+     *                      billed for -- the one a cut-off or unusable call carries too -- and the
+     *                      provider that served it
      * @return consolidated result string (success or error description)
      */
-    public Outcome execute(DelegationPlan plan, AgentContext parentContext) {
+    public Outcome execute(DelegationPlan plan, AgentContext parentContext,
+                           java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
         // A delegation sees only its own results. If the goal names an earlier one, the local
         // model would read {{3}} as ITS OWN third step -- which is exactly how a second
         // delegation once forwarded the first one's traceback as the body of the morning email.
         // So the references are taken out of what it is given, and the cloud is told why.
         int[] removed = {0};
-        Outcome outcome = run(withoutOutsideReferences(plan, removed), parentContext);
+        Outcome outcome = run(withoutOutsideReferences(plan, removed), parentContext, billed);
         String notes = "";
         if (removed[0] > 0) {
             log.warn("Delegation goal named {} earlier result(s); removed — a delegation cannot see them.",
@@ -198,7 +202,8 @@ public class LocalExecutor {
                 plan.tools());
     }
 
-    private Outcome run(DelegationPlan plan, AgentContext parentContext) {
+    private Outcome run(DelegationPlan plan, AgentContext parentContext,
+                        java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
         LlmProvider localProvider = llmRouter.local();
         if (!localProvider.isAvailable()) {
             return Outcome.failed(
@@ -277,9 +282,7 @@ public class LocalExecutor {
             } catch (Exception e) {
                 // A reply that is no answer -- cut off at the window, or holding a tool call that
                 // cannot be run -- was generated all the same, every token of it.
-                if (e instanceof LlmException failed && failed.reply() != null) {
-                    parentContext.addLocalTokens(failed.reply().totalTokens());
-                }
+                if (e instanceof LlmException failed) billed.accept(localProvider, failed.reply());
                 if (parentContext.isCancelled()) {
                     return partial("Task cancelled during delegation.", mine);
                 }
@@ -307,7 +310,7 @@ public class LocalExecutor {
                 return partial("Local LLM call failed: " + msg, mine);
             }
 
-            parentContext.addLocalTokens(response.totalTokens());
+            billed.accept(localProvider, response);
             // A local call came back, so this task is not stalled — whatever the loop does with
             // the answer. Marking progress only after a tool EXECUTED meant that a delegation
             // being corrected by its own guards looked identical to a hung one: each refusal
@@ -325,11 +328,8 @@ public class LocalExecutor {
                                 + "call ({} tokens, stop reason {}).", step + 1,
                         response.completionTokens(), response.stopDescription());
                 messages.add(LlmMessage.assistant(""));
-                messages.add(LlmMessage.user("Your previous reply was empty"
-                        + (response.stopReason() == null ? ""
-                                : " (stop reason: " + response.stopDescription() + ")")
-                        + ": no text and no tool call, so nothing was run. Continue from where "
-                        + "the task stands."));
+                messages.add(LlmMessage.user(ThinkingEngine.emptyReply(response)
+                        + " Continue from where the task stands."));
                 continue;
             }
 
@@ -876,7 +876,7 @@ public class LocalExecutor {
      * A run is a result's only when the model had it from nowhere else. One it wrote itself, in
      * an argument of an earlier call, or was given in the plan, is its own however many results
      * echo it -- the allowance the canary makes for the cloud's own arguments
-     * (AgentContext#isAllowedLeak), made here: a send echoes the subject it was given and a write
+     * (AgentContext's Excuses), made here: a send echoes the subject it was given and a write
      * the path, and the same subject to a second recipient, or the file just written as an
      * attachment, was refused as a copy of the echo. An earlier argument that is a whole result
      * typed out is that result, not the model's words, and excuses nothing. So text the model
@@ -933,23 +933,15 @@ public class LocalExecutor {
     }
 
     /**
-     * An earlier call anywhere in the task that already SUCCEEDED in doing exactly this, or null.
-     * <p>
-     * A delegation that fails on one step can still have sent the email on
-     * another, and a second delegation retrying the job would send a second morning email. Only
-     * a real success counts: a send that failed, including one reported as {@code "ok": false},
-     * is exactly what a retry is for. Only a tool that declares side effects: a second read costs
-     * nothing but time.
-     */
-    static Artifact sideEffectAlreadyDone(com.ownclaw.agent.tools.Tool tool,
-                                          Map<String, Object> resolved, List<Artifact> task) {
-        return priorSideEffect(tool, resolved, task, true);
-    }
-
-    /**
      * An earlier identical call to a side-effecting tool in {@code among}, or null. Identical
      * means the same tool and the same RESOLVED arguments; {@code successesOnly} decides whether
      * a failed attempt counts.
+     * <p>
+     * Asked of the whole task with {@code successesOnly}: a delegation that fails on one step can
+     * still have sent the email on another, and a second delegation retrying the job would send a
+     * second morning email. Only a real success counts there: a send that failed, including one
+     * reported as {@code "ok": false}, is exactly what a retry is for. Only a tool that declares
+     * side effects: a second read costs nothing but time.
      */
     static Artifact priorSideEffect(com.ownclaw.agent.tools.Tool tool, Map<String, Object> resolved,
                                     List<Artifact> among, boolean successesOnly) {
@@ -995,13 +987,6 @@ public class LocalExecutor {
      * Zero tools and a confident summary is the shape of a hallucinated success, and it used to
      * produce a successful step, a successful task and a scheduled run recorded as delivered —
      * with the registry withheld, the cloud has no instrument to check it with.
-     */
-    static Outcome completed(String localSummary, String goal, List<Artifact> results) {
-        return completed(localSummary, goal, results, null);
-    }
-
-    /**
-     * {@link #completed(String, String, List)}, with the local model's answer when one was kept.
      *
      * @param said the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
      *             handle and size, never its text, and it joins what the delegation produced.

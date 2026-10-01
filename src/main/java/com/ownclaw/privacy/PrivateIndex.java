@@ -10,10 +10,11 @@ import java.util.function.BiPredicate;
  * <p>
  * Every PRIVATE artifact of a task is indexed here as hashes of its 32-character windows, and
  * every outbound cloud body is checked against them before the socket opens -- all of it but
- * the replayed assistant turns, which hold nothing derived from a private input (see
- * CloudGateway). That is what makes privacy a property of the code path rather than of a prompt
- * builder's carefulness: the builders can be wrong about what they rendered and this still
- * refuses the call. The task asks the same question of every result before labelling it
+ * the replayed assistant turns, which hold nothing derived from a private input, and the tools'
+ * descriptions and schemas, the registry's trusted text (see CloudGateway). That is what makes
+ * privacy a property of the code path rather than of a prompt builder's carefulness: the
+ * builders can be wrong about what they rendered into a message and this still refuses the call.
+ * The task asks the same question of every result before labelling it
  * ({@link #firstLeakInResult}, through AgentContext), so a result that repeats a private one is
  * labelled PRIVATE instead of being refused at the door one step later.
  * <p>
@@ -122,11 +123,6 @@ public final class PrivateIndex {
         windowHashes = Arrays.copyOf(windowHashes, windowHashes.length + 1);
         handles[handles.length - 1] = handle;
         windowHashes[windowHashes.length - 1] = sorted;
-    }
-
-    /** The earliest run in {@code part} that belongs to a registered artifact, or null. */
-    public Hit firstHitIn(String part) {
-        return firstLeak(normalise(part), (handle, stretch) -> false);
     }
 
     /**

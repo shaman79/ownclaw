@@ -87,7 +87,7 @@ class PrivateFileEndToEndTest {
         String filesSection = ThinkingEngine.filesSection(ctx);
         var llm = new Scripted(call("read_statement", Map.of()), done(SUMMARY));
         var outcome = DelegationBehaviourTest.executor(llm, new Usage(), new ReadsFiles(files))
-                .execute(plan("summarise the attached statement"), ctx);
+                .execute(plan("summarise the attached statement"), ctx, DelegationBehaviourTest.UNCOUNTED);
         assertTrue(llm.allSeen().contains("KV-7f3a9c21"), "the local model read the file");
 
         // The cloud answers with the handle it was given, and the answer is made on this machine.
@@ -123,7 +123,7 @@ class PrivateFileEndToEndTest {
             assertNull(windowOf(SUMMARY, text), e.getKey() + " carries the answer: " + text);
             assertFalse(text.contains("vypis") || text.contains("123456789"),
                     e.getKey() + " names the file: " + text);
-            assertNull(ctx.privateIndex().firstHitIn(text), e.getKey() + " trips the canary: " + text);
+            assertNull(ctx.egress("test").index().firstLeakIn(text, (h, w) -> false), e.getKey() + " trips the canary: " + text);
         }
         assertTrue(next.conversationSummary().contains(AgentLoop.PRIVATE_NOTE),
                 "the next turn is told an answer was given privately");

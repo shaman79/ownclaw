@@ -174,7 +174,7 @@ scenario breaks the system's ability to handle all others.
 
 ### 3.1 The Ollama Bottleneck
 
-A single Ollama instance processes one inference request at a time (GPU-bound). Multiple users and tasks compete for this resource. The Task Queue is the central scheduler.
+The local model runs on one Ollama server, and its GPU is the scarce resource. The task queue runs tasks one at a time per lane: one lane by default, so queued tasks -- and their local calls -- never overlap; with `separate-background-lane` on, a background task runs beside an interactive one, and both can call Ollama. Work outside the queue (an agent run from the ops or debug API, the ops Ollama probe, the setup benchmark) can call it beside a task. Nothing else serializes local calls: the Ollama server decides whether requests that arrive together run side by side or one after the other.
 
 ### 3.2 Queue Design
 
@@ -213,12 +213,11 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 
 | Operation | Needs Ollama? | Can run in parallel? |
 |-----------|:---:|:---:|
-| Executor: classify task | Yes | No (queued) |
-| Executor: match skills | Yes | No (queued) |
+| Executor: a delegation's steps | Yes | One task per queue lane |
 | Mentor: plan/review | No (cloud API) | Yes (independent) |
 | SkillRunner: execute script | No (Python process) | Yes (multiple sandboxes) |
 
-**This means**: While Executor is doing inference for User A, SkillRunner can simultaneously execute scripts for User B, and a Mentor API call for User C can be in flight. The application serializes nothing: the Ollama server decides how many of its own inferences run at once.
+**This means**: with the background lane on, while one task waits on the local model, the other can be running a skill or waiting on a cloud call. The queue runs one task per lane, and nothing else serializes local calls: the Ollama server decides how many of its own inferences run at once.
 
 ### 3.4 Async & Long-Running Tasks
 

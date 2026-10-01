@@ -212,7 +212,7 @@ class ScheduledDeliveryTest {
         scheduler.pollDueTasks();
 
         assertEquals("active", task(id).get("status"), "a recurring task runs again");
-        assertEquals("MAX_STEPS after 0 steps: " + ending, task(id).get("last_error"), "whole, not its first 500");
+        assertEquals(ending, task(id).get("last_error"), "whole, not its first 500, and as the run ended it");
         assertTrue(result().text().endsWith(ending), "the report is whole");
         List<String> warned = lines(StatusMessage.Type.WARNING);
         assertEquals(1, warned.size(), String.valueOf(warned));
@@ -276,7 +276,7 @@ class ScheduledDeliveryTest {
         scheduler.pollDueTasks();
 
         assertEquals(List.of("**Scheduled task did not finish: " + LONG_TASK + "**\n\n"
-                        + "MAX_STEPS after 0 steps: Stopped: the step limit."),
+                        + "Stopped: the step limit."),
                 jdbc.queryForList("SELECT content FROM conversations WHERE role = 'assistant'", String.class));
         assertEquals(1, lines(StatusMessage.Type.RESULT).size(), "sent once");
     }

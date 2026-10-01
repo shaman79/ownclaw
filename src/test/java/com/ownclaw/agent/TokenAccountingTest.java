@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * What a model call made for a task is charged for, through the real loop: every token it was
  * billed, the prompt cache included, priced attempt by attempt at the rates of the model that ran
- * each -- the think, code and analysis calls alike, by one path (AgentLoop.account).
+ * each -- the think, code, analysis and delegation calls alike, by one path (AgentLoop.account).
  * <p>
  * Anthropic reports {@code input_tokens} as only the tokens that were neither read from nor
  * written to the prompt cache; reads and writes are separate and additional. Every figure in this
@@ -114,5 +114,34 @@ class TokenAccountingTest {
         var row = rig.jdbc.queryForMap("SELECT tokens_used, cost_usd FROM token_usage WHERE user_id = 'u1'");
         assertEquals(2_000_000, row.get("tokens_used"), "both analyses were billed, the refused one too");
         assertEquals(2.0 + 5.0, ((Number) row.get("cost_usd")).doubleValue(), 1e-9);
+    }
+
+    @Test
+    @DisplayName("a delegation's local calls are counted by the same path: every token billed, a reply cut off too")
+    void theDelegationIsCounted(@TempDir Path tmp) throws Exception {
+        // Ollama reports no prompt cache today; a local reply that did is counted as the cloud's
+        // are, its reads included, because it is counted by the same account.
+        var local = new com.ownclaw.llm.LlmProvider() {
+            int calls;
+            public LlmResponse chat(List<com.ownclaw.llm.LlmMessage> m, com.ownclaw.llm.LlmRequestConfig c) {
+                if (calls++ == 0) {
+                    return Replies.of("{\"tool\": \"noop\", \"params\": {}}", 100, 10, 0, 1_000, "stop");
+                }
+                throw new com.ownclaw.llm.OutputTruncated("ollama", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
+                        262_144, Replies.of("", 200, 20, 0, 2_000, "length"));
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "ollama"; }
+        };
+        var rig = new LoopRig(tmp, List.of(TaskEndToEndTest.NOOP), 600, local);
+        rig.cloud.think.add(LoopRig.call(AgentAction.DELEGATE, Map.of("goal", "check the network")));
+        rig.cloud.think.add(DONE);
+        var r = rig.turn(TaskEndToEndTest.session(rig), "check the network");
+
+        var completed = new com.fasterxml.jackson.databind.ObjectMapper().readTree(rig.jdbc.queryForObject(
+                "SELECT details FROM events WHERE event_type = 'task_completed' AND task_id = ?", String.class, r.taskId()));
+        assertEquals(100 + 10 + 1_000 + 200 + 20 + 2_000, completed.get("localTokens").asInt(),
+                "both local replies, the one cut off at the window too, with their cache reads");
+        assertEquals(1_100, completed.get("cloudTokens").asInt(), "the delegate step's, and nothing local in it");
     }
 }
