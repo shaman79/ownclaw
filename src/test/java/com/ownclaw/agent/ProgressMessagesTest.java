@@ -45,10 +45,12 @@ class ProgressMessagesTest {
     /** A local model answering every call with {@code answer}, keeping what it was asked. */
     static final class Local implements LlmProvider {
         final List<List<LlmMessage>> asked = new CopyOnWriteArrayList<>();
+        final List<LlmRequestConfig> configs = new CopyOnWriteArrayList<>();
         final Reply answer;
         Local(Reply answer) { this.answer = answer; }
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             asked.add(List.copyOf(m));
+            configs.add(c);
             try {
                 return answer.answer(c);
             } catch (RuntimeException e) {
@@ -190,6 +192,8 @@ class ProgressMessagesTest {
         String asked = local.asked.get(0).get(1).content();
         assertTrue(asked.contains("Jaký mám zůstatek?") && asked.contains(STATEMENT),
                 "the owner's message, for its language, and the result whole: " + asked);
+        assertTrue(local.configs.get(0).withoutThinking(),
+                "a summary is written straight away, not after minutes of reasoning at 8 tokens a second");
         var live = seen.stream().filter(m -> m.type() == StatusMessage.Type.PROGRESS_MESSAGE
                 && m.text().startsWith("**Result 1")).findFirst().orElseThrow();
         assertEquals(content, live.text(), "what is stored and forwarded is the note");

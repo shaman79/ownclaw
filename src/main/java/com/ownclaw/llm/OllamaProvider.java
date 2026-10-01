@@ -220,6 +220,10 @@ public class OllamaProvider implements LlmProvider {
 
         body.putObject("options").put("temperature", temperature);
 
+        // Only ever "false": a model without a thinking mode takes no "think": true, and leaving it
+        // out keeps the model's own default (Qwen3.6 reasons first).
+        if (reqConfig.withoutThinking()) body.put("think", false);
+
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
             for (ToolSpec spec : reqConfig.tools()) {

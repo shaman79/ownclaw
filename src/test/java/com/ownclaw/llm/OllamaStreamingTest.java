@@ -91,6 +91,16 @@ class OllamaStreamingTest {
                 "Ollama must not drop the oldest messages silently");
         assertTrue(body.has("shift") && !body.path("shift").asBoolean(true));
         assertEquals(-1, body.path("keep_alive").asInt());
+        assertFalse(body.has("think"), "the model's own default unless a call asks to answer directly");
+    }
+
+    @Test
+    @DisplayName("a call that asks to answer directly sends think:false")
+    void answeringDirectly() throws Exception {
+        var http = ollama(line("4", null) + last("stop", 20, 1));
+        provider(config(), http).chat(ASK, new LlmRequestConfig(null, null, false).answeringDirectly());
+        JsonNode body = JSON.readTree(http.to(CHAT).get(0).body());
+        assertTrue(body.has("think") && !body.path("think").asBoolean(true), body.toString());
     }
 
     @Test

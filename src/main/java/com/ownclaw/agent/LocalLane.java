@@ -113,7 +113,8 @@ final class LocalLane {
                 backgroundStopped = stopped;
             }
             try {
-                return local.chat(prompt, new LlmRequestConfig(null, null, false).withProgress(hook));
+                return local.chat(prompt, new LlmRequestConfig(null, null, false).withProgress(hook)
+                        .answeringDirectly());
             } catch (Preempted again) {
                 // Foreground work ended it: made again once the lane is free.
             } finally {

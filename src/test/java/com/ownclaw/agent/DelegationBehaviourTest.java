@@ -43,9 +43,11 @@ class DelegationBehaviourTest {
     static final class Scripted implements LlmProvider {
         final Deque<String> replies = new ArrayDeque<>();
         final List<List<LlmMessage>> calls = new ArrayList<>();
+        final List<LlmRequestConfig> configs = new ArrayList<>();
         Scripted(String... r) { replies.addAll(List.of(r)); }
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             calls.add(List.copyOf(m));
+            configs.add(c);
             return Replies.of(replies.isEmpty() ? done("finished") : replies.poll(), 1, 1);
         }
         public boolean isAvailable() { return true; }
@@ -313,6 +315,7 @@ class DelegationBehaviourTest {
         assertTrue(system.contains("### result 1 (imap_fetch)\nYour balance is 48,213.07 CZK."),
                 "given whole, in the local model's prompt: " + system);
         assertTrue(outcome.ok(), "no tool ran, and none had to: " + outcome.text());
+        assertTrue(llm.configs.get(0).withoutThinking(), "reading what it was handed: it answers straight away");
         assertFalse(outcome.text().contains("48,213.07"), "the cloud is not shown what was read: " + outcome.text());
         assertTrue(ctx.localTierReadPrivate(), "what it does next is written after reading private data");
         Artifact answer = ctx.artifacts().get(1);
@@ -322,6 +325,31 @@ class DelegationBehaviourTest {
         assertTrue(outcome.text().contains("(The local model's answer is {{2}}: private"), outcome.text());
         // Mutations: count only the delegation's own results as read -> the answer goes to the
         // cloud as prose; require a tool to have run -> a failed delegation.
+    }
+
+    @Test
+    @DisplayName("a delegation that runs tools reasons first; one handed results and no tool answers straight away")
+    void onlyReadingAnswersDirectly() {
+        var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        var ctx = new AgentContext("u1", "t1", "is the router up?");
+        ctx.addArtifact("router_status", Map.of(), Map.of(), "up 12 days", true,
+                new Artifact.Decision(Label.PRIVATE, List.of("credentials (1)")));
+
+        var withTools = new Scripted(call("ping", Map.of()), done("it answers"));
+        executor(withTools, new Usage(), ping).execute(
+                new DelegationPlan("Read {{1}}, then ping it", List.of(), List.of(), List.of("ping")), ctx, UNCOUNTED);
+        assertFalse(withTools.configs.get(0).withoutThinking(), "a named tool: choosing and ordering calls needs it");
+
+        var aStep = new Scripted(call("ping", Map.of()), done("it answers"));
+        executor(aStep, new Usage(), ping).execute(new DelegationPlan("Read {{1}}, then check it",
+                List.of(new DelegationPlan.Step("check", "ping", Map.of())), List.of()), ctx, UNCOUNTED);
+        assertFalse(aStep.configs.get(0).withoutThinking(), "a tool named in a step counts too");
+
+        var nothingHanded = new Scripted(call("ping", Map.of()), done("it answers"));
+        executor(nothingHanded, new Usage(), ping).execute(plan("is the router up?"), ctx, UNCOUNTED);
+        assertFalse(nothingHanded.configs.get(0).withoutThinking(), "no result handed: it has work to find");
+        // Mutation: answer directly on every delegation -> the first two fail; on none -> the
+        // reading case in aGoalIsGivenThePrivateResultItNames fails.
     }
 
     @Test

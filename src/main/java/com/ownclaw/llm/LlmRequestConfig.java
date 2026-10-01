@@ -29,7 +29,14 @@ public record LlmRequestConfig(
      * Told about every event of the streamed reply, and handed the call's cancel while it runs;
      * never null (see {@link LlmProgress}).
      */
-    LlmProgress progress
+    LlmProgress progress,
+    /**
+     * Answer straight away, without reasoning first. Only the local provider reads it: a thinking
+     * model on that host writes about 8 tokens a second, so minutes of reasoning ahead of a short
+     * answer -- a summary, a reply about a result it was handed -- are minutes of waiting. Off
+     * by default; the cloud providers ignore it.
+     */
+    boolean withoutThinking
 ) {
     public LlmRequestConfig {
         progress = progress == null ? LlmProgress.NONE : progress;
@@ -37,27 +44,32 @@ public record LlmRequestConfig(
 
     /** Without native tools, a context or a progress hook. */
     public LlmRequestConfig(String model, Double temperature, boolean jsonMode) {
-        this(model, temperature, jsonMode, null, null, null);
+        this(model, temperature, jsonMode, null, null, null, false);
     }
 
     /** With tools, without a context or a progress hook. */
     public LlmRequestConfig(String model, Double temperature, boolean jsonMode, List<ToolSpec> tools) {
-        this(model, temperature, jsonMode, tools, null, null);
+        this(model, temperature, jsonMode, tools, null, null, false);
     }
 
     /** This request, but offering the model these tools natively. */
     public LlmRequestConfig withTools(List<ToolSpec> toolSpecs) {
-        return new LlmRequestConfig(model, temperature, jsonMode, toolSpecs, egress, progress);
+        return new LlmRequestConfig(model, temperature, jsonMode, toolSpecs, egress, progress, withoutThinking);
     }
 
     /** This request, made on behalf of a task. */
     public LlmRequestConfig withEgress(EgressContext egressContext) {
-        return new LlmRequestConfig(model, temperature, jsonMode, tools, egressContext, progress);
+        return new LlmRequestConfig(model, temperature, jsonMode, tools, egressContext, progress, withoutThinking);
     }
 
     /** This request, telling {@code hook} about every event of the reply as it streams in. */
     public LlmRequestConfig withProgress(LlmProgress hook) {
-        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, hook);
+        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, hook, withoutThinking);
+    }
+
+    /** This request, answered without reasoning first (see {@link #withoutThinking()}). */
+    public LlmRequestConfig answeringDirectly() {
+        return new LlmRequestConfig(model, temperature, jsonMode, tools, egress, progress, true);
     }
 
     /** Whether native tools are being offered on this call. */

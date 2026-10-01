@@ -292,6 +292,11 @@ public class LocalExecutor {
         // the model has sent anything -- rather than when the model finishes.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
                 .withProgress(parentContext.progress());
+        // Handed results to read and no tool to run: the work is reading them and answering, which
+        // the model does well without reasoning first. With reasoning it spent eleven minutes on a
+        // DHCP report on 2026-10-01 and then answered nothing; a delegation that runs tools keeps
+        // it, since choosing and ordering calls is where the reasoning pays.
+        if (readsWhatItWasGiven(plan, given)) request = request.answeringDirectly();
 
         // Turns in a row that ran nothing: no tool ran in them -- the reply was empty, held no tool
         // call, or every call it held was refused.
@@ -1056,6 +1061,12 @@ public class LocalExecutor {
      * @param said  the answer recorded by {@link #recordAnswer}, or null. The cloud is told its
      *              handle and size, never its text, and it joins what the delegation produced.
      */
+    /** A delegation handed results to read that names no tool, in its list or in a step. */
+    static boolean readsWhatItWasGiven(DelegationPlan plan, List<Artifact> given) {
+        return !given.isEmpty() && plan.tools().isEmpty()
+                && plan.steps().stream().allMatch(st -> st.tool() == null || st.tool().isBlank());
+    }
+
     static Outcome completed(String localSummary, String goal, List<Artifact> given,
                              List<Artifact> results, Artifact said) {
         boolean anyFailed = results.stream().anyMatch(r -> !r.succeeded());
