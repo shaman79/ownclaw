@@ -904,12 +904,16 @@ public class ThinkingEngine {
 
     /**
      * What the words beside a call are for, on both protocols: the owner reads them in the chat
-     * as the task goes ({@code TaskChat}), so they say what is happening, in his language. No
-     * length is asked for: on the text protocol these words are the model's reasoning too, and a
-     * sentence count asked of them is a cap on it.
+     * as the task goes ({@code TaskChat}), so they say what is happening, in his language. A
+     * progress update about the work, not the model's reasoning: asked for "what you are doing
+     * now and why", with no length given, claude-opus-5 wrote out its reasoning beside the call,
+     * and Anthropic declined the reply part-way as reasoning extraction
+     * ({@code stop_details.category} "reasoning_extraction"), which ended the owner's task on
+     * 2026-10-01. No length is asked for either way: a sentence count is a cap.
      */
-    static final String NARRATION = "write it for them, in their language -- what the last result "
-            + "showed, and what you are doing now and why.";
+    static final String NARRATION = "write it for them, in their language, as a progress update on "
+            + "the work -- what the last result showed and what you are doing next -- not your "
+            + "reasoning.";
 
     /** The text protocol's action, restated to a model whose reply was not one. */
     private static final String ACTION_FORMAT = "Reply with one JSON object: {\"reasoning\": "
