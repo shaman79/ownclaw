@@ -776,6 +776,30 @@ class DelegationBehaviourTest {
     }
 
     @Test
+    @DisplayName("a result the delegation was given is held to the same rule: a partial copy is refused, the whole passes")
+    void aGivenResultRetypedIsRefused() {
+        // A given result is read in the prompt and has no reference: typed out is the only way
+        // to send it on, and a typed-out copy is where a line goes missing.
+        String digest = DelegationSafetyTest.digest();
+        var ctx = task();
+        ctx.addArtifact("daily_news_digest", Map.of(), Map.of(), digest, true,
+                new Artifact.Decision(com.ownclaw.privacy.Label.PUBLIC, List.of()));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Scripted(
+                call("smtp_send_email", Map.of("to", "owner@example.org", "body", digest.substring(0, 900))),
+                call("smtp_send_email", Map.of("to", "owner@example.org", "body", digest)),
+                done("sent the digest"));
+
+        executor(llm, new Usage(), smtp).execute(plan("Email {{1}} to owner@example.org"), ctx, UNCOUNTED);
+
+        assertEquals(1, smtp.calls.size(), "the partial copy was not sent");
+        assertEquals(digest, smtp.calls.get(0).get("body"));
+        assertTrue(llm.allSeen().contains("A result you were given has no reference"), llm.allSeen());
+        // Mutation: check copies against the delegation's own results only -> the 900
+        // characters go out as the digest.
+    }
+
+    @Test
     @DisplayName("every turn carries the whole conversation: nothing older is dropped")
     void theWholeConversationIsSent() {
         var ping = new FakeTool("ping", false, List.of(), p -> ToolResult.success("pong " + p.get("n")));

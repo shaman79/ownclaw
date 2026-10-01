@@ -537,8 +537,8 @@ class TaskEndToEndTest {
         for (int i = 0; i < 3; i++) rig.cloud.think.add(c -> com.ownclaw.llm.Replies.of("", 300, 0, 0, 0, "end_turn"));
         AgentResult first = rig.turn(session, "check the network");
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, first.terminationReason());
-        assertTrue(first.response().startsWith("**Stopped:** The model produced nothing that could be run 3 "
-                + "times in a row.\n\n**What it did** — 4 steps, "), first.response());
+        assertTrue(first.response().startsWith("**Stopped:** The model produced nothing that could be run or "
+                + "delivered 3 times in a row.\n\n**What it did** — 4 steps, "), first.response());
         assertTrue(first.response().contains("\n1. ✓ noop"), first.response());
         assertTrue(first.response().contains("**Next:** Your next message starts a new task"), first.response());
 

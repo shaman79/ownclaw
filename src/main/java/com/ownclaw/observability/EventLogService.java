@@ -92,17 +92,26 @@ public class EventLogService {
     }
 
     /**
-     * Detailed token usage for today, broken down by cloud vs local from task_completed events.
+     * The event type of the local tokens billed to a task after its ending was recorded: a
+     * summary of one of its private results, still being written when it ended. Its details hold
+     * {@code localTokens}, as an ending's do.
+     */
+    public static final String TOKENS_AFTER_END = "tokens_after_end";
+
+    /**
+     * Detailed token usage for today, broken down by cloud vs local: from task_completed events,
+     * and the local tokens billed after a task's ending ({@link #TOKENS_AFTER_END}).
      */
     public Map<String, Object> tokenUsageDetailToday(String userId) {
         return jdbc.queryForMap("""
             SELECT COALESCE(SUM(tokens_used), 0) AS total_tokens,
                    COALESCE(SUM(json_extract(details, '$.cloudTokens')), 0) AS cloud_tokens,
                    COALESCE(SUM(json_extract(details, '$.localTokens')), 0) AS local_tokens,
-                   COUNT(*) AS task_count
+                   COALESCE(SUM(event_type = 'task_completed'), 0) AS task_count
             FROM events
-            WHERE user_id = ? AND event_type = 'task_completed' AND timestamp >= date('now')
-            """, userId);
+            WHERE user_id = ? AND event_type IN ('task_completed', ?)
+              AND timestamp >= date('now')
+            """, userId, TOKENS_AFTER_END);
     }
 
     /**

@@ -193,8 +193,8 @@ class EmptyReplyTest {
         AgentResult r = run(jdbc, cloud, ctx);
 
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
-        assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run 3 times "
-                + "in a row.\n\n"), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run or "
+                + "delivered 3 times in a row.\n\n"), r.response());
         assertEquals(3, cloud.requests.size());
 
         var turns = ctx.trajectory().turns();
@@ -228,7 +228,8 @@ class EmptyReplyTest {
         var script = new ArrayList<Object>();
         for (int i = 0; i < 6; i++) {
             script.add(empty());
-            script.add(call("fetch_page", Map.of()));
+            // A page each time: the same call made again and again is a loop the critic ends.
+            script.add(call("fetch_page", Map.of("page", i)));
         }
         script.add(respond("It is up."));
         var cloud = new Script(true, script.toArray());
@@ -248,18 +249,47 @@ class EmptyReplyTest {
     }
 
     @Test
-    @DisplayName("an answer between two empty replies ends the run of them, even one that is not delivered")
-    void anAnswerEndsTheRun(@TempDir Path tmp) throws Exception {
-        // {{7}} names no result, so the answer is refused and the model asked again -- but it was
-        // an answer, not a step that produced nothing.
-        var cloud = new Script(true, empty(), empty(), respond("{{7}}"), empty(), respond("Paris."));
-        var ctx = new AgentContext("u1", "t-between", "What is the capital of France?");
+    @DisplayName("an answer that is not delivered ran nothing: three such steps in a row end the task, an empty reply among them or not")
+    void anUndeliveredAnswerRanNothing(@TempDir Path tmp) throws Exception {
+        // {{7}} names no result, so the answer is refused and the model asked again. Counted as
+        // anything but a step that ran nothing, a model that kept answering it never ended.
+        var scripts = List.of(new Object[] {respond("{{7}}")},
+                new Object[] {empty(), empty(), respond("{{7}}"), respond("Paris.")});
+        for (int i = 0; i < scripts.size(); i++) {
+            var cloud = new Script(true, scripts.get(i));
+            var ctx = new AgentContext("u1", "t-undelivered", "What is the capital of France?");
 
-        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx);
+            AgentResult r = run(MigratedDatabase.at(tmp.resolve(i + ".db")), cloud, ctx);
+
+            assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+            assertEquals(3, cloud.requests.size());
+            assertTrue(r.response().startsWith("**Stopped:** The model produced nothing that could be run or "
+                    + "delivered 3 times in a row."), r.response());
+            assertTrue(ctx.trajectory().turns().get(1).observation().output()
+                    .contains("WARNING: one more step like this"), "warned before the step that stops it");
+        }
+    }
+
+    @Test
+    @DisplayName("answers that are not delivered, between steps that ran, do not end the task")
+    void undeliveredAnswersBetweenStepsThatRan(@TempDir Path tmp) throws Exception {
+        var registry = new ToolRegistry(List.of(AssistantPartsTest.tool("fetch_page", List.of(),
+                p -> "the page says the service is up")));
+        var script = new ArrayList<Object>();
+        for (int i = 0; i < 5; i++) {
+            script.add(respond("{{" + (i + 9) + "}}"));
+            script.add(respond("{{" + (i + 9) + "}}"));
+            script.add(call("fetch_page", Map.of("page", i)));
+        }
+        script.add(respond("It is up."));
+        var cloud = new Script(true, script.toArray());
+        var ctx = new AgentContext("u1", "t-between", "Is the service up?");
+
+        AgentResult r = run(MigratedDatabase.at(tmp.resolve("t.db")), cloud, ctx, registry, new OwnClawConfig());
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
-        assertEquals("Paris.", r.response());
-        assertEquals(5, cloud.requests.size());
+        assertEquals("It is up.", r.response());
+        assertEquals(16, cloud.requests.size());
     }
 
     @Test
@@ -335,7 +365,8 @@ class EmptyReplyTest {
 
         assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
         assertTrue(r.response().startsWith("**Stopped:** 3 steps in a row ran nothing: the model's reply could not "
-                + "be run 2 times, and the call to it failed 1 time (the last: " + UNREACHABLE + ").\n\n"), r.response());
+                + "be run or delivered 2 times, and the call to it failed 1 time (the last: " + UNREACHABLE
+                + ").\n\n"), r.response());
     }
 
     @Test

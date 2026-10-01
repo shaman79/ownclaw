@@ -96,7 +96,7 @@ public class TaskTraceService {
         int scrubs = 0;
         double cost = 0;
         boolean costIsFloor = false;
-        long prevCloud = 0, prevLocal = 0;
+        long prevCloud = 0, prevLocal = 0, localAfterEnd = 0;
         Map<String, Object> outcome = null;
         String request = null;
 
@@ -178,6 +178,11 @@ public class TaskTraceService {
                     artifacts.add(artifact(d.path("artifact").asText(), d));
                     artifactIds.add(id);
                 }
+                // Local tokens billed after the ending was recorded: a summary of a private result
+                // still being written when the task ended. Part of what the task used.
+                case EventLogService.TOKENS_AFTER_END -> {
+                    if (d != null) localAfterEnd += d.path("localTokens").asLong();
+                }
                 case "task_completed" -> {
                     request = row.get("summary") == null ? null : String.valueOf(row.get("summary"));
                     if (d != null) {
@@ -255,6 +260,10 @@ public class TaskTraceService {
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
+
+        if (outcome != null && localAfterEnd > 0) {
+            outcome.put("localTokens", ((Number) outcome.get("localTokens")).longValue() + localAfterEnd);
+        }
 
         var out = new LinkedHashMap<String, Object>();
         out.put("recorded", recorded);

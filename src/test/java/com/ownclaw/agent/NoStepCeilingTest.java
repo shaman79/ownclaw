@@ -91,6 +91,96 @@ class NoStepCeilingTest {
     }
 
     @Test
+    @DisplayName("a delegation whose every call is refused ran nothing: three such turns in a row end it")
+    void refusedTurnsRanNothing() {
+        var ping = new DelegationBehaviourTest.FakeTool("ping", false, List.of(), p -> ToolResult.success("pong"));
+        var send = new DelegationBehaviourTest.FakeTool("send_mail", true, List.of(), p -> ToolResult.success("sent"));
+        // Each refused before it runs: a reference to no result, a name no tool has, skill_create,
+        // and a change already made in this delegation.
+        var refused = Map.of(
+                "reference", DelegationBehaviourTest.call("ping", Map.of("host", "{{9}}")),
+                "unknown tool", DelegationBehaviourTest.call("read_file", Map.of()),
+                "skill_create", DelegationBehaviourTest.call("skill_create", Map.of("name", "reader")),
+                "repeated change", DelegationBehaviourTest.call("send_mail", Map.of("to", "owner@example.org")));
+        for (var kind : refused.entrySet()) {
+            var script = new ArrayList<String>();
+            for (int i = 0; i < 40; i++) script.add(kind.getValue());
+            var llm = new DelegationBehaviourTest.Scripted(script.toArray(String[]::new));
+
+            var outcome = DelegationBehaviourTest.executor(llm, new DelegationBehaviourTest.Usage(), ping, send)
+                    .execute(DelegationBehaviourTest.plan("ping and mail"), DelegationBehaviourTest.task(),
+                            DelegationBehaviourTest.UNCOUNTED);
+
+            assertFalse(outcome.ok(), kind.getKey());
+            assertTrue(outcome.text().startsWith("Delegation incomplete: the local model produced nothing that "
+                    + "could be run 3 turns in a row."), kind.getKey() + ": " + outcome.text());
+            int ran = "repeated change".equals(kind.getKey()) ? 1 : 0;
+            assertEquals(3 + ran, llm.calls.size(), kind.getKey() + ": asked no more after the third");
+            assertEquals(ran, send.calls.size() + ping.calls.size(), kind.getKey() + ": what ran");
+            send.calls.clear();
+            ping.calls.clear();
+        }
+        // Mutation: count only the turns that name no tool -> each runs until the script ends.
+    }
+
+    @Test
+    @DisplayName("a call the critic blocks ran nothing: blocked again and again, the task ends, and the chat shows only the steps that ran")
+    void blockedStepsRanNothing(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("ping", List.of(), p -> "the router answered")));
+        for (int i = 0; i < 40; i++) rig.cloud.think.add(call("ping", Map.of("host", "192.0.2.1")));
+
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Router"), "ping the router");
+
+        assertEquals(AgentResult.TerminationReason.FAILURE_LIMIT, r.terminationReason(), r.response());
+        assertEquals(6, rig.cloud.calls("think").size(), "three ran, then three were blocked in a row");
+        var told = r.trajectory().turns().stream().map(t -> t.observation().output()).toList();
+        assertTrue(told.get(3).startsWith("BLOCKED: ") && told.get(4).contains("WARNING: one more step like this"),
+                told.toString());
+        var rows = ProgressMessagesTest.progress(rig).stream().map(row -> String.valueOf(row.get("content"))).toList();
+        assertEquals(3, rows.size(), "a row for each step that ran, none for a blocked one: " + rows);
+        // Mutation: leave a blocked step out of the count -> it runs until the script ends;
+        // post the row before the critique -> six rows.
+    }
+
+    @Test
+    @DisplayName("failed calls never stop later ones: after three failures in a row, the next commands run")
+    void failuresDoNotBlockLaterCalls(@TempDir Path tmp) throws Exception {
+        var router = new DelegationBehaviourTest.FakeTool("openwrt_run", false, List.of(), p -> {
+            String cmd = String.valueOf(p.get("cmd"));
+            return cmd.startsWith("bad") ? ToolResult.failure("uci: Invalid argument: " + cmd)
+                    : ToolResult.success("ok " + cmd);
+        });
+        var rig = new LoopRig(tmp, List.of(router));
+        for (int i = 1; i <= 3; i++) rig.cloud.think.add(call("openwrt_run", Map.of("cmd", "bad " + i)));
+        for (int i = 1; i <= 6; i++) rig.cloud.think.add(call("openwrt_run", Map.of("cmd", "set rule " + i)));
+        rig.cloud.think.add(respond("The rules are set."));
+
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Router"), "fix the router");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals(9, router.calls.size(), "every command ran, the six after the failures too");
+        assertTrue(r.trajectory().turns().stream().noneMatch(t -> t.observation().output().startsWith("BLOCKED")));
+        // Mutation: block after five failures in a row, a reflection counted as one -> the
+        // fourth command onwards is refused.
+    }
+
+    @Test
+    @DisplayName("a tool used often is not warned about: how much a task uses a tool is no measure of a loop")
+    void noWarningForUsingAToolOften(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("openwrt_run", List.of(), p -> "ok " + p.get("cmd"))));
+        for (int i = 1; i <= 14; i++) rig.cloud.think.add(call("openwrt_run", Map.of("cmd", "set rule " + i)));
+        rig.cloud.think.add(respond("All fourteen rules are set."));
+
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Router"), "set the rules");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        var told = r.trajectory().turns().stream().map(t -> t.observation().output()).toList();
+        assertEquals(14, told.size());
+        assertTrue(told.stream().noneMatch(t -> t.contains("SYSTEM")), told.toString());
+        // Mutation: warn from the eleventh use -> the twelfth result onwards carries it.
+    }
+
+    @Test
     @DisplayName("skill_create failing again and again for one name is never refused; each failure lists the earlier errors")
     void aFailingSkillIsNeverRefused(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());

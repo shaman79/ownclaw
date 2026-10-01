@@ -245,8 +245,48 @@ class ProgressMessagesTest {
         assertEquals("Fetched and pinged.", r.response(), "the task finished while its summary was being written");
         assertTrue(progress(rig).stream().noneMatch(row -> String.valueOf(row.get("content")).startsWith("**Result")));
         release.countDown();
-        assertNotNull(awaitRow(rig, "**Result 1 (bank_fetch)** — summarised").get("private_content"),
-                "and it is posted when it is ready");
+        // Posted below the task's answer -- and maybe among the next task's rows -- it names its task.
+        var row = awaitRow(rig, "**Result 1 (bank_fetch)** of your message “fetch and ping” — summarised");
+        assertTrue(String.valueOf(row.get("private_content")).startsWith(
+                "**Result 1 (bank_fetch)** of your message “fetch and ping” — summarised by your local model, "
+                        + "not seen by the cloud:\n\n" + SUMMARY), "and it is posted when it is ready");
+        // Mutation: name it alike before and after the task ended -> "Result 1" of which task?
+    }
+
+    @Test
+    @DisplayName("a tool name the local model made up is refused, and never shown: not in the chat, not to the cloud")
+    void aMadeUpToolNameIsNeverShown(@TempDir Path tmp) throws Exception {
+        // Typed after it read the statement, the name can carry what it read: here the account.
+        String iban = "CZ6508000000192000145399";
+        var script = new java.util.ArrayDeque<>(List.of(DelegationBehaviourTest.call(iban, Map.of()),
+                DelegationBehaviourTest.done("The balance is in the statement.")));
+        var told = new CopyOnWriteArrayList<String>();
+        var local = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                if (m.get(0).content().startsWith("You summarise")) return Replies.of("a summary", 1, 1);
+                told.add(m.get(m.size() - 1).content());
+                return Replies.of(script.isEmpty() ? DelegationBehaviourTest.done("done") : script.poll(), 1, 1);
+            }
+            public boolean isAvailable() { return true; }
+            public String name() { return "ollama"; }
+        };
+        var rig = new LoopRig(tmp, List.of(BANK), 600, local);
+        rig.cloud.think.add(call("bank_fetch", Map.of()));
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Read {{1}} and give me the balance.")));
+        rig.cloud.think.add(respond("Done."));
+        String session = rig.chat.createSession("u1", "Bank");
+
+        rig.turn(session, "what is my balance?");
+        awaitRow(rig, "**Result 1 (bank_fetch)**");
+
+        assertTrue(told.get(1).contains("Not run: there is no tool named"), told.toString());
+        for (var row : progress(rig)) assertFalse(String.valueOf(row.get("content")).contains(iban), row.toString());
+        for (var call : rig.cloud.calls) {
+            for (var m : call.messages()) assertFalse(m.content().contains(iban), m.content());
+        }
+        assertEquals(List.of(), rig.jdbc.queryForList("SELECT tool_name FROM skill_usage WHERE tool_name = ?", iban));
+        // Mutation: record the call under the name the model wrote -> "Result 2 (CZ65...)" in
+        // the chat, and in the cloud's next prompt.
     }
 
     @Test

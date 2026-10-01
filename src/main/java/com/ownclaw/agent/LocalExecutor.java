@@ -149,10 +149,7 @@ public class LocalExecutor {
         // cloud is shown only as a description is what the local model is for. A name that is no
         // result is taken out, and the cloud is told.
         Given given = given(plan, parentContext.artifacts());
-        // While it runs, the task's private-result summaries wait: one local model, one request
-        // at a time (TaskChat).
-        Outcome outcome = parentContext.chat().whileDelegating(
-                () -> run(given.plan(), given.results(), parentContext, billed));
+        Outcome outcome = run(given.plan(), given.results(), parentContext, billed);
         String notes = "";
         if (given.missing() > 0) {
             log.warn("Delegation goal named {} result(s) that do not exist; taken out.", given.missing());
@@ -296,7 +293,8 @@ public class LocalExecutor {
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
                 .withProgress(parentContext.progress());
 
-        // Turns in a row that ran nothing: the reply was empty, or held no tool call.
+        // Turns in a row that ran nothing: no tool ran in them -- the reply was empty, held no tool
+        // call, or every call it held was refused.
         int nothingInARow = 0;
         for (int turn = 1; ; turn++) {
             if (parentContext.isCancelled()) {
@@ -406,13 +404,6 @@ public class LocalExecutor {
                 return completed(action.summary, plan.goal(), given, mine, said);
             }
 
-            // A turn whose every call names no tool ran nothing, as an empty one did.
-            if (actions.stream().noneMatch(a -> a.done || a.tool != null && !a.tool.isBlank())) {
-                if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
-            } else {
-                nothingInARow = 0;
-            }
-
             // Every call of the turn, in its order, through the same guards, and none dropped:
             // the model is told about each -- what it returned, or why it did not run. Each is
             // resolved just before it runs, so a call can use a result from earlier in the turn.
@@ -444,13 +435,20 @@ public class LocalExecutor {
                             + "numbering from the results you have now.";
                 } else {
                     int had = mine.size();
-                    reply = act(action, parentContext, mine, nativeTools, plan, turn);
+                    reply = act(action, parentContext, mine, given, nativeTools, plan, turn);
                     if (mine.size() == had) didNotRun = i + 1;
                 }
                 String name = action.done ? "done" : action.tool;
                 replies.add(actions.size() == 1 ? reply : "[call " + (i + 1) + " of "
                         + actions.size() + (name == null || name.isBlank() ? "" : ": " + name)
                         + "] " + reply);
+            }
+            // A turn in which no tool ran -- each of its calls was no call, or was refused -- ran
+            // nothing, as an empty one did, whatever it named.
+            if (mine.size() == before) {
+                if (++nothingInARow == AgentLoop.NOTHING_TO_RUN_IN_A_ROW) return ranNothing(mine);
+            } else {
+                nothingInARow = 0;
             }
             String told = String.join("\n\n", replies);
             if (mine.size() > before) {
@@ -484,7 +482,7 @@ public class LocalExecutor {
      * the model is told about it: the result, or why the call did not run.
      */
     private String act(ExecutorAction action, AgentContext parentContext, List<Artifact> mine,
-                       boolean nativeTools, DelegationPlan plan, int turn) {
+                       List<Artifact> given, boolean nativeTools, DelegationPlan plan, int turn) {
         if (action.tool == null || action.tool.isBlank()) {
             // Local LLM produced something unparseable — tell it, so it can recover
             return nativeTools
@@ -499,6 +497,17 @@ public class LocalExecutor {
         if ("skill_create".equals(action.tool)) {
             return "ERROR: skill_create is not available during delegation. "
                     + "Only existing tools can be used. Pick a different tool from the plan.";
+        }
+
+        // A name no tool has runs nothing, and leaves no result. Recorded, the name would be the
+        // result's tool in everything that names one -- the delegation's report to the cloud,
+        // the owner's chat, the usage table, the log -- and a name the local model wrote after
+        // reading private data can carry what it read. Only the model itself is told it.
+        Tool target = toolRegistry.find(action.tool).orElse(null);
+        if (target == null) {
+            log.warn("Delegation turn {}: a call to a tool that does not exist — refused.", turn);
+            return "Not run: there is no tool named '" + action.tool + "'. Call one of the tools "
+                    + "you were given, by its exact name.";
         }
 
         // One resolution of the arguments, used by every check below and by the call itself.
@@ -529,7 +538,6 @@ public class LocalExecutor {
         // never repeated anywhere in the task. The earlier output is not shown: showing an
         // earlier delegation's output is how a PRIVATE result reached the local model and
         // then, reworded in its summary, the cloud.
-        Tool target = toolRegistry.find(action.tool).orElse(null);
         Artifact triedHere = priorSideEffect(target, params, mine, false);
         Artifact doneInTask = priorSideEffect(target, params, parentContext.artifacts(), true);
         if (triedHere != null || doneInTask != null) {
@@ -546,27 +554,30 @@ public class LocalExecutor {
         // One thing neither guard catches: a result typed out again by hand instead of passed
         // on by its reference -- which is where a date, a line or a whole section goes missing,
         // and the model cannot see what it dropped. Text it composes itself is its own to send.
-        String copied = retyped(target, action.params, mine, planText(plan));
+        // A result it was given is read in its prompt and has no reference: typing it out is the
+        // only way to pass it on, so a copy of one is held to the same rule.
+        String copied = retyped(target, action.params, readBy(given, mine), planText(plan));
         if (copied != null) {
             log.warn("Delegation step {}: '{}' repeats part of an earlier result without being "
                     + "all of it — refused.", mine.size() + 1, copied);
             return "Not run: the '" + copied + "' value repeats part of an earlier result "
                     + "without being all of it — a copy typed out by hand, which is how a date, a "
-                    + "line or a section goes missing. To pass a result on, make the WHOLE value "
-                    + "its reference: it is substituted exactly. " + References.available(mine)
+                    + "line or a section goes missing. To pass one of your results on, make the "
+                    + "WHOLE value its reference: it is substituted exactly. "
+                    + References.available(mine)
+                    + (given.isEmpty() ? "" : " A result you were given has no reference: pass it "
+                            + "on whole, exactly as given, or not at all.")
                     + " Text you compose yourself is fine; a partial copy of a result is not.";
         }
 
         // ACT: execute the tool -- said in the owner's chat first, so the work on the local
-        // tier is seen as it happens. Named as the registry names it: a name the local model
-        // wrote after reading private data can carry what it read, and a progress row's content
-        // is what the cloud could be shown.
-        if (target != null) parentContext.chat().localTurn(turn, target.name());
+        // tier is seen as it happens.
+        parentContext.chat().localTurn(turn, target.name());
         statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
         long toolStartMs = System.currentTimeMillis();
-        ToolResult result = executeToolDirect(action.tool, params, parentContext);
+        ToolResult result = executeToolDirect(target, params, parentContext);
         long toolMs = System.currentTimeMillis() - toolStartMs;
         // A finished call is progress. The calls of a turn run back to back, with no model call
         // between them to say the task is alive, and the stall watchdog would otherwise count
@@ -584,10 +595,9 @@ public class LocalExecutor {
         // echoes its input -- or a file written and then read back -- hands that straight
         // into the output. AgentContext.decide makes such a result PRIVATE and unindexed.
         boolean wroteAfterPrivate = parentContext.localTierReadPrivate();
-        Artifact.Decision decision = parentContext.decide(
-                target == null ? List.of() : target.requiredCredentials(), refs.used(),
+        Artifact.Decision decision = parentContext.decide(target.requiredCredentials(), refs.used(),
                 wroteAfterPrivate, toolResult);
-        Artifact artifact = parentContext.addArtifact(action.tool, action.params, params,
+        Artifact artifact = parentContext.addArtifact(target.name(), action.params, params,
                 toolResult, toolOk, decision);
         mine.add(artifact);
         if (artifact.isPrivate()) {
@@ -807,17 +817,11 @@ public class LocalExecutor {
     }
 
     /**
-     * Execute a tool directly from the registry.
+     * Execute a tool of the registry directly.
      * Simplified version of AgentLoop.executeTool() without LongRunningTaskManager.
      */
-    private ToolResult executeToolDirect(String toolName, Map<String, Object> params, AgentContext context) {
-        var toolOpt = toolRegistry.find(toolName);
-        if (toolOpt.isEmpty()) {
-            return ToolResult.failure("Tool '" + toolName + "' not found. Available: " +
-                    String.join(", ", toolRegistry.names()));
-        }
-
-        Tool tool = toolOpt.get();
+    private ToolResult executeToolDirect(Tool tool, Map<String, Object> params, AgentContext context) {
+        String toolName = tool.name();
         // What the cloud path hands a skill (AgentContext#toolContext): the task's files, its
         // stop, and a report_progress that is progress for the stall watchdog -- shown to the
         // owner here as a delegation step's status line. With no callback the sandbox would
@@ -921,21 +925,25 @@ public class LocalExecutor {
      * September the news digest went out as 2,073 characters the local model had written itself
      * from a 2,745-character source. "Repeats" is the canary's own notion -- a
      * {@link PrivateIndex#WINDOW}-character run of a result's text, normalised the way the canary
-     * normalises it -- applied to every result this delegation can reference. An argument
-     * byte-equal to a result is a perfect copy and passes, however wasteful. Checked on the
-     * arguments as the model WROTE them, where a reference is a short token that repeats nothing,
-     * and only where a reference could have been written instead: a top-level string of a tool
-     * that changes something, against results that succeeded.
+     * normalises it -- applied to every result this delegation has read: the earlier results it
+     * was given, which have no reference and can only be passed on typed out, and its own. An
+     * argument byte-equal to a result is a perfect copy and passes, however wasteful. Checked on
+     * the arguments as the model WROTE them, where a reference is a short token that repeats
+     * nothing, and only where a partial copy can do harm: a top-level string of a tool that
+     * changes something, against results that succeeded.
      * <p>
      * A run is a result's only when the model had it from nowhere else. One it wrote itself, in
      * an argument of an earlier call, or was given in the plan, is its own however many results
      * echo it -- the allowance the canary makes for the cloud's own arguments
      * (AgentContext's Excuses), made here: a send echoes the subject it was given and a write
      * the path, and the same subject to a second recipient, or the file just written as an
-     * attachment, was refused as a copy of the echo. An earlier argument that is a whole result
-     * typed out is that result, not the model's words, and excuses nothing. So text the model
-     * composed passes, of any length, and only a partial or altered copy of a result is refused.
+     * attachment, was refused as a copy of the echo. The arguments of the call that made a
+     * result it was given are excused the same way: whoever wrote them, they are not that
+     * result's data. An earlier argument that is a whole result typed out is that result, not
+     * the model's words, and excuses nothing. So text the model composed passes, of any length,
+     * and only a partial or altered copy of a result is refused.
      *
+     * @param done  the results the model has read: those it was given, then its own
      * @param given what the model was given to work from ({@link #planText})
      */
     static String retyped(Tool tool, Map<String, Object> written, List<Artifact> done,

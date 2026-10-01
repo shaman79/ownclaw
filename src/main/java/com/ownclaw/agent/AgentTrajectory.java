@@ -92,12 +92,23 @@ public class AgentTrajectory {
     }
 
     /**
-     * Count how many consecutive failures have occurred at the tail of the trajectory.
+     * The steps the model took, in order: every turn but the ones the loop recorded itself
+     * ({@link Turn#byTheLoop}). What looks back for a run of failed, empty or repeated steps
+     * reads these, so a reflection the loop injects between two failures neither adds to the run
+     * nor ends it.
+     */
+    public List<Turn> modelSteps() {
+        return turns.stream().filter(t -> !t.byTheLoop()).toList();
+    }
+
+    /**
+     * Count how many of the model's steps at the tail ({@link #modelSteps}) failed in a row.
      */
     public int consecutiveFailures() {
+        var steps = modelSteps();
         int count = 0;
-        for (int i = turns.size() - 1; i >= 0; i--) {
-            if (!turns.get(i).observation().success()) {
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            if (!steps.get(i).observation().success()) {
                 count++;
             } else {
                 break;
@@ -107,14 +118,15 @@ public class AgentTrajectory {
     }
 
     /**
-     * Count consecutive "hollow" results at the tail — tool calls that technically
-     * succeeded but produced empty or trivially short output, suggesting the tool
-     * is broken or returning nothing useful.
+     * Count consecutive "hollow" results among the model's steps at the tail
+     * ({@link #modelSteps}) — tool calls that technically succeeded but produced empty or
+     * trivially short output, suggesting the tool is broken or returning nothing useful.
      */
     public int consecutiveHollowResults() {
+        var steps = modelSteps();
         int count = 0;
-        for (int i = turns.size() - 1; i >= 0; i--) {
-            var obs = turns.get(i).observation();
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            var obs = steps.get(i).observation();
             String out = obs.output();
             if (obs.success() && (out == null || out.isBlank() || out.length() < 10)) {
                 count++;
@@ -123,15 +135,6 @@ public class AgentTrajectory {
             }
         }
         return count;
-    }
-
-    /**
-     * Count how many times a specific tool has been invoked.
-     */
-    public long toolInvocationCount(String toolName) {
-        return turns.stream()
-                .filter(t -> t.action().tool().equals(toolName))
-                .count();
     }
 
     /**

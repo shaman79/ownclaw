@@ -63,12 +63,10 @@ public class ConversationService {
     public String saveMessage(String userId, String sessionId, String role, String content,
                               List<String> attachmentIds, String taskId, String privateContent) {
         String messageId = UUID.randomUUID().toString();
-        String metadata = taskId != null && taskId.matches("[0-9a-f]{8}")
-                ? "{\"taskId\":\"" + taskId + "\"}" : null;
         jdbc.update("""
             INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, messageId, userId, sessionId, role, content, metadata, privateContent);
+            """, messageId, userId, sessionId, role, content, metadataOf(taskId), privateContent);
 
         // Link file attachments to this message
         if (attachmentIds != null) {
@@ -77,15 +75,46 @@ public class ConversationService {
                         messageId, fileId);
             }
         }
+        touch(sessionId, role, content);
+        return messageId;
+    }
 
-        // Update session timestamp and preview (the first user message, whole, is the preview;
-        // the sidebar lays it out)
+    /**
+     * Save a running task's progress row ({@code TaskChat}), as {@link #saveMessage} saves a row
+     * of role {@code progress} -- but only while its chat exists. A summary of a private result
+     * can be written minutes after its task ended; saved into a chat the owner had deleted in the
+     * meantime, it was a row of no chat, which no page showed and no delete reached.
+     *
+     * @return whether it was saved: false when the chat is gone
+     */
+    public boolean saveProgress(String userId, String sessionId, String content, String taskId,
+                                String privateContent) {
+        int saved = jdbc.update("""
+            INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
+            SELECT ?, ?, ?, 'progress', ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?)
+            """, UUID.randomUUID().toString(), userId, sessionId, content, metadataOf(taskId),
+                privateContent, sessionId, userId);
+        if (saved == 0) return false;
+        touch(sessionId, "progress", content);
+        return true;
+    }
+
+    /** A row's metadata (JSON): its task, when it has a well-formed 8-character task id. */
+    private static String metadataOf(String taskId) {
+        return taskId != null && taskId.matches("[0-9a-f]{8}") ? "{\"taskId\":\"" + taskId + "\"}" : null;
+    }
+
+    /**
+     * Update the chat's timestamp and preview after a row is saved in it (the first user message,
+     * whole, is the preview; the sidebar lays it out).
+     */
+    private void touch(String sessionId, String role, String content) {
         jdbc.update("""
             UPDATE chat_sessions SET updated_at = datetime('now'),
                 preview = COALESCE(preview, CASE WHEN ? = 'user' THEN ? ELSE preview END)
             WHERE id = ?
             """, role, content, sessionId);
-        return messageId;
     }
 
     /**

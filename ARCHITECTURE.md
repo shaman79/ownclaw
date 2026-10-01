@@ -214,10 +214,11 @@ The local model runs on one Ollama server, and its GPU is the scarce resource. T
 | Operation | Needs Ollama? | Can run in parallel? |
 |-----------|:---:|:---:|
 | Executor: a delegation's steps | Yes | One task per queue lane |
+| Local model: summary of a private result | Yes | One at a time, and only while no task's work is on the local model |
 | Mentor: plan/review | No (cloud API) | Yes (independent) |
 | SkillRunner: execute script | No (Python process) | Yes (multiple sandboxes) |
 
-**This means**: with the background lane on, while one task waits on the local model, the other can be running a skill or waiting on a cloud call. The queue runs one task per lane, and nothing else serializes local calls: the Ollama server decides how many of its own inferences run at once.
+**This means**: with the background lane on, while one task waits on the local model, the other can be running a skill or waiting on a cloud call. The queue runs one task per lane. The local model's summaries of an attended task's private results are background work (`LocalLane`): written one at a time, after their task has ended too, and a summary under way makes way for a task's local work and is written again afterwards. Nothing else serializes local calls: the Ollama server decides how many of its own inferences run at once.
 
 ### 3.4 Async & Long-Running Tasks
 

@@ -22,11 +22,14 @@ import java.util.List;
  * The task queue: tasks are submitted and run asynchronously, in priority order, one at a time
  * per lane -- one lane, unless {@code separate-background-lane} gives background work a second.
  * <p>
- * It serializes tasks, not Ollama. With one lane no two queued tasks run at once, so neither do
- * their local calls; with two, an interactive and a background task can both call Ollama. Work
- * outside the queue -- an agent run from the ops or debug API, the ops Ollama probe, the setup
- * benchmark -- can call it beside a task. Nothing else serializes local calls: the Ollama server
- * decides whether requests that arrive together run side by side or one after the other.
+ * It serializes tasks, not Ollama. With one lane no two queued tasks run at once; with two, an
+ * interactive and a background task can both call Ollama. Beside them the local model writes its
+ * summaries of the private results of attended tasks, ended ones too -- but only while no task's
+ * work is on it: a summary under way makes way for that, and is written again afterwards
+ * ({@code LocalLane}). Work outside the queue -- an agent run from the ops or debug API, the ops
+ * Ollama probe, the setup benchmark -- can call it beside a task. Nothing else serializes local
+ * calls: the Ollama server decides whether requests that arrive together run side by side or one
+ * after the other.
  */
 @Service
 public class TaskQueue {

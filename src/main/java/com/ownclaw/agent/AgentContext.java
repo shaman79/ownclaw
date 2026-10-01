@@ -58,6 +58,8 @@ public class AgentContext {
     private int localTokens;
     private int cloudTokens;
     private double cloudCostUsd;
+    /** See {@link #closeCounters}. */
+    private boolean countersClosed;
 
     /** Where the task reports its progress; see {@link TaskChat}. */
     private volatile TaskChat chat = TaskChat.NONE;
@@ -168,17 +170,15 @@ public class AgentContext {
     }
 
     /**
-     * End the model calls this task is waiting on: its own, if it is waiting on one, and the
-     * local model's summary of a private result, if one is being written ({@link TaskChat}). A
-     * stop is otherwise heard on the next event of the reply ({@link #progress}), and a call that
-     * sends nothing -- Ollama loading the model and reading the prompt, a cloud call before its
-     * first event, a call waiting minutes to try again after an overload -- has no next event: it
-     * ran until its read timeout, most of an hour for Ollama, or to the end of its wait.
+     * End the model call this task is waiting on, if it is waiting on one. A stop is otherwise
+     * heard on the next event of the reply ({@link #progress}), and a call that sends nothing --
+     * Ollama loading the model and reading the prompt, a cloud call before its first event, a
+     * call waiting minutes to try again after an overload -- has no next event: it ran until its
+     * read timeout, most of an hour for Ollama, or to the end of its wait.
      */
     public void interruptCall() {
         Runnable cancel = callInFlight;
         if (cancel != null) cancel.run();
-        chat.interrupt();
     }
 
     /** What the stall watchdog stopped this task on, or null when it has not. */
@@ -267,10 +267,28 @@ public class AgentContext {
 
     // Synchronized: the local model's summaries of private results are counted from their own
     // thread (TaskChat), beside the task's.
-    public synchronized void addLocalTokens(int tokens) { this.localTokens += tokens; }
+
+    /**
+     * Count local tokens on the task -- unless its ending has been written ({@link #closeCounters}):
+     * then they are not counted here, and the caller records them apart.
+     *
+     * @return whether they were counted
+     */
+    public synchronized boolean addLocalTokens(int tokens) {
+        if (countersClosed) return false;
+        this.localTokens += tokens;
+        return true;
+    }
     public synchronized void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
     public synchronized int localTokens() { return localTokens; }
     public synchronized int cloudTokens() { return cloudTokens; }
+
+    /**
+     * The task is ending: from now on its counters stay as its ending reads and records them. A
+     * summary of a private result can still be written after it (TaskChat), and its tokens are
+     * then not added here ({@link #addLocalTokens}).
+     */
+    public synchronized void closeCounters() { countersClosed = true; }
 
     /** What a cloud call made for this task cost, in USD, at the rates ModelPricing knows. */
     public synchronized void addCloudCost(double usd) { this.cloudCostUsd += usd; }
