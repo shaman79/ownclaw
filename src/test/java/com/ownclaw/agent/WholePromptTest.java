@@ -59,7 +59,7 @@ class WholePromptTest {
         var engine = new ThinkingEngine(new ToolRegistry(library()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "do something");
         for (String provider : List.of("anthropic", "openai")) {
-            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false)));
+            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false, false)));
             for (Tool t : library()) {
                 assertTrue(prompt.contains(t.name() + ": " + t.description()),
                         provider + " shows " + t.name() + " without its whole description");
@@ -75,7 +75,7 @@ class WholePromptTest {
         var engine = new ThinkingEngine(new ToolRegistry(library()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "the morning digest");
         ctx.setUnattended(true);
-        String delegate = engine.toolsFor(ctx, new ThinkingEngine.StepMode(true, true)).stream()
+        String delegate = engine.toolsFor(ctx, new ThinkingEngine.StepMode(true, true, false)).stream()
                 .filter(s -> AgentAction.DELEGATE.equals(s.name())).map(ToolSpec::description)
                 .findFirst().orElseThrow();
         for (Tool t : library()) {
@@ -88,7 +88,7 @@ class WholePromptTest {
     void theWholeSystemPromptOnEveryStep() {
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "do something");
-        var mode = new ThinkingEngine.StepMode(false, false);
+        var mode = new ThinkingEngine.StepMode(false, false, false);
         String first = engine.buildMessages(ctx, "openai", mode).get(0).content();
         ctx.trajectory().record(new AgentAction("fetch", Map.of(), "fetching"),
                 AgentObservation.success("fetch", "page", Map.of(), 5));
@@ -107,7 +107,7 @@ class WholePromptTest {
         var ctx = new AgentContext("u1", "t1", "do something");
         for (boolean nativeTools : new boolean[] {true, false}) {
             String system = engine.buildMessages(ctx, "anthropic",
-                    new ThinkingEngine.StepMode(nativeTools, false)).get(0).content();
+                    new ThinkingEngine.StepMode(nativeTools, false, false)).get(0).content();
             assertFalse(system.contains("1-2 sentences") || system.contains("sentence or two")
                     || system.contains("truncation"), system);
         }
@@ -122,7 +122,7 @@ class WholePromptTest {
                 AgentObservation.success("noop", "nothing to report", Map.of(), 5));
         ctx.markDeclinedAsReasoning();
         for (String provider : List.of("anthropic", "openai")) {
-            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false)));
+            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false, false)));
             assertTrue(prompt.contains("Single JSON: {\"tool\": \"name\", \"params\": {...}}"), prompt);
             assertFalse(prompt.contains("\"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION)
                     || prompt.contains("Checking the network first."), prompt);
@@ -143,11 +143,11 @@ class WholePromptTest {
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "do it like last time");
         for (boolean nativeTools : new boolean[] {true, false}) {
-            String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false)));
+            String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false, false)));
             assertTrue(prompt.contains("memory_manage action=recall"), prompt);
             assertFalse(prompt.contains("## Past Experience"), "no past task is put into the prompt by itself: " + prompt);
         }
-        String text = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(false, false)));
+        String text = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(false, false, false)));
         assertTrue(text.contains("memory_manage(action=store|list|delete|recall, [key], [content], [query])"), text);
     }
 
@@ -161,7 +161,7 @@ class WholePromptTest {
         ToolSpec memory = SpecialActionSchemas.ALL.stream()
                 .filter(t -> AgentAction.MEMORY_MANAGE.equals(t.name())).findFirst().orElseThrow();
         for (boolean nativeTools : new boolean[] {true, false}) {
-            String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false)));
+            String prompt = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(nativeTools, false, false)));
             assertTrue(prompt.contains("## Prior Context") && prompt.contains("record of task 4b22f2c5"),
                     "the premise: the request shows this chat's earlier task");
             for (String told : List.of(prompt, memory.description())) {
@@ -187,7 +187,7 @@ class WholePromptTest {
                             AgentObservation.success("ping", "up", Map.of(), 5));
                 }
                 for (boolean nativeTools : new boolean[] {true, false}) {
-                    var mode = new ThinkingEngine.StepMode(nativeTools, false);
+                    var mode = new ThinkingEngine.StepMode(nativeTools, false, false);
                     String system = engine.buildMessages(ctx, "anthropic", mode).get(0).content();
                     for (String provider : List.of("anthropic", "openai", "ollama")) {
                         List<LlmMessage> messages = engine.buildMessages(ctx, provider, mode);
@@ -212,7 +212,7 @@ class WholePromptTest {
         ctx.trajectory().record(new AgentAction("smtp_send_email",
                         Map.of("to", "team@example.org", "subject", "Weekly report", "body", "{{1}}"), ""),
                 AgentObservation.success("smtp_send_email", "Sent", Map.of(), 12));
-        var mode = new ThinkingEngine.StepMode(true, false);
+        var mode = new ThinkingEngine.StepMode(true, false, false);
         String replayed = engine.buildMessages(ctx, "anthropic", mode).stream()
                 .filter(m -> m.role() == LlmMessage.Role.ASSISTANT).findFirst().orElseThrow().content();
         for (String provider : List.of("openai", "ollama")) {
@@ -233,7 +233,7 @@ class WholePromptTest {
         var ctx = new AgentContext("u1", "t1", "do something");
         var redactor = new com.ownclaw.privacy.Redactor(null);
         for (boolean nativeTools : List.of(true, false)) {
-            var mode = new ThinkingEngine.StepMode(nativeTools, false);
+            var mode = new ThinkingEngine.StepMode(nativeTools, false, false);
             var texts = new ArrayList<String>();
             for (LlmMessage m : engine.buildMessages(ctx, "anthropic", mode)) texts.add(m.content());
             for (ToolSpec t : engine.toolsFor(ctx, mode)) {

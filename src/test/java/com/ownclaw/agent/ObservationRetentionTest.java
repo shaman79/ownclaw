@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ObservationRetentionTest {
 
-    private static final ThinkingEngine.StepMode NATIVE = new ThinkingEngine.StepMode(true, false);
+    private static final ThinkingEngine.StepMode NATIVE = new ThinkingEngine.StepMode(true, false, false);
 
     private static ThinkingEngine engine() {
         var registry = new ToolRegistry(List.of());

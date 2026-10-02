@@ -695,7 +695,7 @@ public class AgentLoop {
                                 + " capability — creating skill deterministically");
                 // No model chose this step, so nothing was written beside it; its code is written
                 // on the cloud, or on the local model when the cloud is not available.
-                context.chat().step(step + 1, action, null, !llmRouter.cloud().isAvailable());
+                context.chat().step(step + 1, action, null, llmRouter.isLocal(llmRouter.selectProvider(context)));
 
                 if (debug) {
                     emitDebug(context.userId(),
@@ -765,12 +765,19 @@ public class AgentLoop {
                 continue;
             } catch (LlmException noReply) {
                 // What the engine does not ask again (ThinkingEngine): a limit of the model, a
-                // request the provider refused as it stands.
+                // request the provider refused as it stands, a provider that cannot be reached.
+                // A cloud that cannot be reached is asked once more or handed over to the local
+                // model, and the step is taken again; anything else ends the task, saying which.
+                if (!local && noReply.unreachable() && goesOnWithoutTheCloud(context, provider, noReply)) {
+                    step--; // the same step, asked again
+                    continue;
+                }
                 return noAnswer(context, local, provider, noReply.reply(), noReply);
             } finally {
                 stopHeartbeat(thinkHeartbeat);
             }
             context.markProgress(); // LLM responded — task is alive
+            if (!local && thinkResult.reply() != null) context.cloudAnswered();
             AgentAction action = thinkResult.action();
             int billed = account(context, local, provider, thinkResult.reply());
             // One tool call runs per step. The others the reply made are not dropped unsaid: the
@@ -1430,8 +1437,13 @@ public class AgentLoop {
             case "read" -> skillManager.readSkill(name);
             case "delete" -> skillManager.deleteSkill(name);
             case "list" -> skillManager.listSkills();
-            case "analyze" -> skillManager.analyzeSkills(context.egress("analyze"), context.progress(),
-                    accountOf(context));
+            case "analyze" -> {
+                LlmProvider provider = llmRouter.selectProvider(context);
+                java.util.function.Supplier<String> analysis = () -> skillManager.analyzeSkills(provider,
+                        context.egress("analyze"), context.progress(), accountOf(context));
+                // On the local model: work the task waits on, as its steps are.
+                yield llmRouter.isLocal(provider) ? lane.foreground(analysis) : analysis.get();
+            }
             default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
     }
@@ -2057,7 +2069,7 @@ public class AgentLoop {
         long startMs = System.currentTimeMillis();
         String result = skillManager.nameRefusal(str(action.params(), "name"));
         if (result == null) {
-            Codegen code = generateSkillCodeWithCloud(action.params(), context);
+            Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
         }
         long durationMs = System.currentTimeMillis() - startMs;
@@ -2067,8 +2079,10 @@ public class AgentLoop {
     }
 
     /**
-     * Write a skill's Python on the cloud model, or on the local one when the cloud is not
-     * available. The thinking model decides what the skill is; this writes its code.
+     * Write a skill's Python on the model the task's calls go to ({@link LlmRouter#selectProvider}):
+     * the cloud, or the local model -- local only, no cloud configured, or a cloud that could not
+     * be reached, here or earlier in the task. The thinking model decides what the skill is; this
+     * writes its code.
      * <p>
      * One loop over attempts: the first reply, then up to {@link #SYNTAX_REPAIRS} repairs of a
      * syntax error. A repair sends the specification and the latest attempt only, in the
@@ -2082,19 +2096,17 @@ public class AgentLoop {
      * Stop ends it; between calls the stop is checked before the next is sent. Every call's
      * tokens are counted against the tier that did the work.
      */
-    Codegen generateSkillCodeWithCloud(Map<String, Object> originalParams, AgentContext context) {
+    Codegen generateSkillCode(Map<String, Object> originalParams, AgentContext context) {
         String name = str(originalParams, "name");
-        LlmProvider provider = llmRouter.cloud();
-        boolean local = !provider.isAvailable();
-        if (local) {
-            provider = llmRouter.local();
-            if (provider == null || !provider.isAvailable()) {
-                log.error("Both cloud and local providers unavailable — cannot generate skill code");
-                return Codegen.failed("no model can write the code for '" + name + "': neither the "
-                        + "cloud model nor the local model is available, so nothing was created.");
-            }
-            log.warn("Cloud provider unavailable — falling back to local LLM for skill code generation (degraded quality)");
+        LlmProvider provider = llmRouter.selectProvider(context);
+        boolean local = llmRouter.isLocal(provider);
+        if (!provider.isAvailable()) {
+            log.error("No model available to write the code of '{}'", name);
+            return Codegen.failed("no model can write the code for '" + name + "': " + (local
+                    ? "the local model is not available" : "neither the cloud model nor the local "
+                    + "model is available") + ", so nothing was created.");
         }
+        if (local) log.warn("The code of '{}' is written on the local model (degraded quality)", name);
 
         String description = str(originalParams, "description");
         String parameters = str(originalParams, "parameters");
@@ -2177,6 +2189,15 @@ public class AgentLoop {
                 return Codegen.failed("the request for the code of '" + name + "' was not sent ("
                         + refused.getMessage() + "), so nothing was created.");
             } catch (LlmException callFailed) {
+                if (!local && callFailed.unreachable() && goesOnWithoutTheCloud(context, provider, callFailed)) {
+                    if (!context.onLocal()) {
+                        attempt--; // the same attempt, asked of the cloud once more
+                        continue;
+                    }
+                    // Written from the start on the local model, whose prompt is its own.
+                    stopHeartbeat(heartbeat);
+                    return generateSkillCode(originalParams, context);
+                }
                 return Codegen.failed("the request for the code of '" + name + "' failed ("
                         + callFailed.getMessage() + "), so nothing was created.");
             } finally {
@@ -2184,6 +2205,7 @@ public class AgentLoop {
             }
             // A reply came back: the task is alive, whatever the reply holds.
             context.markProgress();
+            if (!local) context.cloudAnswered();
             account(context, local, provider, reply);
 
             String code = extractPythonCode(reply.content());
@@ -2303,6 +2325,8 @@ public class AgentLoop {
         String clause;
         if (why instanceof ProviderRefused declined) {
             clause = TaskEnding.declined(declined);
+        } else if (why.unreachable()) {
+            clause = TaskEnding.unreachable(why, local, llmRouter.localOnly());
         } else {
             // A provider's own error can quote the request it refused.
             String said = quotable(why.getMessage(), context);
@@ -2311,6 +2335,30 @@ public class AgentLoop {
         return why instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
                 ? AgentResult.contextWindow(clause, context.trajectory(), context.elapsedMs())
                 : AgentResult.error(clause, context.trajectory(), context.elapsedMs());
+    }
+
+    /**
+     * After a call to the cloud model that could not reach it ({@link LlmException#unreachable}):
+     * whether the task goes on. The first of a task's calls in a row whose connection failed is
+     * made again on the cloud -- a connection that broke off once is often back. Otherwise the
+     * rest of the task runs on the local model, when it answers, with a note in the chat saying
+     * why; when it does not, the task ends ({@link #noAnswer}). A reply it came with is billed.
+     */
+    private boolean goesOnWithoutTheCloud(AgentContext context, LlmProvider cloud, LlmException why) {
+        if (why.connectionFailed() && context.countCloudConnectionFailure() == 1) {
+            account(context, false, cloud, why.reply());
+            log.warn("Task {}: the connection to the cloud model failed ({}); asking it once more",
+                    context.taskId(), why.getMessage());
+            return true;
+        }
+        if (!llmRouter.canGoLocal()) return false;
+        account(context, false, cloud, why.reply());
+        String because = TaskEnding.cloudUnreachable(why);
+        log.warn("Task {}: the cloud model cannot be reached ({}: {}); the rest of the task runs on "
+                + "the local model", context.taskId(), because, why.getMessage());
+        context.goLocal(because);
+        context.chat().onLocalModel(cloud.name(), because);
+        return true;
     }
 
     /**

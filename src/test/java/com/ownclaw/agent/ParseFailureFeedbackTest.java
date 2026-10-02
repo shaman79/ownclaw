@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ParseFailureFeedbackTest {
 
-    private static final ThinkingEngine.StepMode TEXT = new ThinkingEngine.StepMode(false, false);
+    private static final ThinkingEngine.StepMode TEXT = new ThinkingEngine.StepMode(false, false, false);
 
     private static ThinkingEngine engine() {
         var registry = new ToolRegistry(List.of());

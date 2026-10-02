@@ -76,7 +76,7 @@ class PrivateObservationRenderingTest {
     private static List<String> allText(ThinkingEngine engine, AgentContext ctx) {
         var out = new ArrayList<String>();
         for (String provider : List.of("anthropic", "openai")) {
-            for (LlmMessage m : engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false))) {
+            for (LlmMessage m : engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false))) {
                 out.add(m.content());
             }
         }
@@ -121,7 +121,7 @@ class PrivateObservationRenderingTest {
         var rows = new ArrayList<EgressLedger.Row>();
         var gw = gateway(rows);
         for (String provider : List.of("anthropic", "openai")) {
-            var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
+            var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false));
             assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))),
                     provider + ": the gateway found private bytes the renderer test did not");
         }
@@ -142,7 +142,7 @@ class PrivateObservationRenderingTest {
                 "public content goes to the cloud exactly as today");
         var rows = new ArrayList<EgressLedger.Row>();
         var gw = gateway(rows);
-        var messages = engine(registry).buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
+        var messages = engine(registry).buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false, false));
         assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
     }
 

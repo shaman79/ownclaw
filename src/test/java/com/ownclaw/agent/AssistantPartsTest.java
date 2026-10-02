@@ -157,7 +157,7 @@ class AssistantPartsTest {
     static List<LlmMessage> render(AgentContext ctx) {
         var registry = new ToolRegistry(List.of());
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
-        return engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
+        return engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false, false));
     }
 
     static LlmMessage firstAssistant(List<LlmMessage> messages) {
@@ -325,7 +325,8 @@ class AssistantPartsTest {
         String quoted = REPORT.substring(REPORT.indexOf("wireless.default_radio0"));
         LlmProvider failing = new LlmProvider() {
             public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
-                throw new com.ownclaw.llm.LlmException("anthropic", "HTTP 500: the request held " + quoted, 500, null);
+                throw new com.ownclaw.llm.LlmException("anthropic", "the reply stream reported an error: the "
+                        + "request held " + quoted, 0, null);
             }
             public boolean isAvailable() { return true; }
             public boolean supportsTools() { return true; }
@@ -401,7 +402,7 @@ class AssistantPartsTest {
         var router = new LlmRouter(new StopWithoutLocalModelTest.Down(), gateway, config, null);
         var engine = new ThinkingEngine(registry, config, router);
         return new AgentLoop(engine, new CriticAgent(registry), registry, emitter, config, router,
-                null, new SkillCuratorService(jdbc, null, null, null), new NoSkills(),
+                null, new SkillCuratorService(jdbc, null, null), new NoSkills(),
                 new DebugSessionService(), new TaskCancellationService(), null, null,
                 new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null, null, null,

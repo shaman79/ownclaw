@@ -116,18 +116,18 @@ class EmptyReplyTest {
     @DisplayName("a failed call is a failed call, and no answer is invented for the model")
     void aFailedCallIsSaidToBeOne() {
         var ctx = new AgentContext("u1", "t1", "What is the capital of France?");
-        var failed = new LlmException("anthropic", "HTTP 500: internal error", 500, null);
+        var failed = new LlmException("anthropic", "the reply stream ended before message_stop", 0, null);
         AgentAction a = think(ctx, new Script(true, failed)).action();
 
         assertEquals(ThinkingEngine.THINKING, a.tool());
-        assertTrue(a.reasoning().contains("the call to the model failed ([anthropic] HTTP 500: internal error)"),
-                a.reasoning());
+        assertTrue(a.reasoning().contains("the call to the model failed ([anthropic] the reply stream ended "
+                + "before message_stop)"), a.reasoning());
         assertEquals(Map.of(), a.params());
         assertFalse(a.reasoning().contains("I encountered an error"), a.reasoning());
     }
 
     @Test
-    @DisplayName("a refusal, a reply cut off at a limit and a privacy refusal are not asked again")
+    @DisplayName("a refusal, a reply cut off at a limit, a privacy refusal and a provider that cannot be reached are not asked again")
     void notToAskAgain() {
         var refusal = new ProviderRefused("anthropic", Replies.of("", 300, 0, 0, 0, "refusal"));
         var cutOff = new OutputTruncated("anthropic", OutputTruncated.Limit.MAX_OUTPUT, 128_000,
@@ -135,7 +135,11 @@ class EmptyReplyTest {
         var tooLong = new OutputTruncated("anthropic", OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
         var privacy = new EgressRefused("anthropic");
         var badKey = new LlmException("anthropic", "HTTP 401: invalid x-api-key", 401, null);
-        for (RuntimeException e : List.of(refusal, cutOff, tooLong, privacy, badKey)) {
+        // The loop decides what happens next: the local model takes the task over, or it ends.
+        var noInternet = new LlmException("anthropic", "Connection failed: api.anthropic.com", 0,
+                new java.net.UnknownHostException("api.anthropic.com"));
+        var outage = new LlmException("anthropic", "HTTP 529: overloaded", 529, null);   // the backoff gave up
+        for (RuntimeException e : List.of(refusal, cutOff, tooLong, privacy, badKey, noInternet, outage)) {
             var thrown = assertThrows(RuntimeException.class, () -> think(new Script(true, e)),
                     e.getClass().getSimpleName() + " became a step to ask again");
             assertSame(e, thrown, "passed to the loop unchanged, so it can say which it was");
@@ -373,7 +377,7 @@ class EmptyReplyTest {
     }
 
     @Test
-    @DisplayName("a request the provider refuses as it stands -- a key it does not take -- is not sent again: the task ends with its message")
+    @DisplayName("a request the provider refuses as it stands -- a key it does not take -- is not sent again: with no local model, the task ends saying so")
     void aRefusedRequestIsNotSentAgain(@TempDir Path tmp) throws Exception {
         String refused = "HTTP 401: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\","
                 + "\"message\":\"invalid x-api-key\"}}";
@@ -384,7 +388,9 @@ class EmptyReplyTest {
 
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
         assertEquals(1, cloud.requests.size(), "sent again, the same request is refused again");
-        assertTrue(r.response().startsWith("**Stopped:** [anthropic] " + refused + ".\n\n"), r.response());
+        assertTrue(r.response().startsWith("**Stopped:** the cloud model (anthropic) could not be used -- it "
+                + "rejected the API key (HTTP 401) -- and the local model is not available to go on with the "
+                + "task.\n\n"), r.response());
         // Mutation: ask again after any failed call -> three requests, and an ending that blames
         // the model.
     }

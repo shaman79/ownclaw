@@ -69,7 +69,7 @@ class ChatSecretTest {
             }
         };
         CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
-                null, null, null, null, null, null, interactions);
+                null, null, null, null, null, null, interactions, null);
         return new ChatWebSocketHandler(null, null, new ConversationService(jdbc), null, commands, null,
                 null, interactions, null, null, new ObjectMapper());
     }

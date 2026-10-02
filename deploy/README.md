@@ -78,8 +78,11 @@ sudo nano /opt/ownclaw/.env
 | `OWNCLAW_SERVER_PORT` | No | HTTP port (default: `8080`) |
 | `OWNCLAW_EXECUTOR_URL` | No | Ollama URL (default: `http://localhost:11434`) |
 | `OWNCLAW_EXECUTOR_MODEL` | No | Ollama model (default: `qwen2.5:14b`) |
+| `OWNCLAW_LOCAL_ONLY` | No | `true`: call no cloud model; every task runs on the local model, best effort. The settings page and `/local on\|off` set it too, and that setting is kept across restarts |
 | `JAVA_OPTS` | No | JVM tuning, e.g. `-Xmx512m` |
 | `BRAVE_SEARCH_API_KEY` | No | Brave Search API key for the MCP `brave-search` server. Get one at [brave.com/search/api](https://brave.com/search/api/) |
+
+**With no internet**, OwnClaw keeps working on the local model: a task whose cloud model cannot be reached goes on there by itself, and says so in the chat. The page needs nothing from the internet, so open it on the LAN at `http://<server>:8080` (the server's own address and `OWNCLAW_SERVER_PORT`) when the public name does not resolve. Telegram, web pages and package installs need the internet and fail until it is back.
 
 **Ollama** is offered during `--setup`. If you skipped it or need to install later:
 ```bash

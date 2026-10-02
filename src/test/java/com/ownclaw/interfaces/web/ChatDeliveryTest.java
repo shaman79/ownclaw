@@ -122,7 +122,7 @@ class ChatDeliveryTest {
         };
         var interactions = new SkillInteractionHandler();
         var commands = new CommandHandler(null, conversations, null, null, null, null, taskQueue, null, null, null,
-                null, null, new ResultDelivery(conversations, emitter), interactions);
+                null, null, new ResultDelivery(conversations, emitter), interactions, null);
         chat = new ChatWebSocketHandler(taskQueue, null, conversations, emitter, commands, wizard, auth,
                 interactions, null, null, mapper);
         Map<String, Object> attributes = new HashMap<>();

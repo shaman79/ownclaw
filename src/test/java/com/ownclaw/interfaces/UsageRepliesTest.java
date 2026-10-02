@@ -25,7 +25,7 @@ class UsageRepliesTest {
             }, null, null, new ScheduledTaskService(null, null, null, null, null, null),
             new AuthService(null, null, new OwnClawConfig()) {
                 @Override public boolean isOwner(String userId) { return true; }
-            }, null, null, null, null, null);
+            }, null, null, null, null, null, null);
 
     /** A tag, as the page's Markdown would take it, left after the code spans are taken out. */
     static final Pattern TAG = Pattern.compile("<[A-Za-z][^<>]*>");

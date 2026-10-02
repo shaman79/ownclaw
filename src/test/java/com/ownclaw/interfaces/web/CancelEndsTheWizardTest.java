@@ -74,7 +74,7 @@ class CancelEndsTheWizardTest {
         };
         var cancellation = new TaskCancellationService();
         var commands = new CommandHandler(null, conversations, null, null, null, null, queue, null, null, null,
-                null, cancellation, null, interactions);
+                null, cancellation, null, interactions, null);
         chat = new ChatWebSocketHandler(queue, null, conversations, new ChatStatusEmitter(), commands, wizard, auth,
                 interactions, cancellation, null, new ObjectMapper());
         Map<String, Object> attributes = new HashMap<>();

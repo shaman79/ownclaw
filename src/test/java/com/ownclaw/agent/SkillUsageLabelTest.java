@@ -52,7 +52,7 @@ class SkillUsageLabelTest {
     @DisplayName("the repair evidence is PUBLIC rows only; the private error is still in the table")
     void repairEvidenceIsPublicOnly(@TempDir Path tmp) throws Exception {
         var jdbc = db(tmp);
-        var curator = new SkillCuratorService(jdbc, null, null, null);
+        var curator = new SkillCuratorService(jdbc, null, null);
 
         curator.recordUsage("imap_fetch", "u1", "t1", false, 10,
                 Map.of("folder", "INBOX"), "Traceback: mailbox petr@example.com", Label.PRIVATE);
@@ -77,7 +77,7 @@ class SkillUsageLabelTest {
     @DisplayName("a failure is kept whole -- its error, its parameters -- with secret-named ones redacted; repeats are one row")
     void failuresAreKeptWhole(@TempDir Path tmp) throws Exception {
         var jdbc = db(tmp);
-        var curator = new SkillCuratorService(jdbc, null, null, null);
+        var curator = new SkillCuratorService(jdbc, null, null);
         String error = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 9\n".repeat(200) + "KeyError: 'uid'";
         String folder = "INBOX/" + "Archive/".repeat(600);
         for (String task : List.of("t1", "t2")) {

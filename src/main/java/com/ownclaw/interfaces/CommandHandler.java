@@ -2,6 +2,7 @@ package com.ownclaw.interfaces;
 
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.config.LocalMode;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.ScheduledTaskService;
 import com.ownclaw.core.TaskQueue;
@@ -52,6 +53,7 @@ public class CommandHandler {
     private final com.ownclaw.core.TaskCancellationService cancellationService;
     private final com.ownclaw.core.ResultDelivery resultDelivery;
     private final SkillInteractionHandler interactionHandler;
+    private final LocalMode localMode;
 
     public CommandHandler(ToolRegistry toolRegistry, ConversationService conversationService,
                           EventLogService eventLog, TokenBudgetTracker budgetTracker,
@@ -62,7 +64,7 @@ public class CommandHandler {
                           com.ownclaw.conversation.FileStorageService fileStorage,
                           com.ownclaw.core.TaskCancellationService cancellationService,
                           com.ownclaw.core.ResultDelivery resultDelivery,
-                          SkillInteractionHandler interactionHandler) {
+                          SkillInteractionHandler interactionHandler, LocalMode localMode) {
         this.toolRegistry = toolRegistry;
         this.conversationService = conversationService;
         this.eventLog = eventLog;
@@ -77,6 +79,7 @@ public class CommandHandler {
         this.cancellationService = cancellationService;
         this.resultDelivery = resultDelivery;
         this.interactionHandler = interactionHandler;
+        this.localMode = localMode;
     }
 
     /**
@@ -162,6 +165,9 @@ public class CommandHandler {
                 }
                 if (command.startsWith("/schedule")) {
                     yield Optional.of(handleSchedule(userId, message.trim()));
+                }
+                if (command.equals("/local") || command.startsWith("/local ")) {
+                    yield Optional.of(handleLocal(userId, command.substring(6).strip()));
                 }
                 if (command.equals("/user") || command.startsWith("/user ")) {
                     yield Optional.of(handleUser(userId, message.trim().substring(5).strip()));
@@ -319,6 +325,29 @@ public class CommandHandler {
         return String.format("%.1f MB", b / (1024.0 * 1024));
     }
 
+    /**
+     * {@code /local [on|off]}: the owner's local-only switch ({@link LocalMode}), shown or set.
+     * Setting it is the owner's: it decides where every account's tasks run.
+     */
+    private String handleLocal(String userId, String arg) {
+        if (!arg.isEmpty()) {
+            if (!authService.isOwner(userId)) return "Only the owner can switch the cloud model on or off.";
+            switch (arg) {
+                case "on" -> localMode.set(true);
+                case "off" -> localMode.set(false);
+                default -> {
+                    return "Usage: `/local on` -- every task runs on the local model, no cloud model is "
+                            + "called; `/local off` -- back to the cloud; `/local` -- which it is.";
+                }
+            }
+        }
+        return localMode.on()
+                ? "Local only is **on**: no cloud model is called, and every task runs on the local model, "
+                        + "best effort. `/local off` switches the cloud model back on."
+                : "Local only is **off**: tasks run on the cloud model, and one whose cloud model can't be "
+                        + "reached goes on on the local model by itself. `/local on` stops calling the cloud.";
+    }
+
     private String helpText() {
         return """
                 ### Commands
@@ -349,6 +378,7 @@ public class CommandHandler {
                 - `/schedule every <schedule> : <task>` — Recurring task
                 - `/schedule cancel|pause|resume <id>` — Manage tasks
                 - `/setup` — Run setup wizard (Web UI only)
+                - `/local [on|off]` — Local only: every task runs on the local model and no cloud model is called (switching is owner only)
                 - `/status` — System status
                 - `/help` — This message""";
     }

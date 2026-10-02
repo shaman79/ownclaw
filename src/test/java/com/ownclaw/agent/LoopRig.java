@@ -191,7 +191,7 @@ final class LoopRig {
         var registry = new ToolRegistry(tools);
         vault = new CredentialVault(jdbc);
         vault.init();
-        var curator = new SkillCuratorService(jdbc, router, registry,
+        var curator = new SkillCuratorService(jdbc, registry,
                 new DynamicSkillRegistry(null, null, null, null, null, null, null));
         skills = new Skills(curator, registry);
         loop = new AgentLoop(engine.make(registry, config, router),

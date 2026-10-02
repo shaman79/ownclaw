@@ -51,7 +51,7 @@ public final class SpecialActionSchemas {
                             + "prefer deciding and stating the assumption.",
                     params("message", ToolParam.required("string", "The question to ask."))),
 
-            // No 'code' parameter, deliberately. AgentLoop calls generateSkillCodeWithCloud
+            // No 'code' parameter, deliberately. AgentLoop calls generateSkillCode
             // before SkillManager ever sees these params and injects the code it produced, so
             // anything the model writes here is discarded -- it was being asked to generate a
             // whole Python module on every skill_create for nothing. The description is the
@@ -129,6 +129,7 @@ public final class SpecialActionSchemas {
                             "task_id", ToolParam.optional("integer", "Which task, for cancel/pause/resume."))),
 
             spec(AgentAction.DELEGATE,
+                    // The cloud's; the local model running a task itself is given its own below.
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
                             + "tools you name and your credentials, and costs nothing. It reads "
                             + "what you cannot: a private result or a file the user sent reaches "
@@ -155,4 +156,19 @@ public final class SpecialActionSchemas {
                                     + "the tools it will need. Only these, and any the goal or an "
                                     + "unattended (scheduled or /bg) task names, are loaded: every tool "
                                     + "definition takes room in the local model's context that the work needs."))));
+
+    /**
+     * Delegate, as the local model running a task itself reads it ({@code ThinkingEngine#toolsFor}):
+     * it has every tool, so the work is its own, and a delegation is a run of itself -- the way a
+     * private result, which it too sees only as a description, is read.
+     */
+    static final String DELEGATE_ON_THE_LOCAL_MODEL = "Hand a sub-goal to a separate run of the local "
+            + "model. You are the local model too and have every tool, so do the work yourself; delegate "
+            + "only to read private data. A private result or a file the user sent reaches you only as a "
+            + "description: to read, summarise, search, compare or answer a question about one, delegate "
+            + "and name its handle ({{N}}) in the goal -- every earlier result the goal names is given to "
+            + "it whole, and it sees no other. Its answer comes back to you -- as a handle to pass on when "
+            + "it quotes private data. Observations name results as {{N}}. When you have a tool that takes "
+            + "a result, put {{N}} or {{N.field}} as the whole value of that argument to pass it on "
+            + "verbatim without reading it.";
 }

@@ -24,7 +24,7 @@ class ThinkingEngineCacheTest {
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "summarise the article we discussed");
         ctx.setConversationSummary("### Recent conversation\nUSER: here is the article\nASSISTANT: noted");
-        var mode = new ThinkingEngine.StepMode(true, false);
+        var mode = new ThinkingEngine.StepMode(true, false, false);
 
         String first0 = engine.buildMessages(ctx, "anthropic", mode).get(1).content();
         int cut = first0.indexOf(ThinkingEngine.CACHE_BOUNDARY_MARKER);
@@ -46,7 +46,7 @@ class ThinkingEngineCacheTest {
         var registry = new ToolRegistry(List.of());
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "what is the weather in Brno");
-        var messages = engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
+        var messages = engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false, false));
         // The provider is package-private to com.ownclaw.llm; this is the one test that needs both.
         Class<?> anthropic = Class.forName("com.ownclaw.llm.AnthropicProvider");
         var ctor = anthropic.getDeclaredConstructor(OwnClawConfig.class,
@@ -82,7 +82,7 @@ class ThinkingEngineCacheTest {
     void theConversationOnlyGrows() {
         var registry = new ToolRegistry(List.of());
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
-        var mode = new ThinkingEngine.StepMode(true, false);
+        var mode = new ThinkingEngine.StepMode(true, false, false);
         var ctx = new AgentContext("u1", "t1", "audit the routers and write the report");
         var t = ctx.trajectory();
         String told = "Your previous reply was empty (stop reason: end_turn): no text and no tool "

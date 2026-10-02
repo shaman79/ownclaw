@@ -88,7 +88,7 @@ class DelegationBehaviourTest {
         final List<Map<String, Object>> failedArgs = new ArrayList<>();
         final List<String> failedErrors = new ArrayList<>();
         final List<Label> failedLabels = new ArrayList<>();
-        Usage() { super(null, null, null, null); }
+        Usage() { super(null, null, null); }
         @Override
         public void recordUsage(String tool, String user, String task, boolean ok, long ms,
                                 Map<String, Object> params, String error, Label label) {

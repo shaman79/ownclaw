@@ -69,6 +69,12 @@ ownclaw:
     anthropic-model: ${OWNCLAW_ANTHROPIC_MODEL:claude-sonnet-4-20250514}
     temperature: 0.4
 
+    # Local only: call no cloud model; every task runs on the local model, best effort. The
+    # settings page and /local on|off set it (saved, so it survives a restart). Off, a task whose
+    # cloud model cannot be reached -- no internet, a rejected key, no credit, an outage the
+    # retries did not outlast -- moves to the local model by itself.
+    local-only: ${OWNCLAW_LOCAL_ONLY:false}
+
     # Offer tools natively instead of asking for a JSON envelope in the prompt.
     #
     # Verified in production before this was turned on: both a registry skill (shell_exec) and a

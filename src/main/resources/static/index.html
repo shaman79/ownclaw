@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OwnClaw</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"
-            integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="/vendor/marked-12.0.1.min.js"
+            integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu"></script>
     <style>
         /*  Design tokens  */
         :root {
@@ -4006,11 +4006,19 @@
         // ── Cloud Provider section ──
         var cloudSection = document.createElement('div');
         cloudSection.className = 'settings-section';
-        var cloudDotClass = (provider === 'openai' && openaiKeySet) || (provider === 'anthropic' && anthropicKeySet) ? 'ok' : 'warn';
+        var cloudDotClass = data.local_only ? 'off'
+                : (provider === 'openai' && openaiKeySet) || (provider === 'anthropic' && anthropicKeySet) ? 'ok' : 'warn';
         cloudSection.innerHTML =
             '<div class="settings-section-title">' +
                 '<span class="status-dot ' + cloudDotClass + '"></span>' +
                 'Cloud LLM Provider' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label>Mode</label>' +
+                '<select id="settings-local-only">' +
+                    '<option value="false"' + (data.local_only ? '' : ' selected') + '>Cloud model, the local model when the cloud can\'t be reached</option>' +
+                    '<option value="true"' + (data.local_only ? ' selected' : '') + '>Local only: never call the cloud model</option>' +
+                '</select>' +
             '</div>' +
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
@@ -4150,6 +4158,10 @@
 
     function saveSettings(originalData) {
         var payload = {};
+
+        // Local only
+        var localOnly = document.getElementById('settings-local-only').value === 'true';
+        if (localOnly !== !!originalData.local_only) payload.local_only = String(localOnly);
 
         // Provider
         var provider = document.getElementById('settings-provider').value;

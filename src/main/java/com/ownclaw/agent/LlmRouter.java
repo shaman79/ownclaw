@@ -16,12 +16,14 @@ import jakarta.annotation.PostConstruct;
  *
  * <p>Architecture: Cloud-as-orchestrator, local-as-executor.
  * <ul>
- *   <li>The main agent loop ALWAYS uses the cloud provider for reasoning/planning</li>
- *   <li>The local provider is used exclusively by {@link LocalExecutor} for
- *       delegated tool execution</li>
- *   <li>If cloud is unavailable, falls back to local in degraded mode</li>
+ *   <li>The main agent loop uses the cloud provider for reasoning/planning</li>
+ *   <li>The local provider runs {@link LocalExecutor}'s delegated tool execution</li>
+ *   <li>The local model runs the whole task instead -- best effort -- when the owner's
+ *       local-only switch is on, when no cloud is configured, or when the task's cloud
+ *       model could not be reached ({@link AgentContext#onLocal})</li>
  * </ul>
- * Skill code generation always uses cloud (handled separately in AgentLoop).
+ * Every model call of a task chooses through {@link #selectProvider}: each step, the skill code
+ * it writes, the analysis of the skill library.
  *
  * <p>Cloud provider is selected based on {@code ownclaw.mentor.provider}:
  * openai (default) or anthropic. The active cloud provider is resolved at startup
@@ -74,24 +76,17 @@ public class LlmRouter {
     }
 
     /**
-     * Select the best provider for the current reasoning step.
-     *
-     * <p>Cloud-as-orchestrator: the main agent loop always uses cloud for reasoning.
-     * Local is only used by {@link LocalExecutor} for delegated tool execution.
-     * Falls back to local only when cloud is completely unavailable (degraded mode).
+     * The model for a call of this task: the local model when the owner's switch is on or the
+     * task has gone local, even when it is not reachable either -- the call then fails saying so;
+     * otherwise the cloud, or the local model when no cloud is configured.
      */
     public LlmProvider selectProvider(AgentContext context) {
-        // Cloud always orchestrates the main agent loop
-        if (cloudProvider.isAvailable()) {
-            int step = (context.trajectory() != null && !context.trajectory().isEmpty())
-                    ? context.trajectory().size() + 1 : 1;
-            log.debug("Step {}: using cloud provider (orchestrator)", step);
-            return cloudProvider;
-        }
+        if (localOnly() || context.onLocal()) return localProvider;
+        if (cloudProvider.isAvailable()) return cloudProvider;
 
-        // Fallback: cloud unavailable — degraded mode with local
+        // No cloud configured: the local model, in degraded mode
         if (localProvider.isAvailable()) {
-            log.warn("Cloud unavailable — falling back to local provider (degraded mode)");
+            log.warn("No cloud model configured — using the local provider (degraded mode)");
             return localProvider;
         }
 
@@ -99,9 +94,19 @@ public class LlmRouter {
         return cloudProvider;
     }
 
+    /** The owner's local-only switch ({@link com.ownclaw.config.LocalMode}). */
+    public boolean localOnly() {
+        return config.getMentor().isLocalOnly();
+    }
+
     /**
-     * Get the local provider directly (for non-critical, high-volume operations).
+     * Whether a task whose cloud model cannot be reached can go on on the local model: the
+     * server answers. Whether it can drive the task is found out by trying.
      */
+    public boolean canGoLocal() {
+        return localProvider.isAvailable();
+    }
+
     /**
      * Whether the local tier is genuinely usable right now — configured model installed and
      * drivable through /api/chat, not merely a server that answers /api/tags.
@@ -114,6 +119,7 @@ public class LlmRouter {
         return localModelCheck.status();
     }
 
+    /** The local provider directly (for non-critical, high-volume operations). */
     public LlmProvider local() {
         return localProvider;
     }

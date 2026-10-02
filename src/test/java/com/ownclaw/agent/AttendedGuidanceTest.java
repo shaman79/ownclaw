@@ -28,7 +28,7 @@ class AttendedGuidanceTest {
         var ctx = new AgentContext("u1", "t1", "why is the router slow?");
         for (String provider : List.of("anthropic", "openai", "ollama")) {
             for (boolean nativeTools : new boolean[] {true, false}) {
-                var mode = new ThinkingEngine.StepMode(nativeTools, false);
+                var mode = new ThinkingEngine.StepMode(nativeTools, false, false);
                 List<LlmMessage> messages = engine.buildMessages(ctx, provider, mode);
                 String path = provider + (nativeTools ? ", native" : ", text") + ": ";
                 String system = messages.get(0).content();
@@ -70,7 +70,7 @@ class AttendedGuidanceTest {
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "the morning digest");
         ctx.setUnattended(true);
-        var messages = engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
+        var messages = engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false, false));
         String step = messages.get(messages.size() - 1).content();
         assertTrue(step.contains("- Attendance: NOBODY IS WAITING. This was started by the scheduler or sent to the "
                 + "background; the answer is delivered to the chat whenever it is ready. Minutes are free here. "

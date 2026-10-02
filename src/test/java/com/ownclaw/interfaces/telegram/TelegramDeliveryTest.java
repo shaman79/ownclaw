@@ -87,7 +87,7 @@ class TelegramDeliveryTest {
         queue = new Answering(answer);
         bot = new TelegramBotService(config, queue, new UserRepository(jdbc), emitter, JSON,
                 store.apply(jdbc), new SkillInteractionHandler(), null,
-                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null),
+                new CommandHandler(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null),
                 null, jdbc, telegram.client);
     }
 

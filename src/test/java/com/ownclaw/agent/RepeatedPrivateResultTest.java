@@ -141,7 +141,7 @@ class RepeatedPrivateResultTest {
             ctx.trajectory().record(new AgentAction("cat_report", Map.of(), ""),
                     AgentObservation.success("cat_report", output, Map.of(), 7));
             for (String provider : List.of("anthropic", "openai")) {
-                var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
+                var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false));
                 boolean refused;
                 try {
                     gateway.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think")));
@@ -282,7 +282,7 @@ class RepeatedPrivateResultTest {
                 var events = new com.ownclaw.observability.EventLogService(jdbc);
                 var router = new LlmRouter(local, gateway, config, null);
                 var loop = new AgentLoop(new ThinkingEngine(registry, config, router), new CriticAgent(registry),
-                        registry, emitter, config, router, null, new SkillCuratorService(jdbc, null, null, null),
+                        registry, emitter, config, router, null, new SkillCuratorService(jdbc, null, null),
                         new AssistantPartsTest.NoSkills(), new com.ownclaw.observability.DebugSessionService(),
                         new com.ownclaw.core.TaskCancellationService(), null, null,
                         new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,

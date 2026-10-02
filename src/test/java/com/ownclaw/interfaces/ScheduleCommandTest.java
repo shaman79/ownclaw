@@ -30,7 +30,7 @@ class ScheduleCommandTest {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         scheduler = new ScheduledTaskService(jdbc, null, new ChatStatusEmitter(), new EventLogService(jdbc), null, null);
         commands = new CommandHandler(null, null, null, null, null, null, null, scheduler, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     /** Schedule it, and return what was kept and how far ahead it runs. */

@@ -36,7 +36,7 @@ class ThinkingEngineFilesSectionTest {
         var registry = new ToolRegistry(List.of());
         var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         for (String provider : List.of("anthropic", "openai")) {
-            String all = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false))
+            String all = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false))
                     .stream().map(LlmMessage::content).reduce("", String::concat);
             assertTrue(all.contains("## Files sent with this message\n- {{1}}"), provider + " omits the files");
             assertFalse(all.contains("vypis") || all.contains("123456789"), provider + " names the file");

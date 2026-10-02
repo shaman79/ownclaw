@@ -510,6 +510,40 @@ public class AgentContext {
     }
 
     /**
+     * Why the rest of this task runs on the local model -- the cloud model could not be reached
+     * ({@code AgentLoop}) -- or null while it does not. Every model call of the task chooses
+     * through {@link LlmRouter#selectProvider}, which reads it. The next task tries the cloud again.
+     */
+    private volatile String onLocalBecause;
+
+    public boolean onLocal() {
+        return onLocalBecause != null;
+    }
+
+    public String onLocalBecause() {
+        return onLocalBecause;
+    }
+
+    public void goLocal(String because) {
+        onLocalBecause = because;
+    }
+
+    /**
+     * Cloud calls of this task in a row whose connection failed. The first is asked again on the
+     * cloud -- a connection that broke off once is often back -- and the second moves the task to
+     * the local model ({@code AgentLoop}); a cloud reply sets it back to none.
+     */
+    private volatile int cloudConnectionFailures;
+
+    public int countCloudConnectionFailure() {
+        return ++cloudConnectionFailures;
+    }
+
+    public void cloudAnswered() {
+        cloudConnectionFailures = 0;
+    }
+
+    /**
      * Whether the provider has declined a step of this task as reasoning extraction. From then on
      * the model is asked for no words beside its calls, nor shown those it wrote before
      * ({@code ThinkingEngine}): the progress update it is asked for is the likely cause.

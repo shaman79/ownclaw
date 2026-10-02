@@ -62,7 +62,7 @@ class SkillCodegenTest {
         var rig = new LoopRig(tmp, List.of());
         for (int i = 0; i < 4; i++) rig.cloud.codegen.add(cutOff("```python\n" + module("    an =")));
         var ctx = task();
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), ctx);
         assertEquals(1, rig.cloud.calls("codegen").size(), "a cut-off file was sent back for repair");
         assertNull(out.params());
         assertTrue(out.error().startsWith("ERROR: the code for 'openwrt_audit' did not fit in one reply "
@@ -78,7 +78,7 @@ class SkillCodegenTest {
         var rig = new LoopRig(tmp, List.of());
         rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
         for (int i = 0; i < 4; i++) rig.cloud.codegen.add(finished(module("def broken(:\n    pass  # " + i)));
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), task());
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
 
         var calls = rig.cloud.calls("codegen");
         assertEquals(4, calls.size(), "the first reply and three repairs");
@@ -101,7 +101,7 @@ class SkillCodegenTest {
         rig.skills.syntax = code -> code.contains("def broken(:") ? "line 5: invalid syntax" : null;
         rig.cloud.codegen.add(finished(module("def broken(:\n    pass")));
         rig.cloud.codegen.add(finished(module("")));
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), task());
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
         assertNull(out.error());
         assertFalse(String.valueOf(out.params().get("code")).contains("def broken(:"));
         assertEquals(2, rig.cloud.calls("codegen").size());
@@ -122,7 +122,7 @@ class SkillCodegenTest {
             c.progress().onProgress();
             throw new AssertionError("the hook of a stopped task let the reply go on");
         });
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), ctx);
         assertTrue(idle.get(0) >= 50 && idle.get(1) < 50, "an event of the reply is progress: " + idle);
         assertEquals("ERROR: the task was stopped while the code for 'openwrt_audit' was being written, "
                 + "so nothing was created.", out.error());
@@ -138,7 +138,7 @@ class SkillCodegenTest {
             return Replies.of("no code here", 10, 10, 0, 0, "end_turn");
         });
         var ctx = task();
-        rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        rig.loop.generateSkillCode(spec(), ctx);
         assertTrue(ctx.msSinceLastProgress() < 100, "the reply did not count as progress: "
                 + ctx.msSinceLastProgress() + " ms since the last mark");
     }
@@ -155,7 +155,7 @@ class SkillCodegenTest {
             cancellation.requestAll("u1", "you pressed Stop");
             return finished(module("def broken(:")).answer(c);
         });
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), ctx);
         assertEquals(1, rig.cloud.calls("codegen").size(), "a repair was sent after Stop");
         assertTrue(out.error().contains("was stopped"), out.error());
     }
@@ -165,42 +165,42 @@ class SkillCodegenTest {
     void failuresSayWhy(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         rig.cloud.codegen.add(c -> { throw new LlmException("anthropic", "HTTP 500: server error", 500, null); });
-        String failed = rig.loop.generateSkillCodeWithCloud(spec(), task()).error();
+        String failed = rig.loop.generateSkillCode(spec(), task()).error();
         assertEquals("ERROR: the request for the code of 'openwrt_audit' failed ([anthropic] HTTP 500: "
                 + "server error), so nothing was created.", failed);
 
         rig.cloud.codegen.add(c -> Replies.of("I would write a class for this.", 10, 10, 0, 0, "end_turn"));
         assertEquals("ERROR: the reply for 'openwrt_audit' held no Python code, so nothing was created.",
-                rig.loop.generateSkillCodeWithCloud(spec(), task()).error());
+                rig.loop.generateSkillCode(spec(), task()).error());
 
         rig.cloud.codegen.add(c -> Replies.of("```python\nimport json\nprint(json.dumps(1))\n```", 10, 10, 0, 0, "end_turn"));
         assertEquals("ERROR: the reply for 'openwrt_audit' held Python code but no def run(params), which every "
-                + "skill needs, so nothing was created.", rig.loop.generateSkillCodeWithCloud(spec(), task()).error());
+                + "skill needs, so nothing was created.", rig.loop.generateSkillCode(spec(), task()).error());
 
         rig.cloud.codegen.add(c -> new LlmResponse("", List.of(), null, "refusal", "cyber",
                 "claude-opus-5", 128_000, 1_000_000,
                 List.of(new LlmResponse.Usage("claude-opus-5", 2_000, 300, 0, 0))));
         var declined = task();
-        assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), declined).error().startsWith(
+        assertTrue(rig.loop.generateSkillCode(spec(), declined).error().startsWith(
                 "ERROR: the model declined to write the code for 'openwrt_audit' ([anthropic] the model "
                         + "declined this request (stop reason: refusal (cyber)))"));
         assertEquals(2_300, declined.cloudTokens(), "a declined reply was billed, so it is counted");
 
         rig.cloud.codegen.add(c -> { throw new com.ownclaw.llm.EgressRefused("anthropic", 2, "openwrt_audit", 1, "user", 10); });
-        String refused = rig.loop.generateSkillCodeWithCloud(spec(), task()).error();
+        String refused = rig.loop.generateSkillCode(spec(), task()).error();
         assertTrue(refused.startsWith("ERROR: the request for the code of 'openwrt_audit' was not sent ("), refused);
 
         rig.cloud.codegen.add(c -> {
             throw new com.ownclaw.llm.OutputTruncated("anthropic", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
                     1_000_000, null);
         });
-        String tooLong = rig.loop.generateSkillCodeWithCloud(spec(), task()).error();
+        String tooLong = rig.loop.generateSkillCode(spec(), task()).error();
         assertTrue(tooLong.startsWith("ERROR: the request for the code of 'openwrt_audit' did not fit ([anthropic] "
                 + "the conversation is longer than the model's 1,000,000-token context window"), tooLong);
         assertFalse(tooLong.contains("one reply"), "a request too long is not a reply cut off: " + tooLong);
 
         rig.cloud.available = false;
-        assertTrue(rig.loop.generateSkillCodeWithCloud(spec(), task()).error().contains(
+        assertTrue(rig.loop.generateSkillCode(spec(), task()).error().contains(
                 "neither the cloud model nor the local model is available"));
     }
 
@@ -214,7 +214,7 @@ class SkillCodegenTest {
         rig.cloud.codegen.add(c -> Replies.of("```python\n" + module("") + "\n```",
                 200, 60, 0, 6_000, "end_turn"));
         var ctx = task();
-        rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        rig.loop.generateSkillCode(spec(), ctx);
         assertEquals(6_150 + 6_260, ctx.cloudTokens(), "the repair was counted without its cache reads");
         assertEquals(6_150 + 6_260, rig.jdbc.queryForObject(
                 "SELECT SUM(tokens_used) FROM token_usage WHERE user_id = 'u1'", Integer.class));
@@ -230,7 +230,7 @@ class SkillCodegenTest {
         var offline = new LoopRig(tmp.resolve("offline"), List.of(), 600, local);
         offline.cloud.available = false;
         var ctx2 = task();
-        assertNull(offline.loop.generateSkillCodeWithCloud(spec(), ctx2).error());
+        assertNull(offline.loop.generateSkillCode(spec(), ctx2).error());
         assertEquals(1_000, ctx2.localTokens());
         assertEquals(0, ctx2.cloudTokens());
         assertEquals(0, offline.jdbc.queryForObject("SELECT count(*) FROM token_usage", Integer.class),
@@ -244,7 +244,7 @@ class SkillCodegenTest {
         rig.cloud.codegen.add(c -> new LlmResponse("```python\n" + module("") + "\n```", List.of(), null,
                 "end_turn", null, "claude-sonnet-5", 64_000, 1_000_000,
                 List.of(new LlmResponse.Usage("claude-sonnet-5", 1_000_000, 0, 0, 0))));
-        rig.loop.generateSkillCodeWithCloud(spec(), task());
+        rig.loop.generateSkillCode(spec(), task());
         assertEquals(2.0, rig.jdbc.queryForObject("SELECT cost_usd FROM token_usage WHERE user_id = 'u1'", Double.class),
                 1e-9, "a million input tokens at the $2 of the model that answered, not the $5 of the one asked");
     }
@@ -256,7 +256,7 @@ class SkillCodegenTest {
         rig.cloud.codegen.add(c -> Replies.of("Here is the skill:\n\nimport json\nimport subprocess\n\n"
                 + "def run(params):\n    return {'output': json.dumps(subprocess.run(['true']).returncode), 'success': True}\n",
                 10, 10, 0, 0, "end_turn"));
-        String code = String.valueOf(rig.loop.generateSkillCodeWithCloud(spec(), task()).params().get("code"));
+        String code = String.valueOf(rig.loop.generateSkillCode(spec(), task()).params().get("code"));
         assertTrue(code.startsWith("import json\nimport subprocess\n"), code);
     }
 
@@ -267,7 +267,7 @@ class SkillCodegenTest {
         rig.skills.source = name -> "def run(params):\n    raise KeyError('uid')\n";
         String traceback = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 2\n".repeat(300)
                 + "KeyError: 'uid'";
-        var curator = new SkillCuratorService(rig.jdbc, null, null, null);
+        var curator = new SkillCuratorService(rig.jdbc, null, null);
         String longParam = "p".repeat(1_000);
         for (int i = 0; i < 5; i++) {
             curator.recordUsage("openwrt_audit", "u1", "t" + i, false, 5, Map.of("host", longParam + i),
@@ -278,7 +278,7 @@ class SkillCodegenTest {
         ctx.trajectory().record(new AgentAction("openwrt_audit", Map.of(), ""),
                 AgentObservation.failure("openwrt_audit", traceback, 5));
         rig.cloud.codegen.add(finished(module("")));
-        rig.loop.generateSkillCodeWithCloud(spec(), ctx);
+        rig.loop.generateSkillCode(spec(), ctx);
 
         String sent = rig.cloud.calls("codegen").get(0).messages().get(1).content();
         assertTrue(sent.contains(traceback), "the error was cut");
@@ -297,7 +297,7 @@ class SkillCodegenTest {
         // Last week, in another chat: the public skill failed, and its traceback was recorded.
         String recorded = "Skill error: timed out\nTraceback (most recent call last):\n"
                 + "  File \"/skills/web_fetch/skill.py\", line 2, in run\nTimeoutError: timed out";
-        new SkillCuratorService(rig.jdbc, null, null, null).recordUsage("web_fetch", "u1", "t0", false, 5,
+        new SkillCuratorService(rig.jdbc, null, null).recordUsage("web_fetch", "u1", "t0", false, 5,
                 Map.of("url", "https://example.org/status"), recorded, Label.PUBLIC);
         // This task: a credentialed skill failed with a traceback of its own, which is private and
         // indexed -- and every Python traceback opens with the same 32 characters.
@@ -310,7 +310,7 @@ class SkillCodegenTest {
         var spec = spec();
         spec.put("name", "web_fetch");
 
-        AgentLoop.Codegen made = rig.loop.generateSkillCodeWithCloud(spec, ctx);
+        AgentLoop.Codegen made = rig.loop.generateSkillCode(spec, ctx);
 
         assertNull(made.error(), "the repair was not sent: " + made.error());
         assertEquals(1, rig.cloud.calls("codegen").size());
@@ -334,7 +334,7 @@ class SkillCodegenTest {
             return finished("NETWORK = '" + m.group(1) + "'\n" + module("")).answer(c);
         });
 
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec, task());
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec, task());
 
         assertNull(out.error(), "repaired for ever against code the model never wrote: " + out.error());
         assertTrue(String.valueOf(out.params().get("code")).startsWith("NETWORK = \"Fake Jana's WiFi\"\n"),
@@ -349,7 +349,7 @@ class SkillCodegenTest {
         var rig = new LoopRig(tmp, List.of());
         rig.cloud.codegen.add(finished("KEY = '«secret removed»'\n" + module("")));
 
-        AgentLoop.Codegen out = rig.loop.generateSkillCodeWithCloud(spec(), task());
+        AgentLoop.Codegen out = rig.loop.generateSkillCode(spec(), task());
 
         assertNull(out.params());
         assertTrue(out.error().startsWith("ERROR: the code for 'openwrt_audit' holds a removed secret, so "

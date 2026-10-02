@@ -54,7 +54,7 @@ class TelegramSecretTest {
             }
         };
         CommandHandler commands = new CommandHandler(null, null, null, null, vault, null, null,
-                null, null, null, null, new TaskCancellationService(), null, interactions);
+                null, null, null, null, new TaskCancellationService(), null, interactions, null);
         OwnClawConfig config = new OwnClawConfig();
         config.getTelegram().setBotToken("123:test");
         ConversationService conv = new ConversationService(jdbc);

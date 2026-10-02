@@ -72,6 +72,17 @@ public class OwnClawConfig {
          */
         private boolean localFirstUnattended = true;
 
+        /**
+         * Local only: no cloud model is called, and every task runs on the local model, best
+         * effort. The owner's switch for a cloud or an internet that is not there: the settings
+         * page and /local set it ({@link LocalMode}). Off, a task whose cloud cannot be reached
+         * moves to the local model by itself ({@code AgentLoop}).
+         */
+        private boolean localOnly = false;
+
+        public boolean isLocalOnly() { return localOnly; }
+        public void setLocalOnly(boolean v) { this.localOnly = v; }
+
         public boolean isLocalFirstUnattended() { return localFirstUnattended; }
         public void setLocalFirstUnattended(boolean v) { this.localFirstUnattended = v; }
 

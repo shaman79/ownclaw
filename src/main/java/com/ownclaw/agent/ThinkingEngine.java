@@ -179,7 +179,15 @@ public class ThinkingEngine {
             // however often it is sent (LlmException#isRetryable), so it is not a step to ask
             // again either: the loop ends the task with the provider's own message. Sent twice
             // more, it ended "the model produced nothing" about a model that was never reached.
-            if (e.getHttpStatus() != 0 && !e.isRetryable()) throw e;
+            // Nor is a cloud that cannot be reached (LlmException#unreachable): the loop moves the
+            // task to the local model, or ends it saying neither can be reached. The local model
+            // has no backoff and is on the LAN: its failed reply, a 5xx or a stream that broke
+            // off -- a runner restarting -- is a step asked again, and only one it cannot connect
+            // to at all ends the task.
+            if (mode.local() ? e.getHttpStatus() != 0 && !e.isRetryable() || e.cannotConnect()
+                    : e.getHttpStatus() != 0 || e.unreachable()) {
+                throw e;
+            }
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
             return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
                             + "model failed (" + e.getMessage() + "), so nothing was run.",
@@ -328,8 +336,12 @@ public class ThinkingEngine {
      * tools array and the prompt disagreeing is worse than either choice alone: the model is
      * told in prose that it owns a skill while the API says it does not, and which half wins
      * decides the run.
+     *
+     * @param local the local model takes this step, running the task on its own
+     *              ({@link LlmRouter#selectProvider}): the prompt says so, and nothing that holds
+     *              only for the cloud
      */
-    record StepMode(boolean nativeTools, boolean localFirst) {}
+    record StepMode(boolean nativeTools, boolean localFirst, boolean local) {}
 
     /**
      * Can the local tier be handed real work — asked once per task, then remembered.
@@ -369,10 +381,14 @@ public class ThinkingEngine {
 
     StepMode stepMode(AgentContext context, LlmProvider provider) {
         boolean nativeTools = config.getMentor().isNativeTools() && provider.supportsTools();
+        // A test that builds prompts by hand has no router, and its provider is the cloud.
+        boolean local = llmRouter != null && llmRouter.isLocal(provider);
 
         // Gated on nativeTools, because withholding tools from an array nobody is reading
-        // restricts nothing -- on the text protocol the manifest is the channel.
-        boolean localFirst = nativeTools
+        // restricts nothing -- on the text protocol the manifest is the channel. Never for the
+        // local model running the task itself: the registry would be withheld from the one
+        // model that runs the tools, to make it hand the work to itself.
+        boolean localFirst = nativeTools && !local
                 && config.getMentor().isLocalFirstUnattended()
                 && context.isUnattended()
                 && localTierReady(context)
@@ -383,7 +399,7 @@ public class ThinkingEngine {
                 // trading a token saving for a silently broken task.
                 && !delegationFailed(context);
 
-        return new StepMode(nativeTools, localFirst);
+        return new StepMode(nativeTools, localFirst, local);
     }
 
     /**
@@ -420,8 +436,14 @@ public class ThinkingEngine {
     List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
-            return ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(),
-                    context.credentialKeys());
+            var specs = new ArrayList<>(ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(),
+                    context.credentialKeys()));
+            // The local model is told what delegate is to it: a run of itself, for private data.
+            if (mode.local()) specs.replaceAll(spec -> AgentAction.DELEGATE.equals(spec.name())
+                    ? new com.ownclaw.llm.ToolSpec(spec.name(), SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL,
+                            spec.inputSchema())
+                    : spec);
+            return specs;
         }
         log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
@@ -493,7 +515,8 @@ public class ThinkingEngine {
      * The per-step block (datetime, attendance, preferences, tools, vault, what next): what
      * changes from one step to the next, at the end of the last user message for every provider
      * ({@link #buildMessages}), so the system prompt stays the same bytes and is cached. It
-     * changes once at most, in a task the provider has stopped ({@link #buildSystemPrompt}).
+     * changes in a task the provider has stopped ({@link #buildSystemPrompt}) and in one the local
+     * model takes over, whose prompt is its own.
      */
     private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
@@ -516,22 +539,31 @@ public class ThinkingEngine {
         // three skills in seventeen minutes to read router data it could not see, which the
         // local model reads directly. So the local model's speed is stated as the facts it is,
         // and the delegate description and the rules say where it is the right tool.
+        if (mode.local()) {
+            sb.append("- Model: you are the local model, running this task on your own: ")
+              .append(context.onLocal() ? "the cloud model could not be used -- " + context.onLocalBecause()
+                      : config.getMentor().isLocalOnly() ? "the owner has switched the cloud model off"
+                      : "no cloud model is configured")
+              .append(". Do what you can with the tools you have, and say what you could not do.\n");
+        }
         if (context.isUnattended()) {
             sb.append("- Attendance: NOBODY IS WAITING. This was started by the scheduler or sent "
                     + "to the background; the answer is delivered to the chat whenever it is "
-                    + "ready. Minutes are free here. Prefer 'delegate' for anything the local "
-                    + "model can do, especially work on this machine, the LAN or private data, "
-                    + "and never stop to ask a question -- decide, and say which assumption you "
-                    + "made.\n\n");
+                    + "ready. Minutes are free here. "
+                    + (mode.local() ? "" : "Prefer 'delegate' for anything the local "
+                    + "model can do, especially work on this machine, the LAN or private data, and ")
+                    + (mode.local() ? "Never" : "never") + " stop to ask a question -- decide, and "
+                    + "say which assumption you made.\n\n");
         } else {
             sb.append("- Attendance: THE USER IS WAITING in the chat right now"
-                    + (context.declinedAsReasoning() ? ". "
-                            : ", and reads what you write beside each call as you go. ")
-                    + "Delegate where the local model is "
+                    + (context.declinedAsReasoning() ? "." : ", and reads what you write beside "
+                    + "each call as you go.")
+                    + (mode.local() ? "" : " Delegate where the local model is "
                     + "the right tool -- private data, and tool calls on this machine, the LAN "
                     + "and its servers -- knowing its speed: it reads about 100 tokens a second "
                     + "and writes about 8, so a delegation that reads a long result or writes a "
-                    + "long answer takes minutes.\n\n");
+                    + "long answer takes minutes.")
+                    + "\n\n");
         }
 
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
@@ -609,8 +641,9 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content. Sent whole on every
      * step, never shortened, and the same for every provider, task and step: what changes goes in
      * the per-step block at the end of the last user message ({@link #buildDynamicContext}), so
-     * the provider's prompt cache holds all of this. The one exception is {@code quiet}, which
-     * changes it once in a task, and only in a task the provider has already stopped.
+     * the provider's prompt cache holds all of this. The exceptions are {@code quiet}, which
+     * changes it once in a task, and only in a task the provider has already stopped, and the
+     * local model's own prompt ({@link StepMode#local}).
      *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
@@ -730,8 +763,8 @@ public class ThinkingEngine {
         sb.append("- On failure: diagnose WHY, then try fundamentally different approach. Never repeat failed actions.\n");
         sb.append("- Skill errors: fix via skill_create (SAME name). Never _v2/_fixed.\n");
         sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
-        sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders -- <email_N>, <ssid_N> and so on, N a number. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
-        sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
+        if (!mode.local()) sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders -- <email_N>, <ssid_N> and so on, N a number. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
+        if (!mode.local()) sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");

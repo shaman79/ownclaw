@@ -116,7 +116,7 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("under localFirst the prompt does not offer a skill the tools array withholds")
     void promptDoesNotContradictTheToolsArray() {
-        var mode = new ThinkingEngine.StepMode(true, true);
+        var mode = new ThinkingEngine.StepMode(true, true, false);
         var engine = engine();
         String text = prompt(engine, unattended(), mode);
         String delegateSpec = engine.toolsFor(unattended(), mode).stream()
@@ -148,7 +148,7 @@ class LocalFirstUnattendedTest {
         // second time, the very skills the array withholds advertised as callable, and the
         // "Output: {reasoning, tool, params}" instruction the array exists to replace. The
         // duplicate is what kept the deadlock alive there after it was fixed for Anthropic.
-        var mode = new ThinkingEngine.StepMode(true, true);
+        var mode = new ThinkingEngine.StepMode(true, true, false);
         var engine = engine();
         var first = unattended();
         String step0 = promptFor(engine, first, mode, "openai");
@@ -175,7 +175,7 @@ class LocalFirstUnattendedTest {
 
         // Without native tools the prompt is the only place any of it can be.
         String textProtocol = promptFor(engine, unattended(),
-                new ThinkingEngine.StepMode(false, false), "openai");
+                new ThinkingEngine.StepMode(false, false, false), "openai");
         assertTrue(textProtocol.contains("## Tools"), textProtocol);
         assertTrue(textProtocol.contains("Fetch and format a news digest."));
     }
@@ -183,7 +183,7 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("native tools: the JSON envelope is not taught alongside a tools array")
     void nativeToolsDoNotTeachTheTextEnvelope() {
-        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(true, false));
+        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(true, false, false));
         assertFalse(text.contains("Single JSON:"),
                 "this instruction IS the escape hatch: a model told to emit {tool, params} as "
                         + "text will, and the parser accepts it, and the loop runs it");
@@ -195,7 +195,7 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("the text protocol still gets the full prose prompt")
     void textProtocolIsUnchanged() {
-        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(false, false));
+        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(false, false, false));
         assertTrue(text.contains("Single JSON:"), "without a tools array, prose is the protocol");
         assertTrue(text.contains("## Actions"));
         assertTrue(text.contains("## Tools"));

@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.AgentResult.TerminationReason;
 import com.ownclaw.privacy.Redactor;
 import com.ownclaw.llm.EgressRefused;
+import com.ownclaw.llm.LlmException;
 import com.ownclaw.llm.ProviderRefused;
 import com.ownclaw.privacy.PrivateIndex;
 
@@ -36,13 +37,17 @@ final class TaskEnding {
     /**
      * The ending of {@code r}, written around the loop's why ({@code r.response()}); a question
      * keeps the question on top. A finished answer is returned as the model placed it, with vault
-     * values scrubbed out.
+     * values scrubbed out, and a line under it when the local model took the task over.
      *
      * @param trace the task's rows as {@code TaskTraceService} parses them -- the steps it did
      */
     static AgentResult apply(AgentResult r, AgentContext ctx, Map<String, Object> trace) {
         if (r.terminationReason() == TerminationReason.COMPLETED) {
-            return texts(r, scrubbed(r.response(), ctx), scrubbed(r.ownerText(), ctx));
+            // Said under the answer too: a scheduled report has no chat note to say it.
+            String local = ctx.onLocal() ? "\n\n_🏠 Written by the local model: the cloud model could not "
+                    + "be used -- " + ctx.onLocalBecause() + "._" : "";
+            return texts(r, scrubbed(r.response(), ctx) + local,
+                    r.ownerText() == null ? null : scrubbed(r.ownerText(), ctx) + local);
         }
         boolean question = r.awaitingUser();
         var ending = new StringBuilder();
@@ -78,6 +83,31 @@ final class TaskEnding {
         return who + " declined to answer this request" + (category == null
                 ? " (" + declined.stopReason() + ")"
                 : ": its safety check placed it in the category \"" + category + "\"");
+    }
+
+    /**
+     * Why the cloud model cannot be used, in words: the provider's reason, and for a failed
+     * connection that the internet may be down -- the local model is on the LAN, so it is said of
+     * the cloud only. The chat's note, the local model's prompt and the task's ending say it so.
+     */
+    static String cloudUnreachable(LlmException why) {
+        return why.unreachableBecause() + (why.connectionFailed() ? ", and the internet may be down" : "");
+    }
+
+    /**
+     * Why no model could take the task on, in words: the local model could not be reached --
+     * and, the owner's switch being on, that the cloud is switched off -- or the cloud could not
+     * be, and the local model was not there to go on with it.
+     */
+    static String unreachable(LlmException why, boolean local, boolean localOnly) {
+        if (local) {
+            return "the local model (" + why.getProvider() + ") could not be reached -- "
+                    + why.unreachableBecause()
+                    + (localOnly ? " -- and the cloud model is switched off (the owner's /local off "
+                    + "switches it on)" : "");
+        }
+        return "the cloud model (" + why.getProvider() + ") could not be used -- " + cloudUnreachable(why)
+                + " -- and the local model is not available to go on with the task";
     }
 
     /**

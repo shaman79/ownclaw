@@ -26,12 +26,13 @@ import java.util.function.BiConsumer;
  * The chat an attended task reports its progress in while it works: a message before each step
  * of the loop, one before each tool call of a delegation, a note after a step whose result the
  * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
- * as reasoning extraction is asked again, the local model's summary of each
+ * as reasoning extraction is asked again, one when the task moves to the local model because its
+ * cloud model cannot be reached, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
  * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
  * <p>
- * Every row but the two notes opens with its {@link Header}: who acts -- the cloud or the
+ * Every row but the notes opens with its {@link Header}: who acts -- the cloud or the
  * local model -- and where the task stands. The row's content is that header as one line, with
  * what the cloud could be shown under it: the cloud's own words beside its call, or a note that a
  * summary exists or why there is none. What only the owner may read -- a summary of a private
@@ -213,6 +214,17 @@ public final class TaskChat {
         note("⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a "
                 + "safety check against giving away the model's hidden reasoning, most likely set off by "
                 + "the progress updates. Asking again; the steps from here on come without them.");
+    }
+
+    /**
+     * The task's cloud model cannot be used, and the rest of the task runs on the local model
+     * ({@code AgentLoop}). Said, with why, because the steps that follow are slower and best
+     * effort, and their chips change.
+     */
+    void onLocalModel(String cloud, String because) {
+        if (sessionId == null) return;
+        note("🏠 The cloud model (" + cloud + ") can't be used -- " + because + ". The rest of this "
+                + "task runs on the local model: slower, and best effort.");
     }
 
     /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
@@ -400,7 +412,8 @@ public final class TaskChat {
     }
 
     /**
-     * A line about the task that is no step of it -- the filter's counts, a step asked again --
+     * A line about the task that is no step of it -- the filter's counts, a step asked again, the
+     * move to the local model --
      * posted without a header, so it is not read as one more step. The page draws a row without
      * one as its text.
      */

@@ -112,6 +112,7 @@ public class OpsController {
                         "POST /api/ops/skills/reload",
                     "POST /api/ops/config/native-tools?enabled=true|false",
                     "POST /api/ops/config/local-first?enabled=true|false",
+                    "POST /api/ops/config/local-only?enabled=true|false",
                     "POST /api/ops/config/privacy-canary?mode=enforce|observe",
                     "GET  /api/ops/egress?offset=0&limit=50[&decision=SENT|REFUSED|OBSERVED_LEAK|ERROR]",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)",
@@ -376,6 +377,23 @@ public class OpsController {
                 "previous", before,
                 "note", "Applies from the next reasoning step. Not persisted: a restart returns "
                         + "to ownclaw.mentor.native-tools in configuration."));
+    }
+
+    /**
+     * The local-only switch, for this run: on, no cloud model is called and every task runs on
+     * the local model -- the way to try that path on a live system and turn it off again. Not
+     * saved: a restart returns to the owner's setting (the settings page, /local).
+     */
+    @PostMapping("/config/local-only")
+    public ResponseEntity<?> localOnly(@RequestParam boolean enabled) {
+        boolean before = config.getMentor().isLocalOnly();
+        config.getMentor().setLocalOnly(enabled);
+        log.warn("Local only {} at runtime (was {})", enabled ? "ON" : "OFF", before);
+        return ResponseEntity.ok(Map.of(
+                "localOnly", enabled,
+                "previous", before,
+                "note", "Applies from the next model call. Not saved: a restart returns to the "
+                        + "owner's setting."));
     }
 
     /** What the canary does on a hit. Not persisted; OWNCLAW_PRIVACY_CANARY on restart. */

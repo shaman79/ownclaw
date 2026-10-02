@@ -14,7 +14,7 @@ OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LL
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
 - **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (Podman containers on Linux, ProcessBuilder on Windows).
 
-The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is a fallback — if the cloud is unavailable, the system degrades to local-only mode.
+The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is also the fallback: with the owner's local-only switch on, with no cloud configured, or when a task's cloud model cannot be reached (no internet, a rejected key, no credit, an outage the retries did not outlast), the local LLM runs the task itself, best effort.
 
 The system supports **multiple users**, each with isolated profiles, credentials, skill libraries, and conversation state.
 
@@ -68,14 +68,14 @@ scenario breaks the system's ability to handle all others.
 |-----------|-----------|-------------|---------|
 | **AgentLoop** | Main agent loop | Drives the Think→Act→Observe cycle: cloud LLM reasons, picks an action, system executes it, result feeds back | Java (Spring Boot) |
 | **ThinkingEngine** | Prompt builder + LLM caller | Builds system/user prompts, calls the selected LLM provider, parses structured JSON responses | Java |
-| **LlmRouter** | Provider selector | Always selects cloud LLM; falls back to local only if cloud is unavailable | Java |
+| **LlmRouter** | Provider selector | Selects the cloud LLM; the local LLM when local-only is on, no cloud is configured, or the task's cloud could not be reached | Java |
 | **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
 | **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
 | **SkillRunner** | Skill execution engine | Runs Python skill scripts in sandboxed containers (Podman/ProcessBuilder), manages I/O | Java + Python |
 | **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
 | **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
-**Key architectural rule**: The cloud LLM **always** orchestrates the main loop. The local LLM is only used when the cloud issues a `delegate` action with a structured plan, or as a degraded fallback when the cloud is unavailable.
+**Key architectural rule**: The cloud LLM orchestrates the main loop. The local LLM is used when the cloud issues a `delegate` action with a structured plan, or runs the loop itself as a degraded fallback (§4.7).
 
 ### 2.2 Architecture Diagram
 
@@ -294,7 +294,7 @@ Long-running tasks emit periodic progress messages to the user's chat:
 **Key rules**:
 - The cloud LLM sees **every** message and makes **every** decision in the main loop
 - The local LLM is **never** called directly in the main loop — only via `delegate`
-- `LlmRouter.selectProvider()` always returns the cloud provider; local is only a fallback if cloud is unavailable
+- `LlmRouter.selectProvider()` returns the cloud provider; the local provider only as the fallback of §4.7
 - All tools except `skill_create` are available to the local LLM during delegation
 
 ### 4.2 The Agent Loop (Think → Act → Observe)
@@ -404,14 +404,16 @@ public record DelegationPlan(
 `LlmRouter.java` implements a simple routing policy:
 
 ```
-selectProvider():
-  if cloudProvider is available:
-    return cloudProvider          ← ALWAYS cloud for main loop
+selectProvider(task):
+  if local-only is on, or the task has gone local:
+    return localProvider          ← the owner's switch, or the cloud could not be reached
+  if cloudProvider is configured:
+    return cloudProvider          ← the main loop, codegen, the library analysis
   else:
-    return localProvider          ← degraded mode only
+    return localProvider          ← degraded mode
 ```
 
-The old architecture had complex routing logic (confidence thresholds, circuit breakers, blocked-tool escalation, thinking-failure tracking). All of that has been removed. The cloud LLM is always the orchestrator; if it's unavailable, the system degrades to local-only mode where the local LLM drives the main loop directly (reduced capability but functional).
+The old architecture had complex routing logic (confidence thresholds, circuit breakers, blocked-tool escalation, thinking-failure tracking). All of that has been removed. Every model call of a task chooses through `selectProvider`. A cloud call that cannot reach its model (`LlmException.unreachable`: a failed connection, 401/402/403, no credit, a retryable failure the backoff gave up on) is asked again once if it was a first broken connection; otherwise the task goes local for the rest of its steps and the chat says why (`AgentLoop.goesOnWithoutTheCloud`). The next task tries the cloud again.
 
 ### 4.6 Prompt Caching (Anthropic)
 
@@ -424,11 +426,13 @@ When using Anthropic as the cloud provider, the system supports **prompt caching
 
 ### 4.7 Graceful Degradation
 
-| Capability | Cloud Available | Cloud Unavailable (Degraded) |
+Degraded means: the owner's local-only switch is on (the settings page, `/local on`), no cloud is configured, or the task's cloud model could not be reached (§4.5).
+
+| Capability | Cloud Available | Degraded (local LLM runs the task) |
 |-----------|----------------|------------------------------|
-| Main agent loop | Cloud LLM orchestrates | Local LLM orchestrates (reduced quality) |
-| Tool execution | All tools available | All tools available |
-| Delegation | Cloud delegates to local | N/A (local is already the main loop) |
+| Main agent loop | Cloud LLM orchestrates | Local LLM orchestrates (reduced quality, told why in its prompt) |
+| Tool execution | All tools available | All tools available, offered to it directly |
+| Delegation | Cloud delegates to local | Only to read private results, which stay descriptors as on the cloud |
 | Skill creation | Available | Available (local LLM generates, lower quality) |
 | Conversational chat | Cloud quality | Local quality |
 

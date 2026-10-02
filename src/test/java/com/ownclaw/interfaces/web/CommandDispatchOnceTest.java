@@ -46,7 +46,7 @@ class CommandDispatchOnceTest {
         final List<String> asked = new ArrayList<>();
 
         CountingCommandHandler(ConversationService conversations, TaskQueue queue) {
-            super(null, conversations, null, null, null, null, queue, null, null, null, null, null, null, null);
+            super(null, conversations, null, null, null, null, queue, null, null, null, null, null, null, null, null);
         }
 
         @Override

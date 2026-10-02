@@ -300,6 +300,7 @@ public class SetupWizardService {
         getSetting("openai_api_key").ifPresent(key -> config.getMentor().setApiKey(key));
         getSetting("anthropic_api_key").ifPresent(key -> config.getMentor().setAnthropicApiKey(key));
         getSetting("cloud_provider").ifPresent(p -> config.getMentor().setProvider(p));
+        getSetting(LocalMode.SETTING).ifPresent(v -> config.getMentor().setLocalOnly(Boolean.parseBoolean(v)));
         getSetting("anthropic_model").ifPresent(model -> config.getMentor().setAnthropicModel(model));
         getSetting("ollama_url").ifPresent(url -> config.getExecutor().setUrl(url));
         getSetting("ollama_model").ifPresent(model -> config.getExecutor().setModel(model));
