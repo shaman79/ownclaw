@@ -158,14 +158,28 @@ public final class SpecialActionSchemas {
                                     + "definition takes room in the local model's context that the work needs."))));
 
     /**
+     * The local model running a task itself is given the tools likeliest to fit it, not all of
+     * them ({@code ThinkingEngine#toolsFor}); this finds the rest. Never offered to the cloud.
+     */
+    static final ToolSpec FIND_TOOLS = spec(AgentAction.FIND_TOOLS,
+            "Search all the skills for what you need -- 'send email', 'router wifi settings', 'fetch a web "
+                    + "page' -- by English keywords. The matches are listed best first, " + ToolFinder.PAGE
+                    + " at a time, and you can call each of them from your next step, with its whole "
+                    + "description and parameters. Search before creating a skill: one may already exist.",
+            params(
+                    "query", ToolParam.required("string", "What the tool should do, in English keywords."),
+                    "page", ToolParam.optional("integer", "Which page of the matches, from 1: an answer "
+                            + "says how many matches there are.")));
+
+    /**
      * Delegate, as the local model running a task itself reads it ({@code ThinkingEngine#toolsFor}):
-     * it has every tool, so the work is its own, and a delegation is a run of itself -- the way a
-     * private result, which it too sees only as a description, is read.
+     * every skill is its own to call, so the work is its own, and a delegation is a run of itself --
+     * the way a private result, which it too sees only as a description, is read.
      */
     static final String DELEGATE_ON_THE_LOCAL_MODEL = "Hand a sub-goal to a separate run of the local "
-            + "model. You are the local model too and have every tool, so do the work yourself; delegate "
-            + "only to read private data. A private result or a file the user sent reaches you only as a "
-            + "description: to read, summarise, search, compare or answer a question about one, delegate "
+            + "model. You are the local model too, and every skill is yours to call -- find_tools finds "
+            + "the ones you were not given -- so do the work yourself; delegate only to read private data. "
+            + "A private result or a file the user sent reaches you only as a description: to read, summarise, search, compare or answer a question about one, delegate "
             + "and name its handle ({{N}}) in the goal -- every earlier result the goal names is given to "
             + "it whole, and it sees no other. Its answer comes back to you -- as a handle to pass on when "
             + "it quotes private data. Observations name results as {{N}}. When you have a tool that takes "

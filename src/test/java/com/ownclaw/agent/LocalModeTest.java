@@ -228,12 +228,12 @@ class LocalModeTest {
     }
 
     @Test
-    @DisplayName("the local model taking the task is given the whole registry, attended or not")
+    @DisplayName("the local model taking the task is not made to delegate: tools of its own, find_tools, and a delegate described for it")
     void theLocalModelIsGivenTheTools(@TempDir Path tmp) throws Exception {
         var local = localModel();
         var rig = new LoopRig(tmp, List.of(NOOP), 600, local);
         rig.config.getMentor().setLocalOnly(true);
-        var ctx = new AgentContext("u1", "t1", "check the network");
+        var ctx = new AgentContext("u1", "t1", "check the network with noop");
         ctx.setUnattended(true);
         ctx.setLocalTierReady(true);
         var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(List.of(NOOP)), rig.config,

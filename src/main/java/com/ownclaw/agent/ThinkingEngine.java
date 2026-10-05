@@ -1,5 +1,6 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
@@ -436,14 +437,8 @@ public class ThinkingEngine {
     List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
-            var specs = new ArrayList<>(ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(),
-                    context.credentialKeys()));
-            // The local model is told what delegate is to it: a run of itself, for private data.
-            if (mode.local()) specs.replaceAll(spec -> AgentAction.DELEGATE.equals(spec.name())
-                    ? new com.ownclaw.llm.ToolSpec(spec.name(), SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL,
-                            spec.inputSchema())
-                    : spec);
-            return specs;
+            if (mode.local()) return localTools(context);
+            return ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(), context.credentialKeys());
         }
         log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
@@ -471,6 +466,59 @@ public class ThinkingEngine {
                     spec.inputSchema());
         });
         return specs;
+    }
+
+    /**
+     * The local model's tools when it runs the task itself: the special actions -- delegate
+     * described for it, a run of itself for private data -- find_tools, and the task's tools.
+     * Not every tool: their descriptions were most of a 42,000-token first prompt the local model
+     * reads at about 90 tokens a second. The task's tools are seeded on its first step
+     * ({@link #firstTools}) and grow, appended in order, by what find_tools finds and what it
+     * creates ({@code AgentLoop}), so what it has read normally stays a prefix. It can call only
+     * what it is offered: asked to call a tool it was not given, it was seen to call one it was --
+     * get_weather, with a router's address as the city -- so the prompt says to find a tool first.
+     */
+    private List<com.ownclaw.llm.ToolSpec> localTools(AgentContext context) {
+        if (context.taskTools() == null) context.addTaskTools(firstTools(context));
+        List<Tool> tools = context.taskTools().stream()
+                .map(toolRegistry::find).flatMap(java.util.Optional::stream).toList();
+        var specials = new ArrayList<com.ownclaw.llm.ToolSpec>();
+        for (var spec : SpecialActionSchemas.ALL) {
+            specials.add(AgentAction.DELEGATE.equals(spec.name())
+                    ? new com.ownclaw.llm.ToolSpec(spec.name(), SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL,
+                            spec.inputSchema())
+                    : spec);
+        }
+        specials.add(SpecialActionSchemas.FIND_TOOLS);
+        return ToolSchemas.inOrder(specials, tools, context.credentialKeys());
+    }
+
+    /**
+     * What the local model starts a task with: the tools the task has already run -- it can take
+     * a task over from the cloud mid-way -- every tool the request or the chat so far names, the
+     * best page of find_tools for the request, and the owner's most used skills.
+     */
+    private List<String> firstTools(AgentContext context) {
+        var names = new ArrayList<String>();
+        for (var turn : context.trajectory().turns()) {
+            AgentAction ran = turn.action();
+            if (ran == null) continue;
+            if (toolRegistry.find(ran.tool()).isPresent()) names.add(ran.tool());
+            // A skill the task created before this step: the resolver's own at step 1 among them.
+            if (ran.isSkillCreate() && turn.observation() != null && turn.observation().success()) {
+                names.add(AgentLoop.skillOf(ran));
+            }
+        }
+        String said = context.originalMessage() + "\n"
+                + (context.conversationSummary() == null ? "" : context.conversationSummary());
+        for (Tool tool : toolRegistry.all()) {
+            if (LocalExecutor.namedIn(said, tool.name())) names.add(tool.name());
+        }
+        for (Tool tool : ToolFinder.find(toolRegistry.all(), context.originalMessage(), 1).tools()) {
+            names.add(tool.name());
+        }
+        names.addAll(context.usualTools());
+        return names;
     }
 
     /**
@@ -765,6 +813,7 @@ public class ThinkingEngine {
         sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
         if (!mode.local()) sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders -- <email_N>, <ssid_N> and so on, N a number. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
         if (!mode.local()) sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
+        if (mode.local() && nativeTools) sb.append("- Your tools are the skills likeliest to fit this task, not all of them, and you can call only the tools you are given: find_tools searches every skill by English keywords and gives you what it finds. Search before you create a skill.\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");

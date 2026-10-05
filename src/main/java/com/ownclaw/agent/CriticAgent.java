@@ -93,6 +93,18 @@ public class CriticAgent {
             return Verdict.allow(warnings);
         }
 
+        // 1b'. find_tools: the same search again finds the same skills. Its matches are already
+        // in the context, so a third identical one is a loop.
+        if (action.isFindTools()) {
+            int identicalCount = countIdenticalTrailingActions(context.trajectory(), action);
+            if (identicalCount >= 2) {
+                return Verdict.block("You have searched for the same thing " + identicalCount + " times in a "
+                        + "row and the skills have not changed. The matches are already in your context: call "
+                        + "one, search with other words, or create a skill if none fits.");
+            }
+            return Verdict.allow(warnings);
+        }
+
         // 1c. skill_create is dispatched directly by AgentLoop (:564) and is NOT a registered
         // Tool, so it must not fall through to the registry and schema checks below — those
         // would block it outright. It gets the checks that actually apply to it.

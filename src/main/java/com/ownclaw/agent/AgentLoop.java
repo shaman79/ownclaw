@@ -238,6 +238,14 @@ public class AgentLoop {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
 
+        // Some of the tools the local model starts with, should it run the task itself.
+        try {
+            context.setUsualTools(curatorService.mostUsedTools(userId).stream()
+                    .filter(name -> toolRegistry.find(name).isPresent()).limit(USUAL_TOOLS).toList());
+        } catch (Exception e) {
+            log.warn("Could not read which skills user {} uses most: {}", userId, e.getMessage());
+        }
+
         // A skill's own source is not a disclosure of what that skill returned: a Python
         // traceback quotes the line that threw, so without this the failure of a skill whose
         // result is private -- a mail reader's -- made its own repair prompt unsendable. Outside
@@ -874,7 +882,7 @@ public class AgentLoop {
             // === CRITIQUE ===
             // skill_manage and the registry's tools: the other special actions have no rules
             // there. A call the critic blocks runs nothing (stepRanNothing).
-            CriticAgent.Verdict verdict = action.isSkillManage() || !action.isSpecialAction()
+            CriticAgent.Verdict verdict = action.isSkillManage() || action.isFindTools() || !action.isSpecialAction()
                     ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
             if (!verdict.allowed()) {
                 log.warn("Task {} step {} blocked by critic: {}", context.taskId(), step + 1, verdict.blockReason());
@@ -944,6 +952,20 @@ public class AgentLoop {
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + result);
                 }
+                continue;
+            }
+
+            // === FIND TOOLS (special action: the local model running the task itself) ===
+            if (action.isFindTools()) {
+                long startMs = System.currentTimeMillis();
+                String result = findTools(action.params(), context);
+                long durationMs = System.currentTimeMillis() - startMs;
+                AgentObservation obs = result.startsWith("ERROR")
+                        ? AgentObservation.failure(action.tool(), result, durationMs)
+                        : AgentObservation.success(action.tool(), result, Map.of(), durationMs);
+                recordAndEmitObservation(context, action, obs, step + 1);
+                context.markProgress();
+                nothing.steps = 0; // a step that ran
                 continue;
             }
 
@@ -1421,6 +1443,57 @@ public class AgentLoop {
         }
 
         return Artifact.asObservation(artifact, result, durationMs);
+    }
+
+    /** How many of the owner's most used skills the local model starts with, running a task itself. */
+    static final int USUAL_TOOLS = 5;
+
+    /**
+     * find_tools: one page of the skills that match the query, best first, each with the first
+     * sentence of its description; the matches join the task's tools ({@link AgentContext#addTaskTools}),
+     * so from the next step the model has their whole descriptions and parameters.
+     */
+    private String findTools(Map<String, Object> params, AgentContext context) {
+        Object query = params.get("query");
+        if (query == null || query.toString().isBlank()) {
+            return "ERROR: 'query' is required: what the tool should do, in English keywords.";
+        }
+        int page = 1;
+        Object asked = params.get("page");
+        if (asked != null) {
+            try {
+                page = Math.max(1, (int) Double.parseDouble(asked.toString()));
+            } catch (NumberFormatException e) {
+                return "ERROR: 'page' is a number, from 1.";
+            }
+        }
+        ToolFinder.Page found = ToolFinder.find(toolRegistry.all(), query.toString(), page);
+        if (found.total() == 0) {
+            return "No skill matches \"" + query + "\" among the " + toolRegistry.all().size()
+                    + ". Try other words, or create one with skill_create.";
+        }
+        if (found.tools().isEmpty()) {
+            return "\"" + query + "\" has " + found.total() + " matches, on pages 1 to " + found.pages()
+                    + ": there is no page " + found.page() + ".";
+        }
+        context.addTaskTools(found.tools().stream().map(com.ownclaw.agent.tools.Tool::name).toList());
+        var sb = new StringBuilder();
+        int first = (found.page() - 1) * ToolFinder.PAGE + 1;
+        sb.append(found.total()).append(found.total() == 1 ? " skill matches \"" : " skills match \"")
+          .append(query).append("\"");
+        if (found.pages() > 1) {
+            sb.append("; these are ").append(first).append(" to ").append(first + found.tools().size() - 1)
+              .append(", best first");
+        }
+        sb.append(". You can call them from your next step:\n");
+        for (var tool : found.tools()) {
+            sb.append("- ").append(tool.name()).append(": ").append(ToolFinder.gist(tool.description())).append('\n');
+        }
+        if (found.page() < found.pages()) {
+            sb.append("More: find_tools with the same query and page ").append(found.page() + 1)
+              .append(" (of ").append(found.pages()).append(").");
+        }
+        return sb.toString().strip();
     }
 
     /** What skill_manage can do: the cases of {@link #executeSkillManage}. */
@@ -2071,6 +2144,10 @@ public class AgentLoop {
         if (result == null) {
             Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
+        }
+        // The skill a local model running the task has just created is one of its tools from here.
+        if (!result.startsWith("ERROR") && context.taskTools() != null) {
+            context.addTaskTools(List.of(str(action.params(), "name")));
         }
         long durationMs = System.currentTimeMillis() - startMs;
         return result.startsWith("ERROR")

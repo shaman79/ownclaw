@@ -266,6 +266,30 @@ public class AgentContext {
     public List<String> credentialKeys() { return credentialKeys; }
     public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }
 
+    /** The owner's most used skills, best first: some of the tools the local model starts with. */
+    private volatile List<String> usualTools = List.of();
+
+    public List<String> usualTools() { return usualTools; }
+    public void setUsualTools(List<String> names) { this.usualTools = names != null ? names : List.of(); }
+
+    /**
+     * The tools the local model running this task itself is given, in the order it was given
+     * them: seeded on its first step, then appended to -- find_tools's matches, a skill it
+     * creates. Null until then. Appended only, so the part of the prompt the local model
+     * has already read normally stays the same.
+     */
+    private java.util.LinkedHashSet<String> taskTools;
+
+    public synchronized java.util.Set<String> taskTools() {
+        return taskTools == null ? null : java.util.Collections.unmodifiableSet(new java.util.LinkedHashSet<>(taskTools));
+    }
+
+    /** Adds what is not there yet, at the end. */
+    public synchronized void addTaskTools(java.util.Collection<String> names) {
+        if (taskTools == null) taskTools = new java.util.LinkedHashSet<>();
+        taskTools.addAll(names);
+    }
+
     /**
      * The credential key prefixes that mark a personal-content source
      * ({@code ownclaw.privacy.personal-sources}), set from the configuration at task start.

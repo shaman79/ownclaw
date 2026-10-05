@@ -147,7 +147,8 @@ class ToolSchemasTest {
     @Test
     @DisplayName("every special action the loop branches on is declared")
     void everySentinelIsDeclared() throws Exception {
-        var declared = SpecialActionSchemas.ALL.stream().map(ToolSpec::name).toList();
+        var declared = new java.util.ArrayList<>(SpecialActionSchemas.ALL.stream().map(ToolSpec::name).toList());
+        declared.add(SpecialActionSchemas.FIND_TOOLS.name());   // the local model's, never the cloud's
         for (var f : AgentAction.class.getDeclaredFields()) {
             if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())
                     || f.getType() != String.class) continue;

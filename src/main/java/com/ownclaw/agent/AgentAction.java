@@ -38,6 +38,9 @@ public record AgentAction(
     /** Sentinel tool name indicating the agent wants to delegate a plan to the local LLM executor. */
     public static final String DELEGATE = "delegate";
 
+    /** The local model running a task itself searches the skills ({@link ToolFinder}). */
+    public static final String FIND_TOOLS = "find_tools";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
@@ -70,11 +73,15 @@ public record AgentAction(
         return DELEGATE.equals(tool);
     }
 
+    public boolean isFindTools() {
+        return FIND_TOOLS.equals(tool);
+    }
+
     /** Returns true if this action is a built-in special action (not a tool invocation). */
     public boolean isSpecialAction() {
         return isResponse() || isAskUser() || isSkillCreate() || isSkillManage()
                 || isCredentialManage() || isMemoryManage() || isScheduleManage()
-                || isDelegate();
+                || isDelegate() || isFindTools();
     }
 
     public String responseText() {
