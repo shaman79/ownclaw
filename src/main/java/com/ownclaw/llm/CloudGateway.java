@@ -124,7 +124,10 @@ public final class CloudGateway implements LlmProvider {
         var tally = new Redactor.Tally();
         var filteredMessages = new ArrayList<LlmMessage>(messages.size());
         for (LlmMessage m : messages) {
-            filteredMessages.add(new LlmMessage(m.role(), redactor.filter(user, m.content(), vault, tally)));
+            // A TOOLS message is the registry's own tool names, not data: filtered, a name that
+            // looked like an identifier would no longer name its tool.
+            filteredMessages.add(m.role() == LlmMessage.Role.TOOLS ? m
+                    : new LlmMessage(m.role(), redactor.filter(user, m.content(), vault, tally)));
         }
         List<ToolSpec> tools = cfg.tools();
         List<ToolSpec> filteredTools = null;
@@ -135,7 +138,7 @@ public final class CloudGateway implements LlmProvider {
                 Map<String, Object> schema = (Map<String, Object>) redactor.filterTree(user,
                         t.inputSchema(), vault, tally);
                 filteredTools.add(new ToolSpec(t.name(), redactor.filter(user, t.description(), vault, tally),
-                        schema));
+                        schema, t.deferred()));
             }
         }
 

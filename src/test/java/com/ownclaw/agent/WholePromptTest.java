@@ -70,16 +70,17 @@ class WholePromptTest {
     }
 
     @Test
-    @DisplayName("delegate's catalogue carries every skill's whole description")
-    void theCatalogueIsWhole() {
+    @DisplayName("every skill's whole description is sent: in the tools array, deferred until it is offered")
+    void everySkillIsSentWhole() {
         var engine = new ThinkingEngine(new ToolRegistry(library()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "the morning digest");
-        ctx.setUnattended(true);
-        String delegate = engine.toolsFor(ctx, new ThinkingEngine.StepMode(true, true, false)).stream()
-                .filter(s -> AgentAction.DELEGATE.equals(s.name())).map(ToolSpec::description)
-                .findFirst().orElseThrow();
+        var mode = new ThinkingEngine.StepMode(true, false, false);
+        engine.buildMessages(ctx, "anthropic", mode);
+        var tools = engine.toolsFor(ctx, mode);
         for (Tool t : library()) {
-            assertTrue(delegate.contains("- " + t.name() + ": " + t.description()), t.name());
+            ToolSpec spec = tools.stream().filter(s -> s.name().equals(t.name())).findFirst()
+                    .orElseThrow(() -> new AssertionError(t.name() + " is not sent"));
+            assertTrue(spec.description().contains(t.description()), t.name());
         }
     }
 

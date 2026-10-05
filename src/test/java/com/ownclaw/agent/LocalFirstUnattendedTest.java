@@ -118,8 +118,9 @@ class LocalFirstUnattendedTest {
     void promptDoesNotContradictTheToolsArray() {
         var mode = new ThinkingEngine.StepMode(true, true, false);
         var engine = engine();
-        String text = prompt(engine, unattended(), mode);
-        String delegateSpec = engine.toolsFor(unattended(), mode).stream()
+        var ctx = unattended();
+        String text = prompt(engine, ctx, mode);   // as on every step: the messages, then the tools
+        String delegateSpec = engine.toolsFor(ctx, mode).stream()
                 .filter(s -> "delegate".equals(s.name())).map(ToolSpec::description)
                 .findFirst().orElse("");
 
@@ -127,10 +128,11 @@ class LocalFirstUnattendedTest {
                 "the actionable manifest is what tells the model it can call these");
         assertTrue(text.contains("delegate"), "it has to be told how the work gets done");
 
-        // The catalogue lives in ONE place. With a tools array it is delegate's description,
-        // which sits inside the cache prefix; rendering it into the newest user message as well
-        // paid for it twice a step, and forced the canary to reason about the same bytes
-        // appearing in two parts at once — which is how a leak got in.
+        // The skills it is told of are named in ONE place: delegate's description, a tool part
+        // inside the cache prefix -- the task's likeliest (this request names the digest) and the
+        // owner's usual ones. Rendering them into the newest user message as well paid for them
+        // twice a step, and forced the canary to reason about the same bytes appearing in two
+        // parts at once -- which is how a leak got in.
         assertTrue(delegateSpec.contains("daily_news_digest"),
                 "it must still know the skill exists, or it will rebuild it with skill_create");
         assertTrue(delegateSpec.contains("cannot run skills yourself"),
@@ -167,7 +169,7 @@ class LocalFirstUnattendedTest {
             assertFalse(text.contains("Output: {\"reasoning\""),
                     "the instruction to use the protocol the tools array replaces: " + text);
         }
-        String spec = engine.toolsFor(unattended(), mode).stream()
+        String spec = engine.toolsFor(first, mode).stream()
                 .filter(t -> "delegate".equals(t.name())).map(ToolSpec::description)
                 .findFirst().orElse("");
         assertTrue(spec.contains("Fetch and format a news digest."),

@@ -273,21 +273,39 @@ public class AgentContext {
     public void setUsualTools(List<String> names) { this.usualTools = names != null ? names : List.of(); }
 
     /**
-     * The tools the local model running this task itself is given, in the order it was given
-     * them: seeded on its first step, then appended to -- find_tools's matches, a skill it
-     * creates. Null until then. Appended only, so the part of the prompt the local model
-     * has already read normally stays the same.
+     * Skills this task's model was offered beyond its usual ones, and when: seeded on its first
+     * step, then added to -- find_tools's matches, a skill it creates. Each addition is a TOOLS
+     * message after the steps there were when it was made ({@code ThinkingEngine}), so what the
+     * model has read stays as it was. Null until seeded.
+     *
+     * @param afterSteps how many steps the trajectory held when the tools were added
      */
-    private java.util.LinkedHashSet<String> taskTools;
+    public record ToolsAdded(int afterSteps, List<String> names) {}
 
-    public synchronized java.util.Set<String> taskTools() {
-        return taskTools == null ? null : java.util.Collections.unmodifiableSet(new java.util.LinkedHashSet<>(taskTools));
+    private List<ToolsAdded> toolsAdded;
+
+    /** Every addition, in order; null until the task's tools were seeded. */
+    public synchronized List<ToolsAdded> toolsAdded() {
+        return toolsAdded == null ? null : List.copyOf(toolsAdded);
     }
 
-    /** Adds what is not there yet, at the end. */
+    /** The task's first tools, offered before the step about to be asked for. */
+    public synchronized void seedTaskTools(java.util.Collection<String> names) {
+        add(names, trajectory.size());
+    }
+
+    /** Tools the step being taken found or made, offered after it: from the next step. */
     public synchronized void addTaskTools(java.util.Collection<String> names) {
-        if (taskTools == null) taskTools = new java.util.LinkedHashSet<>();
-        taskTools.addAll(names);
+        add(names, trajectory.size() + 1);
+    }
+
+    /** The names not offered before, as one addition. */
+    private void add(java.util.Collection<String> names, int afterSteps) {
+        if (toolsAdded == null) toolsAdded = new java.util.ArrayList<>();
+        var known = new java.util.HashSet<String>();
+        toolsAdded.forEach(a -> known.addAll(a.names()));
+        List<String> fresh = names.stream().distinct().filter(n -> !known.contains(n)).toList();
+        if (!fresh.isEmpty() || toolsAdded.isEmpty()) toolsAdded.add(new ToolsAdded(afterSteps, fresh));
     }
 
     /**

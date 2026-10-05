@@ -13,8 +13,14 @@ public record LlmMessage(Role role, String content) {
      */
     public static final String CACHE_BOUNDARY = "\n<!-- CACHE_BOUNDARY -->\n";
 
+    /**
+     * TOOLS: from here on the model is offered these tools too -- deferred ones
+     * ({@link ToolSpec#deferred}), named one per line. Anthropic's provider sends it as a
+     * mid-conversation tool addition, which leaves the cached prefix as it was; the others add the
+     * tools to the array they send ({@link ToolSpec#offered}) and send no message.
+     */
     public enum Role {
-        SYSTEM, USER, ASSISTANT;
+        SYSTEM, USER, ASSISTANT, TOOLS;
 
         public String apiValue() {
             return name().toLowerCase();
@@ -31,5 +37,15 @@ public record LlmMessage(Role role, String content) {
 
     public static LlmMessage assistant(String content) {
         return new LlmMessage(Role.ASSISTANT, content);
+    }
+
+    public static LlmMessage toolsAdded(java.util.List<String> names) {
+        return new LlmMessage(Role.TOOLS, String.join("\n", names));
+    }
+
+    /** The tools a {@link Role#TOOLS} message offers; none for any other. */
+    public java.util.List<String> addedTools() {
+        if (role != Role.TOOLS || content == null || content.isBlank()) return java.util.List.of();
+        return java.util.List.of(content.split("\n"));
     }
 }

@@ -112,8 +112,9 @@ class ToolFinderTest {
         assertEquals("No full stop", ToolFinder.gist("No full stop"));
     }
 
+    /** What the model was offered: what a provider without deferred loading sends. */
     static List<String> offered(Call call) {
-        return call.config().tools().stream().map(ToolSpec::name).toList();
+        return ToolSpec.offered(call.config().tools(), call.messages()).stream().map(ToolSpec::name).toList();
     }
 
     @Test
@@ -145,11 +146,15 @@ class ToolFinderTest {
         String found = calls.get(1).messages().stream().map(LlmMessage::content).reduce("", String::concat);
         assertTrue(found.contains("- openwrtWifiConfig: Read the wireless configuration of every router."), found);
 
-        List<String> cloud = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()), rig.config, null)
-                .toolsFor(new AgentContext("u1", "t2", "send an email"), new ThinkingEngine.StepMode(true, false, false))
-                .stream().map(ToolSpec::name).toList();
-        assertFalse(cloud.contains(AgentAction.FIND_TOOLS), "the cloud is offered every tool, and no search");
-        assertTrue(cloud.containsAll(library().stream().map(Tool::name).toList()));
+        // The cloud's toolset is the same: every skill sent, deferred until offered, and find_tools.
+        var cloudTask = new AgentContext("u1", "t2", "send an email");
+        var cloudMode = new ThinkingEngine.StepMode(true, false, false);
+        var cloudEngine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()), rig.config, null);
+        cloudEngine.buildMessages(cloudTask, "anthropic", cloudMode);
+        List<ToolSpec> cloud = cloudEngine.toolsFor(cloudTask, cloudMode);
+        assertTrue(cloud.stream().anyMatch(t -> AgentAction.FIND_TOOLS.equals(t.name()) && !t.deferred()));
+        assertTrue(cloud.stream().filter(ToolSpec::deferred).map(ToolSpec::name).toList()
+                .containsAll(library().stream().map(Tool::name).toList()), "nothing usual: every skill deferred");
     }
 
     @Test
@@ -161,14 +166,17 @@ class ToolFinderTest {
         ctx.setConversationSummary("USER: scan it\n[OwnClaw's record of task 4b22f2c5, from its step log:\n1. ✓ filler_05]");
         ctx.setUsualTools(List.of("filler_11", "a_skill_since_deleted"));
 
-        List<String> names = engine.toolsFor(ctx, new ThinkingEngine.StepMode(true, false, true)).stream()
+        var mode = new ThinkingEngine.StepMode(true, false, true);
+        var messages = engine.buildMessages(ctx, "ollama", mode);
+        List<String> names = ToolSpec.offered(engine.toolsFor(ctx, mode), messages).stream()
                 .map(ToolSpec::name).toList();
 
         assertTrue(names.contains("filler_05"), "named in the chat so far: " + names);
         assertTrue(names.contains("smtp_send_email"), "the best match: " + names);
         assertTrue(names.contains("filler_11"), "used most: " + names);
         assertFalse(names.contains("a_skill_since_deleted"), names.toString());
-        assertEquals(List.of("filler_05", "filler_11"), names.stream().filter(n -> n.startsWith("filler_")).toList());
+        assertEquals(List.of("filler_11", "filler_05"), names.stream().filter(n -> n.startsWith("filler_")).toList(),
+                "the usual ones first, the same for every task; then the task's");
     }
 
     @Test
@@ -182,7 +190,9 @@ class ToolFinderTest {
         ctx.trajectory().record(new AgentAction(AgentAction.SKILL_CREATE, Map.of("name", "filler_09"), ""),
                 AgentObservation.success(AgentAction.SKILL_CREATE, "Skill 'filler_09' created.", Map.of(), 5));
 
-        List<String> names = engine.toolsFor(ctx, new ThinkingEngine.StepMode(true, false, true)).stream()
+        var mode = new ThinkingEngine.StepMode(true, false, true);
+        var messages = engine.buildMessages(ctx, "ollama", mode);
+        List<String> names = ToolSpec.offered(engine.toolsFor(ctx, mode), messages).stream()
                 .map(ToolSpec::name).toList();
 
         assertTrue(names.containsAll(List.of("filler_03", "filler_09")), names.toString());
@@ -221,15 +231,16 @@ class ToolFinderTest {
     }
 
     @Test
-    @DisplayName("only a local model offered find_tools is told about it")
+    @DisplayName("every model offered skills by find_tools is told about it, and no other")
     void theRuleIsTrue() {
         var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()),
                 new com.ownclaw.config.OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "send an email");
         String rule = "you can call only the tools you are given";
-        assertTrue(engine.buildMessages(ctx, "ollama", new ThinkingEngine.StepMode(true, false, true)).get(0)
-                .content().contains(rule));
-        for (var mode : List.of(new ThinkingEngine.StepMode(false, false, true), new ThinkingEngine.StepMode(true, false, false))) {
+        for (var mode : List.of(new ThinkingEngine.StepMode(true, false, true), new ThinkingEngine.StepMode(true, false, false))) {
+            assertTrue(engine.buildMessages(ctx, "ollama", mode).get(0).content().contains(rule), mode.toString());
+        }
+        for (var mode : List.of(new ThinkingEngine.StepMode(false, false, true), new ThinkingEngine.StepMode(true, true, false))) {
             assertFalse(engine.buildMessages(ctx, "ollama", mode).get(0).content().contains(rule), mode.toString());
         }
     }

@@ -226,7 +226,7 @@ public class OllamaProvider implements LlmProvider {
 
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
-            for (ToolSpec spec : reqConfig.tools()) {
+            for (ToolSpec spec : ToolSpec.offered(reqConfig.tools(), messages)) {
                 ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
                 fn.put("name", spec.name());
                 fn.put("description", spec.description() == null ? "" : spec.description());
@@ -236,6 +236,7 @@ public class OllamaProvider implements LlmProvider {
 
         ArrayNode msgs = body.putArray("messages");
         for (LlmMessage msg : messages) {
+            if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the array
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
             m.put("content", msg.content());

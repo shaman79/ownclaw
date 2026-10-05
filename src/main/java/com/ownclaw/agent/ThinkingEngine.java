@@ -263,6 +263,9 @@ public class ThinkingEngine {
      */
     List<LlmMessage> buildMessages(AgentContext context, String providerName,
                                    StepMode mode) {
+        // A step offered tools natively is offered skills by TOOLS messages: the task's first
+        // ones are chosen on its first such step, before anything is rendered.
+        if (mode.nativeTools() && context.toolsAdded() == null) context.seedTaskTools(firstTools(context));
         List<LlmMessage> messages = new ArrayList<>();
         messages.add(LlmMessage.system(buildSystemPrompt(mode, context.declinedAsReasoning())));
 
@@ -270,20 +273,30 @@ public class ThinkingEngine {
             // Anthropic: the steps replayed turn by turn, append-only for prefix caching.
             buildAnthropicMessages(messages, context, mode);
         } else {
-            // Every other provider: the task, then every step in one history message.
+            // Every other provider: the task, then every step in one history message. Where the
+            // TOOLS messages sit does not matter to these providers, only their order
+            // (ToolSpec#offered): after the task.
             String task = buildUserMessage(context);
             String step = "\n\n---\n" + buildDynamicContext(context, mode);
             AgentTrajectory trajectory = context.trajectory();
             if (trajectory.isEmpty()) {
                 messages.add(LlmMessage.user(task + step));
+                withToolsAdded(messages, toolsAdded(context, mode), 0, Integer.MAX_VALUE);
             } else {
                 messages.add(LlmMessage.user(task));
+                withToolsAdded(messages, toolsAdded(context, mode), 0, Integer.MAX_VALUE);
                 messages.add(LlmMessage.user("## History\n"
                         + trajectory.toPromptSummary(!context.declinedAsReasoning()) + step));
             }
         }
 
         return messages;
+    }
+
+    /** The task's tool additions a step's messages carry: none on local-first work or the text protocol. */
+    private static List<AgentContext.ToolsAdded> toolsAdded(AgentContext context, StepMode mode) {
+        var added = context.toolsAdded();
+        return added == null || mode.localFirst() || !mode.nativeTools() ? List.of() : added;
     }
 
     /**
@@ -308,28 +321,26 @@ public class ThinkingEngine {
      * the stable prefix, which the provider caches for longer than the steps after it.
      */
     void buildAnthropicMessages(List<LlmMessage> messages, AgentContext context, StepMode mode) {
+        var added = toolsAdded(context, mode);
+        int next = 0;
+        int steps = 0;
         var user = new StringBuilder(buildUserMessage(context)).append(CACHE_BOUNDARY_MARKER);
         for (var turn : context.trajectory().turns()) {
             if (turn.byTheLoop()) {
                 String told = turn.observation().output();
                 if (told != null && !told.isBlank()) user.append("\n\n").append(told);
+                steps++;
                 continue;
             }
             messages.add(LlmMessage.user(user.toString()));
+            next = withToolsAdded(messages, added, next, steps);
             messages.add(LlmMessage.assistant(turn.actionText(!context.declinedAsReasoning())));
             user = new StringBuilder(turn.observationText());
+            steps++;
         }
         user.append("\n\n---\n").append(buildDynamicContext(context, mode));
         messages.add(LlmMessage.user(user.toString()));
-    }
-
-    /** Every skill by name with its whole description: what exists, without the ability to call it. */
-    private String skillCatalogue() {
-        return toolRegistry.all().stream()
-                .filter(t -> t != null && t.name() != null)
-                .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
-                .map(t -> "- " + t.name() + ": " + t.description())
-                .collect(java.util.stream.Collectors.joining("\n"));
+        withToolsAdded(messages, added, next, Integer.MAX_VALUE);
     }
 
     /**
@@ -437,66 +448,86 @@ public class ThinkingEngine {
     List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
-            if (mode.local()) return localTools(context);
-            return ToolSchemas.build(SpecialActionSchemas.ALL, toolRegistry.all(), context.credentialKeys());
+            return toolset(context, mode);
         }
         log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
                 context.taskId());
-        context.setOfferedTools(SpecialActionSchemas.ALL.stream()
+        var specials = new ArrayList<>(SpecialActionSchemas.ALL);
+        specials.add(SpecialActionSchemas.FIND_TOOLS);
+        context.setOfferedTools(specials.stream()
                 .map(com.ownclaw.llm.ToolSpec::name)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet()));
 
         // The cloud cannot CALL the skills, but it still has to know they exist, or it will
         // write a goal that asks for something already built -- or reach for skill_create to
-        // rebuild it. So delegate's description carries a catalogue: every skill's name and
-        // description, which is knowledge without capability.
-        var specs = new ArrayList<>(ToolSchemas.build(
-                SpecialActionSchemas.ALL, List.of(), context.credentialKeys()));
-        String catalogue = skillCatalogue();
+        // rebuild it. Delegate's description names the task's likeliest -- its first tools and
+        // the owner's usual ones, the same on every step of the task -- and find_tools searches
+        // the rest. It used to carry
+        // every skill's whole description: 114,293 characters of a scheduled run's every
+        // request. In the description, a tool part, not the task's message: the canary reads
+        // the user parts for private text, and a skill's own words are not that.
+        var specs = new ArrayList<>(ToolSchemas.build(specials, List.of(), context.credentialKeys()));
+        var likeliest = new StringBuilder();
+        var added = context.toolsAdded();
+        var names = new java.util.LinkedHashSet<String>();
+        if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
+        names.addAll(context.usualTools());
+        for (String name : names) {
+            toolRegistry.find(name).ifPresent(t -> likeliest.append("\n- ").append(t.name()).append(": ")
+                    .append(ToolFinder.gist(t.description())));
+        }
         specs.replaceAll(spec -> {
             if (!AgentAction.DELEGATE.equals(spec.name())) return spec;
             return new com.ownclaw.llm.ToolSpec(spec.name(),
                     spec.description()
                             + "\n\nYou are orchestrating unattended work, so you cannot run "
                             + "skills yourself — this is how the work gets done. State the goal "
-                            + "fully and name the skills it needs in 'tools'. Skills available "
-                            + "to it:\n"
-                            + (catalogue.isBlank() ? "(none yet — use skill_create first)" : catalogue),
+                            + "fully and name the skills it needs in 'tools'; find_tools searches "
+                            + "every skill."
+                            + (likeliest.isEmpty() ? "" : " The likeliest for this task:" + likeliest),
                     spec.inputSchema());
         });
         return specs;
     }
 
     /**
-     * The local model's tools when it runs the task itself: the special actions -- delegate
-     * described for it, a run of itself for private data -- find_tools, and the task's tools.
-     * Not every tool: their descriptions were most of a 42,000-token first prompt the local model
-     * reads at about 90 tokens a second. The task's tools are seeded on its first step
-     * ({@link #firstTools}) and grow, appended in order, by what find_tools finds and what it
-     * creates ({@code AgentLoop}), so what it has read normally stays a prefix. It can call only
-     * what it is offered: asked to call a tool it was not given, it was seen to call one it was --
-     * get_weather, with a router's address as the city -- so the prompt says to find a tool first.
+     * The tools of a step that is offered skills, the cloud's and the local model's alike: the
+     * special actions -- delegate described for the local model, a run of itself for private
+     * data -- find_tools, the owner's usual skills, and every other skill deferred: sent, but read
+     * by the model only from the TOOLS message that offers it ({@link #withToolsAdded}). The part
+     * that is not deferred is the same from task to task while the usual skills are, so the
+     * cloud's cached prefix is shared between tasks. Every skill's description used to be sent on every step: ~170,000
+     * characters on the cloud, and most of a 42,000-token first prompt the local model reads at
+     * about 90 tokens a second. A model can call only what it is offered: the local one, asked to
+     * call a tool it was not given, was seen to call one it was -- get_weather, with a router's
+     * address as the city -- so the prompt says to find a tool first.
      */
-    private List<com.ownclaw.llm.ToolSpec> localTools(AgentContext context) {
-        if (context.taskTools() == null) context.addTaskTools(firstTools(context));
-        List<Tool> tools = context.taskTools().stream()
-                .map(toolRegistry::find).flatMap(java.util.Optional::stream).toList();
+    private List<com.ownclaw.llm.ToolSpec> toolset(AgentContext context, StepMode mode) {
         var specials = new ArrayList<com.ownclaw.llm.ToolSpec>();
         for (var spec : SpecialActionSchemas.ALL) {
-            specials.add(AgentAction.DELEGATE.equals(spec.name())
+            specials.add(mode.local() && AgentAction.DELEGATE.equals(spec.name())
                     ? new com.ownclaw.llm.ToolSpec(spec.name(), SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL,
                             spec.inputSchema())
                     : spec);
         }
         specials.add(SpecialActionSchemas.FIND_TOOLS);
-        return ToolSchemas.inOrder(specials, tools, context.credentialKeys());
+        Set<String> usual = Set.copyOf(context.usualTools());
+        Comparator<Tool> byName = Comparator.comparing(Tool::name, String.CASE_INSENSITIVE_ORDER);
+        var skills = new ArrayList<Tool>();
+        toolRegistry.all().stream().filter(t -> usual.contains(t.name())).sorted(byName).forEach(skills::add);
+        toolRegistry.all().stream().filter(t -> !usual.contains(t.name())).sorted(byName).forEach(skills::add);
+        Set<String> special = new java.util.HashSet<>();
+        specials.forEach(s -> special.add(s.name()));
+        return ToolSchemas.inOrder(specials, skills, context.credentialKeys()).stream()
+                .map(spec -> special.contains(spec.name()) || usual.contains(spec.name()) ? spec : spec.asDeferred())
+                .toList();
     }
 
     /**
-     * What the local model starts a task with: the tools the task has already run -- it can take
-     * a task over from the cloud mid-way -- every tool the request or the chat so far names, the
-     * best page of find_tools for the request, and the owner's most used skills.
+     * The skills a task is first offered beyond the usual ones: those it has already run or
+     * created -- the local model can take a task over from the cloud mid-way -- those the request
+     * or the chat so far names, and the best page of find_tools for the request.
      */
     private List<String> firstTools(AgentContext context) {
         var names = new ArrayList<String>();
@@ -517,8 +548,24 @@ public class ThinkingEngine {
         for (Tool tool : ToolFinder.find(toolRegistry.all(), context.originalMessage(), 1).tools()) {
             names.add(tool.name());
         }
-        names.addAll(context.usualTools());
         return names;
+    }
+
+    /**
+     * The TOOLS messages of a task, in place: each after the user message that holds the steps
+     * there were when its tools were offered ({@link AgentContext.ToolsAdded}), from the
+     * {@code next} addition on, up to {@code steps}. None on local-first work, whose cloud calls
+     * no skill.
+     *
+     * @return the index of the next addition not yet placed
+     */
+    private static int withToolsAdded(List<LlmMessage> messages, List<AgentContext.ToolsAdded> added,
+                                      int next, int steps) {
+        while (next < added.size() && added.get(next).afterSteps() <= steps) {
+            var names = added.get(next++).names();
+            if (!names.isEmpty()) messages.add(LlmMessage.toolsAdded(names));
+        }
+        return next;
     }
 
     /**
@@ -645,7 +692,7 @@ public class ThinkingEngine {
         // is read at a tenth of the price, while this hangs off the newest message and is paid
         // in full on every single step. Sending both was costing the manifest twice per step.
         // On local-first work, which only native tools can be (stepMode), the array withholds
-        // the skills, and delegate's own description carries their catalogue (see toolsFor):
+        // the skills, and delegate's own description names the likeliest (see toolsFor):
         // not here as well. Rendering the same text into a tool part AND into the newest user
         // message forced the canary to choose between refusing a copy the cloud is receiving
         // anyway and excusing text across parts. Excusing across parts turned out to be a leak —
@@ -813,7 +860,7 @@ public class ThinkingEngine {
         sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
         if (!mode.local()) sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders -- <email_N>, <ssid_N> and so on, N a number. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
         if (!mode.local()) sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
-        if (mode.local() && nativeTools) sb.append("- Your tools are the skills likeliest to fit this task, not all of them, and you can call only the tools you are given: find_tools searches every skill by English keywords and gives you what it finds. Search before you create a skill.\n");
+        if (nativeTools && !mode.localFirst()) sb.append("- Your tools are the skills likeliest to fit this task, not all of them, and you can call only the tools you are given: find_tools searches every skill by English keywords and gives you what it finds. Search before you create a skill.\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");

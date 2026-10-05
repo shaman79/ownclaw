@@ -238,7 +238,7 @@ public class AgentLoop {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
 
-        // Some of the tools the local model starts with, should it run the task itself.
+        // The skills every task's model is offered from the start, the cloud's and the local one's.
         try {
             context.setUsualTools(curatorService.mostUsedTools(userId).stream()
                     .filter(name -> toolRegistry.find(name).isPresent()).limit(USUAL_TOOLS).toList());
@@ -1445,7 +1445,7 @@ public class AgentLoop {
         return Artifact.asObservation(artifact, result, durationMs);
     }
 
-    /** How many of the owner's most used skills the local model starts with, running a task itself. */
+    /** How many of the owner's most used skills every task's model is offered from the start. */
     static final int USUAL_TOOLS = 5;
 
     /**
@@ -1476,7 +1476,10 @@ public class AgentLoop {
             return "\"" + query + "\" has " + found.total() + " matches, on pages 1 to " + found.pages()
                     + ": there is no page " + found.page() + ".";
         }
-        context.addTaskTools(found.tools().stream().map(com.ownclaw.agent.tools.Tool::name).toList());
+        // Offered from the next step -- where skills are offered by TOOLS messages at all.
+        if (context.toolsAdded() != null) {
+            context.addTaskTools(found.tools().stream().map(com.ownclaw.agent.tools.Tool::name).toList());
+        }
         var sb = new StringBuilder();
         int first = (found.page() - 1) * ToolFinder.PAGE + 1;
         sb.append(found.total()).append(found.total() == 1 ? " skill matches \"" : " skills match \"")
@@ -1485,7 +1488,10 @@ public class AgentLoop {
             sb.append("; these are ").append(first).append(" to ").append(first + found.tools().size() - 1)
               .append(", best first");
         }
-        sb.append(". You can call them from your next step:\n");
+        // On unattended local-first work the cloud calls no skill: it names them to delegate.
+        sb.append(context.offeredTools() != null
+                ? ". They are for delegate's 'tools': you do not call them yourself:\n"
+                : ". You can call them from your next step:\n");
         for (var tool : found.tools()) {
             sb.append("- ").append(tool.name()).append(": ").append(ToolFinder.gist(tool.description())).append('\n');
         }
@@ -2145,8 +2151,8 @@ public class AgentLoop {
             Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
         }
-        // The skill a local model running the task has just created is one of its tools from here.
-        if (!result.startsWith("ERROR") && context.taskTools() != null) {
+        // The skill the model has just created is one of its tools from the next step.
+        if (!result.startsWith("ERROR") && context.toolsAdded() != null) {
             context.addTaskTools(List.of(str(action.params(), "name")));
         }
         long durationMs = System.currentTimeMillis() - startMs;

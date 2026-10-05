@@ -70,6 +70,13 @@ class AnthropicProvider implements LlmProvider {
     static final String CONTEXT_WINDOW_BETA = "model-context-window-exceeded-2025-08-26";
 
     /**
+     * Tools offered partway through a conversation: a deferred tool ({@code defer_loading}) is
+     * sent with every request but read by the model only from the {@code tool_addition} that
+     * names it, a mid-conversation system message, so the cached prefix is never edited.
+     */
+    static final String TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+
+    /**
      * The refusal categories Anthropic bills even when the model declined before writing
      * anything. A decline before any output in any other category, or in none, is not billed.
      */
@@ -175,8 +182,10 @@ class AnthropicProvider implements LlmProvider {
                 .url(BASE_URL + "/messages")
                 .header("x-api-key", apiKey)
                 .header("anthropic-version", API_VERSION)
-                .header("anthropic-beta", withFallbacks
-                        ? FALLBACK_BETA + "," + CONTEXT_WINDOW_BETA : CONTEXT_WINDOW_BETA)
+                .header("anthropic-beta", (withFallbacks ? FALLBACK_BETA + "," : "") + CONTEXT_WINDOW_BETA
+                        + (supportsToolChanges(model) && reqConfig.hasTools()
+                                && reqConfig.tools().stream().anyMatch(ToolSpec::deferred)
+                                ? "," + TOOL_CHANGES_BETA : ""))
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
                 .build();
@@ -468,8 +477,30 @@ class AnthropicProvider implements LlmProvider {
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
         boolean stable = false;
+        // A model that takes no tool changes -- the one a refusal is retried on, say -- is sent
+        // what a provider without deferred loading is: the tools offered so far, none deferred,
+        // and no TOOLS message.
+        List<ToolSpec> tools = !reqConfig.hasTools() ? List.of()
+                : supportsToolChanges(model) ? reqConfig.tools() : ToolSpec.offered(reqConfig.tools(), messages);
+        // A TOOLS message offers deferred tools of this request, each once: a name that is not
+        // one -- a tool deleted since, or one offered from the start -- would be refused.
+        java.util.Set<String> deferred = new java.util.HashSet<>();
+        for (ToolSpec t : tools) if (t.deferred()) deferred.add(t.name());
         for (LlmMessage msg : messages) {
-            if (msg.role() == LlmMessage.Role.SYSTEM) {
+            if (msg.role() == LlmMessage.Role.TOOLS) {
+                var added = msg.addedTools().stream().filter(deferred::remove).toList();
+                if (added.isEmpty()) continue;
+                ObjectNode m = msgs.addObject();
+                m.put("role", "system");
+                ArrayNode blocks = m.putArray("content");
+                for (String name : added) {
+                    ObjectNode block = blocks.addObject();
+                    block.put("type", "tool_addition");
+                    ObjectNode ref = block.putObject("tool");
+                    ref.put("type", "tool_reference");
+                    ref.put("name", name);
+                }
+            } else if (msg.role() == LlmMessage.Role.SYSTEM) {
                 systemPrompt = (systemPrompt == null)
                         ? msg.content()
                         : systemPrompt + "\n\n" + msg.content();
@@ -515,14 +546,21 @@ class AnthropicProvider implements LlmProvider {
         }
 
         // The sliding conversation breakpoint, from the second step on: on the message before
-        // the newest, so the next step -- two messages longer -- finds this step's entry two
-        // positions back, well inside the 20 positions each breakpoint looks back over. Each step
+        // the newest, so the next step -- a few messages longer, with any tool addition -- finds
+        // this step's entry a few positions back, well inside the 20 positions each breakpoint looks back over. Each step
         // pays full price only for its newest turn and the context that changes with it; when
         // this entry has expired, the next step reads the task's hour-long one and writes only
         // the steps after it. With the tools, the system prompt and the task, that is four
         // marks, the most the API takes.
-        if (msgs.size() >= 3) {
-            setMessageCacheBreakpoint(msgs, msgs.size() - 2);
+        // Before the newest user turn, on a message of text: a tool addition -- after that turn,
+        // or before it -- is not one.
+        int newest = msgs.size() - 1;
+        while (newest > 0 && !"user".equals(msgs.get(newest).path("role").asText())) newest--;
+        for (int i = newest - 1; i > 0; i--) {
+            if (msgs.get(i).path("content").isTextual()) {
+                setMessageCacheBreakpoint(msgs, i);
+                break;
+            }
         }
 
         // Native tools.
@@ -544,18 +582,23 @@ class AnthropicProvider implements LlmProvider {
         // one observation. Accepting two calls would mean either dropping one -- silently losing
         // work the model asked for -- or restructuring the trajectory. That is a later stage,
         // not a side effect of this one.
+        //
+        // A deferred tool is sent with defer_loading: the API leaves it out of the prompt until a
+        // tool addition names it (above), and it may not carry the cache mark, which goes on the
+        // last tool that is not deferred.
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
-            for (ToolSpec spec : reqConfig.tools()) {
+            ObjectNode lastOffered = null;
+            for (ToolSpec spec : tools) {
                 ObjectNode t = toolsArray.addObject();
                 t.put("name", spec.name());
                 t.put("description", spec.description() == null ? "" : spec.description());
                 t.set("input_schema", mapper.valueToTree(spec.inputSchema()));
                 t.put("eager_input_streaming", true);
+                if (spec.deferred()) t.put("defer_loading", true);
+                else lastOffered = t;
             }
-            if (toolsArray.size() > 0) {
-                ((ObjectNode) toolsArray.get(toolsArray.size() - 1)).set("cache_control", cacheControl(stable));
-            }
+            if (lastOffered != null) lastOffered.set("cache_control", cacheControl(stable));
             ObjectNode choice = body.putObject("tool_choice");
             choice.put("type", "auto");
             choice.put("disable_parallel_tool_use", true);
@@ -607,6 +650,27 @@ class AnthropicProvider implements LlmProvider {
      * and the legacy {@code claude-3-*} ids. The check is version-based rather than a
      * hardcoded list so that models released later default to the correct behaviour.
      */
+    /**
+     * Whether a model takes deferred tools and mid-conversation tool additions
+     * ({@link #TOOL_CHANGES_BETA}): Claude Opus 4.8, Opus 5 and later, Sonnet 5.5 and later,
+     * Fable and Mythos 5.1 and later, as Anthropic's documentation lists them -- not Sonnet 5.
+     */
+    static boolean supportsToolChanges(String model) {
+        if (model == null || model.isBlank()) return false;
+        Matcher m = MODEL_GENERATION.matcher(model.trim().toLowerCase());
+        if (!m.find()) return false;
+        String family = m.group(1);
+        int major = Integer.parseInt(m.group(2));
+        int minor = m.group(3) != null ? Integer.parseInt(m.group(3)) : 0;
+        int version = major * 10 + Math.min(minor, 9);
+        return switch (family) {
+            case "opus" -> version >= 48;
+            case "sonnet" -> version >= 55;
+            case "fable", "mythos" -> version >= 51;
+            default -> false;
+        };
+    }
+
     static boolean supportsSampling(String model) {
         if (model == null || model.isBlank()) {
             return true;
