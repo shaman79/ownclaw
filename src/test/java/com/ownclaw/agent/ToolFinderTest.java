@@ -180,6 +180,21 @@ class ToolFinderTest {
     }
 
     @Test
+    @DisplayName("a task starts with the request's best few matches, not a whole page: the rest are a find away")
+    void aFewMatches() {
+        var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()),
+                new com.ownclaw.config.OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "it converts kelvins");
+        var mode = new ThinkingEngine.StepMode(true, false, false);
+        var messages = engine.buildMessages(ctx, "anthropic", mode);
+        List<String> offered = ToolSpec.offered(engine.toolsFor(ctx, mode), messages).stream()
+                .map(ToolSpec::name).filter(n -> n.startsWith("filler_")).toList();
+        assertEquals(ThinkingEngine.FIRST_MATCHES, offered.size(), "20 match: " + offered);
+        assertEquals(ToolFinder.find(library(), "it converts kelvins", 1).tools().stream().limit(ThinkingEngine.FIRST_MATCHES)
+                .map(Tool::name).toList(), offered, "the best of them");
+    }
+
+    @Test
     @DisplayName("taking a task over, the local model starts with the tools the task already ran and created")
     void takenOverMidTask() {
         var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()),

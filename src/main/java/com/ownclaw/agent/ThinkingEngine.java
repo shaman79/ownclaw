@@ -527,7 +527,7 @@ public class ThinkingEngine {
     /**
      * The skills a task is first offered beyond the usual ones: those it has already run or
      * created -- the local model can take a task over from the cloud mid-way -- those the request
-     * or the chat so far names, and the best page of find_tools for the request.
+     * or the chat so far names, and find_tools's best few matches for the request ({@link #FIRST_MATCHES}).
      */
     private List<String> firstTools(AgentContext context) {
         var names = new ArrayList<String>();
@@ -545,11 +545,18 @@ public class ThinkingEngine {
         for (Tool tool : toolRegistry.all()) {
             if (LocalExecutor.namedIn(said, tool.name())) names.add(tool.name());
         }
-        for (Tool tool : ToolFinder.find(toolRegistry.all(), context.originalMessage(), 1).tools()) {
-            names.add(tool.name());
-        }
+        ToolFinder.find(toolRegistry.all(), context.originalMessage(), 1).tools().stream()
+                .limit(FIRST_MATCHES).forEach(tool -> names.add(tool.name()));
         return names;
     }
+
+    /**
+     * How many of find_tools's best matches for the request a task starts with. A skill's
+     * description runs to 8,500 characters, and eight of them were ~15,000 tokens of a cloud
+     * task's first request -- and minutes of the local model's first read -- whether or not the
+     * task used one. find_tools gives the rest when the model asks.
+     */
+    static final int FIRST_MATCHES = 3;
 
     /**
      * The TOOLS messages of a task, in place: each after the user message that holds the steps
