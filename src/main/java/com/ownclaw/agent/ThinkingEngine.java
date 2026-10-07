@@ -400,9 +400,12 @@ public class ThinkingEngine {
         // restricts nothing -- on the text protocol the manifest is the channel. Never for the
         // local model running the task itself: the registry would be withheld from the one
         // model that runs the tools, to make it hand the work to itself.
+        //
+        // Unattended work always (local-first-unattended); a chat when the owner chose cost over
+        // speed (prefer-cost, the slider): nobody, or nobody in a hurry, waits on it.
         boolean localFirst = nativeTools && !local
-                && config.getMentor().isLocalFirstUnattended()
-                && context.isUnattended()
+                && (context.isUnattended() ? config.getMentor().isLocalFirstUnattended()
+                        : config.getMentor().isPreferCost())
                 && localTierReady(context)
                 // The valve. If a delegation has already failed, the local tier has had its
                 // turn and the registry comes back for the rest of the task. Without this, a
@@ -481,8 +484,9 @@ public class ThinkingEngine {
             if (!AgentAction.DELEGATE.equals(spec.name())) return spec;
             return new com.ownclaw.llm.ToolSpec(spec.name(),
                     spec.description()
-                            + "\n\nYou are orchestrating unattended work, so you cannot run "
-                            + "skills yourself — this is how the work gets done. State the goal "
+                            + "\n\n" + (context.isUnattended() ? "You are orchestrating unattended work"
+                                    : "The owner has chosen cost over speed")
+                            + ", so you cannot run skills yourself — this is how the work gets done. State the goal "
                             + "fully and name the skills it needs in 'tools'; find_tools searches "
                             + "every skill."
                             + (likeliest.isEmpty() ? "" : " The likeliest for this task:" + likeliest),
@@ -583,7 +587,8 @@ public class ThinkingEngine {
      * model can finish through, in {@link #unlessAnsweredBeforeWork}.
      */
     private static boolean nothingRanYet(AgentContext context, StepMode mode) {
-        return mode.localFirst() && context.trajectory().turns().stream()
+        // Unattended only: on a chat, a question that needs no skill is answered at once.
+        return mode.localFirst() && context.isUnattended() && context.trajectory().turns().stream()
                 .noneMatch(t -> t.observation() != null && t.observation().success());
     }
 
@@ -660,7 +665,10 @@ public class ThinkingEngine {
             sb.append("- Attendance: THE USER IS WAITING in the chat right now"
                     + (context.declinedAsReasoning() ? "." : ", and reads what you write beside "
                     + "each call as you go.")
-                    + (mode.local() ? "" : " Delegate where the local model is "
+                    + (mode.local() ? "" : mode.localFirst() ? " The owner has chosen cost over "
+                    + "speed, so the skills run on the local model: delegate the work. It reads "
+                    + "about 100 tokens a second and writes about 8, so a delegation takes minutes."
+                    : " Delegate where the local model is "
                     + "the right tool -- private data, and tool calls on this machine, the LAN "
                     + "and its servers -- knowing its speed: it reads about 100 tokens a second "
                     + "and writes about 8, so a delegation that reads a long result or writes a "
@@ -1057,10 +1065,12 @@ public class ThinkingEngine {
      * ({@code stop_details.category} "reasoning_extraction"), which ended the owner's task on
      * 2026-10-01. No length is asked for either way: a sentence count is a cap. A step declined so
      * all the same is asked again with nothing asked for beside the call ({@code AgentLoop}).
+     * Only what is new: on 2026-10-07 every update of a 30-step router task restated the same
+     * suspicion, so different checks read as the same step done again.
      */
     static final String NARRATION = "write it for them, in their language, as a progress update on "
-            + "the work -- what the last result showed and what you are doing next -- not your "
-            + "reasoning.";
+            + "the work -- what the last result showed and what you are doing next, only what is "
+            + "new since your last update -- not your reasoning.";
 
     /**
      * The text protocol's action, restated to a model whose reply was not one: what makes it an

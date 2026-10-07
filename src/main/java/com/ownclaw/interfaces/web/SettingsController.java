@@ -56,6 +56,7 @@ public class SettingsController {
 
         // Cloud LLM
         result.put("local_only", localMode.on());
+        result.put("prefer_cost", localMode.preferCost());
         result.put("cloud_provider", config.getMentor().getProvider());
         result.put("openai_api_key", maskKey(config.getMentor().getApiKey()));
         result.put("openai_api_key_set", config.getMentor().getApiKey() != null && !config.getMentor().getApiKey().isBlank());
@@ -106,6 +107,7 @@ public class SettingsController {
 
             switch (key) {
                 case "local_only" -> localMode.set(Boolean.parseBoolean(value.strip()));
+                case "prefer_cost" -> localMode.setPreferCost(Boolean.parseBoolean(value.strip()));
                 case "cloud_provider" -> {
                     String provider = value.strip().toLowerCase();
                     if ("openai".equals(provider) || "anthropic".equals(provider)) {

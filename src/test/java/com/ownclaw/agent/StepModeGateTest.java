@@ -76,10 +76,66 @@ class StepModeGateTest {
     }
 
     @Test
-    @DisplayName("attended work is never restricted")
-    void attendedIsExempt() {
-        assertFalse(mode(true, true, true, false, true).localFirst(),
-                "the user is waiting; a local step costs about a minute");
+    @DisplayName("a chat is restricted only when the owner chose cost over speed (the slider)")
+    void attendedFollowsTheSlider() {
+        var cfg = config(true, true);
+        cfg.getMentor().setPreferCost(false);
+        assertFalse(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+                "fastest: the cloud runs the skills; a local step costs minutes");
+        cfg.getMentor().setPreferCost(true);
+        assertTrue(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+                "cheaper: the cloud plans and the local model runs them");
+        cfg.getMentor().setLocalFirstUnattended(false);
+        assertTrue(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+                "the unattended flag is not the chat's");
+        assertFalse(engine(cfg).stepMode(context(false, false), provider(true)).localFirst(),
+                "and never with a local tier that cannot take the work");
+    }
+
+    @Test
+    @DisplayName("on a chat that delegates, a question that needs no skill is answered at once; the words say why skills are not its own")
+    void aChatThatDelegates() {
+        var cfg = config(true, true);
+        var engine = engine(cfg);
+        var chat = context(false, true);
+        var mode = engine.stepMode(chat, provider(true));
+        LlmProvider answering = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                return com.ownclaw.llm.Replies.of("", 10, 5, 0, 0, "tool_use",
+                        List.of(new com.ownclaw.llm.ToolCall("c1", AgentAction.RESPOND, Map.of("message", "It is 4."))));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+        };
+        assertEquals(AgentAction.RESPOND, engine.decideNextActionFull(chat, answering).action().tool(),
+                "a question needing no skill would be refused as 'a plan, not an answer'");
+
+        String text = engine.buildMessages(chat, "anthropic", mode).stream().map(LlmMessage::content)
+                .reduce("", String::concat);
+        assertTrue(text.contains("The owner has chosen cost over speed, so the skills run on the local model: "
+                + "delegate the work."), text);
+        assertTrue(text.contains("what the last result showed and what you are doing next, only what is new "
+                + "since your last update"), "each update restated the same suspicion: " + text);
+        String delegate = engine.toolsFor(chat, mode).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
+                .findFirst().orElseThrow().description();
+        assertTrue(delegate.contains("The owner has chosen cost over speed, so you cannot run skills yourself"), delegate);
+        assertFalse(delegate.contains("unattended work"), delegate);
+    }
+
+    @Test
+    @DisplayName("a skill the cloud calls on a chat that delegates is refused in the chat's words")
+    void theRefusalOnAChat(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("noop", List.of(), p -> "ran")));
+        var ctx = new AgentContext("u1", "t1", "check it");
+        ctx.setOfferedTools(java.util.Set.of(AgentAction.DELEGATE));   // what a chat that delegates offers
+        var execute = AgentLoop.class.getDeclaredMethod("executeTool", AgentAction.class, AgentContext.class);
+        execute.setAccessible(true);
+        var obs = (AgentObservation) execute.invoke(rig.loop, new AgentAction("noop", Map.of(), ""), ctx);
+        assertFalse(obs.success());
+        assertTrue(obs.output().contains("The owner has chosen cost over speed, so the work runs on the local model"),
+                obs.output());
+        assertFalse(obs.output().contains("Nobody is waiting"), "the owner is: " + obs.output());
     }
 
     @Test

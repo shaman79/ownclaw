@@ -75,6 +75,10 @@ ownclaw:
     # retries did not outlast -- moves to the local model by itself.
     local-only: ${OWNCLAW_LOCAL_ONLY:false}
 
+    # Cost over speed on a chat: the cloud plans and the local model runs every skill -- the
+    # owner's time-vs-cost slider, saved by the settings page. Off, the cloud runs skills itself.
+    prefer-cost: ${OWNCLAW_PREFER_COST:true}
+
     # Offer tools natively instead of asking for a JSON envelope in the prompt.
     #
     # Verified in production before this was turned on: both a registry skill (shell_exec) and a

@@ -81,6 +81,17 @@ public class OwnClawConfig {
         private boolean localOnly = false;
 
         public boolean isLocalOnly() { return localOnly; }
+
+        /**
+         * Cost over speed, on a chat: the cloud plans and the local model runs every skill, as
+         * on unattended work ({@code ThinkingEngine#stepMode}) -- slower, cheaper. Off, the
+         * cloud runs the skills itself. The middle stop of the owner's time-vs-cost slider,
+         * local only being the last ({@link LocalMode}).
+         */
+        private boolean preferCost = true;
+
+        public boolean isPreferCost() { return preferCost; }
+        public void setPreferCost(boolean v) { this.preferCost = v; }
         public void setLocalOnly(boolean v) { this.localOnly = v; }
 
         public boolean isLocalFirstUnattended() { return localFirstUnattended; }

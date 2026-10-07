@@ -4014,11 +4014,12 @@
                 'Cloud LLM Provider' +
             '</div>' +
             '<div class="settings-field">' +
-                '<label>Mode</label>' +
-                '<select id="settings-local-only">' +
-                    '<option value="false"' + (data.local_only ? '' : ' selected') + '>Cloud model, the local model when the cloud can\'t be reached</option>' +
-                    '<option value="true"' + (data.local_only ? ' selected' : '') + '>Local only: never call the cloud model</option>' +
-                '</select>' +
+                '<label for="settings-cost">Time vs cost</label>' +
+                '<input type="range" id="settings-cost" min="0" max="2" step="1" value="' + costStop(data) + '" style="width:100%">' +
+                '<div style="display:flex;justify-content:space-between;font-size:12px;opacity:.75">' +
+                    '<span>Fastest</span><span>Cheaper</span><span>Free</span>' +
+                '</div>' +
+                '<div class="field-hint" id="settings-cost-hint">' + escapeHtml(COST_STOPS[costStop(data)]) + '</div>' +
             '</div>' +
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
@@ -4151,17 +4152,34 @@
             }
         });
 
+        document.getElementById('settings-cost').addEventListener('input', function() {
+            document.getElementById('settings-cost-hint').textContent = COST_STOPS[Number(this.value)];
+        });
         document.getElementById('settings-save').addEventListener('click', function() {
             saveSettings(data);
         });
     }
 
+    /** The time-vs-cost slider's stops, as the settings page says them. */
+    var COST_STOPS = [
+        'Fastest: the cloud model runs the skills itself. The local model reads private data and takes over when the cloud can\'t be reached.',
+        'Cheaper: the cloud model plans and the local model runs the skills. Slower -- each hand-off takes minutes -- and cheaper.',
+        'Free: local only. No cloud model is called; every task runs on the local model, best effort.'
+    ];
+
+    function costStop(data) {
+        return data.local_only ? 2 : (data.prefer_cost ? 1 : 0);
+    }
+
     function saveSettings(originalData) {
         var payload = {};
 
-        // Local only
-        var localOnly = document.getElementById('settings-local-only').value === 'true';
+        // Time vs cost: local only is the last stop; the first two say whether the cloud runs
+        // the skills itself, and leave prefer_cost as it was on the last.
+        var stop = Number(document.getElementById('settings-cost').value);
+        var localOnly = stop === 2;
         if (localOnly !== !!originalData.local_only) payload.local_only = String(localOnly);
+        if (stop < 2 && (stop === 1) !== !!originalData.prefer_cost) payload.prefer_cost = String(stop === 1);
 
         // Provider
         var provider = document.getElementById('settings-provider').value;

@@ -60,6 +60,13 @@ class LocalSwitchTest {
         assertFalse(config.getMentor().isLocalOnly());
         assertEquals(Optional.of("false"), settings.getSetting("local_only"));
         assertTrue(commands.handle("owner", "/local maybe").orElseThrow().startsWith("Usage:"));
+
+        // The slider's middle stop: cost over speed on a chat, saved and kept by a restart.
+        mode.setPreferCost(false);
+        assertEquals(Optional.of("false"), settings.getSetting("prefer_cost"));
+        var again = new OwnClawConfig();
+        new SetupWizardService(db, again, new ObjectMapper(), null, null, null).applyOverrides();
+        assertFalse(again.getMentor().isPreferCost(), "a restart forgot the slider");
         assertTrue(commands.handle("owner", "/help").orElseThrow().contains("`/local [on|off]`"));
     }
 
@@ -87,8 +94,12 @@ class LocalSwitchTest {
                 MessageDigest.getInstance("SHA-384").digest(library)), "the integrity hash is not the file's");
 
 
-        assertTrue(page.contains("<select id=\"settings-local-only\">"), "the switch is not on the settings page");
-        assertTrue(page.replaceAll("\\s+", " ").contains(
-                "if (localOnly !== !!originalData.local_only) payload.local_only = String(localOnly);"));
+        assertTrue(page.contains("'<input type=\"range\" id=\"settings-cost\" min=\"0\" max=\"2\" step=\"1\""),
+                "the time-vs-cost slider is not on the settings page");
+        String flat = page.replaceAll("\\s+", " ");
+        assertTrue(flat.contains("return data.local_only ? 2 : (data.prefer_cost ? 1 : 0);"), "where it stands");
+        assertTrue(flat.contains("var localOnly = stop === 2;"), "the last stop is local only");
+        assertTrue(flat.contains("if (stop < 2 && (stop === 1) !== !!originalData.prefer_cost) payload.prefer_cost = String(stop === 1);"),
+                "the first two say whether the cloud runs the skills");
     }
 }

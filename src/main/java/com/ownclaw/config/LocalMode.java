@@ -3,15 +3,18 @@ package com.ownclaw.config;
 import org.springframework.stereotype.Component;
 
 /**
- * The owner's local-only switch ({@link OwnClawConfig.Mentor#isLocalOnly}): read by the router on
- * every model call, set from the settings page and the /local command, and saved, so a restart
- * keeps it ({@link SetupWizardService#applyOverrides}).
+ * How much of the work the local model does: the owner's time-vs-cost slider. Its stops are the
+ * cloud running the skills (fastest), the cloud planning and the local model running them
+ * ({@link OwnClawConfig.Mentor#isPreferCost}), and local only ({@link OwnClawConfig.Mentor#isLocalOnly},
+ * read by the router on every model call). Set from the settings page and, local only, the
+ * /local command; saved, so a restart keeps it ({@link SetupWizardService#applyOverrides}).
  */
 @Component
 public class LocalMode {
 
-    /** Its row in system_settings: "true" or "false". */
+    /** Their rows in system_settings: "true" or "false". */
     static final String SETTING = "local_only";
+    static final String PREFER_COST = "prefer_cost";
 
     private final OwnClawConfig config;
     private final SetupWizardService settings;
@@ -29,5 +32,15 @@ public class LocalMode {
     public void set(boolean on) {
         settings.saveSetting(SETTING, Boolean.toString(on));
         config.getMentor().setLocalOnly(on);
+    }
+
+    public boolean preferCost() {
+        return config.getMentor().isPreferCost();
+    }
+
+    /** Saved first, as {@link #set} is. */
+    public void setPreferCost(boolean on) {
+        settings.saveSetting(PREFER_COST, Boolean.toString(on));
+        config.getMentor().setPreferCost(on);
     }
 }

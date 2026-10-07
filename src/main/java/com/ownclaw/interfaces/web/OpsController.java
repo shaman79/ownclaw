@@ -113,6 +113,7 @@ public class OpsController {
                     "POST /api/ops/config/native-tools?enabled=true|false",
                     "POST /api/ops/config/local-first?enabled=true|false",
                     "POST /api/ops/config/local-only?enabled=true|false",
+                    "POST /api/ops/config/prefer-cost?enabled=true|false",
                     "POST /api/ops/config/privacy-canary?mode=enforce|observe",
                     "GET  /api/ops/egress?offset=0&limit=50[&decision=SENT|REFUSED|OBSERVED_LEAK|ERROR]",
                     "POST /api/ops/skills/maintenance[?apply=true]  (dry run unless apply=true)",
@@ -394,6 +395,21 @@ public class OpsController {
                 "previous", before,
                 "note", "Applies from the next model call. Not saved: a restart returns to the "
                         + "owner's setting."));
+    }
+
+    /**
+     * Cost over speed on a chat, for this run: on, the cloud plans and the local model runs the
+     * skills. Not saved: a restart returns to the owner's setting (the settings page).
+     */
+    @PostMapping("/config/prefer-cost")
+    public ResponseEntity<?> preferCost(@RequestParam boolean enabled) {
+        boolean before = config.getMentor().isPreferCost();
+        config.getMentor().setPreferCost(enabled);
+        log.warn("Prefer cost {} at runtime (was {})", enabled ? "ON" : "OFF", before);
+        return ResponseEntity.ok(Map.of(
+                "preferCost", enabled,
+                "previous", before,
+                "note", "Applies from the next step. Not saved: a restart returns to the owner's setting."));
     }
 
     /** What the canary does on a hit. Not persisted; OWNCLAW_PRIVACY_CANARY on restart. */

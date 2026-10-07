@@ -1332,8 +1332,10 @@ public class AgentLoop {
             log.info("Task {}: refused '{}' — it was not offered on this step.",
                     context.taskId(), action.tool());
             return AgentObservation.failure(action.tool(),
-                    "'" + action.tool() + "' is not available to you on this task. Nobody is "
-                            + "waiting for it, so the work runs on the local model: call "
+                    "'" + action.tool() + "' is not available to you on this task. "
+                            + (context.isUnattended() ? "Nobody is waiting for it"
+                                    : "The owner has chosen cost over speed")
+                            + ", so the work runs on the local model: call "
                             + "'delegate' with the goal stated in full — including anything you "
                             + "have already worked out — and the skills it needs in 'tools'.", 0);
         }
@@ -1488,7 +1490,8 @@ public class AgentLoop {
             sb.append("; these are ").append(first).append(" to ").append(first + found.tools().size() - 1)
               .append(", best first");
         }
-        // On unattended local-first work the cloud calls no skill: it names them to delegate.
+        // On local-first work -- unattended, or a chat that prefers cost -- the cloud calls no
+        // skill: it names them to delegate.
         sb.append(context.offeredTools() != null
                 ? ". They are for delegate's 'tools': you do not call them yourself:\n"
                 : ". You can call them from your next step:\n");
