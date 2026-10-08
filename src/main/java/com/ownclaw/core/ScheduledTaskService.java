@@ -549,8 +549,7 @@ public class ScheduledTaskService {
             }
 
             // Notify user
-            statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
-                    "Scheduled task firing: " + description);
+            background(userId, StatusMessage.Type.SCHEDULED, "Scheduled task firing: " + description);
 
             // Track start time for duration calculation
             taskStartTimes.put(taskId, System.currentTimeMillis());
@@ -712,7 +711,7 @@ public class ScheduledTaskService {
                                updated_at = datetime('now')
                         WHERE id = ?
                         """, response, taskId);
-                    statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+                    background(userId, StatusMessage.Type.COMPLETED,
                             "Recurring task #" + taskId + " completed (max runs reached): "
                                     + description);
                 } else {
@@ -724,7 +723,7 @@ public class ScheduledTaskService {
                                last_result = ?, updated_at = datetime('now')
                         WHERE id = ?
                         """, nextRun.toString(), response, taskId);
-                    statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
+                    background(userId, StatusMessage.Type.SCHEDULED,
                             "Recurring task #" + taskId + " completed. Next run: "
                                     + formatTime(nextRun));
                 }
@@ -737,7 +736,7 @@ public class ScheduledTaskService {
                        updated_at = datetime('now')
                 WHERE id = ?
                 """, response, taskId);
-            statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+            background(userId, StatusMessage.Type.COMPLETED,
                     "Deferred task #" + taskId + " completed: " + description);
         }
 
@@ -799,7 +798,7 @@ public class ScheduledTaskService {
                            last_error = ?, updated_at = datetime('now')
                     WHERE id = ?
                     """, nextRun.toString(), error, taskId);
-                statusEmitter.emit(userId, StatusMessage.Type.WARNING,
+                background(userId, StatusMessage.Type.WARNING,
                         "Recurring task #" + taskId + " failed and runs again at "
                                 + formatTime(nextRun) + ". " + WHERE_ITS_REPORT_IS);
             }
@@ -811,7 +810,7 @@ public class ScheduledTaskService {
                        updated_at = datetime('now')
                 WHERE id = ?
                 """, error, taskId);
-            statusEmitter.emit(userId, StatusMessage.Type.FAILED,
+            background(userId, StatusMessage.Type.FAILED,
                     "Deferred task #" + taskId + " failed. " + WHERE_ITS_REPORT_IS);
         }
 
@@ -971,5 +970,15 @@ public class ScheduledTaskService {
                 "totalCloudTokens", totalCloudTokens,
                 "totalLocalTokens", totalLocalTokens
         );
+    }
+
+    /**
+     * A notice about a run nobody is waiting on in the chat on screen -- one firing, completed or
+     * failed -- marked as unattended work's (ChatStatusEmitter#BACKGROUND), as the run's own
+     * steps are: unmarked, it showed in whatever chat was open, and a completed or failed one
+     * ended the working state of a task asked there.
+     */
+    private void background(String userId, StatusMessage.Type type, String text) {
+        statusEmitter.emit(userId, type, text, Map.of(ChatStatusEmitter.BACKGROUND, true));
     }
 }

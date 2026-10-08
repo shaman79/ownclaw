@@ -58,6 +58,7 @@ class ScheduledPrivateAnswerTest {
     private Finished queue;
     private ScheduledTaskService scheduler;
     private final List<StatusMessage> results = new ArrayList<>();
+    private final List<StatusMessage> notices = new ArrayList<>();
 
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
@@ -65,6 +66,7 @@ class ScheduledPrivateAnswerTest {
         var emitter = new ChatStatusEmitter();
         emitter.subscribe("u1", "web", m -> {
             if (m.type() == StatusMessage.Type.RESULT) results.add(m);
+            else notices.add(m);
         });
         queue = new Finished();
         scheduler = new ScheduledTaskService(jdbc, queue, emitter, new EventLogService(jdbc),
@@ -118,5 +120,21 @@ class ScheduledPrivateAnswerTest {
         scheduler.pollDueTasks();
 
         assertDeliveredToTheOwnerAlone();
+    }
+
+    @Test
+    @DisplayName("the scheduler's notices about a run -- firing, completed -- are unattended work's, kept out of the chat on screen")
+    void theRunsNoticesAreBackground(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        notices.clear();   // "Task scheduled for ..." answers the owner's own request in the chat
+
+        scheduler.pollDueTasks();
+
+        assertTrue(notices.stream().anyMatch(n -> n.text().startsWith("Scheduled task firing")), String.valueOf(notices));
+        assertTrue(notices.stream().anyMatch(n -> n.text().startsWith("Deferred task #")), String.valueOf(notices));
+        for (StatusMessage n : notices) {
+            assertEquals(Boolean.TRUE, n.data() == null ? null : n.data().get(ChatStatusEmitter.BACKGROUND),
+                    "shown in the chat that was open, and a completed one ended its working state: " + n.text());
+        }
     }
 }
