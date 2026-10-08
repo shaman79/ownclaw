@@ -435,7 +435,8 @@ public class ThinkingEngine {
     /**
      * The tools the CLOUD model may call on this step.
      *
-     * <p>On unattended work the registry is withheld, so the cloud can orchestrate but cannot
+     * <p>On unattended work, and on a chat whose owner chose cost over speed (Cheaper, the
+     * default: {@link #stepMode}), the registry is withheld, so the cloud can orchestrate but cannot
      * execute. That is the architecture the owner asked for — "cloud orchestrates, local
      * executes" — made structural instead of advisory.
      *
@@ -459,18 +460,17 @@ public class ThinkingEngine {
      * the cloud keeps the full set and the task runs exactly as it does today: a local tier that
      * is not answering must not become a reason for scheduled work to stop.
      *
-     * <p>Attended chat is untouched. There the user IS waiting, a local step costs about a
-     * minute, and the owner has been explicit that latency matters there and does not matter for
-     * scheduled work.
+     * <p>A chat on Fastest is untouched: there the owner chose speed, and a local step costs
+     * about a minute.
      */
     List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
             return toolset(context, mode);
         }
-        log.info("Unattended task {}: offering the cloud orchestration only — the registry is "
+        log.info("Task {} ({}): offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
-                context.taskId());
+                context.taskId(), context.isUnattended() ? "unattended" : "a chat on Cheaper");
         var specials = new ArrayList<>(SpecialActionSchemas.ALL);
         specials.add(SpecialActionSchemas.FIND_TOOLS);
         context.setOfferedTools(specials.stream()
