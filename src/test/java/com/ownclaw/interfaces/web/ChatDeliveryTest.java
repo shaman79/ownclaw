@@ -110,6 +110,8 @@ class ChatDeliveryTest {
     private Consumer<JsonNode> whileSending = frame -> {};
     /** Set while the socket is sending a frame: a second send then is refused, as Tomcat refuses it. */
     private final AtomicBoolean writing = new AtomicBoolean();
+    /** Whether the chat's account is the owner's. */
+    private boolean owner = true;
 
     private void connect(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
@@ -117,6 +119,7 @@ class ChatDeliveryTest {
         TaskQueue taskQueue = tasks.apply(jdbc);
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override public Optional<String> validateToken(String token) { return Optional.of(USER); }
+            @Override public boolean isOwner(String userId) { return owner; }
         };
         var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null, null) {
             @Override public boolean isSetupNeeded() { return false; }
@@ -527,6 +530,20 @@ class ChatDeliveryTest {
         assertEquals(new ChatOptions(null, "medium"), conversations.chatOptions(USER, session),
                 "a command runs no task: the chat's choice stays");
         // Mutation: build the message without what it was sent with -> its task runs on the defaults.
+    }
+
+    @Test
+    @DisplayName("another account's chat runs on the owner's defaults: what its message is sent with is neither its task's nor kept")
+    void anotherAccountsChoiceIsNotTaken(@TempDir Path tmp) throws Exception {
+        owner = false;
+        connect(tmp);
+        String session = conversations.getCurrentSession(USER);
+
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("message", "check the routers", "clientId", "m1", "costMode", "fast", "effort", "high"))));
+
+        assertEquals(ChatOptions.NONE, queue.sent.getLast().options(), "the settings page and /local are the owner's");
+        assertEquals(ChatOptions.NONE, conversations.chatOptions(USER, session), "nor kept for its Telegram messages");
     }
 
     @Test

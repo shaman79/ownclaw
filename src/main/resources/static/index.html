@@ -2622,7 +2622,7 @@
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
-    <div class="composer-options">
+    <div class="composer-options" id="chat-options">
         <label title="Time vs cost for this chat: sent with your next message and kept for the chat's next ones. Default follows the settings page.">Time vs cost
             <select id="cost-mode">
                 <option value="">Default</option>
@@ -4325,6 +4325,8 @@
         document.getElementById('settings-save').addEventListener('click', function() {
             saveSettings(data);
         });
+        // The page reloads them after a save: "Default" next to Send names the new ones.
+        nameDefaults({ costMode: ['fast', 'cheaper', 'free'][costStop(data)], effort: data.thinking_effort });
     }
 
     /** The time-vs-cost slider's stops, as the settings page says them. */
@@ -5494,7 +5496,9 @@
      * refused by the API regardless of what the client chooses to render.
      */
     function applyOwnerVisibility(isOwner) {
-        ['skills-btn', 'settings-btn'].forEach(function(id) {
+        // Time vs cost and effort next to Send too: another account's chats run on the owner's
+        // defaults, whatever they would choose.
+        ['skills-btn', 'settings-btn', 'chat-options'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.style.display = isOwner ? '' : 'none';
         });
@@ -6509,11 +6513,16 @@
      * "Default: ..." naming the default on the settings page it follows.
      */
     function showChatOptions(options, defaults) {
-        costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];
-        effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];
+        nameDefaults(defaults);
         costSel.value = options.costMode || '';
         effortSel.value = options.effort || '';
         updateComposer();
+    }
+
+    /** Name, in each "Default" choice next to Send, the default on the settings page it follows. */
+    function nameDefaults(defaults) {
+        costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];
+        effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];
     }
 
     /** What is chosen next to Send: null where it follows the default. */

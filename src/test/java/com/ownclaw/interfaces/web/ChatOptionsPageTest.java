@@ -45,6 +45,8 @@ class ChatOptionsPageTest {
                 + "<option value=\"high\">High</option> </select>"), "the thinking effort");
         assertTrue(page.indexOf("class=\"composer-options\"") > page.indexOf("<button id=\"send\""),
                 "under Send, in the composer");
+        assertTrue(function("applyOwnerVisibility").contains("'chat-options'"),
+                "hidden from another account, whose chats run on the owner's defaults");
     }
 
     @Test
@@ -53,9 +55,16 @@ class ChatOptionsPageTest {
         String load = function("loadSessionMessages");
         assertTrue(load.contains("showChatOptions(data.options, data.defaults);"), load);
         String show = function("showChatOptions");
-        assertTrue(show.contains("costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];")
-                && show.contains("effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];"),
-                "the default state names the default: " + show);
+        assertTrue(show.contains("nameDefaults(defaults);"), show);
+        String name = function("nameDefaults");
+        assertTrue(name.contains("costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];")
+                && name.contains("effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];"),
+                "the default state names the default: " + name);
+        // Saving the settings page re-renders it: "Default" then names the new defaults, not
+        // those the chat was opened with.
+        assertTrue(function("renderSettings").contains(
+                "nameDefaults({ costMode: ['fast', 'cheaper', 'free'][costStop(data)], effort: data.thinking_effort });"),
+                "the settings page names its defaults next to Send");
         assertTrue(show.contains("costSel.value = options.costMode || '';")
                 && show.contains("effortSel.value = options.effort || '';"), show);
         assertTrue(function("chosenOptions").contains(

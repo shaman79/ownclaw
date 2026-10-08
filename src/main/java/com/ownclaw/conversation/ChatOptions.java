@@ -11,6 +11,7 @@ import java.util.List;
  * choice: the chat follows that default. The web chat sends its choice with each message, and it
  * is saved on the chat ({@link ConversationService#setChatOptions}), so it stays for the chat's
  * next messages, those sent from Telegram too.
+ * Only the owner's chats choose: another account's follow the defaults, as the owner set them.
  * <p>
  * A value that is none of those is no choice either: a message cannot make a chat run on
  * something the owner was never offered.
@@ -30,7 +31,7 @@ public record ChatOptions(String costMode, String effort) {
     }
 
     /**
-     * The owner's defaults, as the stops he chose them at: local only is the last stop of time vs
+     * The owner's defaults, as the stops they were chosen at: local only is the last stop of time vs
      * cost, as on the settings page, whatever prefer-cost was left at.
      */
     public static ChatOptions defaultsOf(OwnClawConfig.Mentor mentor) {

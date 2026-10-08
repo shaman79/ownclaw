@@ -260,6 +260,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } catch (Exception e) {
             userMessage = payload;
         }
+        // The defaults are the owner's -- the settings page and /local are owner only -- so another
+        // account's chat runs on them: a choice it sends is not taken, nor kept for its chat.
+        if (!chosen.equals(ChatOptions.NONE) && !authService.isOwner(userId)) chosen = ChatOptions.NONE;
 
         // Heartbeat ping: keep-alive for long-lived browser connections, sent as {type:'ping'}.
         // Do not treat as user input or command. A typed "ping" is a message like any other:
