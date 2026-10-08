@@ -858,7 +858,9 @@ public class OpsService {
                         + "FROM conversations WHERE user_id = ? ORDER BY timestamp DESC, rowid DESC",
                 page, userId);
         section(out, more, "sessions",
-                "SELECT id, title, preview, created_at, updated_at, archived "
+                // With its kind, so a chat an ops check ran in, which the owner's list leaves
+                // out, is told from the owner's own.
+                "SELECT id, title, kind, preview, created_at, updated_at, archived "
                         + "FROM chat_sessions WHERE user_id = ? ORDER BY created_at DESC, rowid DESC",
                 page, userId);
         section(out, more, "events",

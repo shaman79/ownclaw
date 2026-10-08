@@ -253,6 +253,7 @@ class OpsServiceTest {
         assertEquals(longText + "2", list(first, "toolCalls").getFirst().get("error"), "newest first, whole");
         assertEquals(longText, list(first, "conversations").getFirst().get("content"));
         assertEquals(longText, list(first, "sessions").getFirst().get("preview"));
+        assertEquals("chat", list(first, "sessions").getFirst().get("kind"), "an ops check's chat is told apart by it");
         assertEquals(longText, list(first, "memory").getFirst().get("content"));
         assertEquals(longText, list(first, "scheduledTasks").getFirst().get("last_result"));
         assertEquals(longText, list(first, "scheduledRuns").getFirst().get("result"));
