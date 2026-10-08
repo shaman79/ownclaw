@@ -162,7 +162,7 @@ class ProgressMessagesTest {
         assertEquals(rows.get(0).get("content"), live.get(0).text());
         assertEquals(header.toString(), String.valueOf(live.get(1).data().get("progress")),
                 "the live frame carries the header the row keeps");
-        var reload = rig.chat.getSessionMessages("u1", session).stream()
+        var reload = rig.chat.getSessionMessages("u1", session, null, null).messages().stream()
                 .filter(m -> "progress".equals(m.get("role"))).toList();
         var reloaded = (com.fasterxml.jackson.databind.JsonNode) reload.get(1).get("progress");
         assertEquals("cloud", reloaded.path("actor").asText(), "and a reload reads it back: " + reload);

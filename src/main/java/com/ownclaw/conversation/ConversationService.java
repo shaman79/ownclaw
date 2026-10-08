@@ -9,6 +9,8 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -290,7 +292,21 @@ public class ConversationService {
     }
 
     /**
-     * Get all messages in a session, chronological -- for the owner's own chat, on reload.
+     * Rows of a chat, oldest first, and whether the chat has rows earlier than these.
+     */
+    public record Page(List<Map<String, Object>> messages, boolean hasMore) {}
+
+    /**
+     * Get the messages in a session, oldest first -- for the owner's own chat, on reload: all of
+     * them, or a page of them.
+     * <p>
+     * A page is the newest {@code limit} rows before the row {@code before} names, or of the
+     * whole chat when it names none. The web page draws the newest page first, then asks for the
+     * page before the oldest row it has drawn, so every row is in exactly one page. Rows are
+     * ordered by timestamp, which has seconds, and the rows of one second -- a running task saves
+     * its progress rows seconds apart or less -- in the order they were saved (rowid), so a page
+     * boundary between two rows of one second neither repeats nor skips either. A row id not of
+     * this chat gives an empty page.
      * <p>
      * The one reader of private_content: a private answer shows here as it did live, and
      * nowhere else. A row without one, including every row from before the column, shows its
@@ -298,20 +314,32 @@ public class ConversationService {
      * live; one from before the header was kept has none, and shows its content as it is. Each
      * row comes with its id, as a live frame names it: the page marks a message the running task
      * has read, or handed on, by its row.
+     *
+     * @param before the id of the row the page ends before, or null for the newest rows
+     * @param limit  how many rows the page holds at most, or null for every row before
+     *               {@code before}
      */
-    public List<Map<String, Object>> getSessionMessages(String userId, String sessionId) {
-        List<Map<String, Object>> rows = jdbc.queryForList("""
+    public Page getSessionMessages(String userId, String sessionId, String before, Integer limit) {
+        // One row past the page, when it has a size, says whether earlier rows exist; a limit of
+        // -1 is none.
+        List<Map<String, Object>> rows = new ArrayList<>(jdbc.queryForList("""
             SELECT id, role, COALESCE(private_content, content) AS content, timestamp,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.progress') END AS progress
             FROM conversations
             WHERE user_id = ? AND session_id = ? AND role != 'status'
-            ORDER BY timestamp ASC
-            """, userId, sessionId);
+              AND (? IS NULL OR (timestamp, rowid) <
+                   (SELECT timestamp, rowid FROM conversations WHERE id = ? AND session_id = ?))
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT ?
+            """, userId, sessionId, before, before, sessionId, limit == null ? -1 : limit + 1));
+        boolean hasMore = limit != null && rows.size() > limit;
+        if (hasMore) rows.removeLast();
+        Collections.reverse(rows);
         for (var row : rows) {
             if (row.get("progress") instanceof String header) row.put("progress", headerOf(header));
         }
-        return rows;
+        return new Page(rows, hasMore);
     }
 
     /** A progress row's header, as the JSON it was saved as; null when it does not read as one. */

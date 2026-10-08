@@ -35,7 +35,7 @@ class ConversationPrivateContentTest {
         assertTrue(context.stream().noneMatch(c -> c.contains("48,213.07")),
                 "a task's context goes into every prompt of that task: " + context);
 
-        var reload = conversations.getSessionMessages("u1", session).stream()
+        var reload = conversations.getSessionMessages("u1", session, null, null).messages().stream()
                 .map(m -> String.valueOf(m.get("content"))).toList();
         assertTrue(reload.contains(SECRET), "the owner's chat shows what it showed live: " + reload);
         assertFalse(reload.contains(NOTE));

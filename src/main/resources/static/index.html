@@ -1222,6 +1222,8 @@
             animation: spin .8s linear infinite;
             flex-shrink: 0;
         }
+        /* The line above a chat's drawn rows that stands for its earlier ones. */
+        .messages-loading.earlier { padding: 8px 16px }
 
         /*  Main chat column  */
         #chat-main {
@@ -2851,7 +2853,7 @@
         messagesEl.appendChild(loader);
 
         var asked = authToken;   // a reply after logout or another login is dropped
-        fetch('/api/chats/' + sessionId + '/messages', {
+        fetch('/api/chats/' + sessionId + '/messages?limit=' + HISTORY_PAGE, {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(okJson)
@@ -2862,17 +2864,18 @@
             var lastTask = null;
             msgs.forEach(function(m) {
                 if (m.task_id) lastTask = m.task_id;
-                if (m.role === 'progress') { addProgress(m.content, m.progress); return; }
-                var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
-                var drawn = addMsg(type, m.content, m.task_id);
-                // Named by its row, as a bubble drawn live is once its fate comes: a task still
-                // running marks it read, or handed on, after a reload or a switch back too.
-                if (type === 'user') drawn.dataset.messageId = m.id;
+                drawRow(m, thinkingEl);
             });
+            if (data.hasMore) holdEarlier(sessionId, msgs[0].id);
             // A chat opens on its newest message, and follows from there: how far the chat shown
-            // before was scrolled says nothing about this one.
-            scrollBottom(true);
+            // before was scrolled says nothing about this one. At once, not smoothly: scrolled down
+            // from its top, it would ask for its earlier rows on the way.
+            following = true;
+            scrollPane(messagesEl.scrollHeight);
+            // The latest task is read from the newest page: when none of its rows names a task,
+            // no task's counters are read back.
             if (lastTask) restoreTaskStats(lastTask, sessionId);
+            loadEarlierNearTop();
         })
         .catch(function(e) {
             // Say what happened. clearMessages() alone left a blank pane, which is exactly what
@@ -2891,10 +2894,114 @@
         });
     }
 
+    /**
+     * Draw a saved row of the chat before the given element: the thinking dots for the newest
+     * page, the oldest row on screen for an earlier one.
+     */
+    function drawRow(m, before) {
+        if (m.role === 'progress') { addProgress(m.content, m.progress, before); return; }
+        var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
+        var drawn = addMsg(type, m.content, m.task_id, before);
+        // Named by its row, as a bubble drawn live is once its fate comes: a task still
+        // running marks it read, or handed on, after a reload or a switch back too.
+        if (type === 'user') drawn.dataset.messageId = m.id;
+    }
+
+    /**
+     * How many rows of a chat are fetched at a time. A long task saves dozens of progress rows,
+     * and a chat of many was fetched and drawn whole each time it was opened.
+     */
+    var HISTORY_PAGE = 50;
+
+    /**
+     * The chat's rows not drawn yet, which are its earliest: the row the next page of them ends
+     * before, and the line above the drawn rows that stands for them. Null when every row of the
+     * chat on screen is drawn, when a page of them failed to load -- the line then says so -- or
+     * when no chat is on screen.
+     */
+    var earlier = null;
+
+    /** Stand for this chat's rows before the given one, on a line above the drawn rows. */
+    function holdEarlier(sessionId, before) {
+        var line = document.createElement('div');
+        line.className = 'messages-loading earlier';
+        line.innerHTML = '<div class="mini-spinner"></div><span>Loading earlier messages...</span>';
+        messagesEl.insertBefore(line, messagesEl.querySelector('.msg'));
+        earlier = { sessionId: sessionId, before: before, line: line, loading: false };
+    }
+
+    /**
+     * Fetch the next earlier page while the top of what is drawn is less than a screen above the
+     * view: a page is then usually drawn before the owner scrolls up to the line that stands for
+     * it, and a page too short to scroll is followed by the next at once.
+     */
+    function loadEarlierNearTop() {
+        if (messagesEl.scrollTop < messagesEl.clientHeight) loadEarlier();
+    }
+
+    messagesEl.addEventListener('scroll', loadEarlierNearTop);
+
+    /**
+     * Draw the next earlier page above the drawn rows, leaving the rows the owner is reading
+     * where they are on screen.
+     */
+    function loadEarlier() {
+        var page = earlier;
+        if (!page || page.loading) return;
+        page.loading = true;
+        fetch('/api/chats/' + page.sessionId + '/messages?limit=' + HISTORY_PAGE
+                + '&before=' + encodeURIComponent(page.before), {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(okJson)
+        .then(function(data) {
+            if (earlier !== page) return;   // the chat was drawn again, or left, since
+            var msgs = data.messages;
+            var oldest = messagesEl.querySelector('.msg');
+            var from = oldest.getBoundingClientRect().top;
+            // A run of one sender's messages is drawn as one, across the pages too: the page's
+            // last sender may go on with the run of the rows below it, and a row drawn live goes
+            // on with the run of the newest message.
+            var run = messagesEl.querySelector('.msg.first-in-run');
+            var following = lastMsgSender;
+            lastMsgSender = null;
+            page.line.remove();
+            msgs.forEach(function(m) { drawRow(m, oldest); });
+            if (run && lastMsgSender === (run.classList.contains('user') ? 'user' : 'ai')) {
+                run.classList.remove('first-in-run');
+            }
+            if (following) lastMsgSender = following;
+            earlier = null;
+            if (data.hasMore) holdEarlier(page.sessionId, msgs[0].id);
+            scrollPane(messagesEl.scrollTop + oldest.getBoundingClientRect().top - from);
+            loadEarlierNearTop();
+        })
+        .catch(function(e) {
+            if (earlier !== page) return;
+            earlier = null;
+            page.line.textContent = 'Could not load earlier messages: '
+                    + (e && e.message ? e.message : 'the server did not respond')
+                    + '. Nothing is lost — open this chat again to see them.';
+            console.error('Failed to load earlier messages:', e);
+        });
+    }
+
+    /**
+     * Scroll the chat to this offset at once, where the pane otherwise scrolls smoothly: the rows
+     * the owner reads would slide away from him while a page is drawn above them, and a chat just
+     * opened would scroll down from its top, asking for its earlier rows on the way.
+     */
+    function scrollPane(top) {
+        messagesEl.style.scrollBehavior = 'auto';
+        messagesEl.scrollTop = top;
+        messagesEl.style.scrollBehavior = '';
+    }
+
     function clearMessages() {
         messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view, .skills-view').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
         sentBubbles = {};
+        earlier = null;
     }
 
     function renderSessionList(sessions, currentActiveId) {
@@ -5854,7 +5961,11 @@
     /** The task whose trace the activity strip shows, which stays there after it ends. */
     var traceTaskId = null;
 
-    function addMsg(type, text, taskId) {
+    /**
+     * @param before for a saved row of the chat, the element it is drawn before; whoever draws a
+     *               page of them sets the scroll position once it is drawn
+     */
+    function addMsg(type, text, taskId, before) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
         var senderKey = isUserMsg ? 'user' : (isAiMsg ? 'ai' : null);
@@ -5898,6 +6009,7 @@
             if (text.indexOf('\n') === -1 && text.length < 80) div.classList.add('short');
         }
 
+        if (before) { messagesEl.insertBefore(div, before); return div; }
         messagesEl.insertBefore(div, thinkingEl);
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
@@ -5912,11 +6024,11 @@
      * has run and what it has cost. The page draws the emoji as a chip, styled by who acts from
      * the data sent with the row, and the rest of the line as it is; the rest of the text under
      * the header. A row saved before the header was kept comes without the data, and is drawn as
-     * its text.
+     * its text. A saved row is drawn before the element given, as addMsg draws one.
      */
-    function addProgress(text, header) {
+    function addProgress(text, header, before) {
         if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) {
-            addMsg('progress', text);
+            addMsg('progress', text, null, before);
             return;
         }
         var div = node('div', 'msg progress');
@@ -5936,6 +6048,7 @@
             b.querySelectorAll('pre').forEach(wrapCodeBlock);
             div.appendChild(b);
         }
+        if (before) { messagesEl.insertBefore(div, before); return; }
         messagesEl.insertBefore(div, thinkingEl);
         scrollBottom(false);
     }

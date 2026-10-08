@@ -110,7 +110,7 @@ class PrivateFileEndToEndTest {
         // Saved as the chat saves it; the reload shows the owner the answer.
         conversations.saveMessage("u1", session, "assistant", result.response(), List.of(),
                 result.taskId(), result.ownerText());
-        assertTrue(conversations.getSessionMessages("u1", session).stream()
+        assertTrue(conversations.getSessionMessages("u1", session, null, null).messages().stream()
                 .anyMatch(m -> String.valueOf(m.get("content")).contains(SUMMARY)));
 
         // The next turn, and the episode memory recalls into later prompts.

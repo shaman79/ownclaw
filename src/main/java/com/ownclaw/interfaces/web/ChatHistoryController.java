@@ -71,15 +71,23 @@ public class ChatHistoryController {
     }
 
     /**
-     * Get messages for a specific session.
+     * Get messages for a specific session, oldest first: all of them, or a page of them.
      * GET /api/chats/{sessionId}/messages
+     * Query params: limit=N for the newest N, before=<message id> for those before that row;
+     * hasMore says whether the chat has rows earlier than the ones returned.
      */
     @GetMapping("/{sessionId}/messages")
     public ResponseEntity<?> getMessages(HttpServletRequest request,
-                                         @PathVariable String sessionId) {
+                                         @PathVariable String sessionId,
+                                         @RequestParam(required = false) String before,
+                                         @RequestParam(required = false) Integer limit) {
         String userId = (String) request.getAttribute("userId");
-        List<Map<String, Object>> messages = conversationService.getSessionMessages(userId, sessionId);
-        return ResponseEntity.ok(Map.of("messages", messages, "sessionId", sessionId));
+        if (limit != null && limit < 1) {
+            return ResponseEntity.badRequest().body(Map.of("error", "limit must be at least 1"));
+        }
+        var page = conversationService.getSessionMessages(userId, sessionId, before, limit);
+        return ResponseEntity.ok(Map.of("messages", page.messages(), "hasMore", page.hasMore(),
+                "sessionId", sessionId));
     }
 
     /**

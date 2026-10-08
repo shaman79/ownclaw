@@ -34,7 +34,8 @@ class ConversationTaskIdTest {
 
         // All three share a timestamp, so look them up by content rather than by position.
         var byContent = new java.util.HashMap<Object, Object>();
-        conversations.getSessionMessages("u1", "s1").forEach(m -> byContent.put(m.get("content"), m.get("task_id")));
+        conversations.getSessionMessages("u1", "s1", null, null).messages()
+                .forEach(m -> byContent.put(m.get("content"), m.get("task_id")));
         assertEquals(3, byContent.size());
         assertEquals("a1b2c3d4", byContent.get("the menu"));
         assertNull(byContent.get("old answer"));
@@ -50,7 +51,8 @@ class ConversationTaskIdTest {
         String answered = conversations.saveMessage("u1", chat, "assistant", "Switched.", List.of(), "a1b2c3d4");
         // Saved in one second, they share a timestamp: matched by content, not by position.
         var ids = new java.util.HashMap<Object, Object>();
-        conversations.getSessionMessages("u1", chat).forEach(m -> ids.put(m.get("content"), m.get("id")));
+        conversations.getSessionMessages("u1", chat, null, null).messages()
+                .forEach(m -> ids.put(m.get("content"), m.get("id")));
         assertEquals(java.util.Map.of("use the backup link", asked, "Switched.", answered), ids,
                 "what the page names a bubble by, as the read frame names it");
         // Mutation: leave the id out -> a bubble drawn after a reload is never marked read.

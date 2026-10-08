@@ -77,6 +77,57 @@ class ChatPageTest {
     }
 
     @Test
+    @DisplayName("a chat opens on its newest page, at the bottom, and draws each earlier page above as the owner scrolls up to it")
+    void aChatIsDrawnAPageAtATime() {
+        String load = page.substring(page.indexOf("function loadSessionMessages(sessionId) {"));
+        load = load.substring(0, load.indexOf(".catch("));
+        assertTrue(load.contains("fetch('/api/chats/' + sessionId + '/messages?limit=' + HISTORY_PAGE, {"),
+                "the newest page: " + load);
+        assertTrue(load.contains("drawRow(m, thinkingEl); }); if (data.hasMore) holdEarlier(sessionId, msgs[0].id);"),
+                "drawn, with a line for the rows before them: " + load);
+        assertTrue(load.contains("following = true; scrollPane(messagesEl.scrollHeight);"),
+                "and landed at the bottom at once: " + load);
+        assertTrue(load.endsWith("if (lastTask) restoreTaskStats(lastTask, sessionId); loadEarlierNearTop(); }) "),
+                "a page that does not fill the pane cannot be scrolled up from: the next is asked for at once: " + load);
+
+        assertTrue(page.contains("messagesEl.addEventListener('scroll', loadEarlierNearTop);"));
+        assertTrue(page.contains("function loadEarlierNearTop() { if (messagesEl.scrollTop < messagesEl.clientHeight) loadEarlier(); }"),
+                "scrolled to within a screen of the top");
+        assertTrue(page.contains("messagesEl.insertBefore(line, messagesEl.querySelector('.msg'));"),
+                "the line that says earlier rows are loading stands above the drawn rows");
+
+        String earlier = page.substring(page.indexOf("function loadEarlier() {"));
+        earlier = earlier.substring(0, earlier.indexOf("function scrollPane(top) {"));
+        assertTrue(earlier.contains("if (!page || page.loading) return; page.loading = true;"), "one page in flight: " + earlier);
+        assertTrue(earlier.contains("'&before=' + encodeURIComponent(page.before)"), "the page before the oldest drawn row");
+        assertTrue(earlier.contains(".then(function(data) { if (earlier !== page) return;")
+                        && earlier.contains(".catch(function(e) { if (earlier !== page) return;"),
+                "not into a chat drawn again, or left, since: " + earlier);
+        assertTrue(earlier.contains("var oldest = messagesEl.querySelector('.msg'); var from = oldest.getBoundingClientRect().top;")
+                && earlier.contains("msgs.forEach(function(m) { drawRow(m, oldest); });")
+                && earlier.contains("scrollPane(messagesEl.scrollTop + oldest.getBoundingClientRect().top - from); loadEarlierNearTop();"),
+                "drawn above, the rows on screen staying where they were, and the next asked for when still near the top: " + earlier);
+        assertTrue(earlier.contains("earlier = null; if (data.hasMore) holdEarlier(page.sessionId, msgs[0].id);"),
+                "on until the first row of the chat: " + earlier);
+        assertTrue(earlier.contains("if (run && lastMsgSender === (run.classList.contains('user') ? 'user' : 'ai')) { "
+                        + "run.classList.remove('first-in-run'); } if (following) lastMsgSender = following;"),
+                "a sender's run of messages reads as one across a page boundary: " + earlier);
+        assertTrue(earlier.contains("page.line.textContent = 'Could not load earlier messages: '"),
+                "a page that failed says so, where the rows it held would be: " + earlier);
+
+        assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return div; } "
+                + "messagesEl.insertBefore(div, thinkingEl);"), "a saved row is drawn where it belongs, and scrolls nothing");
+        assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return; } "
+                + "messagesEl.insertBefore(div, thinkingEl); scrollBottom(false);"), "a saved progress row too");
+        String clear = page.substring(page.indexOf("function clearMessages() {"));
+        clear = clear.substring(0, clear.indexOf("function renderSessionList("));
+        assertTrue(clear.contains("earlier = null;"), "a pane cleared holds no chat's earlier rows: " + clear);
+        // Mutation: forget the scroll position -> each earlier page pushes the rows being read
+        // down by its height; drop the stale check -> a page of the chat left is drawn into the
+        // next one opened.
+    }
+
+    @Test
     @DisplayName("a task's progress is drawn in its own chat, live and after a reload, compact and apart from the answer")
     void progressIsDrawnInItsChat() {
         assertTrue(page.contains("} else if (type === 'progress') {"), "a frame of its own");
@@ -86,7 +137,7 @@ class ChatPageTest {
                 + "addProgress(content, data.progress); }"), "only in the chat it belongs to: " + handler);
         assertFalse(handler.contains("setThinking(false)") || handler.contains("doneActivity()"),
                 "progress is not the end of the work: " + handler);
-        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress); return; }"),
+        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress, before); return; }"),
                 "a saved progress row is drawn as one after a reload, with the header it was saved with");
         assertTrue(page.contains(".msg.progress {"), "and styled as secondary");
         // Mutation: draw it as a response -> after a reload every step reads as an answer.
@@ -114,10 +165,10 @@ class ChatPageTest {
     @Test
     @DisplayName("a progress row's header is the line the server wrote, its emoji drawn as a chip for who acts; a row without one is its text")
     void progressHeadersAreChips() {
-        String draw = page.substring(page.indexOf("function addProgress(text, header) {"));
+        String draw = page.substring(page.indexOf("function addProgress(text, header, before) {"));
         draw = draw.substring(0, draw.indexOf("// Chat messages are persisted"));
         assertTrue(draw.contains("if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) { "
-                + "addMsg('progress', text); return; }"), "a row saved before headers were kept: " + draw);
+                + "addMsg('progress', text, null, before); return; }"), "a row saved before headers were kept: " + draw);
         assertTrue(draw.contains("var line = lineBreak < 0 ? text : text.slice(0, lineBreak); "
                 + "var space = line.indexOf(' '); "
                 + "var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);"),
@@ -200,7 +251,7 @@ class ChatPageTest {
     @Test
     @DisplayName("a message drawn from the history is named by its row, so a task still running marks it read after a reload")
     void historyBubblesAreNamedByTheirRows() {
-        assertTrue(page.contains("var drawn = addMsg(type, m.content, m.task_id);"), "the bubble a reload draws");
+        assertTrue(page.contains("var drawn = addMsg(type, m.content, m.task_id, before);"), "the bubble a reload draws");
         assertTrue(page.contains("if (type === 'user') drawn.dataset.messageId = m.id;"),
                 "named as bubbleOf finds it");
         assertTrue(page.contains("'.msg.user[data-message-id=\"' + CSS.escape(messageId) + '\"]'"));
@@ -251,8 +302,8 @@ class ChatPageTest {
     void theChatFollowsItsNewestMessage() {
         String load = page.substring(page.indexOf("function loadSessionMessages(sessionId) {"));
         load = load.substring(0, load.indexOf("function clearMessages()"));
-        assertTrue(load.contains("scrollBottom(true); if (lastTask) restoreTaskStats(lastTask, sessionId); })"),
-                "once its messages are drawn: " + load);
+        assertTrue(load.contains("following = true; scrollPane(messagesEl.scrollHeight);"),
+                "once its newest messages are drawn, at once and following: " + load);
 
         String scroll = page.substring(page.indexOf("function scrollBottom(force) {"));
         scroll = scroll.substring(0, scroll.indexOf("inputEl.addEventListener('input'"));
