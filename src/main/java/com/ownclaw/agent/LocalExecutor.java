@@ -557,11 +557,11 @@ public class LocalExecutor {
         // One resolution of the arguments, used by every check below and by the call itself.
         // It was once computed twice, which is how a guard and the thing it guards drift
         // apart.
-        References.Resolved refs = References.resolve(action.params, mine);
+        References.Resolved refs = References.resolveInText(action.params, mine);
         Map<String, Object> params = refs.params();
 
         // A reference that could not be resolved: out of range, a missing field, a failed
-        // result, or reference-shaped text that is not the whole value. Each of these used to
+        // result, or malformed reference-shaped text. Each of these used to
         // survive as literal text -- "$1.body" as the entire body of an email, sent, recorded
         // green, with not one line in the log. Refused here, before anything runs.
         if (!refs.ok()) {
@@ -1095,8 +1095,8 @@ public class LocalExecutor {
         sb.append("]");
         if (results.stream().anyMatch(Artifact::isPrivate)) {
             sb.append("\nPrivate results are not shown. When you have a tool that takes one, put its "
-                    + "handle ({{N}} or {{N.field}}) as the whole value of that argument; a new "
-                    + "delegation cannot see it.");
+                    + "handle ({{N}} or {{N.field}}) in that argument -- the whole value, or inside "
+                    + "text -- and it is filled in when the call runs; a new delegation cannot see it.");
         }
         return sb.toString();
     }
@@ -1135,8 +1135,8 @@ public class LocalExecutor {
                     + " characters -- it " + String.join("; ", said.why()) + ", which you are shown "
                     + "only as a description, so you are not shown it either. "
                     + "To give it to the user, make " + k + " the whole of respond's message; its "
-                    + "text is filled in on this machine. To send it somewhere, make " + k
-                    + " the whole value of a tool argument.)";
+                    + "text is filled in on this machine. To send it somewhere, put " + k
+                    + " in a tool argument.)";
         } else {
             // Written after reading private data or not, a summary that quotes none of it is the
             // cloud's to read, through the gateway's filter like everything else. In the task's

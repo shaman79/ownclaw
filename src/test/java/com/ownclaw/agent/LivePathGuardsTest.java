@@ -48,7 +48,7 @@ class LivePathGuardsTest {
         int end = s.indexOf("\n    private ", start + 10);
         String body = end > start ? s.substring(start, end) : s.substring(start);
 
-        int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
+        int resolve = body.indexOf("References.resolveInText(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
         int run = body.indexOf("tool.execute(");
         int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false,");

@@ -159,6 +159,21 @@ class DelegationBehaviourTest {
     }
 
     @Test
+    @DisplayName("the 8 October lunch email: a date line and then {{1}} is the date and then the menu")
+    void aReferenceInsideTextIsFilledIn() {
+        var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.success(MENU));
+        var smtp = new FakeTool("smtp_send_email", true, List.of(), p -> ToolResult.success("Sent"));
+        var llm = new Scripted(call("daily_menu_fetcher", Map.of()),
+                call("smtp_send_email", Map.of("to", "petr@example.com", "body", "čtvrtek 8. 10. 2026\n\n{{1.body_text}}")),
+                done("menu emailed"));
+
+        executor(llm, new Usage(), fetch, smtp).execute(plan("fetch the menu and email it"), task(), UNCOUNTED);
+
+        assertEquals("čtvrtek 8. 10. 2026\n\nPolévka: česneková. Hlavní: guláš.", smtp.calls.get(0).get("body"),
+                "the email went out with the literal {{1}} in place of the menu");
+    }
+
+    @Test
     @DisplayName("a failed result is refused as an argument — its output is an error message")
     void aFailedResultIsNeverForwarded() {
         var fetch = new FakeTool("daily_menu_fetcher", false, List.of(), p -> ToolResult.failure(TRACEBACK));

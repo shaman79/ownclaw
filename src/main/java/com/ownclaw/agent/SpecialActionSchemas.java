@@ -145,8 +145,9 @@ public final class SpecialActionSchemas {
                             + "and writes about 8, so reading a long result or writing a long "
                             + "answer takes minutes. Give it a goal; it works out the steps. "
                             + "Observations name results as {{N}}. When you have a tool that "
-                            + "takes a result, put {{N}} or {{N.field}} as the whole value of that "
-                            + "argument to pass it on verbatim without reading it.",
+                            + "takes a result, put {{N}} or {{N.field}} in that argument -- as the "
+                            + "whole value, or inside text such as a message body -- and the result "
+                            + "is filled in when the call runs, without your reading it.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully, "
                                     + "with the handle of each earlier result it should read."),
@@ -183,6 +184,7 @@ public final class SpecialActionSchemas {
             + "and name its handle ({{N}}) in the goal -- every earlier result the goal names is given to "
             + "it whole, and it sees no other. Its answer comes back to you -- as a handle to pass on when "
             + "it quotes private data. Observations name results as {{N}}. When you have a tool that takes "
-            + "a result, put {{N}} or {{N.field}} as the whole value of that argument to pass it on "
-            + "verbatim without reading it.";
+            + "a result, put {{N}} or {{N.field}} in that argument -- as the whole value, or inside text "
+            + "such as a message body -- and the result is filled in when the call runs, without your "
+            + "reading it.";
 }

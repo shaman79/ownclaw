@@ -51,9 +51,25 @@ final class References {
      * whose output is an error message and never what anyone meant to send; a malformed
      * reference; and one nested in a list or an object, which cannot be substituted. A reference
      * inside other text is not recognised at all — it is text, and so is ordinary code or a
-     * template that happens to contain braces and a digit.
+     * template that happens to contain braces and a digit. A tool's arguments are resolved with
+     * {@link #resolveInText}, which fills those in too.
      */
     static Resolved resolve(Map<String, Object> written, List<Artifact> namespace) {
+        return resolve(written, namespace, false);
+    }
+
+    /**
+     * As {@link #resolve}, for a tool's arguments: a reference inside text is filled in as well --
+     * "čtvrtek 8. 10. 2026\n\n{{1}}" is the date and the menu, and an email went out to the owner
+     * and his wife with the literal "{{1}}" in place of the menu. Only a handle the task has: one
+     * past the last result is left as text, a template's own placeholder. One to a result that
+     * failed, or a field it does not have, is refused, as a whole value is.
+     */
+    static Resolved resolveInText(Map<String, Object> written, List<Artifact> namespace) {
+        return resolve(written, namespace, true);
+    }
+
+    private static Resolved resolve(Map<String, Object> written, List<Artifact> namespace, boolean inText) {
         if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
         var out = new LinkedHashMap<String, Object>(written);
         var used = new ArrayList<Artifact>();
@@ -61,6 +77,33 @@ final class References {
             Object v = e.getValue();
             if (v instanceof String s) {
                 ArtifactRef ref = ArtifactRef.parse(s);
+                if (ref == null && inText && ArtifactRef.TOKEN.matcher(s).find()) {
+                    var m = ArtifactRef.TOKEN.matcher(s);
+                    var filled = new StringBuilder();
+                    var mentioned = new ArrayList<Artifact>();
+                    while (m.find()) {
+                        ArtifactRef inner = ArtifactRef.parse(m.group());
+                        if (inner == null || inner.handle() > namespace.size()) continue;   // text
+                        Artifact a = namespace.get(inner.handle() - 1);
+                        if (!a.succeeded()) {
+                            return refuse(written, e.getKey(), inner + " in it is a FAILED result — its "
+                                    + "output is an error message, not something to pass on.");
+                        }
+                        String value = inner.field() == null ? a.output() : field(a.output(), inner);
+                        if (value == null) {
+                            return refuse(written, e.getKey(), inner + " in it names a field that "
+                                    + "result does not have.");
+                        }
+                        m.appendReplacement(filled, java.util.regex.Matcher.quoteReplacement(value));
+                        mentioned.add(a);
+                    }
+                    if (!mentioned.isEmpty()) {
+                        m.appendTail(filled);
+                        e.setValue(filled.toString());
+                        for (Artifact a : mentioned) if (!used.contains(a)) used.add(a);
+                        continue;
+                    }
+                }
                 if (ref == null) {
                     String legacy = legacyReference(s, namespace);
                     if (legacy != null) {
@@ -156,9 +199,10 @@ final class References {
     /**
      * A delegation's arguments in the task's numbering, for the cloud and the repair log.
      * <p>
-     * Only values that ARE references, and only ones in range — the ones the resolver actually
-     * substituted. Rewriting every {{k}} anywhere turned a WhatsApp template's {{1}} into {{5}}
-     * in the failure evidence, so the evidence described a call that never ran.
+     * Only the references the resolver filled in ({@link #resolveInText}): whole values and
+     * handles inside text that are in range. Rewriting every {{k}} anywhere turned a WhatsApp
+     * template's {{9}} into {{5}} in the failure evidence, so the evidence described a call that
+     * never ran.
      */
     static Map<String, Object> argsForTask(Map<String, Object> written, List<Artifact> mine) {
         if (written == null) return null;
@@ -166,8 +210,22 @@ final class References {
         for (var e : out.entrySet()) {
             if (!(e.getValue() instanceof String s)) continue;
             ArtifactRef ref = ArtifactRef.parse(s);
-            if (ref == null || ref.handle() > mine.size()) continue;
-            e.setValue(new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString());
+            if (ref != null) {
+                if (ref.handle() <= mine.size()) {
+                    e.setValue(new ArtifactRef(mine.get(ref.handle() - 1).n(), ref.field()).toString());
+                }
+                continue;
+            }
+            var m = ArtifactRef.TOKEN.matcher(s);
+            var sb = new StringBuilder();
+            while (m.find()) {
+                ArtifactRef inner = ArtifactRef.parse(m.group());
+                String to = inner == null || inner.handle() > mine.size() ? m.group()
+                        : new ArtifactRef(mine.get(inner.handle() - 1).n(), inner.field()).toString();
+                m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(to));
+            }
+            m.appendTail(sb);
+            e.setValue(sb.toString());
         }
         return out;
     }

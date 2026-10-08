@@ -565,6 +565,23 @@ class TaskEndToEndTest {
         assertFalse(observed.contains("Use ask_user to request it"), observed);
     }
 
+    @Test
+    @DisplayName("a result referenced inside a tool argument's text is filled in: the email is the date and then the menu")
+    void aReferenceInsideTextIsFilledIn(@TempDir Path tmp) throws Exception {
+        var sent = new java.util.concurrent.atomic.AtomicReference<Object>();
+        var rig = new LoopRig(tmp, List.of(
+                tool("daily_menu_fetcher", List.of(), p -> "Hospoda: polévka, řízek"),
+                tool("smtp_send_email", List.of(), p -> { sent.set(p.get("body")); return "sent"; })));
+        rig.cloud.think.add(call("daily_menu_fetcher", Map.of()));
+        rig.cloud.think.add(call("smtp_send_email", Map.of("body", "čtvrtek 8. 10. 2026\n\n{{1}}")));
+        rig.cloud.think.add(respond("sent"));
+
+        rig.turn(session(rig), "send me today's menu");
+
+        assertEquals("čtvrtek 8. 10. 2026\n\nHospoda: polévka, řízek", sent.get(),
+                "on 8 October the email went out with the literal {{1}} in place of the menu");
+    }
+
     /** A reply the provider stopped as {@code category}: billed, and no answer. */
     static Reply declined(String category) {
         return c -> new com.ownclaw.llm.LlmResponse("", List.of(), null, "refusal", category,

@@ -454,9 +454,9 @@ public class AgentLoop {
      * Each message as it was written. A message that is nothing but a handle is written in words
      * ({@link TaskRecord#inWords}): this task numbers its own results from 1, and as a call's
      * whole value that message would resolve to one of them. A handle inside other text is left
-     * alone, as the resolver leaves it: it resolves only as a whole value, and a template's {{1}}
-     * is the owner's text -- rewritten, the template he was working on came back with "result 1"
-     * in it from the second turn on. The records under the answers name results in words.
+     * alone: a template's {{1}} is the owner's text -- rewritten, the template he was working on
+     * came back with "result 1" in it from the second turn on. (Copied into a tool's argument,
+     * it is filled in when the task has a result 1: References#resolveInText.) The records under the answers name results in words.
      *
      * @param recordOf a task id to the record shown under that task's answer, or null for none
      */
@@ -1386,10 +1386,10 @@ public class AgentLoop {
         // The same resolver the delegation uses, against the task's results -- the cloud sees
         // task-wide handles in every descriptor, so {{3}} here is the task's third result. One
         // pass substitutes and refuses: a reference that does not resolve, names a failed result,
-        // or is not the whole value would otherwise reach the skill as literal text -- as an
-        // argument to smtp_send_email, an email whose whole body is five characters, sent and
-        // recorded green.
-        References.Resolved refs = References.resolve(action.params(), context.artifacts());
+        // or is malformed would otherwise reach the skill as literal text -- as an argument to
+        // smtp_send_email, an email whose whole body is five characters, sent and recorded green.
+        // One inside text is filled in (resolveInText): a date line and then the menu.
+        References.Resolved refs = References.resolveInText(action.params(), context.artifacts());
         if (!refs.ok()) {
             log.warn("Task {}: '{}' — reference refused.", context.taskId(), refs.refused());
             return AgentObservation.failure(action.tool(), "Not run: the value of '"

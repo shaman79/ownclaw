@@ -596,7 +596,7 @@ class DelegationSafetyTest {
     }
 
     @Test
-    @DisplayName("only real references are renumbered; template text is shown as it ran")
+    @DisplayName("only the references that were filled in are renumbered; the rest of the text is shown as it ran")
     void onlyReferencesAreRenumbered() {
         var first = new Artifact(5, "digest", Map.of(), Map.of(), "{\"body_text\":\"x\"}", true,
                 com.ownclaw.privacy.Label.PUBLIC, List.of());
@@ -604,8 +604,9 @@ class DelegationSafetyTest {
                 "template", "Hello {{1}}, your order {{2}} ships today");
         var out = References.argsForTask(written, List.of(first));
         assertEquals("{{5.body_text}}", out.get("body"));
-        assertEquals("Hello {{1}}, your order {{2}} ships today", out.get("template"),
-                "the failure evidence has to describe the call that actually ran");
+        assertEquals("Hello {{5}}, your order {{2}} ships today", out.get("template"),
+                "{{1}} was filled in with result 1 (resolveInText), {{2}} -- no such result -- left as "
+                        + "text: the failure evidence has to describe the call that actually ran");
         assertEquals("sent {{5}}, then {{?}}", References.proseForTask("sent {{1}}, then {{3}}", List.of(first)),
                 "a handle the delegation has no result for cannot resolve task-wide to someone else's");
     }

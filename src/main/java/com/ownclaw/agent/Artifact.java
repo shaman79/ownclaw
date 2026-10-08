@@ -213,8 +213,8 @@ public record Artifact(int n, String tool, Map<String, Object> written,
         if (!succeeded()) return sb.toString();
         sb.append(" · use: ").append(handle());
         for (ArtifactRef ref : shape.refs()) sb.append(", ").append(ref);
-        sb.append(" — any of these as the whole value of a tool argument, when you have a tool "
-                + "that takes it; the text is substituted here");
+        sb.append(" — any of these in a tool argument, as the whole value or inside text, when "
+                + "you have a tool that takes it; the text is substituted here");
         return sb.toString();
     }
 

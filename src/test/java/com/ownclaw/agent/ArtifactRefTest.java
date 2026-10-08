@@ -125,6 +125,34 @@ class ArtifactRefTest {
     }
 
     @Test
+    @DisplayName("in a tool's arguments a reference inside text is filled in: a date line and then the menu")
+    void referencesInsideText() {
+        var menu = new Artifact(1, "daily_menu_fetcher", Map.of(), Map.of(), "Hospoda: polévka, řízek", true,
+                Label.PUBLIC, List.of());
+        // The body of 8 October's lunch email, as the local model wrote it.
+        var r = References.resolveInText(Map.of("body", "čtvrtek 8. 10. 2026\n\n{{1}}"), List.of(menu));
+        assertTrue(r.ok(), r.reason());
+        assertEquals("čtvrtek 8. 10. 2026\n\nHospoda: polévka, řízek", r.params().get("body"));
+        assertEquals(List.of(menu), r.used(), "what moved decides the label");
+
+        var fields = References.resolveInText(Map.of("body", "Menu: {{1.body_text}} -- and {{1.polévka}}"), NAMESPACE);
+        assertTrue(fields.ok(), fields.reason());
+        assertEquals("Menu: SECRET body text -- and SECRET czech", fields.params().get("body"));
+        assertTrue(fields.used().getFirst().isPrivate(), "a private result filled into text still labels the call");
+
+        assertEquals("Hello {{7}}, your order ships", References.resolveInText(
+                Map.of("t", "Hello {{7}}, your order ships"), NAMESPACE).params().get("t"),
+                "a handle past the last result is a template's own placeholder: text");
+        var failed = References.resolveInText(Map.of("body", "Today: {{2}}"), NAMESPACE);
+        assertFalse(failed.ok(), "a failed result inside text is still never sent");
+        assertTrue(failed.reason().contains("FAILED"), failed.reason());
+        assertFalse(References.resolveInText(Map.of("body", "Today: {{1.nope}}"), NAMESPACE).ok());
+
+        assertEquals("Menu: {{1.body_text}}", References.resolve(Map.of("m", "Menu: {{1.body_text}}"), NAMESPACE)
+                .params().get("m"), "outside a tool's arguments -- an answer -- only a whole value is a reference");
+    }
+
+    @Test
     @DisplayName("quotes or backticks around a reference are forgiven")
     void quotedReferencesResolve() {
         for (String v : List.of("\"{{1.body_text}}\"", "`{{1.body_text}}`", "'{{1.body_text}}'")) {
