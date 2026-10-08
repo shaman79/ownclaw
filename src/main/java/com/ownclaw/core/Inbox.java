@@ -1,6 +1,7 @@
 package com.ownclaw.core;
 
 import com.ownclaw.agent.TaskChat;
+import com.ownclaw.conversation.ChatOptions;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,19 +24,25 @@ public final class Inbox {
 
     /** Where the task came from: the one place its answer is sent. */
     private final TaskChat.Channel channel;
+    /** What the task's message was sent with: what the task runs on. */
+    private final ChatOptions options;
     private final List<Sent> waiting = new ArrayList<>();
     private boolean taking = true;
 
-    public Inbox(TaskChat.Channel channel) {
+    public Inbox(TaskChat.Channel channel, ChatOptions options) {
         this.channel = channel;
+        this.options = options;
     }
 
     /**
      * Take a message for the task, unless it cannot take it: one from another channel, which the
-     * task's answer would not reach, or one with files -- those become a task's private files
+     * task's answer would not reach; one with files -- those become a task's private files
      * when it starts, and added to a running task they would make its later results private
      * part-way through, past the check a task holding files starts with
-     * ({@code AgentLoop.stopWithoutLocalModel}).
+     * ({@code AgentLoop.stopWithoutLocalModel}); or one sent with other options than the task's
+     * -- time vs cost or the thinking effort chosen otherwise next to the message box -- which,
+     * read by the task, would run on what the task runs on: a message sent on Free read by the
+     * cloud model.
      *
      * @param order its place in the queue, taken when it was sent ({@link TaskQueue#steer}): where
      *              it runs if the task ends without reading it
@@ -43,7 +50,8 @@ public final class Inbox {
      *         caller's to queue
      */
     public synchronized boolean offer(UserMessage message, long order) {
-        if (message.channel() != channel || !message.attachmentIds().isEmpty()) taking = false;
+        if (message.channel() != channel || !message.attachmentIds().isEmpty()
+                || !message.options().equals(options)) taking = false;
         if (!taking) return false;
         waiting.add(new Sent(message, order));
         return true;

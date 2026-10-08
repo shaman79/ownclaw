@@ -353,6 +353,24 @@ public class ConversationService {
     }
 
     /**
+     * What this user's chat has chosen of the owner's defaults: {@link ChatOptions#NONE} for a
+     * chat that has chosen nothing, a new one included, and for one that is not his.
+     */
+    public ChatOptions chatOptions(String userId, String sessionId) {
+        List<ChatOptions> chosen = jdbc.query(
+                "SELECT cost_mode, thinking_effort FROM chat_sessions WHERE id = ? AND user_id = ?",
+                (rs, n) -> new ChatOptions(rs.getString("cost_mode"), rs.getString("thinking_effort")),
+                sessionId, userId);
+        return chosen.isEmpty() ? ChatOptions.NONE : chosen.getFirst();
+    }
+
+    /** Make what a message was sent with its chat's choice, for the chat's next messages. His chat only. */
+    public void setChatOptions(String userId, String sessionId, ChatOptions options) {
+        jdbc.update("UPDATE chat_sessions SET cost_mode = ?, thinking_effort = ? WHERE id = ? AND user_id = ?",
+                options.costMode(), options.effort(), sessionId, userId);
+    }
+
+    /**
      * Rename a session.
      */
     public void renameSession(String userId, String sessionId, String newTitle) {

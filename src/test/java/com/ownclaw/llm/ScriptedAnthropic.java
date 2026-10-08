@@ -42,4 +42,9 @@ public final class ScriptedAnthropic {
     public int requests() {
         return http.to(AnthropicStreamingTest.MESSAGES).size();
     }
+
+    /** The bodies of the requests sent to /v1/messages, oldest first. */
+    public java.util.List<String> bodies() {
+        return http.to(AnthropicStreamingTest.MESSAGES).stream().map(FakeHttp.Sent::body).toList();
+    }
 }

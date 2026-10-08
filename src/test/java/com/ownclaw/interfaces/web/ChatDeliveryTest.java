@@ -6,6 +6,7 @@ import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.ResultDelivery;
@@ -205,7 +206,8 @@ class ChatDeliveryTest {
             public AgentResult executeFull(String userId, String message, boolean unattended,
                                            String currentMessageId, List<String> attachmentIds,
                                            com.ownclaw.agent.TaskChat.Channel channel,
-                                           com.ownclaw.core.Inbox inbox) {
+                                           com.ownclaw.core.Inbox inbox,
+                                           com.ownclaw.conversation.ChatOptions chosen) {
                 throw new IllegalStateException("database is locked");
             }
         };
@@ -493,6 +495,38 @@ class ChatDeliveryTest {
 
         assertEquals(1, frames("status").size(), String.valueOf(sent));
         assertEquals(1, frames("pong").size(), "the pong was refused for coming while the status was written: " + sent);
+    }
+
+    @Test
+    @DisplayName("what a message is sent with is its task's and, from then on, its chat's -- over what the chat chose before; the fate says it")
+    void theOptionsAMessageIsSentWith(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        String session = conversations.getCurrentSession(USER);
+        conversations.setChatOptions(USER, session, new ChatOptions("free", "low"));
+
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("message", "check the routers", "clientId", "m1", "costMode", "fast"))));
+
+        var fast = new ChatOptions("fast", null);
+        assertEquals(fast, queue.sent.getLast().options(), "the message's choice, the default effort with it");
+        assertEquals(fast, conversations.chatOptions(USER, session), "kept for the chat's next messages");
+        var fate = frames("fate").getLast();
+        assertEquals("fast", fate.path("options").path("costMode").asText());
+        assertTrue(fate.path("options").path("effort").isNull(), fate.toString());
+
+        type("and the printer");
+        assertEquals(ChatOptions.NONE, queue.sent.getLast().options(), "sent with nothing chosen: the defaults");
+        assertEquals(ChatOptions.NONE, conversations.chatOptions(USER, session));
+
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("message", "/queue then the switch", "clientId", "m3", "effort", "medium"))));
+        assertEquals(new ChatOptions(null, "medium"), queue.sent.getLast().options(), "a queued message too");
+
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("message", "/history", "clientId", "m4", "costMode", "free"))));
+        assertEquals(new ChatOptions(null, "medium"), conversations.chatOptions(USER, session),
+                "a command runs no task: the chat's choice stays");
+        // Mutation: build the message without what it was sent with -> its task runs on the defaults.
     }
 
     @Test

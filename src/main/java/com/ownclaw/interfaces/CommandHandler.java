@@ -327,7 +327,8 @@ public class CommandHandler {
 
     /**
      * {@code /local [on|off]}: the owner's local-only switch ({@link LocalMode}), shown or set.
-     * Setting it is the owner's: it decides where every account's tasks run.
+     * Setting it is the owner's: it decides where every account's tasks run -- by default: a chat
+     * that chose its own time vs cost next to its message box runs on that.
      */
     private String handleLocal(String userId, String arg) {
         if (!arg.isEmpty()) {
@@ -337,15 +338,18 @@ public class CommandHandler {
                 case "off" -> localMode.set(false);
                 default -> {
                     return "Usage: `/local on` -- every task runs on the local model, no cloud model is "
-                            + "called; `/local off` -- back to the cloud; `/local` -- which it is.";
+                            + "called; `/local off` -- back to the cloud; `/local` -- which it is. A chat "
+                            + "that chose its own time vs cost next to its message box keeps it.";
                 }
             }
         }
         return localMode.on()
                 ? "Local only is **on**: no cloud model is called, and every task runs on the local model, "
-                        + "best effort. `/local off` switches the cloud model back on."
-                : "Local only is **off**: tasks run on the cloud model, and one whose cloud model can't be "
-                        + "reached goes on on the local model by itself. `/local on` stops calling the cloud.";
+                        + "best effort -- but in a chat that chose otherwise next to its message box. "
+                        + "`/local off` switches the cloud model back on."
+                : "Local only is **off**: tasks run on the cloud model -- but in a chat set to Free next to "
+                        + "its message box -- and one whose cloud model can't be reached goes on on the local "
+                        + "model by itself. `/local on` stops calling the cloud.";
     }
 
     private String helpText() {
@@ -378,7 +382,7 @@ public class CommandHandler {
                 - `/schedule every <schedule> : <task>` — Recurring task
                 - `/schedule cancel|pause|resume <id>` — Manage tasks
                 - `/setup` — Run setup wizard (Web UI only)
-                - `/local [on|off]` — Local only: every task runs on the local model and no cloud model is called (switching is owner only)
+                - `/local [on|off]` — Local only: every task runs on the local model and no cloud model is called, but in a chat that chose otherwise next to its message box (switching is owner only)
                 - `/status` — System status
                 - `/help` — This message""";
     }

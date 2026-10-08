@@ -199,7 +199,7 @@ final class LoopRig {
                 curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null,
-                new LocalExecutor(router, registry, emitter, curator, config), files, redactor);
+                new LocalExecutor(router, registry, emitter, curator), files, redactor);
         queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);
     }
 
@@ -209,6 +209,17 @@ final class LoopRig {
         AgentResult r = loop.executeFull("u1", text, false, row, List.of(), TaskChat.Channel.WEB);
         chat.saveMessage("u1", session, "assistant", r.response(), List.of(), r.taskId(), r.ownerText());
         return r;
+    }
+
+    /**
+     * A chat turn sent with these options, as the web chat sends one -- its row saved, then run
+     * on the queue's chat path ({@link com.ownclaw.core.TaskQueue#runChat}), which starts its task
+     * on what the message was sent with; its answer saved.
+     */
+    AgentResult turn(String session, String text, com.ownclaw.conversation.ChatOptions sentWith) {
+        String row = chat.saveMessage("u1", session, "user", text);
+        return queue.runChat(new com.ownclaw.core.UserMessage("u1", session, row, text, List.of(),
+                TaskChat.Channel.WEB, sentWith, r -> chat.saveAnswer("u1", session, r)));
     }
 
     /** Every status the task emits for u1, in order, from now on. */

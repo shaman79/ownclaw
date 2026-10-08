@@ -96,15 +96,17 @@ final class TaskEnding {
 
     /**
      * Why no model could take the task on, in words: the local model could not be reached --
-     * and, the owner's switch being on, that the cloud is switched off -- or the cloud could not
-     * be, and the local model was not there to go on with it.
+     * and, the task running local only, that the cloud is switched off -- or the cloud could not
+     * be, and the local model was not there to go on with it. Local only is Free in time vs cost,
+     * the chat's own or the default it follows ({@link TaskOptions}): either way, choosing
+     * Fastest or Cheaper next to the message box switches the cloud on for that chat.
      */
     static String unreachable(LlmException why, boolean local, boolean localOnly) {
         if (local) {
             return "the local model (" + why.getProvider() + ") could not be reached -- "
                     + why.unreachableBecause()
-                    + (localOnly ? " -- and the cloud model is switched off (the owner's /local off "
-                    + "switches it on)" : "");
+                    + (localOnly ? " -- and the cloud model is switched off (time vs cost is set to Free; "
+                    + "Fastest or Cheaper next to the message box switches it on)" : "");
         }
         return "the cloud model (" + why.getProvider() + ") could not be used -- " + cloudUnreachable(why)
                 + " -- and the local model is not available to go on with the task";

@@ -204,7 +204,8 @@ class ChatPageTest {
         assertTrue(page.contains("<button id=\"queue\""), "the Queue button");
         String send = page.substring(page.indexOf("function send(queued) {"));
         send = send.substring(0, send.indexOf("function markFate("));
-        assertTrue(send.contains("var payload = { message: text, clientId: clientId }; if (queued) payload.queue = true;"), send);
+        assertTrue(send.contains("var payload = { message: text, clientId: clientId, costMode: options.costMode, "
+                + "effort: options.effort }; if (queued) payload.queue = true;"), send);
         assertTrue(send.contains("if (!thinkingEl.classList.contains('active')) {"),
                 "a message sent while a task runs keeps that task's trace: " + send);
         // Mutation: disable Send in setThinking again -> nothing can be sent while a task runs.
@@ -233,12 +234,14 @@ class ChatPageTest {
         String composer = page.substring(page.indexOf("function updateComposer() {"));
         composer = composer.substring(0, composer.indexOf("function resetThinkingSafetyTimer()"));
         assertTrue(composer.contains("var steering = thinkingEl.classList.contains('active') "
-                        + "&& steeredChatId !== null && steeredChatId === displayedSessionId; "
+                        + "&& steeredChatId !== null && steeredChatId === displayedSessionId "
+                        + "&& chosen.costMode === steeredOptions.costMode && chosen.effort === steeredOptions.effort; "
                         + "queueBtn.classList.toggle('visible', steering); inputEl.placeholder = steering "
                         + "? 'Send to the running task, or Queue it for after...' : idlePlaceholder;"),
                 "while a task runs elsewhere, or takes nothing from here, nothing is promised: " + composer);
-        assertTrue(page.contains("if (data.fate === 'started' || data.fate === 'steered') steeredChatId = data.sessionId; "
-                        + "else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null; updateComposer();"),
+        assertTrue(page.contains("if (data.fate === 'started' || data.fate === 'steered') { steeredChatId = data.sessionId; "
+                        + "steeredOptions = data.options; } else if (!data.queue && data.sessionId === steeredChatId) "
+                        + "steeredChatId = null; updateComposer();"),
                 "the fate of a message names the chat where Send reaches the task, or says it takes nothing more");
         assertTrue(page.contains("if (!on) { stopPressed = false; steeredChatId = null; }"), "and no task runs once it ends");
         assertTrue(page.contains("if (listed) listed.classList.remove('unread'); updateComposer();"),

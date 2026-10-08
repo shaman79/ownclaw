@@ -30,7 +30,7 @@ class ChatHistoryPagingTest {
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
         conversations = new ConversationService(jdbc);
-        controller = new ChatHistoryController(conversations);
+        controller = new ChatHistoryController(conversations, new com.ownclaw.config.OwnClawConfig());
     }
 
     /** A request as JwtAuthFilter leaves it: signed in as this user. */

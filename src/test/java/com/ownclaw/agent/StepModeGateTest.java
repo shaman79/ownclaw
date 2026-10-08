@@ -76,19 +76,26 @@ class StepModeGateTest {
     }
 
     @Test
-    @DisplayName("a chat is restricted only when the owner chose cost over speed (the slider)")
+    @DisplayName("a chat is restricted only when its task runs cost over speed (the slider, its default or the chat's)")
     void attendedFollowsTheSlider() {
         var cfg = config(true, true);
-        cfg.getMentor().setPreferCost(false);
-        assertFalse(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+        var fastest = context(false, true);
+        fastest.setOptions(new TaskOptions(false, false, "high"));
+        assertFalse(engine(cfg).stepMode(fastest, provider(true)).localFirst(),
                 "fastest: the cloud runs the skills; a local step costs minutes");
-        cfg.getMentor().setPreferCost(true);
-        assertTrue(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+        var cheaper = context(false, true);
+        cheaper.setOptions(new TaskOptions(false, true, "high"));
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
                 "cheaper: the cloud plans and the local model runs them");
+        cfg.getMentor().setPreferCost(false);
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
+                "the task's options, not the default as it is now");
         cfg.getMentor().setLocalFirstUnattended(false);
-        assertTrue(engine(cfg).stepMode(context(false, true), provider(true)).localFirst(),
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
                 "the unattended flag is not the chat's");
-        assertFalse(engine(cfg).stepMode(context(false, false), provider(true)).localFirst(),
+        var notReady = context(false, false);
+        notReady.setOptions(new TaskOptions(false, true, "high"));
+        assertFalse(engine(cfg).stepMode(notReady, provider(true)).localFirst(),
                 "and never with a local tier that cannot take the work");
     }
 

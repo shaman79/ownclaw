@@ -62,3 +62,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/021-privacy-placeholders.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/022-chat-options.sql
+      relativeToChangelogFile: false

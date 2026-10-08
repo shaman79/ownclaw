@@ -288,7 +288,7 @@ class RepeatedPrivateResultTest {
                         new com.ownclaw.core.LongRunningTaskManager(jdbc, emitter, events, config), null,
                         new com.ownclaw.core.TokenBudgetTracker(jdbc, config, emitter), events, null,
                         new LocalExecutor(new LlmRouter(local, null, null, null), registry, emitter,
-                                new DelegationBehaviourTest.Usage(), config), null, new com.ownclaw.privacy.Redactor(null));
+                                new DelegationBehaviourTest.Usage()), null, new com.ownclaw.privacy.Redactor(null));
                 var ctx = new AgentContext("u1", "t-partial", "Email me the morning digest.");
                 ctx.setLocalTierReady(false);
                 // The confirmation stands for a private result that quotes a public one.

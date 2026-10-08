@@ -78,9 +78,9 @@ public class ThinkingEngine {
         // a call site that forgets is stopped, not silently unscanned. The task's progress hook
         // keeps its stall watchdog from taking a long call for silence, and lets its Stop end it.
         requestConfig = requestConfig.withEgress(context.egress("think")).withProgress(context.progress());
-        // At the owner's thinking effort. On the local model, running the task itself, low means
+        // At the task's thinking effort. On the local model, running the task itself, low means
         // answering without reasoning first.
-        requestConfig = requestConfig.withEffort(config.getMentor().getThinkingEffort());
+        requestConfig = requestConfig.withEffort(context.options().effort());
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
         } else {
@@ -405,10 +405,11 @@ public class ThinkingEngine {
         // model that runs the tools, to make it hand the work to itself.
         //
         // Unattended work always (local-first-unattended); a chat when the owner chose cost over
-        // speed (prefer-cost, the slider): nobody, or nobody in a hurry, waits on it.
+        // speed (Cheaper, the slider's default or the chat's own): nobody, or nobody in a hurry,
+        // waits on it.
         boolean localFirst = nativeTools && !local
                 && (context.isUnattended() ? config.getMentor().isLocalFirstUnattended()
-                        : config.getMentor().isPreferCost())
+                        : context.options().preferCost())
                 && localTierReady(context)
                 // The valve. If a delegation has already failed, the local tier has had its
                 // turn and the registry comes back for the rest of the task. Without this, a
@@ -652,7 +653,7 @@ public class ThinkingEngine {
         if (mode.local()) {
             sb.append("- Model: you are the local model, running this task on your own: ")
               .append(context.onLocal() ? "the cloud model could not be used -- " + context.onLocalBecause()
-                      : config.getMentor().isLocalOnly() ? "the owner has switched the cloud model off"
+                      : context.options().localOnly() ? "the owner has switched the cloud model off"
                       : "no cloud model is configured")
               .append(". Do what you can with the tools you have, and say what you could not do.\n");
         }

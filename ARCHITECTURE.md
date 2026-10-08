@@ -14,7 +14,7 @@ OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LL
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
 - **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (Podman containers on Linux, ProcessBuilder on Windows).
 
-The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is also the fallback: with the owner's local-only switch on, with no cloud configured, or when a task's cloud model cannot be reached (no internet, a rejected key, no credit, an outage the retries did not outlast), the local LLM runs the task itself, best effort.
+The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is also the fallback: with local only chosen (the owner's default, or a chat's own), with no cloud configured, or when a task's cloud model cannot be reached (no internet, a rejected key, no credit, an outage the retries did not outlast), the local LLM runs the task itself, best effort.
 
 The system supports **multiple users**, each with isolated profiles, credentials, skill libraries, and conversation state.
 
@@ -426,7 +426,7 @@ When using Anthropic as the cloud provider, the system supports **prompt caching
 
 ### 4.7 Graceful Degradation
 
-Degraded means: the owner's local-only switch is on (the settings page, `/local on`), no cloud is configured, or the task's cloud model could not be reached (§4.5).
+Degraded means: the task runs local only (Free in time vs cost: the owner's default, on the settings page or by `/local on`, or its chat's own choice next to the message box), no cloud is configured, or the task's cloud model could not be reached (§4.5).
 
 | Capability | Cloud Available | Degraded (local LLM runs the task) |
 |-----------|----------------|------------------------------|

@@ -1,5 +1,6 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.core.Inbox;
 import com.ownclaw.core.UserMessage;
 import com.ownclaw.llm.LlmMessage;
@@ -27,14 +28,15 @@ class MessagesWhileWorkingTest {
 
     /** A message the owner sent in the chat, saved as {@code row}. */
     static UserMessage owner(String row, String text) {
-        return new UserMessage("u1", "chat", row, text, List.of(), TaskChat.Channel.WEB, r -> { });
+        return new UserMessage("u1", "chat", row, text, List.of(), TaskChat.Channel.WEB, ChatOptions.NONE,
+                r -> { });
     }
 
     /** A rig whose first step sends the task a message while it runs, as the chat would. */
     record Run(LoopRig rig, Inbox inbox, String chat, String asked, String steering) {}
 
     static Run run(Path tmp, String provider) throws Exception {
-        var inbox = new Inbox(TaskChat.Channel.WEB);
+        var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
         String[] steering = new String[1];
         var rig = new LoopRig(tmp, List.of(
                 AssistantPartsTest.tool("router_status", List.of(), p -> {
@@ -64,7 +66,7 @@ class MessagesWhileWorkingTest {
         var statuses = run.rig().statuses();
 
         AgentResult r = run.rig().loop.executeFull("u1", "Check the uplink.", false, run.asked(), List.of(),
-                TaskChat.Channel.WEB, run.inbox());
+                TaskChat.Channel.WEB, run.inbox(), ChatOptions.NONE);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         var calls = run.rig().cloud.calls("think");
@@ -115,7 +117,7 @@ class MessagesWhileWorkingTest {
     void theHistoryShowsItInItsPlace(@TempDir Path tmp) throws Exception {
         Run run = run(tmp, "openai");
         AgentResult r = run.rig().loop.executeFull("u1", "Check the uplink.", false, run.asked(), List.of(),
-                TaskChat.Channel.WEB, run.inbox());
+                TaskChat.Channel.WEB, run.inbox(), ChatOptions.NONE);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         String history = lastUser(run.rig().cloud.calls("think").get(1));
@@ -132,7 +134,7 @@ class MessagesWhileWorkingTest {
         // longer does: the privacy filter sends it, without secrets and identifiers).
         String mail = "From the landlord: the heating in the flat is serviced on Thursday morning, "
                 + "please leave the boiler room unlocked.";
-        var inbox = new Inbox(TaskChat.Channel.WEB);
+        var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
         String quote = "About \"the heating in the flat is serviced on Thursday morning\": I will be home.";
         var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("mail_read", List.of("IMAP_PASS"), p -> {
             inbox.offer(owner("r2", quote), 2);
@@ -141,7 +143,8 @@ class MessagesWhileWorkingTest {
         rig.cloud.think.add(call("mail_read", Map.of()));
         rig.cloud.think.add(respond("Noted."));
 
-        AgentResult r = rig.loop.executeFull("u1", "Read my mail.", false, null, List.of(), null, inbox);
+        AgentResult r = rig.loop.executeFull("u1", "Read my mail.", false, null, List.of(), null, inbox,
+                ChatOptions.NONE);
 
         assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
         String second = lastUser(rig.cloud.calls("think").get(1));

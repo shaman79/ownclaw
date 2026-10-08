@@ -3,6 +3,7 @@ package com.ownclaw.agent;
 import com.ownclaw.agent.memory.AgentMemory;
 import com.ownclaw.agent.tools.*;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.conversation.FileStorageService;
 import com.ownclaw.core.LongRunningTaskManager;
@@ -146,6 +147,8 @@ public class AgentLoop {
     }
 
     /**
+     * A task on the owner's defaults ({@link TaskOptions}).
+     *
      * @param currentMessageId the chat row this task answers, or null for a scheduled or
      *                         background run: its chat is the one that row was saved in, and a
      *                         run without one has no chat
@@ -157,19 +160,24 @@ public class AgentLoop {
     public AgentResult executeFull(String userId, String message, boolean unattended,
                                    String currentMessageId, List<String> attachmentIds,
                                    TaskChat.Channel channel) {
-        return executeFull(userId, message, unattended, currentMessageId, attachmentIds, channel, null);
+        return executeFull(userId, message, unattended, currentMessageId, attachmentIds, channel, null,
+                ChatOptions.NONE);
     }
 
     /**
-     * @param inbox what the owner sends in the task's chat while it runs, read before each step
-     *              ({@link #readMessages}); null for a task nobody can write to
+     * @param inbox  what the owner sends in the task's chat while it runs, read before each step
+     *               ({@link #readMessages}); null for a task nobody can write to
+     * @param chosen what its message was sent with, or its chat has chosen, of the owner's defaults
+     *               ({@link com.ownclaw.core.UserMessage#options}): the task runs on these, and on
+     *               the defaults where they choose nothing
      */
     public AgentResult executeFull(String userId, String message, boolean unattended,
                                    String currentMessageId, List<String> attachmentIds,
-                                   TaskChat.Channel channel, com.ownclaw.core.Inbox inbox) {
+                                   TaskChat.Channel channel, com.ownclaw.core.Inbox inbox,
+                                   ChatOptions chosen) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
         java.util.function.Supplier<AgentResult> task = () -> execute(taskId, userId, message, unattended,
-                currentMessageId, attachmentIds, channel, inbox);
+                currentMessageId, attachmentIds, channel, inbox, chosen);
         // Unattended work is waited on in no chat on screen: every status it emits, its ending
         // too, is marked so (ChatStatusEmitter#BACKGROUND), and a page shows it apart.
         return unattended ? statusEmitter.inBackground(taskId, task) : task.get();
@@ -178,9 +186,12 @@ public class AgentLoop {
     /** {@link #executeFull}, once the task has its id. */
     private AgentResult execute(String taskId, String userId, String message, boolean unattended,
                                 String currentMessageId, List<String> attachmentIds,
-                                TaskChat.Channel channel, com.ownclaw.core.Inbox inbox) {
+                                TaskChat.Channel channel, com.ownclaw.core.Inbox inbox,
+                                ChatOptions chosen) {
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
+        // Once, here: a default changed while the task runs is the next task's.
+        context.setOptions(TaskOptions.of(chosen, config.getMentor()));
         context.setInbox(inbox);
         context.setPersonalSources(config.getPrivacy().getPersonalSources());
 
@@ -2247,12 +2258,12 @@ public class AgentLoop {
                 oldCode, lastError, local);
         // 0.2 where the model takes a temperature: AnthropicProvider leaves it out for the models
         // that reject one -- Opus 4.7 and later and every 5.x model, claude-opus-5 among them.
-        // At the owner's thinking effort, as the steps are: writing a skill is part of the task's
+        // At the task's thinking effort, as the steps are: writing a skill is part of the task's
         // work. On the local model, low means the code is written without reasoning first.
         LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)
                 .withEgress(context.egress("codegen"))
                 .withProgress(context.progress())
-                .withEffort(config.getMentor().getThinkingEffort());
+                .withEffort(context.options().effort());
 
         List<LlmMessage> prompt = spec;
         for (int attempt = 0; ; attempt++) {
@@ -2426,7 +2437,7 @@ public class AgentLoop {
         if (why instanceof ProviderRefused declined) {
             clause = TaskEnding.declined(declined);
         } else if (why.unreachable()) {
-            clause = TaskEnding.unreachable(why, local, llmRouter.localOnly());
+            clause = TaskEnding.unreachable(why, local, context.options().localOnly());
         } else {
             // A provider's own error can quote the request it refused.
             String said = quotable(why.getMessage(), context);

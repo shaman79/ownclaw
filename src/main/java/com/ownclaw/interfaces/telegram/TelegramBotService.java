@@ -304,9 +304,10 @@ public class TelegramBotService {
         // To the task running in this chat when it was asked from Telegram too, whose answer comes
         // here; otherwise a task of its own (TaskQueue#send), whose answer is saved and sent here.
         // It came from Telegram, so a task of its own shows its progress messages in Telegram too
-        // (forTelegram).
+        // (forTelegram). Telegram has no choice of time vs cost or thinking effort beside the
+        // message: it runs on what its chat has chosen next to the web chat's message box.
         var sent = new UserMessage(userId, currentSessionId, currentMessageId, text, List.of(),
-                TaskChat.Channel.TELEGRAM, result -> {
+                TaskChat.Channel.TELEGRAM, conversationService.chatOptions(userId, currentSessionId), result -> {
             // Saved as the web chat saves an answer: the web chat shows it on reload, the private
             // answer included, and links it to what the task did. Saving is one half of
             // delivering it, and failing it must not also lose the other: it is still sent.

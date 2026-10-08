@@ -3,11 +3,12 @@ package com.ownclaw.config;
 import org.springframework.stereotype.Component;
 
 /**
- * How much of the work the local model does: the owner's time-vs-cost slider. Its stops are the
- * cloud running the skills (fastest), the cloud planning and the local model running them
- * ({@link OwnClawConfig.Mentor#isPreferCost}), and local only ({@link OwnClawConfig.Mentor#isLocalOnly},
- * read by the router on every model call). Set from the settings page and, local only, the
- * /local command; saved, so a restart keeps it ({@link SetupWizardService#applyOverrides}).
+ * How much of the work the local model does: the owner's time-vs-cost slider -- the default, which
+ * a chat can override next to its message box. Its stops are the cloud running the skills
+ * (fastest), the cloud planning and the local model running them
+ * ({@link OwnClawConfig.Mentor#isPreferCost}), and local only ({@link OwnClawConfig.Mentor#isLocalOnly}).
+ * A task reads it when it starts ({@code TaskOptions}). Set from the settings page and, local
+ * only, the /local command; saved, so a restart keeps it ({@link SetupWizardService#applyOverrides}).
  */
 @Component
 public class LocalMode {

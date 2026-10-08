@@ -1,6 +1,7 @@
 package com.ownclaw.core;
 
 import com.ownclaw.agent.TaskChat;
+import com.ownclaw.conversation.ChatOptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -21,13 +22,13 @@ class InboxTest {
     }
 
     static UserMessage message(String text, TaskChat.Channel channel, List<String> files) {
-        return new UserMessage("u1", "chat", "row-" + text, text, files, channel, r -> { });
+        return new UserMessage("u1", "chat", "row-" + text, text, files, channel, ChatOptions.NONE, r -> { });
     }
 
     @Test
     @DisplayName("the task reads what was offered, in order, once; the close hands on the rest, each with its place, and takes nothing more")
     void readOnceThenHandedOn() {
-        var inbox = new Inbox(TaskChat.Channel.WEB);
+        var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
         assertTrue(inbox.offer(message("a"), 1));
         assertTrue(inbox.offer(message("b"), 2));
         assertEquals(List.of("a", "b"), inbox.drain().stream().map(UserMessage::text).toList());
@@ -49,7 +50,7 @@ class InboxTest {
         for (UserMessage refused : List.of(message("from the phone", TaskChat.Channel.TELEGRAM, List.of()),
                 message("from the ops API", TaskChat.Channel.OPS, List.of()),
                 message("read this file", TaskChat.Channel.WEB, List.of("f1")))) {
-            var inbox = new Inbox(TaskChat.Channel.WEB);
+            var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
             assertTrue(inbox.offer(message("before"), 1));
             assertFalse(inbox.offer(refused, 2), refused.text() + ": its answer would not reach its sender, or its files the task");
             assertFalse(inbox.offer(message("compare it with the running one"), 3),
@@ -57,7 +58,7 @@ class InboxTest {
             assertEquals(List.of("before"), inbox.drain().stream().map(UserMessage::text).toList());
             inbox.close((m, order) -> fail("nothing left to hand on: " + m.text()));
         }
-        var telegram = new Inbox(TaskChat.Channel.TELEGRAM);
+        var telegram = new Inbox(TaskChat.Channel.TELEGRAM, ChatOptions.NONE);
         assertTrue(telegram.offer(message("use the backup link", TaskChat.Channel.TELEGRAM, List.of()), 1),
                 "a task asked from Telegram takes what is sent from there");
         // Mutation: take a message from any channel -> a Telegram question read by a web task is
@@ -68,7 +69,7 @@ class InboxTest {
     @DisplayName("offers racing the close on other threads: every message is read, or queued, exactly once, each sender's in order")
     void offerRacesClose() throws Exception {
         for (int round = 0; round < 2_000; round++) {
-            var inbox = new Inbox(TaskChat.Channel.WEB);
+            var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
             var read = Collections.synchronizedList(new ArrayList<String>());
             // What runs as a task of its own, in the order it was queued: handed on by the close
             // (under the inbox's lock), or queued by a sender whose offer came after it.

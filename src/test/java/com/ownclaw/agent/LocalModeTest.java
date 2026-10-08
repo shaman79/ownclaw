@@ -184,8 +184,8 @@ class LocalModeTest {
 
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
         assertTrue(r.response().startsWith("**Stopped:** the local model (ollama) could not be reached -- no "
-                + "connection to it -- and the cloud model is switched off (the owner's /local off switches it "
-                + "on).\n\n"),
+                + "connection to it -- and the cloud model is switched off (time vs cost is set to Free; Fastest "
+                + "or Cheaper next to the message box switches it on).\n\n"),
                 r.response());
         assertTrue(rig.cloud.calls.isEmpty());
     }

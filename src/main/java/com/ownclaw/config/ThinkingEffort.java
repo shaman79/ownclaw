@@ -6,8 +6,9 @@ import java.util.List;
 
 /**
  * How much the models think before they act: the owner's thinking effort, low, medium or high
- * ({@link OwnClawConfig.Mentor#getThinkingEffort}). Set from the settings page; saved, so a
- * restart keeps it ({@link SetupWizardService#applyOverrides}).
+ * ({@link OwnClawConfig.Mentor#getThinkingEffort}) -- the default, which a chat can override next
+ * to its message box. Set from the settings page; saved, so a restart keeps it
+ * ({@link SetupWizardService#applyOverrides}).
  */
 @Component
 public class ThinkingEffort {
@@ -15,8 +16,8 @@ public class ThinkingEffort {
     /** Its row in system_settings: one of {@link #LEVELS}. */
     static final String SETTING = "thinking_effort";
 
-    /** The levels the owner chooses from. */
-    private static final List<String> LEVELS = List.of("low", "medium", "high");
+    /** The levels the owner chooses from, here and for a chat ({@code ChatOptions}). */
+    public static final List<String> LEVELS = List.of("low", "medium", "high");
 
     private final OwnClawConfig config;
     private final SetupWizardService settings;

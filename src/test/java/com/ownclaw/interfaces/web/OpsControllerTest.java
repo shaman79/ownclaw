@@ -58,6 +58,8 @@ class OpsControllerTest {
         final List<String> currentMessageIds = new CopyOnWriteArrayList<>();
         final List<String> channels = new CopyOnWriteArrayList<>();
         final List<Boolean> unattended = new CopyOnWriteArrayList<>();
+        /** What each call was told its message was sent with. */
+        final List<com.ownclaw.conversation.ChatOptions> chosen = new CopyOnWriteArrayList<>();
         /** The row each call was told it answers, as the database had it when the call began. */
         final List<List<Object>> rowAtCall = new CopyOnWriteArrayList<>();
         volatile CountDownLatch hold = new CountDownLatch(0);
@@ -74,8 +76,10 @@ class OpsControllerTest {
         public AgentResult executeFull(String userId, String message, boolean unattended,
                                        String currentMessageId, List<String> attachmentIds,
                                        com.ownclaw.agent.TaskChat.Channel channel,
-                                       com.ownclaw.core.Inbox inbox) {
+                                       com.ownclaw.core.Inbox inbox,
+                                       com.ownclaw.conversation.ChatOptions chosen) {
             this.unattended.add(unattended);
+            this.chosen.add(chosen);
             currentMessageIds.add(String.valueOf(currentMessageId));
             channels.add(String.valueOf(channel));
             if (currentMessageId != null) {
@@ -170,6 +174,21 @@ class OpsControllerTest {
         String untitled = s.conversations().createSession("u1", "New Chat");
         body(s.ops().runAgent(Map.of("message", "plan the trip", "userId", "u1", "sessionId", untitled)));
         assertEquals("plan the trip", title(s.jdbc(), untitled));
+    }
+
+    @Test
+    @DisplayName("a chat turn runs on the owner's defaults, whatever its chat has chosen next to the message box")
+    void aChatTurnRunsOnTheDefaults(@TempDir Path tmp) throws Exception {
+        var s = setup(tmp);
+        String chat = s.conversations().createSession("u1", "Network");
+        var free = new com.ownclaw.conversation.ChatOptions("free", "low");
+        s.conversations().setChatOptions("u1", chat, free);
+
+        body(s.ops().runAgent(Map.of("message", "check the routers", "userId", "u1", "sessionId", chat)));
+
+        assertEquals(List.of(com.ownclaw.conversation.ChatOptions.NONE), s.loop().chosen);
+        assertEquals(free, s.conversations().chatOptions("u1", chat), "and the chat's choice is left as it was");
+        // Mutation: send the turn with the chat's choice -> an ops check runs on the owner's chat's Free.
     }
 
     @Test

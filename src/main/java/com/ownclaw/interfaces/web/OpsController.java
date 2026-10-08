@@ -4,6 +4,7 @@ import com.ownclaw.agent.AgentLoop;
 import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.TaskChat;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
@@ -381,9 +382,10 @@ public class OpsController {
     }
 
     /**
-     * The local-only switch, for this run: on, no cloud model is called and every task runs on
-     * the local model -- the way to try that path on a live system and turn it off again. Not
-     * saved: a restart returns to the owner's setting (the settings page, /local).
+     * The local-only switch, for this run: on, no cloud model is called and every task on the
+     * defaults -- every one but in a chat that chose otherwise -- runs on the local model: the way
+     * to try that path on a live system and turn it off again. Not saved: a restart returns to the
+     * owner's setting (the settings page, /local).
      */
     @PostMapping("/config/local-only")
     public ResponseEntity<?> localOnly(@RequestParam boolean enabled) {
@@ -393,13 +395,14 @@ public class OpsController {
         return ResponseEntity.ok(Map.of(
                 "localOnly", enabled,
                 "previous", before,
-                "note", "Applies from the next model call. Not saved: a restart returns to the "
+                "note", "Applies from the next task. Not saved: a restart returns to the "
                         + "owner's setting."));
     }
 
     /**
      * Cost over speed on a chat, for this run: on, the cloud plans and the local model runs the
-     * skills. Not saved: a restart returns to the owner's setting (the settings page).
+     * skills -- in every chat on the defaults. Not saved: a restart returns to the owner's setting
+     * (the settings page).
      */
     @PostMapping("/config/prefer-cost")
     public ResponseEntity<?> preferCost(@RequestParam boolean enabled) {
@@ -409,7 +412,7 @@ public class OpsController {
         return ResponseEntity.ok(Map.of(
                 "preferCost", enabled,
                 "previous", before,
-                "note", "Applies from the next step. Not saved: a restart returns to the owner's setting."));
+                "note", "Applies from the next task. Not saved: a restart returns to the owner's setting."));
     }
 
     /** What the canary does on a hit. Not persisted; OWNCLAW_PRIVACY_CANARY on restart. */
@@ -576,8 +579,11 @@ public class OpsController {
         String chat = NEW_CHAT.equals(sessionId)
                 ? conversations.createSessionWithoutOpening(userId, "Ops check") : sessionId;
         conversations.autoTitleIfNeeded(userId, chat, message);
+        // On the owner's defaults, whatever the chat has chosen: the ops API checks the system as
+        // the settings page sets it.
         return new UserMessage(userId, chat, conversations.saveMessage(userId, chat, "user", message, List.of()),
-                message, List.of(), TaskChat.Channel.OPS, result -> conversations.saveAnswer(userId, chat, result));
+                message, List.of(), TaskChat.Channel.OPS, ChatOptions.NONE,
+                result -> conversations.saveAnswer(userId, chat, result));
     }
 
     /**

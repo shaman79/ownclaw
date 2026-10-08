@@ -73,9 +73,10 @@ public class OwnClawConfig {
         private boolean localFirstUnattended = true;
 
         /**
-         * Local only: no cloud model is called, and every task runs on the local model, best
+         * Local only: no cloud model is called, and the task runs on the local model, best
          * effort. The owner's switch for a cloud or an internet that is not there: the settings
-         * page and /local set it ({@link LocalMode}). Off, a task whose cloud cannot be reached
+         * page and /local set it ({@link LocalMode}). The default: a chat can choose otherwise
+         * next to its message box ({@code TaskOptions}). Off, a task whose cloud cannot be reached
          * moves to the local model by itself ({@code AgentLoop}).
          */
         private boolean localOnly = false;
@@ -86,7 +87,7 @@ public class OwnClawConfig {
          * Cost over speed, on a chat: the cloud plans and the local model runs every skill, as
          * on unattended work ({@code ThinkingEngine#stepMode}) -- slower, cheaper. Off, the
          * cloud runs the skills itself. The middle stop of the owner's time-vs-cost slider,
-         * local only being the last ({@link LocalMode}).
+         * local only being the last ({@link LocalMode}); the default, as local only is.
          */
         private boolean preferCost = true;
 
@@ -96,10 +97,11 @@ public class OwnClawConfig {
 
         /**
          * How much the models think before they act: "low", "medium" or "high", the owner's
-         * choice on the settings page ({@link ThinkingEffort}). A cloud model that takes an
-         * effort is sent it on every step of a task and on the skill code it writes; at low the
-         * local model also answers without reasoning first, on the same calls when it runs a task
-         * itself and on every turn of a delegation. Medium and high change nothing locally.
+         * default on the settings page ({@link ThinkingEffort}), which a chat can override next
+         * to its message box ({@code TaskOptions}). A cloud model that takes an effort is sent
+         * it on every step of a task and on the skill code it writes; at low the local model also
+         * answers without reasoning first, on the same calls when it runs a task itself and on
+         * every turn of a delegation. Medium and high change nothing locally.
          */
         private String thinkingEffort = "high";
 

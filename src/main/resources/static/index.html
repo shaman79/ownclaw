@@ -855,6 +855,28 @@
         #stop:active { transform: scale(.96) }
         #stop svg { width: 12px; height: 12px; fill: currentColor }
 
+        /* What this chat runs on, under Send: sent with each message, and kept for the chat. */
+        .composer-options {
+            max-width: 780px;
+            margin: 6px auto 0;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 6px 14px;
+            font-size: 12px;
+            color: var(--text-3);
+        }
+        .composer-options label { display: inline-flex; align-items: center; gap: 6px }
+        .composer-options select {
+            padding: 3px 6px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 12px;
+            font-family: var(--font);
+        }
+
         .input-hint {
             max-width: 780px;
             margin: 6px auto 0;
@@ -2600,6 +2622,24 @@
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
     </div>
+    <div class="composer-options">
+        <label title="Time vs cost for this chat: sent with your next message and kept for the chat's next ones. Default follows the settings page.">Time vs cost
+            <select id="cost-mode">
+                <option value="">Default</option>
+                <option value="fast">Fastest</option>
+                <option value="cheaper">Cheaper</option>
+                <option value="free">Free</option>
+            </select>
+        </label>
+        <label title="How much the models think, for this chat: sent with your next message and kept for the chat's next ones. Default follows the settings page.">Effort
+            <select id="effort-level">
+                <option value="">Default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+            </select>
+        </label>
+    </div>
     <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
@@ -2644,6 +2684,8 @@
     var sendBtn         = document.getElementById('send');
     var stopBtn         = document.getElementById('stop');
     var queueBtn        = document.getElementById('queue');
+    var costSel         = document.getElementById('cost-mode');
+    var effortSel       = document.getElementById('effort-level');
     var idlePlaceholder = inputEl.placeholder;
     var attachBtn       = document.getElementById('attach-btn');
     var fileInput       = document.getElementById('file-input');
@@ -2867,6 +2909,7 @@
                 drawRow(m, thinkingEl);
             });
             if (data.hasMore) holdEarlier(sessionId, msgs[0].id);
+            showChatOptions(data.options, data.defaults);
             // A chat opens on its newest message, and follows from there: how far the chat shown
             // before was scrolled says nothing about this one. At once, not smoothly: scrolled down
             // from its top, it would ask for its earlier rows on the way.
@@ -4124,21 +4167,23 @@
                 'Cloud LLM Provider' +
             '</div>' +
             '<div class="settings-field">' +
-                '<label for="settings-cost">Time vs cost</label>' +
+                '<label for="settings-cost">Default time vs cost</label>' +
                 '<input type="range" id="settings-cost" min="0" max="2" step="1" value="' + costStop(data) + '" style="width:100%">' +
                 '<div style="display:flex;justify-content:space-between;font-size:12px;opacity:.75">' +
                     '<span>Fastest</span><span>Cheaper</span><span>Free</span>' +
                 '</div>' +
                 '<div class="field-hint" id="settings-cost-hint">' + escapeHtml(COST_STOPS[costStop(data)]) + '</div>' +
+                '<div class="field-hint">Each chat can override it next to the message box.</div>' +
             '</div>' +
             '<div class="settings-field">' +
-                '<label for="settings-effort">Thinking effort</label>' +
+                '<label for="settings-effort">Default thinking effort</label>' +
                 '<select id="settings-effort">' +
                     '<option value="low"' + (data.thinking_effort === 'low' ? ' selected' : '') + '>Low</option>' +
                     '<option value="medium"' + (data.thinking_effort === 'medium' ? ' selected' : '') + '>Medium</option>' +
                     '<option value="high"' + (data.thinking_effort === 'high' ? ' selected' : '') + '>High</option>' +
                 '</select>' +
                 '<div class="field-hint" id="settings-effort-hint">' + escapeHtml(EFFORT_HINTS[data.thinking_effort]) + '</div>' +
+                '<div class="field-hint">Each chat can override it next to the message box.</div>' +
             '</div>' +
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
@@ -5761,8 +5806,10 @@
                     // And where Send reaches the running task: the chat this message started or
                     // reached it in. Sent there without Queue and not taken, it says that task
                     // takes nothing more from here.
-                    if (data.fate === 'started' || data.fate === 'steered') steeredChatId = data.sessionId;
-                    else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
+                    if (data.fate === 'started' || data.fate === 'steered') {
+                        steeredChatId = data.sessionId;
+                        steeredOptions = data.options;
+                    } else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
                     updateComposer();
                 } else if (type === 'status') {
                     // Unattended work -- a scheduled run, /bg -- is shown apart: its statuses
@@ -5934,13 +5981,22 @@
     var steeredChatId = null;
 
     /**
+     * What the message that started or reached the running task there was sent with: the task
+     * takes no message sent with other options (Inbox#offer) -- one sent on Free is not read by a
+     * task on the cloud -- so Send reaches it only while the same are chosen.
+     */
+    var steeredOptions = null;
+
+    /**
      * Promise only what Send does: the running task, with Queue beside Send, only in the chat
-     * where Send is known to reach it. Anywhere else nothing is promised, and the line under the
-     * bubble says what became of the message.
+     * where Send is known to reach it, with what it was sent with chosen. Anywhere else nothing is
+     * promised, and the line under the bubble says what became of the message.
      */
     function updateComposer() {
+        var chosen = chosenOptions();
         var steering = thinkingEl.classList.contains('active')
-                && steeredChatId !== null && steeredChatId === displayedSessionId;
+                && steeredChatId !== null && steeredChatId === displayedSessionId
+                && chosen.costMode === steeredOptions.costMode && chosen.effort === steeredOptions.effort;
         queueBtn.classList.toggle('visible', steering);
         inputEl.placeholder = steering ? 'Send to the running task, or Queue it for after...' : idlePlaceholder;
     }
@@ -6339,7 +6395,9 @@
         var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;
         if (drawn) sentBubbles[clientId] = drawn;
 
-        var payload = { message: text, clientId: clientId };
+        // With what is chosen next to Send, which its task runs on and the chat keeps from now on.
+        var options = chosenOptions();
+        var payload = { message: text, clientId: clientId, costMode: options.costMode, effort: options.effort };
         if (queued) payload.queue = true;
         if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;
         ws.send(JSON.stringify(payload));
@@ -6439,6 +6497,29 @@
 
     sendBtn.addEventListener('click', function() { send(false); });
     queueBtn.addEventListener('click', function() { send(true); });
+    costSel.addEventListener('change', updateComposer);
+    effortSel.addEventListener('change', updateComposer);
+
+    /** The options' names, as the settings page says them. */
+    var COST_NAMES = { fast: 'Fastest', cheaper: 'Cheaper', free: 'Free' };
+    var EFFORT_NAMES = { low: 'Low', medium: 'Medium', high: 'High' };
+
+    /**
+     * Show what the chat opened runs on: what it has chosen, or, where it has chosen nothing,
+     * "Default: ..." naming the default on the settings page it follows.
+     */
+    function showChatOptions(options, defaults) {
+        costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];
+        effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];
+        costSel.value = options.costMode || '';
+        effortSel.value = options.effort || '';
+        updateComposer();
+    }
+
+    /** What is chosen next to Send: null where it follows the default. */
+    function chosenOptions() {
+        return { costMode: costSel.value || null, effort: effortSel.value || null };
+    }
 
     /** Set when Stop has been pressed once and we are waiting for the task to notice. */
     var stopPressed = false;

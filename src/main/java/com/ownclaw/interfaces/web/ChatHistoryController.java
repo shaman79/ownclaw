@@ -1,5 +1,7 @@
 package com.ownclaw.interfaces.web;
 
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -21,9 +23,11 @@ public class ChatHistoryController {
     private static final Logger log = LoggerFactory.getLogger(ChatHistoryController.class);
 
     private final ConversationService conversationService;
+    private final OwnClawConfig config;
 
-    public ChatHistoryController(ConversationService conversationService) {
+    public ChatHistoryController(ConversationService conversationService, OwnClawConfig config) {
         this.conversationService = conversationService;
+        this.config = config;
     }
 
     /**
@@ -74,7 +78,9 @@ public class ChatHistoryController {
      * Get messages for a specific session, oldest first: all of them, or a page of them.
      * GET /api/chats/{sessionId}/messages
      * Query params: limit=N for the newest N, before=<message id> for those before that row;
-     * hasMore says whether the chat has rows earlier than the ones returned.
+     * hasMore says whether the chat has rows earlier than the ones returned. With what the chat
+     * has chosen of the owner's defaults (options) and those defaults (defaults), which the page
+     * shows next to the message box: the chat's choice, or the default it follows.
      */
     @GetMapping("/{sessionId}/messages")
     public ResponseEntity<?> getMessages(HttpServletRequest request,
@@ -87,7 +93,8 @@ public class ChatHistoryController {
         }
         var page = conversationService.getSessionMessages(userId, sessionId, before, limit);
         return ResponseEntity.ok(Map.of("messages", page.messages(), "hasMore", page.hasMore(),
-                "sessionId", sessionId));
+                "sessionId", sessionId, "options", conversationService.chatOptions(userId, sessionId),
+                "defaults", ChatOptions.defaultsOf(config.getMentor())));
     }
 
     /**

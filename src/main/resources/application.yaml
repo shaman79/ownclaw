@@ -70,20 +70,23 @@ ownclaw:
     temperature: 0.4
 
     # Local only: call no cloud model; every task runs on the local model, best effort. The
-    # settings page and /local on|off set it (saved, so it survives a restart). Off, a task whose
-    # cloud model cannot be reached -- no internet, a rejected key, no credit, an outage the
-    # retries did not outlast -- moves to the local model by itself.
+    # settings page and /local on|off set it (saved, so it survives a restart). It is the default:
+    # a chat can choose its own time vs cost next to its message box. Off, a task whose cloud
+    # model cannot be reached -- no internet, a rejected key, no credit, an outage the retries did
+    # not outlast -- moves to the local model by itself.
     local-only: ${OWNCLAW_LOCAL_ONLY:false}
 
     # Cost over speed on a chat: the cloud plans and the local model runs every skill -- the
-    # owner's time-vs-cost slider, saved by the settings page. Off, the cloud runs skills itself.
+    # owner's time-vs-cost slider, saved by the settings page; the default, as local-only is. Off,
+    # the cloud runs skills itself.
     prefer-cost: ${OWNCLAW_PREFER_COST:true}
 
     # How much the models think before they act: low, medium or high -- saved by the settings
-    # page. A cloud model that takes an effort is sent it on every step and on the skill code it
-    # writes; at low the local model also answers without reasoning first -- on those calls when it
-    # runs a task itself, and in delegations -- so its steps are much faster. Medium and high
-    # change nothing on the local model.
+    # page; the default, which a chat can override next to its message box. A cloud model that
+    # takes an effort is sent it on every step and on the skill code it writes; at low the local
+    # model also answers without reasoning first -- on those calls when it runs a task itself, and
+    # in delegations -- so its steps are much faster. Medium and high change nothing on the local
+    # model.
     thinking-effort: ${OWNCLAW_THINKING_EFFORT:high}
 
     # Offer tools natively instead of asking for a JSON envelope in the prompt.

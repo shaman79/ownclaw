@@ -195,8 +195,8 @@ public class TaskQueue {
      * <p>
      * False -- the caller then runs the message as a task of its own -- when no task of this user
      * runs in that chat, when the one that did has just ended, and when the task does not take
-     * it ({@link Inbox#offer}): a message from another channel than the task's, or with files,
-     * and any sent after one of those.
+     * it ({@link Inbox#offer}): a message from another channel than the task's, with files, or
+     * sent with other options than the task's, and any sent after one of those.
      */
     public boolean steer(UserMessage message) {
         Inbox inbox = inboxes.get(new Chat(message.userId(), message.sessionId()));
@@ -256,13 +256,13 @@ public class TaskQueue {
      */
     public AgentResult runChat(UserMessage message) {
         Chat chat = new Chat(message.userId(), message.sessionId());
-        Inbox inbox = new Inbox(message.channel());
+        Inbox inbox = new Inbox(message.channel(), message.options());
         inboxes.put(chat, inbox);
         try {
             AgentResult result;
             try {
                 result = agentLoop.executeFull(message.userId(), message.text(), false, message.messageId(),
-                        message.attachmentIds(), message.channel(), inbox);
+                        message.attachmentIds(), message.channel(), inbox, message.options());
             } catch (RuntimeException e) {
                 answer(message, AgentResult.error("Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
                 throw e;

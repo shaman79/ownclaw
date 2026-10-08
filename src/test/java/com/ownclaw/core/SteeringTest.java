@@ -5,6 +5,7 @@ import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.MigratedDatabase;
 import com.ownclaw.core.TaskQueue.Fate;
 import com.ownclaw.observability.ChatStatusEmitter;
@@ -41,6 +42,8 @@ class SteeringTest {
         final List<String> ran = new CopyOnWriteArrayList<>();
         final List<String> rows = new CopyOnWriteArrayList<>();
         final List<TaskChat.Channel> channels = new CopyOnWriteArrayList<>();
+        /** What each task was told it was sent with. */
+        final List<ChatOptions> options = new CopyOnWriteArrayList<>();
         /** The inbox of the last task that had one. */
         volatile Inbox inbox;
 
@@ -52,10 +55,11 @@ class SteeringTest {
         @Override
         public AgentResult executeFull(String userId, String message, boolean unattended,
                                        String currentMessageId, List<String> attachmentIds,
-                                       TaskChat.Channel channel, Inbox inbox) {
+                                       TaskChat.Channel channel, Inbox inbox, ChatOptions chosen) {
             ran.add(message);
             rows.add(String.valueOf(currentMessageId));
             channels.add(channel);
+            options.add(chosen);
             if (inbox != null) this.inbox = inbox;
             events.add("started " + message + (inbox == null ? " (no inbox)" : ""));
             while (true) {
@@ -103,7 +107,12 @@ class SteeringTest {
     }
 
     UserMessage message(String user, String chat, String text, List<String> files, TaskChat.Channel channel) {
-        return new UserMessage(user, chat, "row" + rows.incrementAndGet(), text, files, channel,
+        return message(user, chat, text, files, channel, ChatOptions.NONE);
+    }
+
+    UserMessage message(String user, String chat, String text, List<String> files, TaskChat.Channel channel,
+                        ChatOptions options) {
+        return new UserMessage(user, chat, "row" + rows.incrementAndGet(), text, files, channel, options,
                 r -> loop.events.add("answered " + text + ": " + r.response()));
     }
 
@@ -209,6 +218,34 @@ class SteeringTest {
         assertEquals("started read this file", next());
         assertEquals("answered read this file: done: read this file", next());
         idle();
+    }
+
+    @Test
+    @DisplayName("a message sent with other options than the running task's is a task of its own, on its options, and what follows it queues behind it")
+    void otherOptionsAreNotSteered(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        var cheaper = new ChatOptions("cheaper", null);
+        var free = new ChatOptions("free", null);
+        queue.send(message("u1", "A", "check the routers", List.of(), TaskChat.Channel.WEB, cheaper), false);
+        assertEquals("started check the routers", next());
+        assertEquals(Fate.STEERED, queue.send(message("u1", "A", "use the backup link", List.of(),
+                TaskChat.Channel.WEB, cheaper), false), "sent with the task's own options");
+        assertEquals(Fate.QUEUED, queue.send(message("u1", "A", "read my mail", List.of(), TaskChat.Channel.WEB,
+                free), false), "sent on Free: the cloud model running the task must not read it");
+        assertEquals(Fate.QUEUED, queue.send(message("u1", "A", "and summarise it", List.of(), TaskChat.Channel.WEB,
+                cheaper), false), "after it, behind it");
+        loop.commands.add("step");
+        assertEquals("read [use the backup link]", next());
+        for (int i = 0; i < 3; i++) loop.commands.add("end");
+        assertEquals("answered check the routers: done: check the routers", next());
+        assertEquals("started read my mail", next());
+        assertEquals("answered read my mail: done: read my mail", next());
+        assertEquals("started and summarise it", next());
+        assertEquals("answered and summarise it: done: and summarise it", next());
+        idle();
+        assertEquals(List.of(cheaper, free, cheaper), loop.options, "each task runs on what its message was sent with");
+        // Mutation: let the inbox take a message whatever its options -> "read my mail", sent on
+        // Free, is read by the running task, on the cloud.
     }
 
     @Test

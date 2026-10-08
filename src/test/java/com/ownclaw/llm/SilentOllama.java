@@ -44,6 +44,11 @@ public final class SilentOllama {
         return http.to(OllamaStreamingTest.CHAT).size();
     }
 
+    /** The bodies of the chat requests, oldest first. */
+    public java.util.List<String> bodies() {
+        return http.to(OllamaStreamingTest.CHAT).stream().map(FakeHttp.Sent::body).toList();
+    }
+
     /** Wait until a chat request is under way -- sent, and answered with nothing. */
     public void awaitCall() throws InterruptedException {
         if (!http.silenced.await(10, TimeUnit.SECONDS)) throw new AssertionError("no chat request was made");

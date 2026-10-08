@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.SetupWizardService;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
@@ -232,19 +233,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String userMessage;
 
         // Accept plain text or JSON {"message": "...", "type": "...", "attachmentIds": [...],
-        // "queue": true, "clientId": "..."}: queue asks for a task of its own instead of the
-        // running one (TaskQueue#send), and clientId is the page's name for the bubble it drew,
-        // which the frame saying what became of the message carries back.
+        // "queue": true, "clientId": "...", "costMode": "...", "effort": "..."}: queue asks for a
+        // task of its own instead of the running one (TaskQueue#send), clientId is the page's name
+        // for the bubble it drew, which the frame saying what became of the message carries back,
+        // and costMode and effort are what is chosen next to the message box, null for the default.
         String messageType = "message";
         java.util.List<String> attachmentIds = java.util.List.of();
         boolean queue = false;
         String clientId = null;
+        ChatOptions chosen = ChatOptions.NONE;
         try {
             JsonNode json = mapper.readTree(payload);
             messageType = json.has("type") ? json.path("type").asText("message") : "message";
             userMessage = json.has("message") ? json.path("message").asText() : payload;
             queue = json.path("queue").asBoolean(false);
             clientId = json.hasNonNull("clientId") ? json.path("clientId").asText() : null;
+            chosen = new ChatOptions(json.hasNonNull("costMode") ? json.path("costMode").asText() : null,
+                    json.hasNonNull("effort") ? json.path("effort").asText() : null);
             if (json.has("attachmentIds") && json.get("attachmentIds").isArray()) {
                 var ids = new java.util.ArrayList<String>();
                 for (JsonNode id : json.get("attachmentIds")) {
@@ -357,6 +362,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Auto-generate title from first user message in a session
         String currentSessionId = conversationService.getCurrentSession(userId);
         conversationService.autoTitleIfNeeded(userId, currentSessionId, userMessage);
+        // What it was sent with is its chat's from now on: the page shows it when the chat is
+        // opened again, and the chat's messages from Telegram run on it.
+        conversationService.setChatOptions(userId, currentSessionId, chosen);
 
         // Persist user message BEFORE submitting to the agent loop so conversation
         // history is available when AgentLoop loads context for the LLM.
@@ -380,7 +388,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // was to switch chats and back. Resolve the socket at DELIVERY time instead, the way
         // sendSystemToUser already does.
         var sent = new UserMessage(userId, currentSessionId, currentMessageId, userMessage, attachmentIds,
-                TaskChat.Channel.WEB, result -> {
+                TaskChat.Channel.WEB, chosen, result -> {
                     // Two texts. The history every later prompt is built from gets the safe one;
                     // a private answer is kept beside it, for this chat and its reload only.
                     // Saving is one half of delivering it, and failing it must not also lose the
@@ -411,16 +419,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // ran only on an Error thrown while an answer was sent, and saved that line beside it.
         TaskQueue.Fate fate = taskQueue.send(sent, queue);
 
-        // What became of it, for the page to say under the bubble it drew -- with its chat and
-        // whether it was sent to be queued, from which the page reads where Send reaches the
-        // running task: in the chat a message started or reached it in, until one sent there
-        // without Queue is not taken.
+        // What became of it, for the page to say under the bubble it drew -- with its chat, its
+        // options and whether it was sent to be queued, from which the page reads where Send
+        // reaches the running task: in the chat a message started or reached it in, with the
+        // options it was sent with (Inbox#offer), until one sent there without Queue is not taken.
         var said = new LinkedHashMap<String, Object>();
         said.put("type", "fate");
         said.put("fate", fate.name().toLowerCase(java.util.Locale.ROOT));
         if (fate.line() != null) said.put("content", fate.line());
         said.put("messageId", currentMessageId);
         said.put("sessionId", currentSessionId);
+        said.put("options", chosen);
         said.put("queue", queue);
         if (clientId != null) said.put("clientId", clientId);
         send(session, said);

@@ -46,6 +46,7 @@ class TelegramDeliveryTest {
         final List<com.ownclaw.agent.TaskChat.Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<String> texts = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<Boolean> queued = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<com.ownclaw.conversation.ChatOptions> options = new java.util.concurrent.CopyOnWriteArrayList<>();
         volatile Fate fate = Fate.STARTED;
 
         Answering(AgentResult answer) {
@@ -58,6 +59,7 @@ class TelegramDeliveryTest {
             channels.add(message.channel());
             texts.add(message.text());
             queued.add(queue);
+            options.add(message.options());
             if (fate != Fate.STEERED) message.answer().accept(answer);
             return fate;
         }
@@ -129,6 +131,25 @@ class TelegramDeliveryTest {
         assertEquals("[Private answer]", row.get("content"), "what later prompts read");
         assertEquals("Closing balance 48,213.07 CZK", row.get("private_content"), "what the web chat shows");
         assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "what links it to what the task did");
+    }
+
+    @Test
+    @DisplayName("a message from Telegram runs on what its chat has chosen next to the web chat's message box, else the defaults")
+    void itRunsOnItsChatsChoice(@TempDir Path tmp) throws Exception {
+        start(tmp, "The router is up.");
+        var conversations = new ConversationService(jdbc);
+        receive("check the router");
+        FakeTelegram.drain(bot);
+        assertEquals(com.ownclaw.conversation.ChatOptions.NONE, queue.options.getLast(), "a chat that chose nothing");
+
+        var chosen = new com.ownclaw.conversation.ChatOptions("free", "low");
+        conversations.setChatOptions(owner, conversations.getCurrentSession(owner), chosen);
+        receive("and the printer");
+        FakeTelegram.drain(bot);
+        assertEquals(chosen, queue.options.getLast());
+        assertEquals(chosen, conversations.chatOptions(owner, conversations.getCurrentSession(owner)),
+                "and leaves it as it was");
+        // Mutation: send it with NONE -> a chat set to Free runs Telegram's messages on the cloud.
     }
 
     @Test

@@ -18,9 +18,10 @@ import jakarta.annotation.PostConstruct;
  * <ul>
  *   <li>The main agent loop uses the cloud provider for reasoning/planning</li>
  *   <li>The local provider runs {@link LocalExecutor}'s delegated tool execution</li>
- *   <li>The local model runs the whole task instead -- best effort -- when the owner's
- *       local-only switch is on, when no cloud is configured, or when the task's cloud
- *       model could not be reached ({@link AgentContext#onLocal})</li>
+ *   <li>The local model runs the whole task instead -- best effort -- when the task runs local
+ *       only (the owner's default, or its chat's choice: {@link TaskOptions}), when no cloud is
+ *       configured, or when the task's cloud model could not be reached
+ *       ({@link AgentContext#onLocal})</li>
  * </ul>
  * Every model call of a task chooses through {@link #selectProvider}: each step, the skill code
  * it writes, the analysis of the skill library.
@@ -76,12 +77,12 @@ public class LlmRouter {
     }
 
     /**
-     * The model for a call of this task: the local model when the owner's switch is on or the
-     * task has gone local, even when it is not reachable either -- the call then fails saying so;
-     * otherwise the cloud, or the local model when no cloud is configured.
+     * The model for a call of this task: the local model when the task runs local only
+     * ({@link TaskOptions}) or has gone local, even when it is not reachable either -- the call
+     * then fails saying so; otherwise the cloud, or the local model when no cloud is configured.
      */
     public LlmProvider selectProvider(AgentContext context) {
-        if (localOnly() || context.onLocal()) return localProvider;
+        if (context.options().localOnly() || context.onLocal()) return localProvider;
         if (cloudProvider.isAvailable()) return cloudProvider;
 
         // No cloud configured: the local model, in degraded mode
@@ -92,11 +93,6 @@ public class LlmRouter {
 
         log.error("No LLM providers available!");
         return cloudProvider;
-    }
-
-    /** The owner's local-only switch ({@link com.ownclaw.config.LocalMode}). */
-    public boolean localOnly() {
-        return config.getMentor().isLocalOnly();
     }
 
     /**

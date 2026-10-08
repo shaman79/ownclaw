@@ -31,6 +31,13 @@ public class AgentContext {
      */
     private boolean unattended;
 
+    /**
+     * How this task runs: decided when it starts ({@link AgentLoop}), the configuration's own
+     * defaults until then.
+     */
+    private TaskOptions options = TaskOptions.of(com.ownclaw.conversation.ChatOptions.NONE,
+            new com.ownclaw.config.OwnClawConfig.Mentor());
+
     /** What the stall watchdog stopped this task on, or null. See {@link #stall}. */
     private volatile String stalled;
     /** How to end the model call this task is waiting on, or null. See {@link #progress}. */
@@ -127,6 +134,9 @@ public class AgentContext {
 
     public boolean isUnattended() { return unattended; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
+
+    public TaskOptions options() { return options; }
+    public void setOptions(TaskOptions options) { this.options = options; }
 
     /**
      * Whether this task should stop: the stall watchdog stopped it, or the external source the
