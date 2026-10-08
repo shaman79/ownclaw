@@ -143,6 +143,8 @@ class OpsControllerTest {
         assertNotNull(chat, String.valueOf(first));
         assertNotEquals(ownersChat, chat);
         assertEquals("Ops check", title(s.jdbc(), chat));
+        assertTrue(s.conversations().listSessions("u1", true).stream().noneMatch(c -> chat.equals(c.get("id"))),
+                "an ops check's chat is not one of the owner's chats");
         assertEquals(ownersChat, s.conversations().getCurrentSession("u1"),
                 "the owner's open chat did not move: the web page files the next message there");
         assertEquals(List.of("user", "remember 7", chat), s.loop().rowAtCall.getFirst(),

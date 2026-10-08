@@ -217,20 +217,31 @@ public class ConversationService {
      * @return the new session ID
      */
     public String createSession(String userId, String title) {
-        String sessionId = createSessionWithoutOpening(userId, title);
+        String sessionId = insertSession(userId, title, "chat");
         setActiveSession(userId, sessionId);
         return sessionId;
     }
 
+    /** The title of a chat an ops check starts. */
+    public static final String OPS_TITLE = "Ops check";
+
     /**
-     * Create a chat without making it the open one, so what the owner types next is still filed
-     * in the chat he has open: for a chat he did not open himself, such as one an ops check runs
-     * in.
+     * A chat for an ops check to run in (POST /api/ops/agent/run with sessionId "new"): the
+     * operator's, not the owner's. Of kind 'ops', which the owner's chat list and search leave
+     * out ({@link #listSessions}, {@link #searchMessages}) -- each check used to start a chat in
+     * the owner's list. Never the open one, so what the owner types next is still filed in the
+     * chat that is open.
      *
      * @return the new session ID
      */
-    public String createSessionWithoutOpening(String userId, String title) {
-        return insertSession(userId, title, "chat");
+    public String createOpsChat(String userId) {
+        return insertSession(userId, OPS_TITLE, "ops");
+    }
+
+    /** Whether this user has this chat, of any kind: one an ops check runs in included. */
+    public boolean hasChat(String userId, String sessionId) {
+        return !jdbc.queryForList("SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?",
+                Integer.class, sessionId, userId).isEmpty();
     }
 
     /** A new chat of this kind; never the open one. Every chat is created here. */
@@ -276,9 +287,9 @@ public class ConversationService {
     }
 
     /**
-     * List all sessions for a user: the pinned chat of scheduled results first, then the rest,
-     * most recent first. Returns id, title, preview, created_at, updated_at, archived, kind,
-     * message_count.
+     * List the user's chats: the pinned chat of scheduled results first, then the rest, most
+     * recent first -- not the chats ops checks ran in ({@link #createOpsChat}). Returns id, title,
+     * preview, created_at, updated_at, archived, kind, message_count.
      */
     public List<Map<String, Object>> listSessions(String userId, boolean includeArchived) {
         String archiveFilter = includeArchived ? "" : "AND s.archived = 0 ";
@@ -286,7 +297,7 @@ public class ConversationService {
             SELECT s.id, s.title, s.preview, s.created_at, s.updated_at, s.archived, s.kind,
                    (SELECT COUNT(*) FROM conversations c WHERE c.session_id = s.id AND c.role IN ('user','assistant')) AS message_count
             FROM chat_sessions s
-            WHERE s.user_id = ? %s
+            WHERE s.user_id = ? AND s.kind != 'ops' %s
             ORDER BY s.kind = 'scheduled' DESC, s.updated_at DESC
             """.formatted(archiveFilter), userId);
     }
@@ -433,8 +444,8 @@ public class ConversationService {
     }
 
     /**
-     * Full-text search across all of a user's conversations: every session with a match, once,
-     * best match first, each with a snippet of its best-matching message.
+     * Full-text search across a user's chats -- not those ops checks ran in: every session with a
+     * match, once, best match first, each with a snippet of its best-matching message.
      * <p>
      * Grouped here rather than in the page. The query used to return the 30 best-matching
      * MESSAGES and the page kept one per session, so a chat with 30 matches hid every other chat
@@ -455,7 +466,8 @@ public class ConversationService {
                     JOIN chat_sessions s ON s.id = c.session_id
                     WHERE conversations_fts MATCH ?
                       AND c.user_id = ?
-                      AND s.archived = 0)
+                      AND s.archived = 0
+                      AND s.kind != 'ops')
                 WHERE n = 1)
             SELECT s.id AS session_id, s.title, s.updated_at,
                    snippet(conversations_fts, 0, '<mark>', '</mark>', '...', 64) AS snippet,

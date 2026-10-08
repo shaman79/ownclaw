@@ -135,7 +135,7 @@ public class OpsController {
                                 + "counts rows, so rows added or deleted between two pages shift it.",
                         "agent/run with sessionId is a chat turn, saved to that chat the way the web "
                                 + "chat saves one (\"new\" starts a chat titled Ops check, which does "
-                                + "not become the owner's open chat); the response names the chat. "
+                                + "not become the owner's open chat, nor is listed among the owner's chats); the response names the chat. "
                                 + "While another such turn runs in that chat, the turn is handed to "
                                 + "it instead (202, steered: true): the task reads it before its next "
                                 + "step, or, ending first, runs it as a task of its own whose answer "
@@ -528,8 +528,7 @@ public class OpsController {
                 return ResponseEntity.badRequest().body(Map.of("error", "There is no user " + userId
                         + ", so no chat can be started for one."));
             }
-            if (!NEW_CHAT.equals(sessionId) && conversations.listSessions(userId, true).stream()
-                    .noneMatch(s -> sessionId.equals(s.get("id")))) {
+            if (!NEW_CHAT.equals(sessionId) && !conversations.hasChat(userId, sessionId)) {
                 return ResponseEntity.badRequest().body(Map.of("error", "User " + userId
                         + " has no chat " + sessionId + ". Pass \"new\" to start one."));
             }
@@ -574,10 +573,10 @@ public class OpsController {
      * read it -- of the task it then runs on the queue.
      */
     private UserMessage startTurn(String userId, String sessionId, String message) {
-        // A fresh chat is never made the open one: the web page files what the owner types next
-        // in the open chat, and an ops check must not move his conversation.
-        String chat = NEW_CHAT.equals(sessionId)
-                ? conversations.createSessionWithoutOpening(userId, "Ops check") : sessionId;
+        // A fresh chat is an ops chat: never the open one -- the web page files what the owner
+        // types next in the open chat, and an ops check must not move that conversation -- and
+        // not in the owner's list.
+        String chat = NEW_CHAT.equals(sessionId) ? conversations.createOpsChat(userId) : sessionId;
         conversations.autoTitleIfNeeded(userId, chat, message);
         // On the owner's defaults, whatever the chat has chosen: the ops API checks the system as
         // the settings page sets it.

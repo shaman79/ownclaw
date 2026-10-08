@@ -65,3 +65,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/022-chat-options.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/023-ops-and-scheduled-out-of-chats.sql
+      relativeToChangelogFile: false

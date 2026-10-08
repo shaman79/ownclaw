@@ -35,14 +35,39 @@ public final class MigratedDatabase {
     private MigratedDatabase() {}
 
     public static JdbcTemplate at(Path file) throws Exception {
+        migrate(file, liquibase -> liquibase.update(""));
+        return new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + file));
+    }
+
+    /**
+     * The schema as it was before the changesets of one changelog file ran: for a test of what that
+     * file does to rows already there. {@link #at} on the same file then runs it and the rest.
+     *
+     * @param changelog the file's name, e.g. "023-ops-and-scheduled-out-of-chats.sql"
+     */
+    public static JdbcTemplate before(Path file, String changelog) throws Exception {
+        migrate(file, liquibase -> {
+            var unrun = liquibase.listUnrunChangeSets(null, null);
+            int first = 0;
+            while (first < unrun.size() && !unrun.get(first).getFilePath().endsWith(changelog)) first++;
+            if (first == unrun.size()) throw new IllegalArgumentException("no changeset of " + changelog);
+            liquibase.update(first, "");
+        });
+        return new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + file));
+    }
+
+    private interface Run {
+        void on(Liquibase liquibase) throws Exception;
+    }
+
+    private static void migrate(Path file, Run run) throws Exception {
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + file)) {
             var database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(c));
             // Its progress report goes to the logger silenced above, not to the suite's output.
             Scope.child(Scope.Attr.ui.name(), new LoggerUIService(), () ->
-                    new Liquibase("db/changelog/db.changelog-master.yaml",
-                            new ClassLoaderResourceAccessor(), database).update(""));
+                    run.on(new Liquibase("db/changelog/db.changelog-master.yaml",
+                            new ClassLoaderResourceAccessor(), database)));
         }
-        return new JdbcTemplate(new DriverManagerDataSource("jdbc:sqlite:" + file));
     }
 }
