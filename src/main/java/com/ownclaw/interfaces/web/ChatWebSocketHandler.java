@@ -669,6 +669,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
+     * This server's run: when it started. A page that connected to an earlier run is the page
+     * of an earlier version -- a deploy restarts the server, and a page left open keeps its old
+     * code and only reconnects -- so it is told, and asks to be reloaded.
+     */
+    static final String VERSION = java.time.Instant.now().toString();
+
+    /**
      * Send the active session info to the client.
      */
     private void sendActiveSessionInfo(WebSocketSession session, String userId) {
@@ -686,7 +693,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     "type", "session_info",
                     "activeSessionId", sessionId,
                     "sessions", sessions,
-                    "taskRunning", taskQueue.isAttendedBusyFor(userId)
+                    "taskRunning", taskQueue.isAttendedBusyFor(userId),
+                    "version", VERSION
             ));
         } catch (Exception e) {
             log.warn("Failed to send session info: {}", e.getMessage());

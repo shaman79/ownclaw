@@ -333,5 +333,14 @@ class ChatPageTest {
     void anOldStepLimitRowIsStillNamed() {
         assertTrue(page.contains("MAX_STEPS: 'Step limit reached'"), "rows from before 1 October 2026 keep it");
     }
+
+    @Test
+    @DisplayName("a page left open across a restart is told OwnClaw was updated, and offered a reload")
+    void aStalePageIsToldToReload() {
+        assertTrue(page.contains("if (serverVersion && data.version !== serverVersion) showUpdated(); "
+                + "serverVersion = serverVersion || data.version;"), "the run it first connected to is kept");
+        String shown = page.substring(page.indexOf("function showUpdated() {"));
+        assertTrue(shown.contains("reload.addEventListener('click', function() { location.reload(); });"), shown);
+    }
 }
 

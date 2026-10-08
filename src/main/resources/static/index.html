@@ -5616,6 +5616,32 @@
     }
     function hideConnBanner() { connBanner.classList.remove('visible'); }
 
+    /** The run of the server this page was loaded from (session_info's version). */
+    var serverVersion = null;
+
+    /**
+     * OwnClaw restarted since this page was loaded -- updated, as a rule: say so, with a button
+     * to reload. A page left open across a deploy kept its old code and only reconnected, so a
+     * new setting was simply not there until the owner happened to reload.
+     */
+    function showUpdated() {
+        if (document.getElementById('updated-banner')) return;
+        var bar = document.createElement('div');
+        bar.id = 'updated-banner';
+        bar.setAttribute('role', 'status');
+        bar.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:1000;'
+                + 'background:var(--surface);border:1px solid var(--border-mid);border-radius:8px;'
+                + 'padding:8px 12px;display:flex;gap:10px;align-items:center;font-size:13px';
+        var text = document.createElement('span');
+        text.textContent = 'OwnClaw has been updated. Reload to use the new version.';
+        var reload = document.createElement('button');
+        reload.textContent = 'Reload';
+        reload.addEventListener('click', function() { location.reload(); });
+        bar.appendChild(text);
+        bar.appendChild(reload);
+        document.body.appendChild(bar);
+    }
+
     //  WebSocket 
     function startHeartbeat() {
         stopHeartbeat();
@@ -5674,6 +5700,12 @@
                 var type    = data.type    || 'response';
                 var content = data.content || '';
                 if (type === 'session_info') {
+                    // The server's run this page first connected to: a later one is a restart --
+                    // a deploy, as a rule -- and this page still runs the code it loaded before.
+                    if (data.version) {
+                        if (serverVersion && data.version !== serverVersion) showUpdated();
+                        serverVersion = serverVersion || data.version;
+                    }
                     // Session list update from server
                     renderSessionList(data.sessions || [], data.activeSessionId || '');
                     // Show the chat the server has open -- where what is typed here is saved --
