@@ -461,6 +461,13 @@ class AnthropicProvider implements LlmProvider {
             log.debug("Anthropic [{}]: omitting temperature, not supported by this model", model);
         }
 
+        // The owner's thinking effort, at every level, high too: high is the default on most models
+        // but not on all of them -- claude-opus-5-5's is medium -- so a level left out would not
+        // be the one the owner chose. A model that takes no effort is sent none.
+        if (reqConfig.effort() != null && supportsEffort(model)) {
+            body.putObject("output_config").put("effort", reqConfig.effort());
+        }
+
         // Claude: system prompt is a top-level field, not in messages.
         // We use structured content blocks with cache_control to enable prompt caching.
         //
@@ -693,6 +700,28 @@ class AnthropicProvider implements LlmProvider {
         }
         // sonnet, haiku, and any family introduced later: gone from the 5.x generation on.
         return major < 5;
+    }
+
+    /**
+     * Whether a model takes {@code output_config.effort} at the levels the owner chooses from --
+     * low, medium and high: Claude Opus 4.5 and later, Sonnet 4.6 and later, and every Fable and
+     * Mythos model, as Anthropic's documentation lists them. It is an error on Sonnet 4.5 and
+     * Haiku 4.5, and an older model is not sent it either.
+     */
+    static boolean supportsEffort(String model) {
+        if (model == null || model.isBlank()) return false;
+        Matcher m = MODEL_GENERATION.matcher(model.trim().toLowerCase());
+        if (!m.find()) return false;
+        String family = m.group(1);
+        int major = Integer.parseInt(m.group(2));
+        int minor = m.group(3) != null ? Integer.parseInt(m.group(3)) : 0;
+        int version = major * 10 + Math.min(minor, 9);
+        return switch (family) {
+            case "opus" -> version >= 45;
+            case "sonnet" -> version >= 46;
+            case "fable", "mythos" -> true;
+            default -> false;
+        };
     }
 
     @Override

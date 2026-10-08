@@ -2236,9 +2236,12 @@ public class AgentLoop {
                 oldCode, lastError, local);
         // 0.2 where the model takes a temperature: AnthropicProvider leaves it out for the models
         // that reject one -- Opus 4.7 and later and every 5.x model, claude-opus-5 among them.
+        // At the owner's thinking effort, as the steps are: writing a skill is part of the task's
+        // work. On the local model, low means the code is written without reasoning first.
         LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)
                 .withEgress(context.egress("codegen"))
-                .withProgress(context.progress());
+                .withProgress(context.progress())
+                .withEffort(config.getMentor().getThinkingEffort());
 
         List<LlmMessage> prompt = spec;
         for (int attempt = 0; ; attempt++) {

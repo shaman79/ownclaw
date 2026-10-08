@@ -199,7 +199,7 @@ final class LoopRig {
                 curator, skills, debug,
                 cancellation, vault, chat, new LongRunningTaskManager(jdbc, emitter, events, config), null,
                 new TokenBudgetTracker(jdbc, config, emitter), events, null,
-                new LocalExecutor(router, registry, emitter, curator), files, redactor);
+                new LocalExecutor(router, registry, emitter, curator, config), files, redactor);
         queue = new com.ownclaw.core.TaskQueue(loop, events, emitter, config, cancellation);
     }
 

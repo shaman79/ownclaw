@@ -79,6 +79,13 @@ ownclaw:
     # owner's time-vs-cost slider, saved by the settings page. Off, the cloud runs skills itself.
     prefer-cost: ${OWNCLAW_PREFER_COST:true}
 
+    # How much the models think before they act: low, medium or high -- saved by the settings
+    # page. A cloud model that takes an effort is sent it on every step and on the skill code it
+    # writes; at low the local model also answers without reasoning first -- on those calls when it
+    # runs a task itself, and in delegations -- so its steps are much faster. Medium and high
+    # change nothing on the local model.
+    thinking-effort: ${OWNCLAW_THINKING_EFFORT:high}
+
     # Offer tools natively instead of asking for a JSON envelope in the prompt.
     #
     # Verified in production before this was turned on: both a registry skill (shell_exec) and a

@@ -78,6 +78,9 @@ public class ThinkingEngine {
         // a call site that forgets is stopped, not silently unscanned. The task's progress hook
         // keeps its stall watchdog from taking a long call for silence, and lets its Stop end it.
         requestConfig = requestConfig.withEgress(context.egress("think")).withProgress(context.progress());
+        // At the owner's thinking effort. On the local model, running the task itself, low means
+        // answering without reasoning first.
+        requestConfig = requestConfig.withEffort(config.getMentor().getThinkingEffort());
         if (nativeTools) {
             requestConfig = requestConfig.withTools(toolsFor(context, mode));
         } else {

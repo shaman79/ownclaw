@@ -113,7 +113,8 @@ class DelegationBehaviourTest {
 
     static LocalExecutor executor(LlmProvider llm, Usage usage, Tool... tools) {
         return new LocalExecutor(new LlmRouter(llm, null, null, null),
-                new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage);
+                new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage,
+                new com.ownclaw.config.OwnClawConfig());
     }
 
     /** The task's account, for a delegation whose tokens the test does not count. */
@@ -854,7 +855,7 @@ class DelegationBehaviourTest {
         var llm = new Scripted(call("net_scan", Map.of()), done("scanned"));
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of(scan)), emitter,
-                new Usage()).execute(plan("scan"), ctx, UNCOUNTED);
+                new Usage(), new com.ownclaw.config.OwnClawConfig()).execute(plan("scan"), ctx, UNCOUNTED);
 
         assertTrue(lines.contains("Delegate: net_scan: Scanning 1/3 (33%)"), lines.toString());
         assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0], quiet[0] + " then " + quiet[1] + " ms");
@@ -1054,7 +1055,7 @@ class DelegationBehaviourTest {
         var task = task();
 
         new LocalExecutor(new LlmRouter(llm, null, null, null), new ToolRegistry(List.of()), emitter,
-                new Usage()).execute(plan(goal), task, UNCOUNTED);
+                new Usage(), new com.ownclaw.config.OwnClawConfig()).execute(plan(goal), task, UNCOUNTED);
 
         var step = lines.stream().filter(m -> m.type() == ChatStatusEmitter.StatusMessage.Type.STEP).toList();
         assertEquals(1, step.size(), lines.toString());

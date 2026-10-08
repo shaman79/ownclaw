@@ -94,6 +94,18 @@ public class OwnClawConfig {
         public void setPreferCost(boolean v) { this.preferCost = v; }
         public void setLocalOnly(boolean v) { this.localOnly = v; }
 
+        /**
+         * How much the models think before they act: "low", "medium" or "high", the owner's
+         * choice on the settings page ({@link ThinkingEffort}). A cloud model that takes an
+         * effort is sent it on every step of a task and on the skill code it writes; at low the
+         * local model also answers without reasoning first, on the same calls when it runs a task
+         * itself and on every turn of a delegation. Medium and high change nothing locally.
+         */
+        private String thinkingEffort = "high";
+
+        public String getThinkingEffort() { return thinkingEffort; }
+        public void setThinkingEffort(String v) { this.thinkingEffort = v; }
+
         public boolean isLocalFirstUnattended() { return localFirstUnattended; }
         public void setLocalFirstUnattended(boolean v) { this.localFirstUnattended = v; }
 

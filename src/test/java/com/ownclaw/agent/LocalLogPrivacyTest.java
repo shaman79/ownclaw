@@ -113,7 +113,8 @@ class LocalLogPrivacyTest {
                 public String name() { return "failing"; }
             };
             var executor = new LocalExecutor(new LlmRouter(llm, null, null, null),
-                    new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage());
+                    new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage(),
+                    new com.ownclaw.config.OwnClawConfig());
             var outcome = executor.execute(plan("summarise the statement"), fileTask(), DelegationBehaviourTest.UNCOUNTED);
             assertFalse(outcome.text().contains("48,213.07"), outcome.text());
             assertTrue(outcome.text().contains("Local LLM call failed"), outcome.text());
@@ -139,7 +140,8 @@ class LocalLogPrivacyTest {
         };
         var billed = new java.util.ArrayList<LlmResponse>();
         var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
-                new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
+                new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage(),
+                new com.ownclaw.config.OwnClawConfig())
                 .execute(plan("summarise the statement"), fileTask(), (provider, reply) -> billed.add(reply));
 
         assertTrue(outcome.text().contains("Local LLM call failed: [ollama] the conversation is longer "
@@ -165,7 +167,8 @@ class LocalLogPrivacyTest {
         var appender = capture();
         try {
             var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
-                    new ToolRegistry(List.of(ping)), new ChatStatusEmitter(), new Usage())
+                    new ToolRegistry(List.of(ping)), new ChatStatusEmitter(), new Usage(),
+                    new com.ownclaw.config.OwnClawConfig())
                     .execute(plan("ping the NAS"), DelegationBehaviourTest.task(), DelegationBehaviourTest.UNCOUNTED);
             assertTrue(outcome.text().contains("nas.example.org"), "the cloud is told what went wrong: " + outcome.text());
             String log = logged(appender);
@@ -197,7 +200,8 @@ class LocalLogPrivacyTest {
         try {
             var billed = new java.util.ArrayList<LlmResponse>();
             var outcome = new LocalExecutor(new LlmRouter(llm, null, null, null),
-                    new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage())
+                    new ToolRegistry(List.of(read)), new ChatStatusEmitter(), new Usage(),
+                    new com.ownclaw.config.OwnClawConfig())
                     .execute(plan("summarise the statement"), fileTask(), (provider, reply) -> billed.add(reply));
 
             assertFalse(outcome.text().contains(SECRET), outcome.text());

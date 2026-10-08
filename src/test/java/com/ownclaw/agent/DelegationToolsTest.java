@@ -45,7 +45,8 @@ class DelegationToolsTest {
 
     private static LocalExecutor executor(LlmProvider llm, Usage usage, Tool... tools) {
         return new LocalExecutor(new LlmRouter(llm, null, null, null),
-                new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage);
+                new ToolRegistry(List.of(tools)), new ChatStatusEmitter(), usage,
+                new com.ownclaw.config.OwnClawConfig());
     }
 
     private static FakeTool tool(String name) {

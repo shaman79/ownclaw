@@ -4022,6 +4022,15 @@
                 '<div class="field-hint" id="settings-cost-hint">' + escapeHtml(COST_STOPS[costStop(data)]) + '</div>' +
             '</div>' +
             '<div class="settings-field">' +
+                '<label for="settings-effort">Thinking effort</label>' +
+                '<select id="settings-effort">' +
+                    '<option value="low"' + (data.thinking_effort === 'low' ? ' selected' : '') + '>Low</option>' +
+                    '<option value="medium"' + (data.thinking_effort === 'medium' ? ' selected' : '') + '>Medium</option>' +
+                    '<option value="high"' + (data.thinking_effort === 'high' ? ' selected' : '') + '>High</option>' +
+                '</select>' +
+                '<div class="field-hint" id="settings-effort-hint">' + escapeHtml(EFFORT_HINTS[data.thinking_effort]) + '</div>' +
+            '</div>' +
+            '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
                 '<select id="settings-provider">' +
                     '<option value="openai"' + (provider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
@@ -4155,6 +4164,9 @@
         document.getElementById('settings-cost').addEventListener('input', function() {
             document.getElementById('settings-cost-hint').textContent = COST_STOPS[Number(this.value)];
         });
+        document.getElementById('settings-effort').addEventListener('change', function() {
+            document.getElementById('settings-effort-hint').textContent = EFFORT_HINTS[this.value];
+        });
         document.getElementById('settings-save').addEventListener('click', function() {
             saveSettings(data);
         });
@@ -4171,6 +4183,13 @@
         return data.local_only ? 2 : (data.prefer_cost ? 1 : 0);
     }
 
+    /** The thinking effort's levels, as the settings page says them. */
+    var EFFORT_HINTS = {
+        low: 'Low: Claude thinks least -- fastest and cheapest. The local model also answers without reasoning first, so its steps are much faster.',
+        medium: 'Medium: Claude thinks less than at high -- faster and cheaper.',
+        high: 'High: Claude thinks the most of the three -- the most careful, the slowest and dearest.'
+    };
+
     function saveSettings(originalData) {
         var payload = {};
 
@@ -4180,6 +4199,9 @@
         var localOnly = stop === 2;
         if (localOnly !== !!originalData.local_only) payload.local_only = String(localOnly);
         if (stop < 2 && (stop === 1) !== !!originalData.prefer_cost) payload.prefer_cost = String(stop === 1);
+
+        var effort = document.getElementById('settings-effort').value;
+        if (effort !== originalData.thinking_effort) payload.thinking_effort = effort;
 
         // Provider
         var provider = document.getElementById('settings-provider').value;

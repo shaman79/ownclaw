@@ -1,6 +1,7 @@
 package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.*;
+import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.llm.*;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
@@ -45,13 +46,16 @@ public class LocalExecutor {
     private final ToolRegistry toolRegistry;
     private final ChatStatusEmitter statusEmitter;
     private final SkillCuratorService curatorService;
+    private final OwnClawConfig config;
 
     public LocalExecutor(LlmRouter llmRouter, ToolRegistry toolRegistry,
-                         ChatStatusEmitter statusEmitter, SkillCuratorService curatorService) {
+                         ChatStatusEmitter statusEmitter, SkillCuratorService curatorService,
+                         OwnClawConfig config) {
         this.llmRouter = llmRouter;
         this.toolRegistry = toolRegistry;
         this.statusEmitter = statusEmitter;
         this.curatorService = curatorService;
+        this.config = config;
     }
 
     /**
@@ -305,8 +309,11 @@ public class LocalExecutor {
         // generation that runs for minutes nor the model loading and reading a long prompt,
         // sending nothing, is taken for a stall; and a Stop ends the call -- mid-reply, or before
         // the model has sent anything -- rather than when the model finishes.
+        // At the owner's thinking effort: at low the local model answers without reasoning first,
+        // on every turn of the delegation.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
-                .withProgress(parentContext.progress());
+                .withProgress(parentContext.progress())
+                .withEffort(config.getMentor().getThinkingEffort());
         // Handed results to read and no tool to run: the work is reading them and answering, which
         // the model does well without reasoning first. With reasoning it spent eleven minutes on a
         // DHCP report on 2026-10-01 and then answered nothing; a delegation that runs tools keeps
