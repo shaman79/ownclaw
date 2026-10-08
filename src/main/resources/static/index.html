@@ -263,7 +263,6 @@
             padding: 24px 20px 16px;
             display: flex;
             flex-direction: column;
-            gap: 2px;
             scroll-behavior: smooth;
         }
         #messages::-webkit-scrollbar { width: 5px }
@@ -292,18 +291,30 @@
             word-break: break-word;
         }
 
-        /* Group spacing — extra gap before a new sender */
-        .msg.first-in-run { margin-top: 20px }
-        .msg:first-child  { margin-top: 0 }
+        /* The rhythm of a chat: the rows of one side close together, more room where the speaker
+           changes -- the owner's messages on one side; answers, a task's steps and notes and system
+           lines on the other. */
+        .msg + .msg { margin-top: 8px }
+        .msg.user + .msg:not(.user), .msg:not(.user) + .msg.user { margin-top: 24px }
+
+        /* Every row's content, with its meta line (.msg-meta) under it. */
+        .msg-main {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
 
         /* ───── User message ───── */
         .msg.user {
             display: flex;
             justify-content: flex-end;
-            padding: 2px 0;
+        }
+        .msg.user .msg-main {
+            max-width: 72%;
+            align-items: flex-end;
         }
         .msg.user .bubble {
-            max-width: 72%;
+            max-width: 100%;
             background: var(--user-hi);
             color: #fff;
             padding: 10px 16px;
@@ -338,7 +349,6 @@
             display: flex;
             gap: 12px;
             align-items: flex-start;
-            padding: 2px 0;
         }
 
         .msg-avatar {
@@ -348,21 +358,21 @@
             display: flex; align-items: center; justify-content: center;
             font-size: 14px;
             flex-shrink: 0;
-            margin-top: 4px;
+            margin-top: 2px;
             box-shadow: 0 2px 8px var(--accent-glow);
             user-select: none;
         }
         .msg:not(.first-in-run) .msg-avatar { visibility: hidden }
+        .msg-avatar + .msg-main { flex: 1 }
 
         .msg-body {
-            flex: 1;
             min-width: 0;
             background: var(--bg-elevated);
             border: 1px solid var(--border);
             border-radius: 4px var(--r-md) var(--r-md) var(--r-md);
-            padding: 12px 16px;
+            padding: 11px 16px;
             font-size: 14.5px;
-            line-height: 1.7;
+            line-height: 1.65;
             color: var(--text-1);
         }
         /* Consecutive AI messages: soften top-left corner */
@@ -410,57 +420,35 @@
         .msg.debug .msg-body::-webkit-scrollbar { width: 4px }
         .msg.debug .msg-body::-webkit-scrollbar-thumb { background: rgba(251,191,36,.2); border-radius: 4px }
 
-        /* ───── System messages ───── */
-        /* Short: centred pill.  Long (contains newline or >80 chars): card. */
-        .msg.system {
-            align-self: center;
-            text-align: left;
-            font-size: 13px;
-            color: var(--text-2);
-            padding: 10px 16px;
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: var(--r-md);
-            margin: 10px auto;
-            max-width: 620px;
-            line-height: 1.65;
-        }
-        /* Truly short system messages get the pill look */
-        .msg.system.short {
-            text-align: center;
-            padding: 6px 16px;
-            border-radius: 100px;
-            max-width: 480px;
-            font-size: 12.5px;
-            color: var(--text-3);
-        }
-
-        /* ───── Progress messages ───── */
-        /* A running task's steps, in its chat: compact and secondary to the answer. As wide as the
-           line leaves it beside its margin: the full width of a row, it ran 42px past the chat,
-           which a phone scrolled sideways, and its time at the end of the header went out of sight. */
+        /* ───── Secondary rows: system lines, a task's steps and its notes ───── */
+        /* One family, quieter than an answer: in the assistant's content column, where an answer's
+           bubble starts -- the 42px are the avatar's 30 and the 12 beside it -- behind a thin rule
+           that holds the row's meta line too. As wide as the column, no wider: a phone never
+           scrolls sideways, and the time stays on screen. */
+        .msg.system,
         .msg.progress {
-            width: auto;
-            margin: 2px 0 2px 42px;
-            padding: 3px 12px;
-            border-left: 2px solid var(--border-mid);
+            padding-left: 42px;
             font-size: 12.5px;
             line-height: 1.55;
             color: var(--text-3);
         }
-        .msg.progress p { margin: 0 }
-        .msg.progress p + p { margin-top: 2px }
-        /* Its header: a chip for who acts, then where the task stands. */
-        .progress-head {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 4px 8px;
+        .msg.system > .msg-main,
+        .msg.progress > .msg-main {
+            border-left: 2px solid var(--border-mid);
+            padding: 2px 0 2px 12px;
         }
+        /* A system line's words and a note's. */
+        .msg-text { color: var(--text-2) }
+        .msg.system p, .msg.progress p { margin: 0 }
+        .msg.system p + p, .msg.progress p + p { margin-top: 4px }
+        /* Code in a secondary row is as compact as the row. */
+        .msg.system .md pre, .msg.progress .md pre { padding: 8px 12px; margin: 6px 0 }
+        /* A step's header: a chip for who acts, where the task stands, then when it was saved. */
         .progress-chip {
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            margin-right: 6px;
             padding: 0 7px;
             border-radius: 100px;
             font-size: 11px;
@@ -472,10 +460,33 @@
         .progress-what { color: var(--text-2) }
         .progress-body { margin-top: 2px; min-width: 0 }
         .progress-body pre { max-width: 100%; overflow-x: auto }
+        /* No margin of the markdown's above a row's first block or below its last: the bubble's
+           padding, or the rule's, is the room. */
+        .msg-body > :first-child, .msg-text > :first-child, .progress-body > :first-child { margin-top: 0 }
+        .msg-body > :last-child, .msg-text > :last-child, .progress-body > :last-child { margin-bottom: 0 }
+        .code-block-wrap:first-child > pre { margin-top: 0 }
+        .code-block-wrap:last-child > pre { margin-bottom: 0 }
+
+        /* ───── A row's meta line ───── */
+        /* Under the row's content, at the row's own edge -- under the owner's bubble at its right, on
+           the assistant's side at the content column's left: when the row was saved, and under an
+           answer of a task, what that task did. A step says when it was saved in its header. */
+        .msg-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0 6px;
+            margin-top: 4px;
+            font-size: 11px;
+            line-height: 16px;
+            color: var(--text-3);
+        }
+        .msg.system .msg-meta, .msg.progress .msg-meta { margin-top: 1px }
+        .msg-meta > .msg-time:not(:last-child)::after { content: '\00B7'; margin-left: 6px }
 
         /* ───── When a row was saved ───── */
-        /* Small and muted, the whole date and time in its tooltip: beside a message's bubble, in
-           the corner of an answer, a note or a system line, at the end of a progress row's header. */
+        /* Small and muted, the whole date and time in its tooltip: first in a row's meta line, and
+           the last item of a step's header, after a dot as the header's own items are. */
         .msg-time {
             font-size: 11px;
             line-height: 16px;
@@ -484,10 +495,7 @@
             font-variant-numeric: tabular-nums;
             user-select: none;
         }
-        .msg.user > .msg-time { align-self: flex-end; flex-shrink: 0; margin: 0 8px 2px 0 }
-        .msg-body > .msg-time, .msg.system > .msg-time, .msg.progress > .msg-time { float: right; margin-left: 12px }
-        .msg-body > .msg-time { margin-top: 4px }
-        .progress-head > .msg-time { margin-left: auto }
+        .progress-head > .msg-time::before { content: ' \00B7\00A0' }
 
         /*  Connection banner  */
         #conn-banner {
@@ -519,6 +527,7 @@
             background: rgba(13,15,20,.9);
             backdrop-filter: blur(12px);
             padding: 0 20px;
+            border-top: 1px solid var(--border);
         }
         #activity {
             max-width: 780px;
@@ -608,11 +617,13 @@
         #activity-steps::-webkit-scrollbar { width: 3px }
         #activity-steps::-webkit-scrollbar-thumb { background: var(--surface); border-radius: 3px }
 
+        /* A step's dot under the spinner's centre, its words under the label's: the 19px and the
+           15 beside the dot come to the spinner's 14, its 15 and the 10 beside it. */
         .activity-step {
             display: flex;
             align-items: flex-start;
-            gap: 10px;
-            padding: 4px 14px;
+            gap: 15px;
+            padding: 4px 14px 4px 19px;
             font-size: 12px;
             color: var(--text-3);
             line-height: 1.5;
@@ -634,8 +645,8 @@
         .step-expand.open { transform: rotate(180deg) }
         .step-detail {
             display: none;
-            width: 100%;
-            margin: 4px 0 2px 15px;
+            width: calc(100% - 20px);
+            margin: 4px 0 2px 20px;
             padding: 6px 10px;
             background: rgba(255,255,255,.02);
             border-left: 2px solid var(--border-mid);
@@ -663,13 +674,13 @@
         .activity-step.cat-observe .step-dot { background: #34d399 }
         .activity-step.cat-observe.step-fail .step-dot { background: #fca5a5 }
 
-        /* Stats bar in activity header */
+        /* The task's counters, under its steps: their words under the label's, as the steps' are. */
         #activity-stats {
             display: none;
             font-size: 10.5px;
             color: var(--text-3);
             gap: 10px;
-            padding: 2px 14px 6px;
+            padding: 4px 14px 8px 39px;
             font-variant-numeric: tabular-nums;
             letter-spacing: .02em;
             border-top: 1px solid rgba(255,255,255,.04);
@@ -749,7 +760,12 @@
         .md h3 { font-size: 1.02em }
         .md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0 }
         .md table { border-collapse: collapse; margin: 8px 0; width: 100%; display: block; overflow-x: auto }
-        .md th, .md td { border: 1px solid rgba(255,255,255,.08); padding: 6px 12px; text-align: left; font-size: 13px }
+        /* A cell breaks between words only, as a page's table does: broken anywhere, as the rest of
+           a row is, a narrow screen squeezed "Router" into "Rout/er" rather than scroll the table. */
+        .md th, .md td { border: 1px solid rgba(255,255,255,.08); padding: 6px 12px; text-align: left; font-size: 13px;
+                         overflow-wrap: normal; word-break: normal }
+        /* What scrolls sideways inside a row does so on a thin, dark bar, not the system's white one. */
+        .md pre, .md table { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.14) transparent }
         .md th { background: rgba(255,255,255,.04); font-weight: 600; color: #fff }
         .md tr:nth-child(even) td { background: rgba(255,255,255,.02) }
         .md img { max-width: 100%; height: auto; border-radius: var(--r-sm); margin: 8px 0 }
@@ -833,6 +849,8 @@
             line-height: 1.55;
             max-height: 160px;
             min-height: 48px;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,.14) transparent;
         }
         #input::placeholder { color: var(--text-3) }
 
@@ -1620,10 +1638,10 @@
         .task-detail .task-detail-value, .task-detail .task-run-desc { min-width: 0 }
         /* "Open steps and cloud calls" at the top of a scheduled run's details. */
         .task-run-details > .skill-back-btn { margin-bottom: 12px }
-        /* Under an answer in chat. A DOM button after the markdown, never a link inside it. */
+        /* In an answer's meta line, after its time: a DOM button, never a link inside the markdown.
+           Its padding, which its margin takes back from the line, is a finger's room on a phone. */
         .msg-trace-link {
-            display: block;
-            margin-top: 8px;
+            margin: -6px 0;
             padding: 6px 0;
             background: none;
             border: none;
@@ -2527,7 +2545,7 @@
         @media (max-width: 600px) {
             #messages { padding: 16px 10px 12px }
             #input-area { padding: 8px 10px 14px }
-            .msg.user .bubble { max-width: 88% }
+            .msg.user .msg-main { max-width: 88% }
             .msg-body { padding: 10px 12px }
             #header { padding: 0 12px }
             #sidebar { display: none }
@@ -6237,43 +6255,47 @@
 
         var div = document.createElement('div');
         div.className = 'msg ' + type + (firstInRun ? ' first-in-run' : '');
+        // Every row drawn here alike: its content, then the meta line under it -- when it was
+        // saved, and under an answer of a task what that task did -- at the row's own edge (CSS).
+        // A step says when it was saved at the end of its header instead (addProgress).
+        var main = node('div', 'msg-main');
+        var meta = node('div', 'msg-meta');
+        if (at) meta.appendChild(timeOf(at));
 
         if (isUserMsg) {
             var bubble = document.createElement('div');
             bubble.className = 'bubble';
             bubble.textContent = text;
-            if (at) div.appendChild(timeOf(at));
-            div.appendChild(bubble);
+            main.appendChild(bubble);
         } else if (isAiMsg) {
             var avatar = document.createElement('div');
             avatar.className = 'msg-avatar';
             avatar.setAttribute('aria-hidden', 'true');
             avatar.textContent = String.fromCodePoint(0x1F980);
+            div.appendChild(avatar);
 
             var body = document.createElement('div');
             body.className = 'msg-body md';
             body.innerHTML = renderMarkdown(text);
             body.querySelectorAll('pre').forEach(wrapCodeBlock);
-            if (at) body.insertBefore(timeOf(at), body.firstChild);
+            main.appendChild(body);
 
-            // After the markdown, never inside it: mdSanitize forces target=_blank on every <a>,
-            // and this opens a page in this window rather than leaving it.
+            // In the meta line, never inside the markdown: mdSanitize forces target=_blank on
+            // every <a>, and this opens a page in this window rather than leaving it.
             if (isTaskId(taskId)) {
                 var trace = node('button', 'msg-trace-link', 'What this task did \u2192');
                 trace.type = 'button';
                 trace.addEventListener('click', function() { openTaskDetail(taskId, 'chat'); });
-                body.appendChild(trace);
+                meta.appendChild(trace);
             }
-
-            div.appendChild(avatar);
-            div.appendChild(body);
         } else {
-            div.innerHTML = renderMarkdown(text);
-            div.classList.add('md');
-            div.querySelectorAll('pre').forEach(wrapCodeBlock);
-            if (text.indexOf('\n') === -1 && text.length < 80) div.classList.add('short');
-            if (at) div.insertBefore(timeOf(at), div.firstChild);
+            var words = node('div', 'msg-text md');
+            words.innerHTML = renderMarkdown(text);
+            words.querySelectorAll('pre').forEach(wrapCodeBlock);
+            main.appendChild(words);
         }
+        if (meta.firstChild) main.appendChild(meta);
+        div.appendChild(main);
 
         if (before) { messagesEl.insertBefore(div, before); return div; }
         messagesEl.insertBefore(div, thinkingEl);
@@ -6299,6 +6321,7 @@
             return;
         }
         var div = node('div', 'msg progress');
+        var main = node('div', 'msg-main');
         var head = node('div', 'progress-head');
         var lineBreak = text.indexOf('\n');
         var line = lineBreak < 0 ? text : text.slice(0, lineBreak);
@@ -6309,14 +6332,15 @@
         head.appendChild(node('span', 'progress-what', line.slice(space + 1)));
         var at = rowTime(timestamp, before);
         if (at) head.appendChild(timeOf(at));
-        div.appendChild(head);
+        main.appendChild(head);
         var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();
         if (body) {
             var b = node('div', 'progress-body md');
             b.innerHTML = renderMarkdown(body);
             b.querySelectorAll('pre').forEach(wrapCodeBlock);
-            div.appendChild(b);
+            main.appendChild(b);
         }
+        div.appendChild(main);
         if (before) { messagesEl.insertBefore(div, before); return; }
         messagesEl.insertBefore(div, thinkingEl);
         scrollBottom(false);

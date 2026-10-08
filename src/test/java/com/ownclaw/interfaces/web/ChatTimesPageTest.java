@@ -68,17 +68,25 @@ class ChatTimesPageTest {
     }
 
     @Test
-    @DisplayName("every kind of row is stamped: beside a bubble, in the corner of an answer or a note, at the end of a progress header")
+    @DisplayName("every kind of row is stamped in one place: the meta line under its content; a step at the end of its header")
     void everyRowIsStamped() {
         String add = function("addMsg");
         assertTrue(add.contains("var at = rowTime(timestamp, before);"), add);
-        assertTrue(add.contains("if (at) div.appendChild(timeOf(at)); div.appendChild(bubble);"), "beside the bubble: " + add);
-        assertTrue(add.contains("if (at) body.insertBefore(timeOf(at), body.firstChild);"), "in an answer's corner: " + add);
-        assertTrue(add.contains("if (at) div.insertBefore(timeOf(at), div.firstChild);"), "a system line, a note: " + add);
+        assertTrue(add.contains("var main = node('div', 'msg-main'); var meta = node('div', 'msg-meta'); "
+                + "if (at) meta.appendChild(timeOf(at));"), "one meta line, for every kind of row drawn here: " + add);
+        assertEquals(1, add.split("timeOf\\(", -1).length - 1, "and no other place for a time: " + add);
+        String last = "if (meta.firstChild) main.appendChild(meta); div.appendChild(main);";
+        assertTrue(add.contains(last), "under the content: " + add);
+        for (String content : new String[] {"main.appendChild(bubble);", "main.appendChild(body);", "main.appendChild(words);"}) {
+            assertTrue(add.indexOf(content) >= 0 && add.indexOf(content) < add.indexOf(last),
+                    "a message's bubble, an answer's body, a system line's or a note's words, then the meta line: " + content);
+        }
         String progress = function("addProgress");
         assertTrue(progress.contains("addMsg('progress', text, null, before, timestamp);"), "a note: " + progress);
-        assertTrue(progress.contains("var at = rowTime(timestamp, before); if (at) head.appendChild(timeOf(at));"),
-                "the end of a progress header: " + progress);
+        assertTrue(progress.contains("var at = rowTime(timestamp, before); if (at) head.appendChild(timeOf(at)); "
+                + "main.appendChild(head);"), "the end of a step's header, its last item: " + progress);
+        // Mutation: put an answer's time back at the start of its body -> the harness's answer shows
+        // it in its top corner, its message under its bubble, and the placement check fails.
         assertTrue(function("timeOf").contains("return showTime(node('time', 'msg-time'), at);"),
                 "a <time>, which no row's markdown makes: the one fate finds is the row's own");
         assertFalse(page.contains("TIME: ["), "the markdown allowlist lets through no <time>");
@@ -99,16 +107,23 @@ class ChatTimesPageTest {
     }
 
     @Test
-    @DisplayName("small and muted, and never wider than the line it is on")
+    @DisplayName("small and muted, under the row's content at its own edge: the owner's bubble's right, the column's left")
     void smallAndMuted() {
         assertTrue(page.contains(".msg-time { font-size: 11px; line-height: 16px; color: var(--text-3); "
                 + "white-space: nowrap; font-variant-numeric: tabular-nums; user-select: none; }"));
-        assertTrue(page.contains(".msg.user > .msg-time { align-self: flex-end; flex-shrink: 0;"),
-                "beside the bubble, which gives way to it on a phone");
-        assertTrue(page.contains(".msg-body > .msg-time, .msg.system > .msg-time, .msg.progress > .msg-time { float: right;"));
-        assertTrue(page.contains(".progress-head > .msg-time { margin-left: auto }"));
-        assertTrue(page.contains(".msg.progress { width: auto; margin: 2px 0 2px 42px;"),
-                "a progress row fits beside its margin, so the time at the end of its header is on screen");
-        // Mutation: drop width: auto -> at 375px the chat scrolls sideways and a step's time is cut off.
+        assertTrue(page.contains(".msg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; "
+                + "margin-top: 4px;"), "a line of its own, under the content");
+        assertTrue(page.contains(".msg.user .msg-main { max-width: 72%; align-items: flex-end; }"),
+                "under the owner's bubble, at its right edge");
+        assertTrue(page.contains(".msg-meta > .msg-time:not(:last-child)::after { content: '\\00B7'; margin-left: 6px }"),
+                "\"20:06 · What this task did\"");
+        assertTrue(page.contains(".progress-head > .msg-time::before { content: ' \\00B7\\00A0' }"),
+                "a step's, after a dot as its header's own items are");
+        for (String old : new String[] {".msg.user > .msg-time", ".msg-body > .msg-time", "> .msg-time { float",
+                ".progress-head > .msg-time { margin-left: auto"}) {
+            assertFalse(page.contains(old), "no time beside a bubble, in a corner or at the far end of a header: " + old);
+        }
+        // Mutation: drop the user row's align-items: flex-end -> the time under the owner's bubble
+        // starts at its left, and the harness's check of the right edge fails.
     }
 }
