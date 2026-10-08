@@ -4,9 +4,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Emits structured status messages to user chat sessions.
@@ -32,6 +35,32 @@ public class ChatStatusEmitter {
      * the browser should report to Telegram too, not instead.
      */
     private final Map<String, Map<Object, Consumer<StatusMessage>>> listeners = new ConcurrentHashMap<>();
+
+    /**
+     * The key in a status's data that marks it as unattended work's -- a scheduled run, /bg --
+     * set to true. Such a status is about work nobody is waiting on in the chat on screen, so a
+     * page shows it only in the pinned chat of scheduled results, and never as the working state
+     * of the chat it has open. Unmarked, the steps of a morning run filled the activity strip of
+     * whatever chat was open, and started its spinner.
+     */
+    public static final String BACKGROUND = "background";
+
+    /** The ids of the unattended tasks running now: every status emitted for one is marked. */
+    private final Set<String> background = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Run an unattended task's work with every status emitted for its id marked
+     * {@link #BACKGROUND}, from its first step to its ending; the mark goes with the work, however
+     * the work ends.
+     */
+    public <T> T inBackground(String taskId, Supplier<T> work) {
+        background.add(taskId);
+        try {
+            return work.get();
+        } finally {
+            background.remove(taskId);
+        }
+    }
 
     /**
      * Register a listener for a user's status messages.
@@ -87,12 +116,20 @@ public class ChatStatusEmitter {
 
     /** Emit attributed to a specific task. Use this from anywhere inside a running task. */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text) {
-        emit(userId, new StatusMessage(type, text, null, taskId));
+        emitForTask(userId, taskId, type, text, null);
     }
 
-    /** Emit attributed to a specific task, with structured data. */
+    /**
+     * Emit attributed to a specific task, with structured data -- marked {@link #BACKGROUND} when
+     * that task is unattended work running now ({@link #inBackground}).
+     */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text,
                             Map<String, Object> data) {
+        if (taskId != null && background.contains(taskId)) {
+            var marked = data == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(data);
+            marked.put(BACKGROUND, true);
+            data = marked;
+        }
         emit(userId, new StatusMessage(type, text, data, taskId));
     }
 

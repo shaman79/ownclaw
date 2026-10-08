@@ -143,12 +143,13 @@ public class LongRunningTaskManager {
             WHERE task_id = ? AND status IN ('running', 'stalled')
             """, message, percent, taskId);
 
-        // Emit to user chat
+        // Emit to user chat, as its task's -- as each status here is -- so an unattended task's
+        // is marked as such (ChatStatusEmitter#BACKGROUND).
         if (hb != null) {
             String formatted = percent != null
                     ? message + " (" + percent + "%)"
                     : message;
-            statusEmitter.emit(hb.userId, StatusMessage.Type.PROGRESS, formatted);
+            statusEmitter.emitForTask(hb.userId, taskId, StatusMessage.Type.PROGRESS, formatted);
         }
 
         log.debug("Progress for task {}: {}% - {}", taskId, percent, message);
@@ -192,7 +193,7 @@ public class LongRunningTaskManager {
         String line = reference("finished", resultSummary, taskId);
         TaskHeartbeat hb = activeHeartbeats.remove(taskId);
         if (hb != null) {
-            statusEmitter.emit(hb.userId, StatusMessage.Type.COMPLETED, line);
+            statusEmitter.emitForTask(hb.userId, taskId, StatusMessage.Type.COMPLETED, line);
             eventLog.info(hb.userId, taskId, "task.long_running.completed", line);
         }
         log.info(line);
@@ -212,7 +213,7 @@ public class LongRunningTaskManager {
         String line = reference("failed", errorMessage, taskId);
         TaskHeartbeat hb = activeHeartbeats.remove(taskId);
         if (hb != null) {
-            statusEmitter.emit(hb.userId, StatusMessage.Type.FAILED, line);
+            statusEmitter.emitForTask(hb.userId, taskId, StatusMessage.Type.FAILED, line);
             eventLog.error(hb.userId, taskId, "task.long_running.failed", line);
         }
         log.error(line);
@@ -237,7 +238,7 @@ public class LongRunningTaskManager {
 
         TaskHeartbeat hb = activeHeartbeats.remove(taskId);
         if (hb != null) {
-            statusEmitter.emit(hb.userId, StatusMessage.Type.WARNING,
+            statusEmitter.emitForTask(hb.userId, taskId, StatusMessage.Type.WARNING,
                     "Long-running task cancelled.");
             eventLog.info(hb.userId, taskId, "task.long_running.cancelled", "Stopped: " + why);
         }
@@ -280,7 +281,7 @@ public class LongRunningTaskManager {
 
         activeHeartbeats.remove(taskId);
 
-        statusEmitter.emit(userId, StatusMessage.Type.WARNING,
+        statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.WARNING,
                 "⚠ Long-running task appears stalled (no progress for " +
                 config.getTasks().getStallTimeout() + "s). The process may have hung.");
 

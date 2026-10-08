@@ -234,7 +234,7 @@ public class TaskQueue {
 
         if (pos > 1) {
             statusEmitter.emit(task.userId(), StatusMessage.Type.QUEUED,
-                    "Task queued (position " + pos + ")");
+                    "Task queued (position " + pos + ")", markOf(task));
         }
 
         eventLog.info(task.userId(), null, "task.queued",
@@ -315,8 +315,30 @@ public class TaskQueue {
         return runningUsers.contains(userId);
     }
 
+    /**
+     * Whether this user has attended work running or waiting: a task somebody waits on, which a
+     * page shows as its working state when it connects or switches chats. Unattended work -- a
+     * scheduled run, /bg -- is left out: none of its statuses is shown as that state
+     * (ChatStatusEmitter#BACKGROUND), so a spinner started for it would have nothing to stop it.
+     */
+    public boolean isAttendedBusyFor(String userId) {
+        if (userId == null) return false;
+        // The interactive queue only: the background queue holds unattended work alone.
+        for (QueuedTask t : interactiveQueue) {
+            if (userId.equals(t.userId()) && t.priority() < BACKGROUND_PRIORITY) return true;
+        }
+        return attendedUsers.contains(userId);
+    }
+
     /** Users whose tasks are executing right now. */
     private final java.util.Set<String> runningUsers =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Users whose attended tasks are executing right now. Attended work runs on the interactive
+     * lane alone, one task at a time, so the end of one cannot take out another still running.
+     */
+    private final java.util.Set<String> attendedUsers =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
@@ -334,6 +356,8 @@ public class TaskQueue {
                 queueSize.decrementAndGet();
                 running.incrementAndGet();
                 runningUsers.add(task.userId());
+                boolean attended = task.priority() < BACKGROUND_PRIORITY;
+                if (attended) attendedUsers.add(task.userId());
 
                 try {
                     // Drop work that was already waiting when the user stopped everything: asked
@@ -372,6 +396,7 @@ public class TaskQueue {
                 } finally {
                     running.decrementAndGet();
                     runningUsers.remove(task.userId());
+                    if (attended) attendedUsers.remove(task.userId());
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -388,7 +413,18 @@ public class TaskQueue {
     private void failed(QueuedTask task, String laneName, Exception e) {
         log.error("Task processing failed on the {} lane for user {}: {}",
                 laneName, task.userId(), e.getMessage(), e);
-        statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED, "An unexpected error occurred.");
+        statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED, "An unexpected error occurred.",
+                markOf(task));
+    }
+
+    /**
+     * What marks a status about this task as unattended work's (ChatStatusEmitter#BACKGROUND):
+     * null for attended work. Its statuses from here carry no task id for the emitter to know it
+     * by -- queued, it has none yet, and failed here, the queue never learned it -- so the mark is
+     * set here, by the rule the queue runs it by: its priority.
+     */
+    private static Map<String, Object> markOf(QueuedTask task) {
+        return task.priority() >= BACKGROUND_PRIORITY ? Map.of(ChatStatusEmitter.BACKGROUND, true) : null;
     }
 
     public int getQueueSize() {

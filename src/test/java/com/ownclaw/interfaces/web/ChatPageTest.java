@@ -219,6 +219,58 @@ class ChatPageTest {
     }
 
     @Test
+    @DisplayName("a status of unattended work is shown in the pinned chat's activity strip alone, and never as the working state")
+    void unattendedWorkIsShownApart() {
+        String status = page.substring(page.indexOf("} else if (type === 'status') {"));
+        status = status.substring(0, status.indexOf("} else if (type === 'input_request') {"));
+        String apart = "if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }";
+        assertTrue(status.contains(apart), "a frame the server marked goes apart: " + status);
+        assertTrue(status.indexOf(apart) < status.indexOf("activeTaskId = traceTaskId = data.taskId;")
+                && status.indexOf(apart) < status.indexOf("setThinking("), "before it can claim the working state");
+
+        String shown = page.substring(page.indexOf("function showBackgroundStatus(data, content) {"));
+        shown = shown.substring(0, shown.indexOf("function checkAuth()"));
+        assertTrue(shown.contains("var shown = currentView === 'chat' && !thinkingEl.classList.contains('active') "
+                + "&& !!sessionListEl.querySelector('.session-item.pinned[data-session-id=\"' + displayedSessionId + '\"]');"),
+                "drawn only in the pinned chat of scheduled results, while nothing asked here runs: " + shown);
+        assertTrue(shown.contains("if (!shown) { if (data.taskId && data.taskId === traceTaskId) resetActivity(); return; }"),
+                "and its trace, left on screen in another chat, goes: " + shown);
+        assertTrue(shown.contains("if (data.taskId && data.taskId !== traceTaskId) { if (traceTaskId) resetActivity(); "
+                + "traceTaskId = data.taskId; }"), "a trace of its own: " + shown);
+        assertTrue(shown.contains("if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') "
+                + "doneActivity();"), "its strip ends with it: " + shown);
+        for (String state : new String[] {"setThinking(", "activeTaskId", "resetThinkingSafetyTimer(", "stopBtn"}) {
+            assertFalse(shown.contains(state), "the working state is not its own (" + state + "): " + shown);
+        }
+        // Mutation: drop the branch -> a morning run's steps fill the open chat's strip and start
+        // its spinner again; draw them in any chat -> the same, with the spinner left alone.
+    }
+
+    @Test
+    @DisplayName("a chat opens on its newest message and follows what arrives, a long answer too, until the owner scrolls up")
+    void theChatFollowsItsNewestMessage() {
+        String load = page.substring(page.indexOf("function loadSessionMessages(sessionId) {"));
+        load = load.substring(0, load.indexOf("function clearMessages()"));
+        assertTrue(load.contains("scrollBottom(true); if (lastTask) restoreTaskStats(lastTask, sessionId); })"),
+                "once its messages are drawn: " + load);
+
+        String scroll = page.substring(page.indexOf("function scrollBottom(force) {"));
+        scroll = scroll.substring(0, scroll.indexOf("inputEl.addEventListener('input'"));
+        assertTrue(scroll.contains("if (currentView !== 'chat') return; if (force) following = true; "
+                + "else if (!following) return;"), "whether it follows, as the owner's scrolling left it: " + scroll);
+        assertFalse(scroll.contains("nearBottom"), "not measured once the new message is in: " + scroll);
+        assertTrue(scroll.contains("messagesEl.addEventListener('scroll', function() { var top = messagesEl.scrollTop; "
+                + "if (messagesEl.scrollHeight - top - messagesEl.clientHeight < 80) following = true; "
+                + "else if (top < lastScrollTop) following = false; lastScrollTop = top; });"),
+                "scrolled up it stops, back at the bottom it follows again: " + scroll);
+        assertTrue(scroll.contains("new ResizeObserver(function() { scrollBottom(false); }).observe(messagesEl);"),
+                "and the strip or the composer taking room does not push the newest message out of view");
+        // Mutation: measure after adding again -> an answer taller than 80px arrives out of sight;
+        // drop the forced scroll on load -> a chat with no message of the owner's opens wherever
+        // the one before it was left.
+    }
+
+    @Test
     @DisplayName("the task page shows a delegation's goal, which the chat no longer does")
     void theTaskPageShowsTheGoal() {
         assertTrue(page.contains("if (s.goal) { d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do')); "

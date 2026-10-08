@@ -337,6 +337,40 @@ class ChatDeliveryTest {
                 "the rows the task read, for the page to mark under their bubbles");
     }
 
+    @Test
+    @DisplayName("a status of unattended work reaches the page with its mark; a page is told of attended work alone as going on")
+    void unattendedWorkReachesThePageMarked(@TempDir Path tmp) throws Exception {
+        var real = new ArrayList<TaskQueue>();
+        tasks = db -> {
+            var q = new TaskQueue(null, new com.ownclaw.observability.EventLogService(db), emitter,
+                    new OwnClawConfig(), new com.ownclaw.core.TaskCancellationService());
+            q.submit(USER, "morning digest", TaskQueue.BACKGROUND_PRIORITY);   // not started: it waits
+            real.add(q);
+            return q;
+        };
+        connect(tmp);
+        assertFalse(frames("session_info").getLast().path("taskRunning").asBoolean(true),
+                "a scheduled run waiting starts no spinner in the chat this page opens");
+
+        real.getFirst().submit(USER, "check the router", 1);
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("type", "switch_session", "message", conversations.getCurrentSession(USER)))));
+        assertTrue(frames("session_info").getLast().path("taskRunning").asBoolean(false),
+                "a task asked for, waiting behind it, does");
+
+        emitter.inBackground("bg123456", () -> {
+            emitter.emitForTask(USER, "bg123456", ChatStatusEmitter.StatusMessage.Type.STEP, "Step 1 · anthropic",
+                    Map.of("cloudTokens", 1_200));
+            return null;
+        });
+        var status = frames("status").getLast();
+        assertEquals("bg123456", status.path("taskId").asText(), status.toString());
+        assertTrue(status.path("data").path(ChatStatusEmitter.BACKGROUND).asBoolean(false),
+                "the mark the page shows it apart by: " + status);
+        assertEquals(1_200, status.path("data").path("cloudTokens").asInt(), "beside the data it carries");
+        // Mutation: count unattended work as running again -> taskRunning is true at connect.
+    }
+
     /** What the page sends for a message: the text, the name it gave the bubble, and queue when asked. */
     private void sendFromPage(String text, String clientId, boolean queued) throws Exception {
         var json = new java.util.LinkedHashMap<String, Object>(Map.of("message", text, "clientId", clientId));

@@ -84,6 +84,42 @@ class LongRunningTaskManagerTest {
     }
 
     @Test
+    @DisplayName("each status of a long-running skill is its task's: inside unattended work, marked as that work's")
+    void statusesAreTheTasks() throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var emitter = new ChatStatusEmitter();
+        var seen = new ArrayList<ChatStatusEmitter.StatusMessage>();
+        emitter.subscribe("u1", "test", seen::add);
+        var config = new OwnClawConfig();
+        config.getTasks().setStallTimeout(-1);   // every task counts as stalled at once
+        var manager = new LongRunningTaskManager(jdbc, emitter, new EventLogService(jdbc), config);
+
+        emitter.inBackground("t4", () -> {
+            manager.register("t4", "u1", DESCRIPTION, "net_scan");
+            manager.reportProgress("t4", "Scanning 45/255 hosts", 18);
+            manager.complete("t4", RESULT);
+            manager.register("t4", "u1", DESCRIPTION, "net_scan");
+            manager.fail("t4", ERROR);
+            manager.register("t4", "u1", DESCRIPTION, "net_scan");
+            manager.cancel("t4", "you pressed Stop");
+            manager.register("t4", "u1", DESCRIPTION, "net_scan");
+            manager.detectStalledTasks();
+            return null;
+        });
+
+        assertEquals(List.of(ChatStatusEmitter.StatusMessage.Type.PROGRESS, ChatStatusEmitter.StatusMessage.Type.COMPLETED,
+                        ChatStatusEmitter.StatusMessage.Type.FAILED, ChatStatusEmitter.StatusMessage.Type.WARNING,
+                        ChatStatusEmitter.StatusMessage.Type.WARNING),
+                seen.stream().map(ChatStatusEmitter.StatusMessage::type).toList());
+        for (var s : seen) {
+            assertEquals("t4", s.taskId(), s.toString());
+            assertEquals(true, s.data().get(ChatStatusEmitter.BACKGROUND), s.toString());
+        }
+        // Mutation: emit any of them without the task's id -> a scheduled run's network scan shows
+        // its progress in the chat on screen, and its end stops that chat's spinner.
+    }
+
+    @Test
     @DisplayName("a cancelled long-running task's event says who stopped its task, not always the user")
     void aCancelSaysWhy() throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));

@@ -679,11 +679,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Status messages are live-only and never replayed, so reloading during a long task
             // produced a completely idle chat with an enabled Send button -- which reads as "the
             // request was lost", and the obvious response is to send it again.
+            // Attended work only: a scheduled run or /bg is nobody's working state. None of its
+            // statuses touches that state (ChatStatusEmitter#BACKGROUND), so a spinner started
+            // for it here, on every chat switch, would turn until the page's own timeout.
             send(session, Map.of(
                     "type", "session_info",
                     "activeSessionId", sessionId,
                     "sessions", sessions,
-                    "taskRunning", taskQueue.isBusyFor(userId)
+                    "taskRunning", taskQueue.isAttendedBusyFor(userId)
             ));
         } catch (Exception e) {
             log.warn("Failed to send session info: {}", e.getMessage());

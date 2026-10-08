@@ -168,6 +168,17 @@ public class AgentLoop {
                                    String currentMessageId, List<String> attachmentIds,
                                    TaskChat.Channel channel, com.ownclaw.core.Inbox inbox) {
         String taskId = UUID.randomUUID().toString().substring(0, 8);
+        java.util.function.Supplier<AgentResult> task = () -> execute(taskId, userId, message, unattended,
+                currentMessageId, attachmentIds, channel, inbox);
+        // Unattended work is waited on in no chat on screen: every status it emits, its ending
+        // too, is marked so (ChatStatusEmitter#BACKGROUND), and a page shows it apart.
+        return unattended ? statusEmitter.inBackground(taskId, task) : task.get();
+    }
+
+    /** {@link #executeFull}, once the task has its id. */
+    private AgentResult execute(String taskId, String userId, String message, boolean unattended,
+                                String currentMessageId, List<String> attachmentIds,
+                                TaskChat.Channel channel, com.ownclaw.core.Inbox inbox) {
         AgentContext context = new AgentContext(userId, taskId, message);
         context.setUnattended(unattended);
         context.setInbox(inbox);
@@ -735,7 +746,7 @@ public class AgentLoop {
                     "Step " + (step + 1) + " · " + providerLabel,
                     tokenData(context));
 
-            ScheduledFuture<?> thinkHeartbeat = startLlmHeartbeat(context.userId(),
+            ScheduledFuture<?> thinkHeartbeat = startLlmHeartbeat(context,
                     "Step " + (step + 1) + " · " + providerLabel);
             ThinkResult thinkResult;
             try {
@@ -800,7 +811,7 @@ public class AgentLoop {
                     tokenData(context));
 
             // Emit thinking detail: user prompt (skip system — it repeats), reasoning, chosen tool
-            emitThinkDetail(context.userId(), thinkResult, step + 1, providerLabel);
+            emitThinkDetail(context, thinkResult, step + 1, providerLabel);
 
             // Emit debug info when debug mode is active
             if (debug) {
@@ -1103,10 +1114,10 @@ public class AgentLoop {
             }
 
             // === ACT ===
-            emitActDetail(context.userId(), action, step + 1);
+            emitActDetail(context, action, step + 1);
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Running " + action.tool() + "...");
-            ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context.userId(),
+            ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context,
                     "Running " + action.tool());
             AgentObservation observation;
             try {
@@ -2251,7 +2262,7 @@ public class AgentLoop {
                         "Repairing syntax error · " + providerLabel + " (attempt " + attempt + "/" + SYNTAX_REPAIRS + ")",
                         tokenData(context));
             }
-            ScheduledFuture<?> heartbeat = startLlmHeartbeat(context.userId(),
+            ScheduledFuture<?> heartbeat = startLlmHeartbeat(context,
                     (attempt == 0 ? "Generating code for '" : "Repairing code for '") + name + "'");
             LlmResponse reply;
             try {
@@ -2627,9 +2638,11 @@ public class AgentLoop {
     }
 
     // ── Detail emission helpers (always-on activity panel enrichment) ──
+    // Each status carries its task's id, as everything emitted inside a task should: without it
+    // an unattended task's would go out unmarked (ChatStatusEmitter#BACKGROUND).
 
     /** Emit thinking step detail: user prompt messages (skip system), reasoning, chosen action. */
-    private void emitThinkDetail(String userId, ThinkResult result, int step, String provider) {
+    private void emitThinkDetail(AgentContext context, ThinkResult result, int step, String provider) {
         var detail = new LinkedHashMap<String, Object>();
         detail.put("category", "think");
         detail.put("step", step);
@@ -2653,12 +2666,12 @@ public class AgentLoop {
             detail.put("params", result.action().params().toString());
         }
 
-        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
-                "💭 Think · Step " + step + " → " + result.action().tool(), detail));
+        statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                "💭 Think · Step " + step + " → " + result.action().tool(), detail);
     }
 
     /** Emit tool execution detail: tool name + input parameters. */
-    private void emitActDetail(String userId, AgentAction action, int step) {
+    private void emitActDetail(AgentContext context, AgentAction action, int step) {
         var detail = new LinkedHashMap<String, Object>();
         detail.put("category", "act");
         detail.put("step", step);
@@ -2670,8 +2683,8 @@ public class AgentLoop {
             }
             detail.put("params", params);
         }
-        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
-                "⚡ Act · " + action.tool(), detail));
+        statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
+                "⚡ Act · " + action.tool(), detail);
     }
 
     /**
@@ -2873,9 +2886,9 @@ public class AgentLoop {
         detail.put("elapsedMs", context.elapsedMs());
 
         String status = obs.success() ? "✓" : "✗";
-        statusEmitter.emit(userId, new StatusMessage(StatusMessage.Type.STEP,
+        statusEmitter.emitForTask(userId, context.taskId(), StatusMessage.Type.STEP,
                 "👁 Observe · " + action.tool() + " " + status + " " + TaskRecord.duration(obs.durationMs()),
-                detail));
+                detail);
     }
 
     // ── Debug helpers ──
@@ -2998,11 +3011,11 @@ public class AgentLoop {
      * Start a periodic heartbeat that emits PROGRESS status messages while a model or tool call
      * is running. Keeps the UI activity indicator alive so users know the system isn't hung.
      *
-     * @param userId      target user for status messages
+     * @param context     the task the call is made for, whose user is sent the messages
      * @param description what's happening (e.g. "Generating code")
      * @return a ScheduledFuture to cancel when the call completes
      */
-    private ScheduledFuture<?> startLlmHeartbeat(String userId, String description) {
+    private ScheduledFuture<?> startLlmHeartbeat(AgentContext context, String description) {
         ScheduledExecutorService scheduler = HEARTBEAT_SCHEDULER;
         long[] startMs = { System.currentTimeMillis() };
         return scheduler.scheduleAtFixedRate(() -> {
@@ -3015,7 +3028,7 @@ public class AgentLoop {
             }
             // Emit as PROGRESS so the frontend updates the last step label
             // rather than adding a new step entry.
-            statusEmitter.emit(userId, StatusMessage.Type.PROGRESS,
+            statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
                     description + " (" + time + ")");
         }, 30, 20, TimeUnit.SECONDS);    // first tick at 30s, then every 20s
     }

@@ -624,7 +624,7 @@ public class LocalExecutor {
         // ACT: execute the tool -- said in the owner's chat first, with the model's words and
         // the call as it wrote it, so the work on the local tier is seen as it happens.
         parentContext.chat().localTurn(turn, target.name(), words, action.params);
-        statusEmitter.emit(parentContext.userId(), StatusMessage.Type.PROGRESS,
+        statusEmitter.emitForTask(parentContext.userId(), parentContext.taskId(), StatusMessage.Type.PROGRESS,
                 "Delegate: running " + action.tool + "...");
 
         long toolStartMs = System.currentTimeMillis();

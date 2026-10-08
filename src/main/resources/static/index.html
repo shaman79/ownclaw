@@ -2869,6 +2869,9 @@
                 // running marks it read, or handed on, after a reload or a switch back too.
                 if (type === 'user') drawn.dataset.messageId = m.id;
             });
+            // A chat opens on its newest message, and follows from there: how far the chat shown
+            // before was scrolled says nothing about this one.
+            scrollBottom(true);
             if (lastTask) restoreTaskStats(lastTask, sessionId);
         })
         .catch(function(e) {
@@ -5275,6 +5278,34 @@
         if (thinkingStartedAt) startElapsedTimer();
     }
 
+    /**
+     * A status of unattended work -- a scheduled run, /bg. Its steps are shown where scheduled
+     * results go: in the activity strip of the pinned chat of scheduled results, while that chat
+     * is on screen and nothing asked in this window is running. Never as the working state --
+     * the spinner under the chat, Stop, the elapsed time: nobody is waiting on this work, and its
+     * result arrives as a message of its own. Its trace, left on screen once another chat is
+     * shown, goes with its next status.
+     */
+    function showBackgroundStatus(data, content) {
+        var shown = currentView === 'chat' && !thinkingEl.classList.contains('active')
+                && !!sessionListEl.querySelector('.session-item.pinned[data-session-id="' + displayedSessionId + '"]');
+        if (!shown) {
+            if (data.taskId && data.taskId === traceTaskId) resetActivity();
+            return;
+        }
+        // A trace of its own, as each task has.
+        if (data.taskId && data.taskId !== traceTaskId) {
+            if (traceTaskId) resetActivity();
+            traceTaskId = data.taskId;
+        }
+        var sub = data.status || '';
+        updateTokens(data.data);
+        if (data.data.totalSteps != null) updateStats(data.data);
+        if (sub === 'progress') updateActivity(content);
+        else showActivity(content, data.data.category ? data.data : null);
+        if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') doneActivity();
+    }
+
 
     //  Auth flow 
     function checkAuth() {
@@ -5595,6 +5626,9 @@
                     else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
                     updateComposer();
                 } else if (type === 'status') {
+                    // Unattended work -- a scheduled run, /bg -- is shown apart: its statuses
+                    // filled the activity strip of whatever chat was open, and started its spinner.
+                    if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }
                     var sub = data.status || '';
                     var detail = data.data && data.data.category ? data.data : null;
                     // Claim this window's working state for the first task we hear from. A task
@@ -6205,12 +6239,40 @@
      * Sticking to the bottom is right when you are already at the bottom: that is following
      * along. It is wrong when you have deliberately scrolled away. The 80px tolerance keeps it
      * feeling sticky rather than brittle, so being a line or two off the bottom still follows.
+     *
+     * Whether you follow is kept from your own scrolling (the listener below), not measured here.
+     * Measured here, it was measured after the new message had been added: one taller than the
+     * tolerance read as you having scrolled away, so a long answer or progress row arrived out
+     * of sight and the chat stopped following. Forced -- your own message, a chat opened -- it
+     * follows from then on.
+     *
+     * The chat only: the task history, Settings and a skill's page are drawn into the same pane
+     * and open at their top, where the measurement this replaced left any taller than the pane.
      */
     function scrollBottom(force) {
-        var nearBottom = (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 80;
-        if (!force && !nearBottom) return;
+        if (currentView !== 'chat') return;
+        if (force) following = true;
+        else if (!following) return;
         requestAnimationFrame(function() { messagesEl.scrollTop = messagesEl.scrollHeight; });
     }
+
+    /** Whether the conversation follows its newest message (scrollBottom). */
+    var following = true;
+    var lastScrollTop = 0;
+    // Scrolled up, away from the bottom, you are reading: it stops following. Back within the
+    // tolerance of the bottom -- by hand, or by a scroll of this page's -- it follows again. A
+    // scroll down that stops short changes nothing: it may be a smooth scroll still under way.
+    messagesEl.addEventListener('scroll', function() {
+        var top = messagesEl.scrollTop;
+        if (messagesEl.scrollHeight - top - messagesEl.clientHeight < 80) following = true;
+        else if (top < lastScrollTop) following = false;
+        lastScrollTop = top;
+    });
+    // The view shrinks when the activity strip appears or opens under it, and as the composer
+    // grows: following, it stays on the newest message. Without this, the strip a chat's counters
+    // are restored into, shown just after the chat opens, pushed its newest message's last lines
+    // out of view.
+    new ResizeObserver(function() { scrollBottom(false); }).observe(messagesEl);
 
     inputEl.addEventListener('input', function() {
         inputEl.style.height = 'auto';
