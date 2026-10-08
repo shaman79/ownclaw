@@ -171,6 +171,9 @@ public class TaskTraceService {
                     s.put("durationMs", d.path("durationMs").asLong());
                     s.put("cloudCalls", recorded ? pending.size() : null);
                     s.put("cloudTokens", pending.isEmpty() ? cloudDelta : billed(pending));
+                    // Kind by kind where the step's calls are recorded, for the page to show: a
+                    // cache read costs a tenth of a new input token.
+                    for (String kind : BILLED) s.put(kind, pending.isEmpty() ? null : sum(pending, kind));
                     s.put("localTokens", localDelta);
                     s.put("costUsd", pending.isEmpty() ? null : costOf(pending));
                     s.put("costIsFloor", pending.stream().anyMatch(TaskTraceService::isError));
@@ -359,14 +362,21 @@ public class TaskTraceService {
         return a;
     }
 
+    /** The kinds of token a call is billed for: new input, output, and both cache directions. */
+    private static final List<String> BILLED =
+            List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens");
+
     /** Tokens billed for a group of calls: in, out, and both cache directions. */
     private static long billed(List<Map<String, Object>> group) {
         long t = 0;
-        for (var c : group) {
-            for (String k : List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens")) {
-                if (c.get(k) instanceof Number n) t += n.longValue();
-            }
-        }
+        for (String kind : BILLED) t += sum(group, kind);
+        return t;
+    }
+
+    /** One kind of token over a group of calls; a call whose tokens are not recorded adds none. */
+    private static long sum(List<Map<String, Object>> group, String kind) {
+        long t = 0;
+        for (var c : group) if (c.get(kind) instanceof Number n) t += n.longValue();
         return t;
     }
 

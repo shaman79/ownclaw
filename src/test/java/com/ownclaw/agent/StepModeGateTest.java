@@ -126,7 +126,7 @@ class StepModeGateTest {
                 + "since your last update"), "each update restated the same suspicion: " + text);
         String delegate = engine.toolsFor(chat, mode).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
                 .findFirst().orElseThrow().description();
-        assertTrue(delegate.contains("The owner has chosen cost over speed, so you cannot run skills yourself"), delegate);
+        assertTrue(delegate.contains("The owner has chosen cost over speed, so while the local model can do the work you are not given the skills to run yourself"), delegate);
         assertFalse(delegate.contains("unattended work"), delegate);
     }
 

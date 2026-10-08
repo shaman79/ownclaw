@@ -135,7 +135,7 @@ class LocalFirstUnattendedTest {
         // parts at once -- which is how a leak got in.
         assertTrue(delegateSpec.contains("daily_news_digest"),
                 "it must still know the skill exists, or it will rebuild it with skill_create");
-        assertTrue(delegateSpec.contains("cannot run skills yourself"),
+        assertTrue(delegateSpec.contains("you are not given the skills to run yourself"),
                 "knowing a skill exists and being able to call it are different things");
         assertFalse(text.contains("Fetch and format a news digest."),
                 "and not a second copy in the message: " + text);

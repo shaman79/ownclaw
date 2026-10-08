@@ -270,18 +270,20 @@ public class ThinkingEngine {
      * <p>
      * The system prompt is the same static text for every provider, and every provider's last
      * user message ends with the same per-step block ({@link #buildDynamicContext}): the date, who
-     * is waiting, the preferences, the tools where the prompt is where they are learnt, the
-     * vault. The providers differ only in how the steps so far are sent. That block used to be
-     * written twice, and the copy every provider but Anthropic got had drifted: it never said
-     * whether anyone was waiting, which the static prompt tells the model to decide by.
+     * is waiting, what to write beside a call, the preferences, the tools where the prompt is
+     * where they are learnt, the vault. The providers differ only in how the steps so far are
+     * sent. That block used to be written twice, and the copy every provider but Anthropic got
+     * had drifted: it never said whether anyone was waiting, which the static prompt tells the
+     * model to decide by.
      */
     List<LlmMessage> buildMessages(AgentContext context, String providerName,
                                    StepMode mode) {
         // A step offered tools natively is offered skills by TOOLS messages: the task's first
         // ones are chosen on its first such step, before anything is rendered.
         if (mode.nativeTools() && context.toolsAdded() == null) context.seedTaskTools(firstTools(context));
+        if (mode.nativeTools() && !mode.local()) context.cloudStep(mode.localFirst());
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(LlmMessage.system(buildSystemPrompt(mode, context.declinedAsReasoning())));
+        messages.add(LlmMessage.system(buildSystemPrompt(mode)));
 
         if ("anthropic".equals(providerName)) {
             // Anthropic: the steps replayed turn by turn, append-only for prefix caching.
@@ -300,17 +302,36 @@ public class ThinkingEngine {
                 messages.add(LlmMessage.user(task));
                 withToolsAdded(messages, toolsAdded(context, mode), 0, Integer.MAX_VALUE);
                 messages.add(LlmMessage.user("## History\n"
-                        + trajectory.toPromptSummary(!context.declinedAsReasoning()) + step));
+                        + trajectory.toPromptSummary(!context.earlierWordsWithheld()) + step));
             }
         }
 
         return messages;
     }
 
-    /** The task's tool additions a step's messages carry: none on local-first work or the text protocol. */
+    /**
+     * The task's tool additions a step's messages carry. None on the text protocol, nor while the
+     * cloud orchestrates only: it runs no skill. On the cloud, none before the step it was first
+     * offered skills to run ({@link AgentContext#skillsOfferedAfter}): the additions made before
+     * it -- with the usual skills, on a task whose cloud orchestrated first and so had them
+     * deferred -- are one addition there, after the steps the cloud has already read. Placed where
+     * each was made, they were inserted into a conversation the provider had cached, and the
+     * whole of it was written to the cache again.
+     */
     private static List<AgentContext.ToolsAdded> toolsAdded(AgentContext context, StepMode mode) {
         var added = context.toolsAdded();
-        return added == null || mode.localFirst() || !mode.nativeTools() ? List.of() : added;
+        if (added == null || mode.localFirst() || !mode.nativeTools()) return List.of();
+        if (mode.local()) return added;
+        Integer from = context.skillsOfferedAfter();
+        if (from == null) return List.of();
+        var first = new LinkedHashSet<String>(context.orchestratedFirst() ? context.usualTools() : List.of());
+        var out = new ArrayList<AgentContext.ToolsAdded>();
+        for (var addition : added) {
+            if (addition.afterSteps() <= from) first.addAll(addition.names());
+            else out.add(addition);
+        }
+        out.addFirst(new AgentContext.ToolsAdded(from, List.copyOf(first)));
+        return out;
     }
 
     /**
@@ -348,7 +369,7 @@ public class ThinkingEngine {
             }
             messages.add(LlmMessage.user(user.toString()));
             next = withToolsAdded(messages, added, next, steps);
-            messages.add(LlmMessage.assistant(turn.actionText(!context.declinedAsReasoning())));
+            messages.add(LlmMessage.assistant(turn.actionText(!context.earlierWordsWithheld())));
             user = new StringBuilder(turn.observationText());
             steps++;
         }
@@ -462,11 +483,21 @@ public class ThinkingEngine {
      *
      * <p>A chat on Fastest is untouched: there the owner chose speed, and a local step costs
      * about a minute.
+     *
+     * <p>Withheld is not left out: on a task whose cloud model is asked to orchestrate first, every
+     * skill is in the array from its first step to its last, deferred, and the array is the same
+     * bytes before a delegation fails and after ({@link #toolset}). The tools are the front of the
+     * provider's cached prefix: when the valve handed the registry back as an array of its own,
+     * the whole conversation was written to the cache again -- $1.43 of one $4.60 task on
+     * 2026-10-08. The valve now offers the skills by a TOOLS message after the steps so far
+     * ({@link #toolsAdded}). What the loop lets the cloud call is {@link AgentContext#offeredTools}.
      */
     List<com.ownclaw.llm.ToolSpec> toolsFor(AgentContext context, StepMode mode) {
+        if (!mode.local()) context.cloudStep(mode.localFirst());
+        var tools = toolset(context, mode, !mode.local() && context.orchestratedFirst());
         if (!mode.localFirst()) {
             context.setOfferedTools(null);
-            return toolset(context, mode);
+            return tools;
         }
         log.info("Task {} ({}): offering the cloud orchestration only — the registry is "
                         + "withheld, so mechanical work must be delegated to the local model.",
@@ -476,38 +507,37 @@ public class ThinkingEngine {
         context.setOfferedTools(specials.stream()
                 .map(com.ownclaw.llm.ToolSpec::name)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+        return tools;
+    }
 
-        // The cloud cannot CALL the skills, but it still has to know they exist, or it will
-        // write a goal that asks for something already built -- or reach for skill_create to
-        // rebuild it. Delegate's description names the task's likeliest -- its first tools and
-        // the owner's usual ones, the same on every step of the task -- and find_tools searches
-        // the rest. It used to carry
-        // every skill's whole description: 114,293 characters of a scheduled run's every
-        // request. In the description, a tool part, not the task's message: the canary reads
-        // the user parts for private text, and a skill's own words are not that.
-        var specs = new ArrayList<>(ToolSchemas.build(specials, List.of(), context.credentialKeys()));
+    /**
+     * What delegate's description adds on a task whose cloud orchestrates first. The cloud cannot
+     * CALL the skills, but it still has to know they exist, or it will write a goal that asks for
+     * something already built -- or reach for skill_create to rebuild it. So this names the
+     * task's likeliest -- its first tools and the owner's usual ones, the same on every step of
+     * the task -- and find_tools searches the rest. It used to carry every skill's whole
+     * description: 114,293 characters of a scheduled run's every request. In the description, a
+     * tool part, not the task's message: the canary reads the user parts for private text, and a
+     * skill's own words are not that. Its words hold after a delegation has failed too, when the
+     * skills are offered after all: the description is part of the cached prefix and does not
+     * change.
+     */
+    private String orchestrationNote(AgentContext context) {
         var likeliest = new StringBuilder();
         var added = context.toolsAdded();
-        var names = new java.util.LinkedHashSet<String>();
+        var names = new LinkedHashSet<String>();
         if (added != null && !added.isEmpty()) names.addAll(added.getFirst().names());
         names.addAll(context.usualTools());
         for (String name : names) {
             toolRegistry.find(name).ifPresent(t -> likeliest.append("\n- ").append(t.name()).append(": ")
                     .append(ToolFinder.gist(t.description())));
         }
-        specs.replaceAll(spec -> {
-            if (!AgentAction.DELEGATE.equals(spec.name())) return spec;
-            return new com.ownclaw.llm.ToolSpec(spec.name(),
-                    spec.description()
-                            + "\n\n" + (context.isUnattended() ? "You are orchestrating unattended work"
-                                    : "The owner has chosen cost over speed")
-                            + ", so you cannot run skills yourself — this is how the work gets done. State the goal "
-                            + "fully and name the skills it needs in 'tools'; find_tools searches "
-                            + "every skill."
-                            + (likeliest.isEmpty() ? "" : " The likeliest for this task:" + likeliest),
-                    spec.inputSchema());
-        });
-        return specs;
+        return "\n\n" + (context.isUnattended() ? "You are orchestrating unattended work"
+                        : "The owner has chosen cost over speed")
+                + ", so while the local model can do the work you are not given the skills to run "
+                + "yourself — this is how the work gets done. State the goal fully and name the skills "
+                + "it needs in 'tools'; find_tools searches every skill."
+                + (likeliest.isEmpty() ? "" : " The likeliest for this task:" + likeliest);
     }
 
     /**
@@ -521,13 +551,20 @@ public class ThinkingEngine {
      * about 90 tokens a second. A model can call only what it is offered: the local one, asked to
      * call a tool it was not given, was seen to call one it was -- get_weather, with a router's
      * address as the city -- so the prompt says to find a tool first.
+     *
+     * @param orchestrating the task's cloud model was asked to orchestrate first
+     *                      ({@link AgentContext#orchestratedFirst}): delegate says so, and the usual
+     *                      skills are deferred too -- offered with the rest by one TOOLS message on
+     *                      the step after a delegation fails, if one does ({@link #toolsAdded})
      */
-    private List<com.ownclaw.llm.ToolSpec> toolset(AgentContext context, StepMode mode) {
+    private List<com.ownclaw.llm.ToolSpec> toolset(AgentContext context, StepMode mode, boolean orchestrating) {
         var specials = new ArrayList<com.ownclaw.llm.ToolSpec>();
         for (var spec : SpecialActionSchemas.ALL) {
-            specials.add(mode.local() && AgentAction.DELEGATE.equals(spec.name())
-                    ? new com.ownclaw.llm.ToolSpec(spec.name(), SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL,
-                            spec.inputSchema())
+            specials.add(!AgentAction.DELEGATE.equals(spec.name()) ? spec
+                    : mode.local() ? new com.ownclaw.llm.ToolSpec(spec.name(),
+                            SpecialActionSchemas.DELEGATE_ON_THE_LOCAL_MODEL, spec.inputSchema())
+                    : orchestrating ? new com.ownclaw.llm.ToolSpec(spec.name(),
+                            spec.description() + orchestrationNote(context), spec.inputSchema())
                     : spec);
         }
         specials.add(SpecialActionSchemas.FIND_TOOLS);
@@ -539,7 +576,8 @@ public class ThinkingEngine {
         Set<String> special = new java.util.HashSet<>();
         specials.forEach(s -> special.add(s.name()));
         return ToolSchemas.inOrder(specials, skills, context.credentialKeys()).stream()
-                .map(spec -> special.contains(spec.name()) || usual.contains(spec.name()) ? spec : spec.asDeferred())
+                .map(spec -> special.contains(spec.name()) || !orchestrating && usual.contains(spec.name())
+                        ? spec : spec.asDeferred())
                 .toList();
     }
 
@@ -634,11 +672,15 @@ public class ThinkingEngine {
     }
 
     /**
-     * The per-step block (datetime, attendance, preferences, tools, vault, what next): what
-     * changes from one step to the next, at the end of the last user message for every provider
-     * ({@link #buildMessages}), so the system prompt stays the same bytes and is cached. It
-     * changes in a task the provider has stopped ({@link #buildSystemPrompt}) and in one the local
-     * model takes over, whose prompt is its own.
+     * The per-step block (datetime, attendance, what to write beside a call, preferences, tools,
+     * vault, what next): what changes from one step to the next, at the end of the last user
+     * message for every provider ({@link #buildMessages}), so the system prompt stays the same
+     * bytes and is cached. What changes partway through a task is said here too -- the words
+     * asked for beside a call once the provider has declined a step as reasoning extraction, the
+     * skills given once a delegation has failed -- for the same reason: the tools and the system
+     * prompt are the front of the provider's cached prefix, and a change there writes the whole
+     * conversation to the cache again. Only a task the local model takes over has another system
+     * prompt, the local model's own.
      */
     private String buildDynamicContext(AgentContext context, StepMode mode) {
         var sb = new StringBuilder();
@@ -675,7 +717,7 @@ public class ThinkingEngine {
                     + (mode.local() ? "" : "Prefer 'delegate' for anything the local "
                     + "model can do, especially work on this machine, the LAN or private data, and ")
                     + (mode.local() ? "Never" : "never") + " stop to ask a question -- decide, and "
-                    + "say which assumption you made.\n\n");
+                    + "say which assumption you made.\n");
         } else {
             sb.append("- Attendance: THE USER IS WAITING in the chat right now"
                     + (context.declinedAsReasoning() ? "." : ", and reads what you write beside "
@@ -688,8 +730,16 @@ public class ThinkingEngine {
                     + "and its servers -- knowing its speed: it reads about 100 tokens a second "
                     + "and writes about 8, so a delegation that reads a long result or writes a "
                     + "long answer takes minutes.")
-                    + "\n\n");
+                    + "\n");
         }
+        // The valve has opened on a task whose cloud orchestrated first (stepMode): the skills
+        // came back by a TOOLS message, and delegate's description, which is cached, still says
+        // why they were not given.
+        if (!mode.local() && mode.nativeTools() && !mode.localFirst() && context.orchestratedFirst()) {
+            sb.append("- Skills: a delegation of this task has failed, so from here you are given the "
+                    + "skills to run yourself as well.\n");
+        }
+        sb.append(beside(mode.nativeTools(), context.declinedAsReasoning())).append("\n\n");
 
         if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
             sb.append("## Preferences\n");
@@ -722,7 +772,7 @@ public class ThinkingEngine {
         // is read at a tenth of the price, while this hangs off the newest message and is paid
         // in full on every single step. Sending both was costing the manifest twice per step.
         // On local-first work, which only native tools can be (stepMode), the array withholds
-        // the skills, and delegate's own description names the likeliest (see toolsFor):
+        // the skills, and delegate's own description names the likeliest (orchestrationNote):
         // not here as well. Rendering the same text into a tool part AND into the newest user
         // message forced the canary to choose between refusing a copy the cloud is receiving
         // anyway and excusing text across parts. Excusing across parts turned out to be a leak —
@@ -766,9 +816,11 @@ public class ThinkingEngine {
      * and output format. Completely generic — no domain-specific content. Sent whole on every
      * step, never shortened, and the same for every provider, task and step: what changes goes in
      * the per-step block at the end of the last user message ({@link #buildDynamicContext}), so
-     * the provider's prompt cache holds all of this. The exceptions are {@code quiet}, which
-     * changes it once in a task, and only in a task the provider has already stopped, and the
-     * local model's own prompt ({@link StepMode#local}).
+     * the provider's prompt cache holds all of this. So it says nothing that holds only while the
+     * cloud orchestrates, nor what to write beside a call, which changes in a task the provider
+     * has stopped as reasoning extraction: changed here, it wrote the whole conversation to the
+     * cache again -- $1.40 of one task on 2026-10-08. The one exception is the local model's own
+     * prompt ({@link StepMode#local}).
      *
      * @param mode when {@code nativeTools} is set, the action list and the JSON-envelope
      *             instruction are omitted. The tools array carries both, and this claim used to
@@ -776,10 +828,8 @@ public class ThinkingEngine {
      *             carried "Single JSON: {reasoning, tool, params}" -- an instruction to use the
      *             one protocol the tools array exists to replace, which is the mechanism by
      *             which a model talks its way back onto the text path.
-     * @param quiet ask for no words beside a call: the provider has declined a step of this task
-     *              as reasoning extraction ({@link AgentContext#declinedAsReasoning})
      */
-    private String buildSystemPrompt(StepMode mode, boolean quiet) {
+    private String buildSystemPrompt(StepMode mode) {
         boolean nativeTools = mode.nativeTools();
         var sb = new StringBuilder();
 
@@ -867,18 +917,13 @@ public class ThinkingEngine {
         sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n");
         sb.append("Of past tasks you are shown only this chat's, under Prior Context: memory_manage action=recall with a query returns every past task that matches, in full.\n\n");
 
-        // Output format
+        // Output format. What to write beside a call is the per-step block's (beside).
         sb.append("## Output\n");
         if (nativeTools) {
-            sb.append(quiet ? "Call exactly one tool per step, and write nothing beside it.\n"
-                    : "Call exactly one tool per step. When the user is waiting, the text you write "
-                    + "beside a tool call is shown to them live in the chat: " + NARRATION + "\n");
+            sb.append("Call exactly one tool per step.\n");
             sb.append("For respond: put the whole answer in the message argument.\n\n");
         } else {
-            sb.append(quiet ? "Single JSON: {\"tool\": \"name\", \"params\": {...}}\n"
-                    : "Single JSON: {\"reasoning\": \"...\", \"tool\": \"name\", \"params\": {...}}\n"
-                    + "When the user is waiting, 'reasoning' is shown to them live in the chat: "
-                    + NARRATION + "\n");
+            sb.append("Single JSON: {\"tool\": \"name\", \"params\": {...}}\n");
             sb.append("For respond: put ALL content in params.message, NOT in reasoning.\n\n");
         }
 
@@ -890,7 +935,9 @@ public class ThinkingEngine {
         sb.append("- Private data -- a result you are shown only as a description, a file the user sent -- is read by the local model: to read, summarise, search, compare or answer a question about it, delegate and name its handle in the goal.\n");
         if (!mode.local()) sb.append("- What you are shown has secrets removed («secret removed», «vault:KEY») and identifiers -- e-mail addresses, phone numbers, account and card numbers, MAC addresses, public IP addresses, SSIDs, client hostnames -- written as placeholders -- <email_N>, <ssid_N> and so on, N a number. Write a placeholder wherever you mean its value, in arguments, code and answers alike: it is replaced with the real value on this machine.\n");
         if (!mode.local()) sb.append("- Work on this machine, the LAN or its servers that is a sequence of tool calls the local model can run → delegate it (free, stays on the host).\n");
-        if (nativeTools && !mode.localFirst()) sb.append("- Your tools are the skills likeliest to fit this task, not all of them, and you can call only the tools you are given: find_tools searches every skill by English keywords and gives you what it finds. Search before you create a skill.\n");
+        // True whether the cloud is given skills to run or orchestrates only (toolsFor), so that
+        // the prompt is the same before a delegation fails and after.
+        if (nativeTools) sb.append("- You are not given every skill, and you can call only the tools you are given: find_tools searches every skill by English keywords and says what it finds. Search before you create a skill.\n");
         sb.append("- No suitable tool → create one. Poor results → read skill code, overwrite fix.\n");
         sb.append("- A skill is for a deterministic program: parsing at scale, changing configuration, repeated runs. Never create one only to read or summarise data -- delegate that.\n");
         sb.append("- Explore thoroughly before 'not found'. Search the internet if stuck.\n");
@@ -1079,18 +1126,39 @@ public class ThinkingEngine {
      * and Anthropic declined the reply part-way as reasoning extraction
      * ({@code stop_details.category} "reasoning_extraction"), which ended the owner's task on
      * 2026-10-01. No length is asked for either way: a sentence count is a cap. A step declined so
-     * all the same is asked again with nothing asked for beside the call ({@code AgentLoop}).
-     * Only what is new: on 2026-10-07 every update of a 30-step router task restated the same
-     * suspicion, so different checks read as the same step done again.
+     * all the same is asked again with nothing asked for beside the call ({@code AgentLoop},
+     * {@link #beside}). Only what is new: on 2026-10-07 every update of a 30-step router task
+     * restated the same suspicion, so different checks read as the same step done again.
      */
     static final String NARRATION = "write it for them, in their language, as a progress update on "
             + "the work -- what the last result showed and what you are doing next, only what is "
             + "new since your last update -- not your reasoning.";
 
     /**
+     * What to write beside a call, on either protocol: a line of the per-step block, not of the
+     * system prompt, so that in a task the provider has declined as reasoning extraction it can
+     * ask for nothing -- and the request no longer asks for words anywhere -- while the system
+     * prompt the provider has cached stays the same bytes.
+     *
+     * @param quiet the provider has declined a step of this task as reasoning extraction
+     *              ({@link AgentContext#declinedAsReasoning})
+     */
+    static String beside(boolean nativeTools, boolean quiet) {
+        if (quiet) {
+            return nativeTools ? "- Beside your call: write nothing."
+                    : "- Beside your call: nothing -- the JSON has only \"tool\" and \"params\".";
+        }
+        return nativeTools
+                ? "- Beside your call: when the user is waiting, the text you write beside a tool call "
+                        + "is shown to them live in the chat: " + NARRATION
+                : "- Beside your call: write \"reasoning\" first in the JSON. When the user is waiting, "
+                        + "'reasoning' is shown to them live in the chat: " + NARRATION;
+    }
+
+    /**
      * The text protocol's action, restated to a model whose reply was not one: what makes it an
-     * action, without the 'reasoning' the system prompt asks for -- or, in a task the provider
-     * declined as reasoning extraction, does not.
+     * action, without the 'reasoning' the per-step block asks for ({@link #beside}) -- or, in a
+     * task the provider declined as reasoning extraction, does not.
      */
     private static final String ACTION_FORMAT = "Reply with one JSON object: {\"tool\": \"name\", "
             + "\"params\": {...}}. To answer: {\"tool\": \"respond\", \"params\": {\"message\": \"...\"}}.";

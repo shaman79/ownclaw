@@ -246,18 +246,21 @@ class ToolFinderTest {
     }
 
     @Test
-    @DisplayName("every model offered skills by find_tools is told about it, and no other")
+    @DisplayName("every model offered tools natively is told it can call only those and find_tools finds the rest; the text protocol is not")
     void theRuleIsTrue() {
         var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(library()),
                 new com.ownclaw.config.OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "send an email");
-        String rule = "you can call only the tools you are given";
-        for (var mode : List.of(new ThinkingEngine.StepMode(true, false, true), new ThinkingEngine.StepMode(true, false, false))) {
+        String rule = "You are not given every skill, and you can call only the tools you are given: find_tools "
+                + "searches every skill";
+        // The cloud orchestrating only is told so too: the system prompt is the same before a
+        // delegation fails and after, when it is given skills.
+        for (var mode : List.of(new ThinkingEngine.StepMode(true, false, true), new ThinkingEngine.StepMode(true, false, false),
+                new ThinkingEngine.StepMode(true, true, false))) {
             assertTrue(engine.buildMessages(ctx, "ollama", mode).get(0).content().contains(rule), mode.toString());
         }
-        for (var mode : List.of(new ThinkingEngine.StepMode(false, false, true), new ThinkingEngine.StepMode(true, true, false))) {
-            assertFalse(engine.buildMessages(ctx, "ollama", mode).get(0).content().contains(rule), mode.toString());
-        }
+        var text = new ThinkingEngine.StepMode(false, false, true);
+        assertFalse(engine.buildMessages(ctx, "ollama", text).get(0).content().contains(rule), text.toString());
     }
 
     @Test

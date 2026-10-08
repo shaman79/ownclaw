@@ -593,6 +593,11 @@ class TaskEndToEndTest {
         return rig.jdbc.queryForObject("SELECT sum(tokens_used) FROM token_usage WHERE user_id = 'u1'", Integer.class);
     }
 
+    /** Every message of a call, as one text. */
+    static String all(List<LlmMessage> messages) {
+        return String.join("\n", messages.stream().map(LlmMessage::content).toList());
+    }
+
     @Test
     @DisplayName("a step declined as reasoning extraction is asked again, with no words asked for beside the call")
     void aStepDeclinedAsReasoningIsAskedAgainQuietly(@TempDir Path tmp) throws Exception {
@@ -611,19 +616,21 @@ class TaskEndToEndTest {
         assertEquals(4, thinks.size());
         String invited = "reads what you write beside each call";
         List<LlmMessage> asked = thinks.get(1).messages();
-        assertTrue(asked.get(0).content().contains(ThinkingEngine.NARRATION), asked.get(0).content());
-        assertTrue(asked.get(asked.size() - 1).content().contains(invited), "the premise: the per-step block invites them");
+        String step = asked.get(asked.size() - 1).content();
+        assertTrue(step.contains(invited) && step.contains(ThinkingEngine.NARRATION),
+                "the premise: the per-step block asks for them: " + step);
         assertTrue(asked.stream().anyMatch(m -> m.content().contains(beside)), "the premise: step 1's words are replayed");
         for (var again : thinks.subList(2, 4)) {
             var quiet = again.messages();
-            assertFalse(quiet.get(0).content().contains(ThinkingEngine.NARRATION), quiet.get(0).content());
-            assertTrue(quiet.get(0).content().contains("Call exactly one tool per step, and write nothing beside it."),
-                    quiet.get(0).content());
+            assertFalse(all(quiet).contains(ThinkingEngine.NARRATION), "nothing asks for words: " + quiet);
             String last = quiet.get(quiet.size() - 1).content();
-            assertTrue(last.contains("THE USER IS WAITING") && !last.contains(invited), last);
-            assertTrue(quiet.stream().noneMatch(m -> m.content().contains(beside)),
-                    "the words beside an earlier call are not shown again: " + quiet);
+            assertTrue(last.contains("THE USER IS WAITING") && !last.contains(invited)
+                    && last.contains(ThinkingEngine.beside(true, true)), last);
         }
+        // Asked at the end of the conversation: the provider reads all before it from its cache.
+        var quiet = thinks.get(2).messages();
+        assertEquals(asked.subList(0, asked.size() - 1), quiet.subList(0, asked.size() - 1),
+                "the system prompt and the steps replayed, step 1's words among them, are the same bytes");
         assertEquals(2, r.trajectory().steps().size(), "the declined step is not one of them");
         assertEquals(3 * 1_100 + 2_300, cloudTokens(rig), "the declined reply was billed, so it is counted");
         List<String> rows = rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class);
@@ -634,23 +641,36 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("declined as reasoning extraction again when asked quietly, the task ends saying so in words")
-    void declinedTwiceEndsInWords(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of());
+    @DisplayName("declined again when asked quietly, the step is asked once more without the earlier words; a third time, the task ends saying so in words")
+    void declinedThriceEndsInWords(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        String beside = "Checking the network first.";
+        rig.cloud.think.add(c -> com.ownclaw.llm.Replies.of(beside, 1_000, 100, 0, 0, "tool_use",
+                List.of(new com.ownclaw.llm.ToolCall("c-noop", "noop", Map.of()))));
+        rig.cloud.think.add(declined("reasoning_extraction"));
         rig.cloud.think.add(declined("reasoning_extraction"));
         rig.cloud.think.add(declined("reasoning_extraction"));
         AgentResult r = rig.turn(session(rig), "check the network");
 
         assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
         var thinks = rig.cloud.calls("think");
-        assertEquals(2, thinks.size(), "asked again once, not until it answers");
-        assertFalse(thinks.get(1).messages().get(0).content().contains(ThinkingEngine.NARRATION), "asked quietly");
+        assertEquals(4, thinks.size(), "asked again twice, not until it answers");
+        for (var quiet : thinks.subList(2, 4)) {
+            assertFalse(all(quiet.messages()).contains(ThinkingEngine.NARRATION), "asked quietly");
+        }
+        assertTrue(all(thinks.get(2).messages()).contains(beside), "first with the earlier words, as cached");
+        assertFalse(all(thinks.get(3).messages()).contains(beside), "then without them");
         assertTrue(r.response().startsWith("**Stopped:** the cloud model's provider (anthropic) stopped the step as "
                 + "reasoning extraction -- a safety check against giving away the model's hidden reasoning -- and "
-                + "did so again after the model was asked for no progress updates beside its calls.\n\n"
-                + "**What it did** — 0 steps, 4,600 cloud tokens, "), r.response());
+                + "did so again after the model was asked for no progress updates beside its calls, and again "
+                + "when it was no longer shown those it had written.\n\n**What it did** — "), r.response());
+        assertTrue(r.response().contains("8,000 cloud tokens"), "every declined reply was billed: " + r.response());
         assertTrue(r.response().contains("**Next:** Your next message starts a new task"), r.response());
+        List<String> rows = rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress'", String.class);
+        assertTrue(rows.contains("⚠️ The cloud model's provider stopped step 2 as reasoning extraction again. Asking "
+                + "once more, without showing the model the progress updates it wrote before."), String.valueOf(rows));
+        // Mutation: end the task on the second decline, as before -> 3 calls, and the ending's words.
     }
 
     @Test

@@ -144,4 +144,44 @@ class TokenAccountingTest {
                 "both local replies, the one cut off at the window too, with their cache reads");
         assertEquals(1_100, completed.get("cloudTokens").asInt(), "the delegate step's, and nothing local in it");
     }
+
+    @Test
+    @DisplayName("the page is told the cloud's tokens kind by kind and what they cost, live; their sum stays for whatever reads it")
+    void theCloudKindByKind(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(TaskEndToEndTest.NOOP));
+        rig.cloud.think.add(noop("claude-opus-5", attempt("claude-opus-5", 400, 250, 1_000, 11_800)));
+        rig.cloud.think.add(noop("claude-opus-5", attempt("claude-opus-5", 300, 50, 200, 12_800)));
+        rig.cloud.think.add(DONE);
+        var statuses = rig.statuses();
+        rig.turn(TaskEndToEndTest.session(rig), "check the network");
+
+        double cost = ((Number) rig.jdbc.queryForObject("SELECT SUM(cost_usd) FROM token_usage WHERE user_id = 'u1'",
+                Double.class)).doubleValue();
+        var done = statuses.stream().filter(s -> s.type() == com.ownclaw.observability.ChatStatusEmitter.StatusMessage.Type.COMPLETED)
+                .findFirst().orElseThrow();
+        @SuppressWarnings("unchecked")
+        var cloud = (Map<String, Object>) done.data().get("cloud");
+        assertEquals(700, cloud.get("promptTokens"), "new input");
+        assertEquals(300, cloud.get("completionTokens"));
+        assertEquals(24_600, cloud.get("cacheReadTokens"));
+        assertEquals(1_200, cloud.get("cacheWriteTokens"));
+        assertEquals(cost, (double) cloud.get("costUsd"), 1e-12, "what the budget was charged");
+        assertEquals(700 + 300 + 24_600 + 1_200, done.data().get("cloudTokens"), "their sum, for Telegram");
+        assertTrue(done.text().endsWith(String.format(java.util.Locale.ROOT, " · $%.2f cloud", cost)),
+                "the last line of the trace says what the cloud cost: " + done.text());
+        // The first step's own observe frame: its running totals, kind by kind.
+        var observed = statuses.stream().filter(s -> s.data() != null && "observe".equals(s.data().get("category")))
+                .findFirst().orElseThrow();
+        assertEquals(Map.of("promptTokens", 400, "completionTokens", 250, "cacheReadTokens", 11_800,
+                "cacheWriteTokens", 1_000), withoutCost(observed.data().get("cloud")));
+        // Mutation: count a cache write as a read -> 24,600 and 1,200 come out swapped.
+    }
+
+    /** A status's `cloud`, without its cost. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> withoutCost(Object cloud) {
+        var copy = new java.util.HashMap<>((Map<String, Object>) cloud);
+        copy.remove("costUsd");
+        return copy;
+    }
 }

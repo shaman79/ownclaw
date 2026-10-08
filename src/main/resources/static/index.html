@@ -675,7 +675,12 @@
             border-top: 1px solid rgba(255,255,255,.04);
         }
         #activity-stats.visible { display: flex }
+        /* The cloud's item is long -- its cost, then its tokens kind by kind -- so the row wraps,
+           and the item wraps between its parts, never inside one. */
+        #activity-stats { flex-wrap: wrap; row-gap: 2px }
         .stat-item { white-space: nowrap }
+        .stat-item.stat-cloud { white-space: normal }
+        .cloud-part { white-space: nowrap }
         .stat-label { color: var(--text-3); opacity: .7 }
         .stat-value { color: var(--text-2); font-weight: 500 }
 
@@ -1394,6 +1399,14 @@
             margin-top: 2px;
             text-transform: uppercase;
             letter-spacing: .04em;
+        }
+        /* The cloud card's tokens kind by kind, under its cost: wrapped between parts only. */
+        .task-stat-split {
+            font-size: 12px;
+            color: var(--text-2);
+            margin-top: 6px;
+            line-height: 1.5;
+            font-variant-numeric: tabular-nums;
         }
 
         /*  Active tasks section  */
@@ -2635,7 +2648,7 @@
             <span class="stat-item"><span class="stat-label">Steps </span><span class="stat-value" id="stat-steps">0</span></span>
             <span class="stat-item"><span class="stat-label">OK </span><span class="stat-value" id="stat-success">0</span></span>
             <span class="stat-item"><span class="stat-label">Fail </span><span class="stat-value" id="stat-fail">0</span></span>
-            <span class="stat-item"><span class="stat-label">Cloud </span><span class="stat-value" id="stat-cloud">0</span></span>
+            <span class="stat-item stat-cloud"><span class="stat-label">Cloud </span><span class="stat-value" id="stat-cloud">0</span></span>
             <span class="stat-item"><span class="stat-label">Local </span><span class="stat-value" id="stat-local">0</span></span>
         </div>
     </div>
@@ -3257,14 +3270,29 @@
             card.appendChild(node('div', 'task-stat-value' + (cls ? ' ' + cls : ''), value));
             card.appendChild(node('div', 'task-stat-label', label));
             stats.appendChild(card);
+            return card;
         }
         var oc = tdOutcome(outcome, steps.filter(function(s) { return s.ok === false; }).length,
                 steps.some(function(s) { return s.ok && s.reportedFailure == null; }));
         stat(oc.words, 'Outcome', 'text' + (oc.tone ? ' ' + oc.tone : ''));
-        stat(formatTokenCount(recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens')), 'Cloud tokens');
+        // The cloud as what it cost, then its tokens kind by kind: together they are mostly cache
+        // reads, at a tenth of the price, and were read as the cost. A task from before requests
+        // were recorded has only the total.
+        if (!recorded) {
+            stat(formatTokenCount(tdSum(steps, 'cloudTokens')), 'Cloud tokens')
+                    .appendChild(node('div', 'task-stat-split', 'cost and kinds not recorded'));
+        } else if (!calls.length) {
+            stat('none', 'Cloud', 'text');
+        } else {
+            var cloudCard = stat(cloudCost(totals), 'Cloud');
+            var split = node('div', 'task-stat-split');
+            cloudParts(totals).forEach(function(p, i) {
+                if (i) split.appendChild(document.createTextNode(' · '));
+                split.appendChild(node('span', 'cloud-part', p));
+            });
+            cloudCard.appendChild(split);
+        }
         stat(formatTokenCount(outcome ? outcome.localTokens : tdSum(steps, 'localTokens')), 'Local tokens');
-        stat(!recorded ? 'not recorded' : calls.length ? (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd)
-                : 'none', 'Cost', calls.length ? '' : 'text');
         view.appendChild(stats);
 
         var stepsPanel = node('div');
@@ -3332,12 +3360,13 @@
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
         // A failed call can have no tokens and no cost on record; if that is all there was, say so.
+        // Otherwise what the calls cost, then their tokens kind by kind (cloudLine).
         var unrecorded = s.costIsFloor && !s.cloudTokens;
-        d.appendChild(tdRow('Tokens', (unrecorded ? 'not recorded' : formatTokenCount(s.cloudTokens)) + ' cloud / '
-                + formatTokenCount(s.localTokens) + ' local'));
-        d.appendChild(tdRow('Cost', unrecorded ? 'not recorded: the call failed'
-                : s.costUsd != null ? (s.costIsFloor ? '≥ ' : '') + formatUsd(s.costUsd)
-                : recorded ? 'none: no cloud call' : 'not recorded'));
+        d.appendChild(tdRow('Cloud', unrecorded ? 'not recorded: the call failed'
+                : s.costUsd != null ? cloudLine(s)
+                : recorded ? 'none: no cloud call'
+                : formatTokenCount(s.cloudTokens) + ' tokens; their cost was not recorded'));
+        d.appendChild(tdRow('Local tokens', formatTokenCount(s.localTokens)));
         if (s.reportedFailure) {
             d.appendChild(tdRow('Result', 'Failed: the skill reported ok:false', 'error'));
         } else if (!s.ok) {
@@ -3369,8 +3398,7 @@
                     + (failedN ? '; ' + failedN + ' failed' : '')
                     + (!unknownN ? '' : ', and whether ' + (unknownN === failedN ? (failedN === 1 ? 'it' : 'they')
                         : unknownN + ' of them') + ' reached the provider is not recorded') + '. Together: '
-                    + formatBytes(totals.bytesOut) + ', ' + formatTokenCount(tdBilled(totals)) + ' tokens, '
-                    + (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd) + '.';
+                    + formatBytes(totals.bytesOut) + ', ' + cloudLine(totals) + '.';
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
             if (dec.unparsed) head += ' ' + tdCount(dec.unparsed, 'record', 'records') + ' could not be read.';
             panel.appendChild(node('div', 'task-trace-headline', head));
@@ -3495,9 +3523,7 @@
         var failed = c.decision === 'ERROR';
         d.appendChild(tdRow('Tokens', c.decision === 'REFUSED' ? 'none: it was not sent'
                 : c.promptTokens == null ? 'not recorded: the call failed'
-                : 'in ' + formatTokenCount(c.promptTokens) + ' · cache read ' + formatTokenCount(c.cacheReadTokens)
-                    + ' · cache write ' + formatTokenCount(c.cacheWriteTokens) + ' · out ' + formatTokenCount(c.completionTokens)
-                    + (failed ? ', as reported before the call failed' : '')));
+                : cloudParts(c).join(' · ') + (failed ? ', as reported before the call failed' : '')));
         d.appendChild(tdRow('Cost', c.decision === 'REFUSED' ? 'none'
                 : c.costUsd == null ? 'not recorded: the call failed' : (failed ? '≥ ' : '') + formatUsd(c.costUsd)));
         if (c.scrubs > 0) d.appendChild(tdRow('Secrets removed', String(c.scrubs)));
@@ -3535,6 +3561,30 @@
     /** Tokens billed: in, out, and both cache directions. */
     function tdBilled(o) {
         return (o.promptTokens || 0) + (o.completionTokens || 0) + (o.cacheReadTokens || 0) + (o.cacheWriteTokens || 0);
+    }
+
+    /**
+     * What the cloud cost, from the task page's totals or one of its steps, or a status's `cloud`:
+     * "≥" when a call failed and its tokens are counted only as far as they were reported.
+     */
+    function cloudCost(o) {
+        return (o.costIsFloor ? '≥ ' : '') + formatUsd(o.costUsd);
+    }
+
+    /**
+     * The cloud's tokens kind by kind, as they are billed: new input, output, read from the cache
+     * -- a tenth of the price of new input -- and written to it. Shown instead of their sum, which
+     * is mostly cache reads and was read as what the task cost.
+     */
+    function cloudParts(o) {
+        return [formatTokenCount(o.promptTokens || 0) + ' in', formatTokenCount(o.completionTokens || 0) + ' out',
+                formatTokenCount(o.cacheReadTokens || 0) + ' from cache',
+                formatTokenCount(o.cacheWriteTokens || 0) + ' to cache'];
+    }
+
+    /** "$4.60 · 46.2K in · 13.0K out · 590.0K from cache · 419.0K to cache" */
+    function cloudLine(o) {
+        return [cloudCost(o)].concat(cloudParts(o)).join(' · ');
     }
 
     function tdCount(n, one, many) {
@@ -5353,12 +5403,26 @@
         return m + 'm ' + s + 's';
     }
 
-    /** Update live stats bar from observe detail data. */
+    /**
+     * Update live stats bar from observe detail data. The cloud as what it cost, then its tokens
+     * kind by kind (cloudParts): all of them together read as inflated, most being cache reads at
+     * a tenth of the price. Before its first cloud call a task has none; a task from before they
+     * were recorded apart has only the total.
+     */
     function updateStats(d) {
         if (d.totalSteps != null) statSteps.textContent = d.totalSteps;
         if (d.successCount != null) statSuccess.textContent = d.successCount;
         if (d.totalSteps != null && d.successCount != null) statFail.textContent = d.totalSteps - d.successCount;
-        if (d.cloudTokens != null) statCloud.textContent = d.cloudTokens.toLocaleString();
+        if (d.cloud && tdBilled(d.cloud) > 0) {
+            statCloud.textContent = '';
+            statCloud.appendChild(node('span', 'cloud-part', cloudCost(d.cloud)));
+            cloudParts(d.cloud).forEach(function(p) {
+                statCloud.appendChild(document.createTextNode(' · '));
+                statCloud.appendChild(node('span', 'cloud-part', p));
+            });
+        } else if (d.cloudTokens != null) {
+            statCloud.textContent = d.cloudTokens ? d.cloudTokens.toLocaleString() + ' tokens' : '0';
+        }
         if (d.localTokens != null) statLocal.textContent = d.localTokens.toLocaleString();
         activityStats.classList.add('visible');
     }
@@ -5421,6 +5485,9 @@
             if (authToken !== asked || displayedSessionId !== sessionId) return;
             var steps = t.steps || [], totals = t.totals || {}, outcome = t.outcome;
             var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');
+            // The totals carry the cloud's tokens kind by kind and its cost, under the names a
+            // live frame's `cloud` does; a task from before requests were recorded has neither.
+            var cloudUse = t.recorded ? totals : null;
             var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');
             var ok = steps.filter(function(st) { return st.ok !== false; }).length;
             if (activityWrap.style.display !== 'block') {
@@ -5428,8 +5495,8 @@
                 activityLabel.textContent = outcome ? 'Last task' : 'Working...';
                 if (outcome) doneActivity();
             }
-            updateStats({ totalSteps: steps.length, successCount: ok, cloudTokens: cloud, localTokens: local });
-            updateTokens({ cloudTokens: cloud, localTokens: local });
+            updateStats({ totalSteps: steps.length, successCount: ok, cloudTokens: cloud, cloud: cloudUse, localTokens: local });
+            updateTokens({ cloudTokens: cloud, cloud: cloudUse, localTokens: local });
         })
         .catch(function(e) { console.error('Task ' + taskId + ' totals:', e); });
     }
@@ -5445,10 +5512,11 @@
         var local = data.localTokens || 0;
         var total = cloud + local;
         if (total === 0) { activityTokens.textContent = ''; return; }
+        // The cloud as what it cost; its tokens kind by kind are in the stats row (updateStats).
         var parts = [];
-        if (cloud > 0) parts.push(cloud.toLocaleString() + ' cloud');
-        if (local > 0) parts.push(local.toLocaleString() + ' local');
-        activityTokens.textContent = parts.join(' + ') + ' tok';
+        if (cloud > 0) parts.push(data.cloud ? cloudCost(data.cloud) + ' cloud' : cloud.toLocaleString() + ' cloud tok');
+        if (local > 0) parts.push(local.toLocaleString() + ' local tok');
+        activityTokens.textContent = parts.join(' + ');
     }
 
     function doneActivity() {

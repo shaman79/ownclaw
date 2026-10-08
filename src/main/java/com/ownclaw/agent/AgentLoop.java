@@ -786,17 +786,21 @@ public class AgentLoop {
                 // Declined as reasoning extraction: the provider judged the step to be giving away
                 // the model's hidden reasoning, most likely because of the words the prompt asks
                 // for beside each call, which ended the owner's task on 2026-10-01. The step is
-                // asked again, once, with no such words asked for or shown back; declined again,
-                // it ends like any refusal.
-                if (!declined.asReasoningExtraction() || context.declinedAsReasoning()) {
+                // asked again with no such words asked for, which changes only the end of the
+                // request, so the provider reads the rest from its cache; declined again, it is
+                // asked once more without the words the model wrote beside its earlier calls,
+                // which rewrites the steps it is shown (AgentContext#declinedAsReasoning); declined
+                // a third time, it ends like any refusal.
+                if (!declined.asReasoningExtraction() || context.timesDeclinedAsReasoning() == 2) {
                     return noAnswer(context, local, provider, declined.reply(), declined);
                 }
                 account(context, local, provider, declined.reply());
                 context.markProgress(); // the model replied
-                log.warn("Task {} step {}: declined as reasoning extraction; asking again with no "
-                        + "words beside the call", context.taskId(), step + 1);
                 context.markDeclinedAsReasoning();
-                context.chat().askedAgainQuietly(step + 1);
+                log.warn("Task {} step {}: declined as reasoning extraction; asking again with no "
+                        + "words beside the call{}", context.taskId(), step + 1,
+                        context.earlierWordsWithheld() ? ", nor those beside the earlier ones" : "");
+                context.chat().askedAgainQuietly(step + 1, context.earlierWordsWithheld());
                 step--; // the same step, asked again
                 continue;
             } catch (LlmException noReply) {
@@ -2044,12 +2048,13 @@ public class AgentLoop {
         } else {
             summary.append(result.terminationReason());
         }
+        // The cloud as what it cost: its tokens together are mostly cache reads, at a tenth of the
+        // price, and the page shows them kind by kind under this line (tokenData).
         if (cloud > 0 || local > 0) {
             summary.append(" · ");
-            if (cloud > 0) summary.append(String.format("%,d", cloud)).append(" cloud");
+            if (cloud > 0) summary.append(String.format(Locale.ROOT, "$%.2f", context.cloudCostUsd())).append(" cloud");
             if (cloud > 0 && local > 0) summary.append(" + ");
-            if (local > 0) summary.append(String.format("%,d", local)).append(" local");
-            summary.append(" tokens");
+            if (local > 0) summary.append(String.format("%,d", local)).append(" local tokens");
         }
 
         // Three outcomes, not two. A task that stopped to ask the user a question is neither
@@ -2096,13 +2101,18 @@ public class AgentLoop {
         return sb.toString();
     }
 
-    /** Build structured token data for status messages. */
+    /**
+     * The task's running totals for status messages: its steps, and its tokens -- the cloud's
+     * kind by kind with what they cost ({@link AgentContext#cloudUse}), which the page shows, and
+     * all of them together, which Telegram does.
+     */
     private Map<String, Object> tokenData(AgentContext context) {
         var steps = context.trajectory().steps();
         int totalSteps = steps.size();
         int successes = (int) steps.stream().filter(t -> t.observation().success()).count();
         return Map.of(
                 "cloudTokens", context.cloudTokens(),
+                "cloud", context.cloudUse(),
                 "localTokens", context.localTokens(),
                 "totalSteps", totalSteps,
                 "successCount", successes
@@ -2400,7 +2410,7 @@ public class AgentLoop {
             if (billed > 0 && !context.addLocalTokens(billed)) recordAfterEnd(context, billed);
             return billed;
         }
-        context.addCloudTokens(billed);
+        context.addCloudTokens(reply);
         if (billed > 0) {
             double cost = ModelPricing.costUsd(reply.model() != null ? reply.model() : provider.model(), reply);
             context.addCloudCost(cost);
@@ -2907,6 +2917,7 @@ public class AgentLoop {
         detail.put("totalSteps", totalSteps);
         detail.put("successCount", successes);
         detail.put("cloudTokens", context.cloudTokens());
+        detail.put("cloud", context.cloudUse());
         detail.put("localTokens", context.localTokens());
         detail.put("elapsedMs", context.elapsedMs());
 

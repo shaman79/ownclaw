@@ -34,10 +34,13 @@ class AttendedGuidanceTest {
                 String system = messages.get(0).content();
                 String step = messages.get(messages.size() - 1).content();
 
-                assertTrue(system.contains((nativeTools ? "the text you write beside a tool call is shown to them "
+                // In the per-step block, which can ask for none once the provider has declined a
+                // step as reasoning extraction, with the cached system prompt as it was.
+                assertTrue(step.contains((nativeTools ? "the text you write beside a tool call is shown to them "
                         + "live in the chat: " : "'reasoning' is shown to them live in the chat: ")
-                        + ThinkingEngine.NARRATION), path + system);
-                assertFalse(system.contains("reasoning, not the answer"), path + system);
+                        + ThinkingEngine.NARRATION), path + step);
+                assertFalse(system.contains(ThinkingEngine.NARRATION), path + system);
+                assertFalse(step.contains("reasoning, not the answer"), path + step);
                 assertTrue(system.contains("is read by the local model: to read, summarise, search, compare or "
                         + "answer a question about it, delegate and name its handle in the goal."), path + system);
                 assertTrue(system.contains("Never create one only to read or summarise data -- delegate that."),

@@ -64,9 +64,10 @@ public class AgentContext {
     /** Null until the local tier is checked; see {@link #localTierReady()}. */
     private volatile Boolean localTierReady;
 
-    // Per-task token usage counters, and what the cloud calls cost
+    // Per-task token usage counters, and what the cloud calls cost: the cloud's tokens kind by
+    // kind, as they are billed -- new input, output, read from the cache, written to it.
     private int localTokens;
-    private int cloudTokens;
+    private int cloudInputTokens, cloudOutputTokens, cloudCacheReadTokens, cloudCacheWriteTokens;
     private double cloudCostUsd;
     /** See {@link #closeCounters}. */
     private boolean countersClosed;
@@ -374,6 +375,40 @@ public class AgentContext {
         if (!fresh.isEmpty() || toolsAdded.isEmpty()) toolsAdded.add(new ToolsAdded(afterSteps, fresh));
     }
 
+    /** See {@link #orchestratedFirst}; null before the task's first native cloud step. */
+    private Boolean orchestratedFirst;
+    /** See {@link #skillsOfferedAfter}. */
+    private Integer skillsOfferedAfter;
+
+    /**
+     * A native step of the cloud model is about to be asked ({@code ThinkingEngine}), and whether
+     * it orchestrates only -- is given no skill to run -- or is given skills. The first such step
+     * decides the task's {@link #orchestratedFirst}; the first that is given skills, its
+     * {@link #skillsOfferedAfter}.
+     */
+    public synchronized void cloudStep(boolean orchestratesOnly) {
+        if (orchestratedFirst == null) orchestratedFirst = orchestratesOnly;
+        if (!orchestratesOnly && skillsOfferedAfter == null) skillsOfferedAfter = trajectory.size();
+    }
+
+    /**
+     * Whether this task's cloud model was asked to orchestrate only on its first step: then every
+     * skill is deferred in its tools for the whole task, the usual ones too, so that the tools --
+     * the front of the provider's cached prefix -- are the same bytes when a failed delegation
+     * gives it the skills after all.
+     */
+    public synchronized boolean orchestratedFirst() {
+        return Boolean.TRUE.equals(orchestratedFirst);
+    }
+
+    /**
+     * How many steps the trajectory held when this task's cloud model was first given skills to
+     * run -- on its first step, or when a delegation had failed -- or null while it has not been.
+     */
+    public synchronized Integer skillsOfferedAfter() {
+        return skillsOfferedAfter;
+    }
+
     /**
      * The credential key prefixes that mark a personal-content source
      * ({@code ownclaw.privacy.personal-sources}), set from the configuration at task start.
@@ -415,9 +450,38 @@ public class AgentContext {
         this.localTokens += tokens;
         return true;
     }
-    public synchronized void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
+    /** Count what a cloud reply was billed for, each kind of token apart. */
+    public synchronized void addCloudTokens(com.ownclaw.llm.LlmResponse reply) {
+        cloudInputTokens += reply.promptTokens();
+        cloudOutputTokens += reply.completionTokens();
+        cloudCacheReadTokens += reply.cacheReadTokens();
+        cloudCacheWriteTokens += reply.cacheCreationTokens();
+    }
+
     public synchronized int localTokens() { return localTokens; }
-    public synchronized int cloudTokens() { return cloudTokens; }
+
+    /**
+     * Every cloud token billed, the four kinds together: what the task's records, its ending and
+     * the budget count. A cache read costs a tenth of a new input token, so this is no measure of
+     * cost: {@link #cloudUse} is.
+     */
+    public synchronized int cloudTokens() {
+        return cloudInputTokens + cloudOutputTokens + cloudCacheReadTokens + cloudCacheWriteTokens;
+    }
+
+    /**
+     * The cloud's tokens kind by kind and what they cost, under the names the task page's totals
+     * use (promptTokens is the new input, the cache's tokens apart), for the page to show live.
+     */
+    public synchronized Map<String, Object> cloudUse() {
+        var use = new java.util.LinkedHashMap<String, Object>();
+        use.put("promptTokens", cloudInputTokens);
+        use.put("completionTokens", cloudOutputTokens);
+        use.put("cacheReadTokens", cloudCacheReadTokens);
+        use.put("cacheWriteTokens", cloudCacheWriteTokens);
+        use.put("costUsd", cloudCostUsd);
+        return use;
+    }
 
     /**
      * The task is ending: from now on its counters stay as its ending reads and records them. A
@@ -652,18 +716,33 @@ public class AgentContext {
     }
 
     /**
-     * Whether the provider has declined a step of this task as reasoning extraction. From then on
-     * the model is asked for no words beside its calls, nor shown those it wrote before
-     * ({@code ThinkingEngine}): the progress update it is asked for is the likely cause.
+     * How many steps of this task the provider has declined as reasoning extraction. After the
+     * first the model is asked for no words beside its calls ({@code ThinkingEngine}): the
+     * progress update it is asked for is the likely cause. That is asked at the end of the
+     * conversation, so the request is the one the provider has cached up to there. After the
+     * second it is no longer shown the words it wrote beside its earlier calls either, the other
+     * likely cause -- which rewrites the steps it is shown, so the provider writes them all to its
+     * cache again. A third ends the task ({@code AgentLoop}).
      */
-    private volatile boolean declinedAsReasoning;
+    private volatile int declinedAsReasoning;
 
+    /** Whether the provider has declined a step of this task as reasoning extraction. */
     public boolean declinedAsReasoning() {
+        return declinedAsReasoning > 0;
+    }
+
+    /** Whether the model is no longer shown the words it wrote beside its earlier calls. */
+    public boolean earlierWordsWithheld() {
+        return declinedAsReasoning > 1;
+    }
+
+    /** How many steps of this task the provider has declined as reasoning extraction. */
+    public int timesDeclinedAsReasoning() {
         return declinedAsReasoning;
     }
 
-    public void markDeclinedAsReasoning() {
-        declinedAsReasoning = true;
+    public synchronized void markDeclinedAsReasoning() {
+        declinedAsReasoning++;
     }
 
     /**

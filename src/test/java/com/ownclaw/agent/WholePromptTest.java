@@ -115,16 +115,27 @@ class WholePromptTest {
     }
 
     @Test
-    @DisplayName("once the provider declined a step as reasoning extraction, no protocol asks for words beside a call")
+    @DisplayName("once the provider declined a step as reasoning extraction, no protocol asks for words beside a call; declined again, the earlier words are not shown either")
     void aDeclinedTaskIsAskedForNoWords() {
         var engine = new ThinkingEngine(new ToolRegistry(List.of()), new OwnClawConfig(), null);
         var ctx = new AgentContext("u1", "t1", "check the network");
         ctx.trajectory().record(new AgentAction("noop", Map.of(), "Checking the network first."),
                 AgentObservation.success("noop", "nothing to report", Map.of(), 5));
+        var mode = new ThinkingEngine.StepMode(false, false, false);
+        String system = engine.buildMessages(ctx, "anthropic", mode).get(0).content();
+        assertTrue(all(engine.buildMessages(ctx, "anthropic", mode)).contains("\"reasoning\""), "the premise");
         ctx.markDeclinedAsReasoning();
         for (String provider : List.of("anthropic", "openai")) {
-            String prompt = all(engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(false, false, false)));
+            var messages = engine.buildMessages(ctx, provider, mode);
+            String prompt = all(messages);
             assertTrue(prompt.contains("Single JSON: {\"tool\": \"name\", \"params\": {...}}"), prompt);
+            assertFalse(prompt.contains("write \"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION), prompt);
+            assertTrue(prompt.contains("Checking the network first."), "shown as the provider has cached it: " + prompt);
+            assertEquals(system, messages.get(0).content(), "the system prompt is the one cached");
+        }
+        ctx.markDeclinedAsReasoning();
+        for (String provider : List.of("anthropic", "openai")) {
+            String prompt = all(engine.buildMessages(ctx, provider, mode));
             assertFalse(prompt.contains("\"reasoning\"") || prompt.contains(ThinkingEngine.NARRATION)
                     || prompt.contains("Checking the network first."), prompt);
         }

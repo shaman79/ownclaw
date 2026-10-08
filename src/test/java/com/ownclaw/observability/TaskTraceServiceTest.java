@@ -94,6 +94,30 @@ class TaskTraceServiceTest {
     }
 
     @Test
+    @DisplayName("a step's cloud tokens kind by kind, over the calls before it; a call with none recorded adds none; a step with no call has none")
+    void aStepsTokensKindByKind() {
+        row("egress", egress("SENT", 1000, 50, 0.01, null)
+                .replace("\"cacheWriteTokens\":0,\"cacheReadTokens\":0", "\"cacheWriteTokens\":300,\"cacheReadTokens\":90000"));
+        row("egress", egress("SENT", 200, 10, 0.02, null)
+                .replace("\"cacheWriteTokens\":0,\"cacheReadTokens\":0", "\"cacheWriteTokens\":40,\"cacheReadTokens\":91000"));
+        row("egress", egress("ERROR", 0, 0, 0, null));
+        row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":182600}");
+        row("step", "{\"step\":2,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":182600}");
+
+        var steps = list(TaskTraceService.build(rows), "steps");
+        var first = steps.get(0);
+        assertEquals(1200L, first.get("promptTokens"), "new input");
+        assertEquals(60L, first.get("completionTokens"));
+        assertEquals(181000L, first.get("cacheReadTokens"));
+        assertEquals(340L, first.get("cacheWriteTokens"));
+        assertEquals(182600L, first.get("cloudTokens"), "their sum, as before");
+        for (String kind : List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens")) {
+            assertNull(steps.get(1).get(kind), "no cloud call before it: not recorded as zero " + kind);
+        }
+        // Mutation: the split over every call of the task -> the second step has the first's.
+    }
+
+    @Test
     @DisplayName("a step chosen with no cloud call but more local tokens was the local model's")
     void localFallback() {
         row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":500,\"cloudTokens\":0}");

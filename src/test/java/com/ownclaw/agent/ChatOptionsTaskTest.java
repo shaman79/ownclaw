@@ -101,9 +101,20 @@ class ChatOptionsTaskTest {
         // Mutation: the ending reading the default (off) -> the switch goes unmentioned.
     }
 
-    /** The registry's skills among the tools the cloud model was offered on a step. */
-    static List<String> skillsOffered(Call think) {
-        return think.config().tools().stream().map(ToolSpec::name).filter("noop"::equals).toList();
+    /**
+     * Whether the cloud model was asked to orchestrate only on a step: delegate says the skills
+     * are not given to it -- and then none is offered: in the array, deferred, with no TOOLS
+     * message to offer it.
+     */
+    static boolean orchestratesOnly(Call think) {
+        String delegate = think.config().tools().stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
+                .findFirst().orElseThrow().description();
+        boolean only = delegate.contains("you are not given the skills to run yourself");
+        if (only) {
+            assertTrue(ToolSpec.offered(think.config().tools(), think.messages()).stream()
+                    .noneMatch(t -> "noop".equals(t.name())), "a skill offered all the same");
+        }
+        return only;
     }
 
     @Test
@@ -127,10 +138,10 @@ class ChatOptionsTaskTest {
         rig.turn(chat, "check the network", ChatOptions.NONE);
 
         var think = rig.cloud.calls("think");
-        assertEquals(List.of("noop"), skillsOffered(think.get(0)), "Fastest: the cloud runs the skills");
-        assertEquals(List.of(), skillsOffered(think.get(1)), "the default Cheaper: they are the local model's");
-        assertEquals(List.of(), skillsOffered(think.get(2)), "Cheaper: they are the local model's");
-        assertEquals(List.of("noop"), skillsOffered(think.get(3)), "the default Fastest: the cloud runs them");
+        assertFalse(orchestratesOnly(think.get(0)), "Fastest: the cloud runs the skills");
+        assertTrue(orchestratesOnly(think.get(1)), "the default Cheaper: they are the local model's");
+        assertTrue(orchestratesOnly(think.get(2)), "Cheaper: they are the local model's");
+        assertFalse(orchestratesOnly(think.get(3)), "the default Fastest: the cloud runs them");
         // Mutation: stepMode reading the default again -> the first and third tasks follow it.
     }
 

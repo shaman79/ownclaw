@@ -77,7 +77,8 @@ final class TaskEnding {
         if (declined.asReasoningExtraction()) {
             return who + " stopped the step as reasoning extraction -- a safety check against giving "
                     + "away the model's hidden reasoning -- and did so again after the model was asked for "
-                    + "no progress updates beside its calls";
+                    + "no progress updates beside its calls, and again when it was no longer shown those "
+                    + "it had written";
         }
         String category = declined.category();
         return who + " declined to answer this request" + (category == null

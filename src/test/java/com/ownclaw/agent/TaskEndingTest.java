@@ -44,7 +44,8 @@ class TaskEndingTest {
         ctx.addArtifact("write_text_file_verbatim", Map.of(), Map.of(), "{\"ok\": true, \"preview\": \""
                 + AUDIT.substring(0, 200) + "\"}", true, new Artifact.Decision(Label.PRIVATE, List.of("references {{2}}")));
         ctx.addArtifact("cat_report", Map.of(), Map.of(), AUDIT, true, new Artifact.Decision(Label.PUBLIC, List.of()));
-        ctx.addCloudTokens(324_866);
+        ctx.addCloudTokens(com.ownclaw.llm.LlmResponse.billedFor(List.of(
+                new com.ownclaw.llm.LlmResponse.Usage("claude-opus-5", 4_866, 20_000, 0, 300_000))));
         return ctx;
     }
 

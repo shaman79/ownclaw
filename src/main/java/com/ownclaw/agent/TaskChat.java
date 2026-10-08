@@ -209,12 +209,19 @@ public final class TaskChat {
      * The provider stopped step {@code step} as reasoning extraction, and the step is asked again
      * ({@code AgentLoop}). Said, because from here on the steps come with no words beside them,
      * and the owner would otherwise see the progress updates simply stop.
+     *
+     * @param again it had stopped a step so before, and the model is now no longer shown the
+     *              progress updates it wrote either
      */
-    void askedAgainQuietly(int step) {
+    void askedAgainQuietly(int step, boolean again) {
         if (sessionId == null) return;
-        note("⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a "
-                + "safety check against giving away the model's hidden reasoning, most likely set off by "
-                + "the progress updates. Asking again; the steps from here on come without them.");
+        note(again
+                ? "⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction "
+                        + "again. Asking once more, without showing the model the progress updates it "
+                        + "wrote before."
+                : "⚠️ The cloud model's provider stopped step " + step + " as reasoning extraction: a "
+                        + "safety check against giving away the model's hidden reasoning, most likely set "
+                        + "off by the progress updates. Asking again; the steps from here on come without them.");
     }
 
     /**

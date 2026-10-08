@@ -75,7 +75,11 @@ class CloudToolsTest {
         var tools = engine.toolsFor(ctx, mode);
 
         assertTrue(messages.stream().noneMatch(m -> m.role() == LlmMessage.Role.TOOLS), "it calls no skill");
-        assertTrue(tools.stream().noneMatch(t -> t.name().startsWith("filler_") || "smtp_send_email".equals(t.name())));
+        // Sent, deferred, so that the tools stay the same bytes when a failed delegation gives
+        // it the skills; offered by no TOOLS message until then.
+        assertTrue(com.ownclaw.llm.ToolSpec.offered(tools, messages).stream()
+                .noneMatch(t -> t.name().startsWith("filler_") || "smtp_send_email".equals(t.name())));
+        assertTrue(tools.stream().filter(t -> "smtp_send_email".equals(t.name())).allMatch(com.ownclaw.llm.ToolSpec::deferred));
         String delegate = tools.stream().filter(t -> AgentAction.DELEGATE.equals(t.name())).findFirst()
                 .orElseThrow().description();
         assertTrue(delegate.contains("- smtp_send_email: Send an email through the configured SMTP server."), delegate);
@@ -90,6 +94,33 @@ class CloudToolsTest {
                 AgentObservation.success(AgentAction.FIND_TOOLS, "20 skills match", Map.of(), 1));
         assertEquals(delegate, engine.toolsFor(ctx, mode).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
                 .findFirst().orElseThrow().description());
+    }
+
+    @Test
+    @DisplayName("on a provider without deferred loading, the skills a failed delegation gives are added after the tools it had")
+    void theValveWithoutToolChanges() {
+        var engine = new ThinkingEngine(new com.ownclaw.agent.tools.ToolRegistry(ToolFinderTest.library()),
+                new com.ownclaw.config.OwnClawConfig(), null);
+        var ctx = new AgentContext("u1", "t1", "Fetch the lunch menus, then send them with smtp_send_email.");
+        ctx.setUnattended(true);
+        ctx.setUsualTools(List.of("web_fetch"));
+        // As a step asks: the messages, then the tools.
+        var orchestrating = new ThinkingEngine.StepMode(true, true, false);
+        var messages = engine.buildMessages(ctx, "openai", orchestrating);
+        var before = ToolSpec.offered(engine.toolsFor(ctx, orchestrating), messages);
+
+        ctx.trajectory().record(new AgentAction(AgentAction.DELEGATE, Map.of("goal", "fetch and send"), ""),
+                AgentObservation.failure(AgentAction.DELEGATE, "Delegation incomplete", 1));
+        var given = new ThinkingEngine.StepMode(true, false, false);
+        messages = engine.buildMessages(ctx, "openai", given);
+        var after = ToolSpec.offered(engine.toolsFor(ctx, given), messages);
+
+        assertEquals(before, after.subList(0, before.size()), "the tools it had, as they were");
+        assertEquals(List.of("web_fetch", "smtp_send_email", "daily_menu_fetcher"),
+                after.subList(before.size(), after.size()).stream().map(ToolSpec::name).toList(),
+                "then the usual skill, and the task's first ones");
+        assertTrue(after.stream().noneMatch(ToolSpec::deferred), "offered, not deferred, to a provider that reads every tool");
+        // Mutation: the usual skills left out of the valve's addition -> web_fetch is never offered.
     }
 
     @Test
