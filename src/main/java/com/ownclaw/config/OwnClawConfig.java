@@ -35,7 +35,25 @@ public class OwnClawConfig {
         private String provider = "ollama";
         private String url = "http://localhost:11434";
         private String model = "qwen2.5:14b";
-        private double temperature = 0.3;
+
+        /**
+         * How the local model chooses each next piece of a reply it reasons on first, sent whole
+         * with every such call (OllamaProvider), so neither the model file's defaults nor
+         * Ollama's own decide. The default is the model publisher's recommendation for
+         * Qwen3.6-35B-A3B in thinking mode, general tasks (its model card). The presence penalty
+         * is what keeps the model out of loops: on 2026-10-08 the turn that had hung for two and a
+         * half hours, replayed three times at each setting, looped once at temperature 0.3 with
+         * no penalty and once at 0.6 with none, and never at these values. Ollama on the
+         * production host was checked to honour every one of them that day.
+         */
+        private Sampling thinking = new Sampling(1.0, 0.95, 20, 0.0, 1.5);
+
+        /**
+         * The same for a reply the model gives straight away, without reasoning first (asked for
+         * by the call, or by the thinking effort at low): the publisher's recommendation for
+         * Qwen3.6-35B-A3B in non-thinking mode.
+         */
+        private Sampling answering = new Sampling(0.7, 0.80, 20, 0.0, 1.5);
 
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
@@ -43,8 +61,52 @@ public class OwnClawConfig {
         public void setUrl(String url) { this.url = url; }
         public String getModel() { return model; }
         public void setModel(String model) { this.model = model; }
-        public double getTemperature() { return temperature; }
-        public void setTemperature(double temperature) { this.temperature = temperature; }
+        public Sampling getThinking() { return thinking; }
+        public void setThinking(Sampling thinking) { this.thinking = thinking; }
+        public Sampling getAnswering() { return answering; }
+        public void setAnswering(Sampling answering) { this.answering = answering; }
+    }
+
+    /**
+     * How a local model chooses each next piece of its reply, as Ollama's options name them. A
+     * null value is not sent, and the model's own default applies.
+     */
+    public static class Sampling {
+        private Double temperature;
+        private Double topP;
+        private Integer topK;
+        private Double minP;
+        private Double presencePenalty;
+
+        public Sampling() {}
+
+        public Sampling(Double temperature, Double topP, Integer topK, Double minP, Double presencePenalty) {
+            this.temperature = temperature;
+            this.topP = topP;
+            this.topK = topK;
+            this.minP = minP;
+            this.presencePenalty = presencePenalty;
+        }
+
+        /** Put the values set into a request's {@code options}, under Ollama's names. */
+        public void into(com.fasterxml.jackson.databind.node.ObjectNode options) {
+            if (temperature != null) options.put("temperature", temperature);
+            if (topP != null) options.put("top_p", topP);
+            if (topK != null) options.put("top_k", topK);
+            if (minP != null) options.put("min_p", minP);
+            if (presencePenalty != null) options.put("presence_penalty", presencePenalty);
+        }
+
+        public Double getTemperature() { return temperature; }
+        public void setTemperature(Double temperature) { this.temperature = temperature; }
+        public Double getTopP() { return topP; }
+        public void setTopP(Double topP) { this.topP = topP; }
+        public Integer getTopK() { return topK; }
+        public void setTopK(Integer topK) { this.topK = topK; }
+        public Double getMinP() { return minP; }
+        public void setMinP(Double minP) { this.minP = minP; }
+        public Double getPresencePenalty() { return presencePenalty; }
+        public void setPresencePenalty(Double presencePenalty) { this.presencePenalty = presencePenalty; }
     }
 
     public static class Mentor {

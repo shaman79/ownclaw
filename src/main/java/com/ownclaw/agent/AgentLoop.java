@@ -2265,7 +2265,8 @@ public class AgentLoop {
                 name, description, parameters, requirements, originalParams, context,
                 oldCode, lastError, local);
         // 0.2 where the model takes a temperature: AnthropicProvider leaves it out for the models
-        // that reject one -- Opus 4.7 and later and every 5.x model, claude-opus-5 among them.
+        // that reject one -- Opus 4.7 and later and every 5.x model, claude-opus-5 among them --
+        // and the local model is sent its own settings (OwnClawConfig.Executor#getThinking).
         // At the task's thinking effort, as the steps are: writing a skill is part of the task's
         // work. On the local model, low means the code is written without reasoning first.
         LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)

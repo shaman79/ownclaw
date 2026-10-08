@@ -192,7 +192,6 @@ public class OllamaProvider implements LlmProvider {
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
         String model = reqConfig.model() != null ? reqConfig.model() : config.getModel();
-        double temperature = reqConfig.temperature() != null ? reqConfig.temperature() : config.getTemperature();
         int contextLength = localModelCheck.contextLength(model);
 
         ObjectNode body = mapper.createObjectNode();
@@ -227,12 +226,17 @@ public class OllamaProvider implements LlmProvider {
             body.put("format", "json");
         }
 
-        body.putObject("options").put("temperature", temperature);
-
         // Only ever "false": a model without a thinking mode takes no "think": true, and leaving it
         // out keeps the model's own default (Qwen3.6 reasons first). Asked for by the call, or by
         // the owner's thinking effort at low.
-        if (reqConfig.withoutThinking() || "low".equals(reqConfig.effort())) body.put("think", false);
+        boolean thinks = !(reqConfig.withoutThinking() || "low".equals(reqConfig.effort()));
+        if (!thinks) body.put("think", false);
+
+        // How the model chooses each next piece of the reply: the settings for a reply it reasons
+        // on, or for one it gives straight away (OwnClawConfig.Executor), whole. A request's own
+        // temperature is not sent: the callers that set one chose it for the cloud models, and at
+        // 0.3, without a presence penalty, this model reasoned itself into a loop.
+        (thinks ? config.getThinking() : config.getAnswering()).into(body.putObject("options"));
 
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
