@@ -35,6 +35,21 @@ public final class SilentOllama {
         return OllamaStreamingTest.line(content, null) + OllamaStreamingTest.last("stop", 30, 8);
     }
 
+    /**
+     * A whole reply that reasons first, one line of the stream for each of {@code thinking} as a
+     * thinking model's reasoning streams, and then says {@code content}.
+     */
+    public static String reasons(java.util.List<String> thinking, String content) {
+        var sb = new StringBuilder();
+        for (String piece : thinking) sb.append(OllamaStreamingTest.line("", piece));
+        return sb + says(content);
+    }
+
+    /** Whether every reply body handed out has been closed, however its call ended. */
+    public boolean closedEveryReply() {
+        return http.opened.get() == http.closed.get();
+    }
+
     public LlmProvider provider() {
         return provider;
     }

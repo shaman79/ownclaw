@@ -275,8 +275,10 @@ class ChatPageTest {
     @Test
     @DisplayName("a status of unattended work is shown in the pinned chat's activity strip alone, and never as the working state")
     void unattendedWorkIsShownApart() {
-        String status = page.substring(page.indexOf("} else if (type === 'status') {"));
-        status = status.substring(0, status.indexOf("} else if (type === 'input_request') {"));
+        assertTrue(page.contains("} else if (type === 'status') { showStatus(data); } else if (type === 'input_request') {"),
+                "a status frame is shown by showStatus, as what a session_info says is going on is");
+        String status = page.substring(page.indexOf("function showStatus(data) {"));
+        status = status.substring(0, status.indexOf("function setThinking(on) {"));
         String apart = "if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }";
         assertTrue(status.contains(apart), "a frame the server marked goes apart: " + status);
         assertTrue(status.indexOf(apart) < status.indexOf("activeTaskId = traceTaskId = data.taskId;")
@@ -298,6 +300,34 @@ class ChatPageTest {
         }
         // Mutation: drop the branch -> a morning run's steps fill the open chat's strip and start
         // its spinner again; draw them in any chat -> the same, with the spinner left alone.
+    }
+
+    @Test
+    @DisplayName("a model call's live state is shown in place, its line under the label; a reload shows what the task is doing at once")
+    void theLiveStateIsShownInPlace() {
+        String status = page.substring(page.indexOf("function showStatus(data) {"));
+        status = status.substring(0, status.indexOf("function setThinking(on) {"));
+        assertTrue(status.contains("} else if (sub === 'live') {"), status);
+        String live = status.substring(status.indexOf("} else if (sub === 'live') {"));
+        live = live.substring(0, live.indexOf("} else if (sub === 'progress') {"));
+        assertTrue(live.contains("showLive(data.data && data.data.live, content);"), live);
+        assertFalse(live.contains("showActivity("), "in place, not a new step each time: " + live);
+
+        String show = page.substring(page.indexOf("function showLive(live, content) {"));
+        show = show.substring(0, show.indexOf("function hideLiveLine() {"));
+        assertTrue(show.contains("updateActivity(live && live.summary ? live.summary : content);"), show);
+        assertTrue(show.contains("var line = live && !live.ended && live.line ? live.line : '';"),
+                "the line goes when the call has ended: " + show);
+        assertTrue(page.contains("<div id=\"activity-live\"></div>"), "under the label, above the steps");
+
+        assertTrue(page.contains("if (data.taskRunning) { setThinking(true); if (data.doing) showStatus(data.doing); "
+                + "else showActivity('Working — reconnected to a task already running', null); }"),
+                "a reload is shown what the running task is doing, not a bare spinner");
+        String background = page.substring(page.indexOf("function showBackgroundStatus(data, content) {"));
+        background = background.substring(0, background.indexOf("function checkAuth()"));
+        assertTrue(background.contains("if (sub === 'live') showLive(data.data.live, content);"),
+                "unattended work's live state too, in place, in its own strip: " + background);
+        // Mutation: draw a live frame as a step -> a new line in the trace every 15 seconds.
     }
 
     @Test

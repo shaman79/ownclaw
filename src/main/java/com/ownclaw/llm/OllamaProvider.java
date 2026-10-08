@@ -96,8 +96,8 @@ public class OllamaProvider implements LlmProvider {
      * both reported as the context window they are. Nothing here sets num_predict: the model
      * writes until it stops or its window is full.
      * <p>
-     * The progress hook hears every line, and whatever it throws leaves through here untouched,
-     * closing the stream.
+     * The progress hook hears every line, and what each line carried ({@link LlmProgress#received}),
+     * and whatever it throws leaves through here untouched, closing the stream.
      *
      * @param http          the client, whose read timeout bounds the silence between two lines
      * @param body          the request; its stream, truncate, shift and num_ctx are set here
@@ -148,11 +148,20 @@ public class OllamaProvider implements LlmProvider {
                 throw failure("the reply stream reported: " + chunk.path("error").asText(), 0, contextLength);
             }
             JsonNode message = chunk.path("message");
-            content.append(message.path("content").asText(""));
             // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
             // separate field before writing the answer to content. It is not part of the answer.
-            thinking.append(message.path("thinking").asText(""));
-            for (JsonNode call : message.path("tool_calls")) toolCalls.add(call);
+            String reasoning = message.path("thinking").asText("");
+            String said = message.path("content").asText("");
+            thinking.append(reasoning);
+            content.append(said);
+            if (!reasoning.isEmpty()) progress.received(LlmProgress.Part.REASONING, reasoning);
+            if (!said.isEmpty()) progress.received(LlmProgress.Part.ANSWER, said);
+            for (JsonNode call : message.path("tool_calls")) {
+                toolCalls.add(call);
+                // Ollama sends each call whole: its name, then all of its arguments at once.
+                progress.received(LlmProgress.Part.CALL, call.path("function").path("name").asText(""));
+                progress.received(LlmProgress.Part.ARGUMENTS, call.path("function").path("arguments").toString());
+            }
             if (!chunk.path("done").asBoolean(false)) continue;
 
             ObjectNode last = chunk.deepCopy();

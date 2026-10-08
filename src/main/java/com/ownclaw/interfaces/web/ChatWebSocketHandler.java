@@ -591,6 +591,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
+        send(session, statusFrame(msg));
+    }
+
+    /** A status as the page reads it: a frame of its own, or what a session_info says is going on. */
+    private static Map<String, Object> statusFrame(ChatStatusEmitter.StatusMessage msg) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", "status");
         payload.put("content", msg.formatted());
@@ -600,7 +605,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (msg.data() != null && !msg.data().isEmpty()) {
             payload.put("data", msg.data());
         }
-        send(session, payload);
+        return payload;
     }
 
     /**
@@ -718,13 +723,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // Attended work only: a scheduled run or /bg is nobody's working state. None of its
             // statuses touches that state (ChatStatusEmitter#BACKGROUND), so a spinner started
             // for it here, on every chat switch, would turn until the page's own timeout.
-            send(session, Map.of(
-                    "type", "session_info",
-                    "activeSessionId", sessionId,
-                    "sessions", sessions,
-                    "taskRunning", taskQueue.isAttendedBusyFor(userId),
-                    "version", VERSION
-            ));
+            boolean running = taskQueue.isAttendedBusyFor(userId);
+            var info = new LinkedHashMap<String, Object>();
+            info.put("type", "session_info");
+            info.put("activeSessionId", sessionId);
+            info.put("sessions", sessions);
+            info.put("taskRunning", running);
+            info.put("version", VERSION);
+            // And what that task is doing now, as the status the page would otherwise wait for
+            // says it: its model call under way, or the step it is on. Without it a reload showed
+            // only that a task was running, for as long as the call ran -- over an hour, on
+            // 2026-10-08, while the local model reasoned.
+            ChatStatusEmitter.StatusMessage doing = running ? statusEmitter.doing(userId) : null;
+            if (doing != null) info.put("doing", statusFrame(doing));
+            send(session, info);
         } catch (Exception e) {
             log.warn("Failed to send session info: {}", e.getMessage());
         }

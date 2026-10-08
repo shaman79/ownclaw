@@ -214,8 +214,9 @@ class AnthropicProvider implements LlmProvider {
     }
 
     /**
-     * The reply, event by event. The progress hook hears every event, pings included, and
-     * whatever it throws leaves through here untouched, closing the stream on its way out. An
+     * The reply, event by event. The progress hook hears every event, pings included, and what
+     * each carried ({@link LlmProgress#received}), and whatever it throws leaves through here
+     * untouched, closing the stream on its way out. An
      * attempt that ends here without a reply -- stopped, cut off, or ended by an error event --
      * first tells the hook what the stream had said it is billed for ({@link LlmProgress#billed}).
      *
@@ -262,9 +263,21 @@ class AnthropicProvider implements LlmProvider {
                         int index = data.path("index").asInt();
                         JsonNode block = data.path("content_block");
                         switch (block.path("type").asText("")) {
-                            case "text" -> reply.text(block.path("text").asText(""));
-                            case "tool_use" -> reply.call(index, block.path("id").asText(null),
-                                    block.path("name").asText(null), null);
+                            case "text" -> {
+                                String text = block.path("text").asText("");
+                                reply.text(text);
+                                if (!text.isEmpty()) progress.received(LlmProgress.Part.ANSWER, text);
+                            }
+                            case "tool_use" -> {
+                                reply.call(index, block.path("id").asText(null),
+                                        block.path("name").asText(null), null);
+                                progress.received(LlmProgress.Part.CALL, block.path("name").asText(""));
+                            }
+                            // Reasoning, not part of the answer: only the hook hears it.
+                            case "thinking" -> {
+                                String text = block.path("thinking").asText("");
+                                if (!text.isEmpty()) progress.received(LlmProgress.Part.REASONING, text);
+                            }
                             // The requested model declined part-way and the fallback model goes on
                             // from here. Its text continues the text before it; a tool call before
                             // it was the declined model's and is not part of the reply.
@@ -272,18 +285,30 @@ class AnthropicProvider implements LlmProvider {
                                 reply.discardCalls();
                                 servedModel = block.path("to").path("model").asText(servedModel);
                             }
-                            // thinking, redacted_thinking and block types newer than this code are
-                            // not part of the answer.
+                            // redacted_thinking and block types newer than this code are not part
+                            // of the answer.
                             default -> { }
                         }
                     }
                     case "content_block_delta" -> {
                         JsonNode delta = data.path("delta");
                         switch (delta.path("type").asText("")) {
-                            case "text_delta" -> reply.text(delta.path("text").asText(""));
-                            case "input_json_delta" -> reply.call(data.path("index").asInt(), null, null,
-                                    delta.path("partial_json").asText(""));
-                            default -> { }     // thinking_delta, signature_delta, ...
+                            case "text_delta" -> {
+                                String text = delta.path("text").asText("");
+                                reply.text(text);
+                                if (!text.isEmpty()) progress.received(LlmProgress.Part.ANSWER, text);
+                            }
+                            case "input_json_delta" -> {
+                                String fragment = delta.path("partial_json").asText("");
+                                reply.call(data.path("index").asInt(), null, null, fragment);
+                                if (!fragment.isEmpty()) progress.received(LlmProgress.Part.ARGUMENTS, fragment);
+                            }
+                            // Reasoning, not part of the answer: only the hook hears it.
+                            case "thinking_delta" -> {
+                                String text = delta.path("thinking").asText("");
+                                if (!text.isEmpty()) progress.received(LlmProgress.Part.REASONING, text);
+                            }
+                            default -> { }     // signature_delta, ...
                         }
                     }
                     case "content_block_stop" -> reply.close(data.path("index").asInt());

@@ -145,7 +145,8 @@ class OpenAiProvider implements LlmProvider {
 
     /**
      * The reply, chunk by chunk, until {@code data: [DONE]}. The progress hook hears every
-     * chunk, and whatever it throws leaves through here untouched, closing the stream. An
+     * chunk, and what each carried ({@link LlmProgress#received}), and whatever it throws leaves
+     * through here untouched, closing the stream. An
      * attempt that ends here without a reply after its counts arrived first tells the hook what
      * it is billed for ({@link LlmProgress#billed}).
      */
@@ -171,13 +172,21 @@ class OpenAiProvider implements LlmProvider {
                 servedModel = chunk.path("model").asText(servedModel);
                 for (JsonNode choice : chunk.path("choices")) {
                     JsonNode delta = choice.path("delta");
-                    if (delta.path("content").isTextual()) reply.text(delta.path("content").asText());
+                    if (delta.path("content").isTextual()) {
+                        String text = delta.path("content").asText();
+                        reply.text(text);
+                        if (!text.isEmpty()) progress.received(LlmProgress.Part.ANSWER, text);
+                    }
                     // Arguments arrive as a JSON STRING in fragments, unlike Anthropic's input
                     // object; the first fragment of a call carries its id and name.
                     for (JsonNode tc : delta.path("tool_calls")) {
-                        reply.call(tc.path("index").asInt(), tc.path("id").asText(null),
-                                tc.path("function").path("name").asText(null),
-                                tc.path("function").path("arguments").asText(null));
+                        String name = tc.path("function").path("name").asText(null);
+                        String fragment = tc.path("function").path("arguments").asText(null);
+                        reply.call(tc.path("index").asInt(), tc.path("id").asText(null), name, fragment);
+                        if (name != null && !name.isEmpty()) progress.received(LlmProgress.Part.CALL, name);
+                        if (fragment != null && !fragment.isEmpty()) {
+                            progress.received(LlmProgress.Part.ARGUMENTS, fragment);
+                        }
                     }
                     finishReason = choice.path("finish_reason").asText(finishReason);
                 }

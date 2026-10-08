@@ -233,6 +233,62 @@ public class AgentContext {
         };
     }
 
+    /** The step of the loop the task is on, from 1; 0 before its first. See {@link #setStep}. */
+    private volatile int step;
+
+    public int step() { return step; }
+
+    /** Set by the loop as each step begins: the step a model call is made for ({@link #call}). */
+    public void setStep(int step) { this.step = step; }
+
+    /**
+     * What a model call is for, as the owner reads it: "step 6", or "step 6, " and {@code what};
+     * before the loop's first step, {@code what} alone, or "a model call" when there is none.
+     */
+    public String atStep(String what) {
+        if (step == 0) return what == null ? "a model call" : what;
+        return "step " + step + (what == null ? "" : ", " + what);
+    }
+
+    /** The model call of this task under way, or null. See {@link #call}. */
+    private volatile LiveCall liveCall;
+
+    /** Told when each model call of this task begins and ends. See {@link #setCallWatch}. */
+    private volatile LiveCall.Watch callWatch = LiveCall.Watch.NONE;
+
+    /**
+     * Attach what is told when a model call of this task begins, and run when it ends -- the loop's,
+     * which shows the owner the call's live state while it runs. Set once at task start; a context
+     * made without the loop tells nobody.
+     */
+    public void setCallWatch(LiveCall.Watch watch) {
+        this.callWatch = watch == null ? LiveCall.Watch.NONE : watch;
+    }
+
+    /**
+     * A model call of this task, about to be made: its hook, which carries this task's own
+     * ({@link #progress}) and keeps the call's live state ({@link LiveCall}). From here until it is
+     * closed it is the task's call under way ({@link #liveCall}), and the watch is told of it.
+     * Close it when the call has returned or failed.
+     *
+     * @param local   whether the call goes to the local model
+     * @param purpose what it is for, as the owner reads it: "step 6", "step 6, delegation turn 1"
+     */
+    public LiveCall call(com.ownclaw.llm.LlmProvider provider, boolean local, String purpose) {
+        LiveCall call = new LiveCall(this, progress(), provider, local, purpose);
+        liveCall = call;
+        call.whenEnded(callWatch.started(call));
+        return call;
+    }
+
+    /** The model call of this task under way -- made with {@link #call} and not yet closed -- or null. */
+    public LiveCall liveCall() { return liveCall; }
+
+    /** {@code call} has ended, and is no longer the task's call under way. */
+    void callEnded(LiveCall call) {
+        if (liveCall == call) liveCall = null;
+    }
+
     public String conversationSummary() { return conversationSummary; }
     public void setConversationSummary(String summary) { this.conversationSummary = summary; }
 

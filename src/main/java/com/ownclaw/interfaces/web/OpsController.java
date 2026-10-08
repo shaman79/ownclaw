@@ -104,7 +104,7 @@ public class OpsController {
                     "GET  /api/ops/skills/quarantine",
                         "GET  /api/ops/ollama",
                         "GET  /api/ops/tasks?offset=0&limit=50",
-                        "GET  /api/ops/tasks/{taskId}"),
+                        "GET  /api/ops/tasks/{taskId}      (with liveCall: its model call under way, if any)"),
                 "actions", List.of(
                         "POST /api/ops/selftest",
                         "POST /api/ops/agent/run           {\"message\":\"...\",\"userId\":\"optional\",\"sessionId\":\"optional: new or a chat id\",\"async\":true,\"unattended\":true}",
@@ -256,9 +256,17 @@ public class OpsController {
         return ResponseEntity.ok(ops.tasks(new OpsService.Page(offset, limit)));
     }
 
+    /**
+     * A task's record, and -- while it runs -- its model call under way as it streams in: which
+     * model and what for, since when, how much it has written, and the end of its reasoning and
+     * of its answer ({@code LiveCall#forOps}), so an operator can see what a model is doing while
+     * nothing of it is recorded yet. Null between calls and once the task has ended.
+     */
     @GetMapping("/tasks/{taskId}")
     public ResponseEntity<?> task(@PathVariable String taskId) {
-        return ResponseEntity.ok(ops.task(taskId));
+        Map<String, Object> out = ops.task(taskId);
+        out.put("liveCall", agentLoop.liveCallOf(taskId));
+        return ResponseEntity.ok(out);
     }
 
     // ── actions ──

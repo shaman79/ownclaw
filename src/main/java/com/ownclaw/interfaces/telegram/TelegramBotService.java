@@ -362,8 +362,9 @@ public class TelegramBotService {
     /**
      * Whether a status message is sent to Telegram: what is meant for the owner to read --
      * results, questions, warnings and failures, and the progress messages of a task that came
-     * from Telegram -- and not the queue, step and progress notices of a running task, nor debug
-     * output. Those went out one message each, the twenty-second heartbeats of a long code
+     * from Telegram -- and not the queue, step and progress notices of a running task, nor the
+     * live state of its model calls, nor debug output. Those went out one message each, the
+     * twenty-second heartbeats of a long code
      * generation and every full prompt of debug mode included; a part Telegram refuses for
      * coming too fast is now waited for, not dropped, and a flood of them would hold up the
      * answer queued behind them. A progress message is one per step, written to be read; a

@@ -6,7 +6,8 @@ package com.ownclaw.llm;
  * had been billed for.
  * <p>
  * Replies are streamed, so a call that runs for many minutes still shows, event by event, that
- * it is alive -- and this is where a caller sees that. It is also how a caller ends an in-flight
+ * it is alive -- and this is where a caller sees that, and what each event carried
+ * ({@link #received}). It is also how a caller ends an in-flight
  * call: whatever the hook throws reaches the caller unchanged, never wrapped in an
  * {@link LlmException}, and the provider closes the stream on its way out. The hook runs on the
  * calling thread between two reads of the stream, so it has to be quick.
@@ -26,6 +27,27 @@ public interface LlmProgress {
     LlmProgress NONE = () -> { };
 
     void onProgress();
+
+    /** Which part of a reply an event carried text of ({@link #received}). */
+    enum Part {
+        /** The model's reasoning before it answers: Ollama's thinking, Anthropic's thinking blocks. */
+        REASONING,
+        /** The answer's text. */
+        ANSWER,
+        /** A tool call that begins: the text is its name. */
+        CALL,
+        /** The arguments of the tool call under way, whole or a fragment of them. */
+        ARGUMENTS
+    }
+
+    /**
+     * What an event of the reply carried, part by part, as it arrives: called by the provider on
+     * the calling thread after {@link #onProgress} for the same event, once for each part the
+     * event carried text of -- a ping or a closing event carries none, and is not reported here.
+     * It runs between two reads of the stream, so it has to be quick too, and what it throws
+     * leaves the provider unchanged, closing the stream, as what {@link #onProgress} throws does.
+     */
+    default void received(Part part, String text) { }
 
     /**
      * The call is under way -- a request has been sent, or the call is waiting to send one again

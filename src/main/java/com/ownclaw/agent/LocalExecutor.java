@@ -300,15 +300,16 @@ public class LocalExecutor {
         // starve thinking models, which spend part of the budget reasoning before they answer.
         // format:json and tools are mutually exclusive in Ollama, so JSON mode is only asked for
         // on the text protocol, where it is what holds the output shape.
-        // The task's own hook, as its think and code calls carry: while the call is under way the
-        // stall watchdog does not count the time (AgentContext#msSinceLastProgress), so neither a
-        // generation that runs for minutes nor the model loading and reading a long prompt,
-        // sending nothing, is taken for a stall; and a Stop ends the call -- mid-reply, or before
-        // the model has sent anything -- rather than when the model finishes.
+        // Each turn's call carries the task's own hook, as its think and code calls do
+        // (AgentContext#call): while the call is under way the stall watchdog does not count the
+        // time (AgentContext#msSinceLastProgress), so neither a generation that runs for minutes
+        // nor the model loading and reading a long prompt, sending nothing, is taken for a stall;
+        // a Stop ends the call -- mid-reply, or before the model has sent anything -- rather than
+        // when the model finishes; the owner is shown the reply as it grows; and a reply that has
+        // become a loop is ended (LiveCall).
         // At the task's thinking effort: at low the local model answers without reasoning first,
         // on every turn of the delegation.
         LlmRequestConfig request = new LlmRequestConfig(null, null, !nativeTools, specs)
-                .withProgress(parentContext.progress())
                 .withEffort(parentContext.options().effort());
         // Handed results to read and no tool to run: the work is reading them and answering, which
         // the model does well without reasoning first. With reasoning it spent eleven minutes on a
@@ -329,8 +330,9 @@ public class LocalExecutor {
 
             // THINK: ask local LLM for next action
             LlmResponse response;
+            LiveCall live = parentContext.call(localProvider, true, parentContext.atStep("delegation turn " + turn));
             try {
-                response = localProvider.chat(messages, request);
+                response = localProvider.chat(messages, request.withProgress(live));
             } catch (Exception e) {
                 // A reply that is no answer -- cut off at the window, or holding a tool call that
                 // cannot be run -- was generated all the same, every token of it.
@@ -338,14 +340,24 @@ public class LocalExecutor {
                 if (parentContext.isCancelled()) {
                     return partial("Task cancelled during delegation.", mine);
                 }
+                // A reply that had become a loop was ended: the delegation fails, as it does on any
+                // failed call, and its work goes back to the model that delegated it -- the cloud's,
+                // unless the task runs on the local model. The owner is told so in the chat.
+                if (e instanceof RepeatedOutput looped) {
+                    parentContext.chat().repeated(looped, live,
+                            parentContext.options().localOnly() || parentContext.onLocal()
+                                    ? "the delegation has failed" : "the cloud model takes over");
+                }
                 // A delegation that outgrew the local model's context window fails with
                 // OutputTruncated, whose message names the window and its size.
                 String msg = String.valueOf(e.getMessage());
                 // After a private read the error can quote it -- a tool-call parse error echoes
                 // the model's raw output -- so then neither the cloud nor the log gets the
-                // message, only its type. OutputTruncated's message is written by the code (the
-                // limit and its size, nothing of the reply), so it is shown whatever was read.
-                if (parentContext.localTierReadPrivate() && !(e instanceof OutputTruncated)) {
+                // message, only its type. The messages of OutputTruncated and RepeatedOutput are
+                // written by the code (a limit and its size; figures of the repeated text), nothing
+                // of the reply, so they are shown whatever was read.
+                if (parentContext.localTierReadPrivate()
+                        && !(e instanceof OutputTruncated || e instanceof RepeatedOutput)) {
                     String kept = e.getClass().getSimpleName()
                             + " (its text is kept out: this delegation had read private data)";
                     log.error("Local LLM call failed during delegation turn {}: {}", turn, kept);
@@ -360,6 +372,8 @@ public class LocalExecutor {
                     log.error("Local LLM call failed during delegation turn {}: {}", turn, msg, e);
                 }
                 return partial("Local LLM call failed: " + msg, mine);
+            } finally {
+                live.close();
             }
 
             billed.accept(localProvider, response);

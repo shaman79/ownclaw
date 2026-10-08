@@ -65,6 +65,13 @@ class OpsControllerTest {
         volatile CountDownLatch hold = new CountDownLatch(0);
         /** Thrown instead of answering: a RuntimeException or an Error. */
         volatile Throwable failWith;
+        /** The model call under way of each task, as the loop gives it to the ops API. */
+        final Map<String, Map<String, Object>> live = new java.util.concurrent.ConcurrentHashMap<>();
+
+        @Override
+        public Map<String, Object> liveCallOf(String taskId) {
+            return live.get(taskId);
+        }
 
         ScriptedLoop(JdbcTemplate jdbc) {
             super(null, null, null, null, null, null, null, null, null, null,
@@ -438,6 +445,30 @@ class OpsControllerTest {
     @SuppressWarnings("unchecked")
     static Map<String, Object> body(ResponseEntity<?> response) {
         return (Map<String, Object>) response.getBody();
+    }
+
+    @Test
+    @DisplayName("a task's record carries its model call under way -- the end of its reasoning and answer -- and null between calls")
+    void aTaskCarriesItsCallUnderWay(@TempDir Path tmp) throws Exception {
+        var s = setup(tmp);
+        s.jdbc().update("INSERT INTO events (user_id, task_id, event_type, severity, summary, details, tokens_used) "
+                + "VALUES ('u1', 'abcd1234', 'task_started', 'info', 'audit the routers', '{}', 0)");
+        var call = new java.util.LinkedHashMap<String, Object>();
+        call.put("model", "local");
+        call.put("purpose", "step 6, delegation turn 1");
+        call.put("phase", "reasoning");
+        call.put("reasoningTail", "Let me check the second router once more.");
+        call.put("answerTail", "");
+        s.loop().live.put("abcd1234", call);
+
+        Map<String, Object> task = body(s.ops().task("abcd1234"));
+        assertEquals(call, task.get("liveCall"), "read from the loop, not the database");
+        assertEquals(1, ((List<?>) task.get("events")).size(), "beside the record as it was");
+
+        s.loop().live.clear();
+        task = body(s.ops().task("abcd1234"));
+        assertTrue(task.containsKey("liveCall") && task.get("liveCall") == null, "said, as none: " + task);
+        // Mutation: leave liveCall out -> an operator cannot see what the model is doing.
     }
 
     @SuppressWarnings("unchecked")

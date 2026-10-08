@@ -244,6 +244,7 @@ public final class CloudGateway implements LlmProvider {
         LlmRequestConfig outbound = (filteredTools == null ? cfg : cfg.withTools(filteredTools))
                 .withProgress(new LlmProgress() {
                     @Override public void onProgress() { hook.onProgress(); }
+                    @Override public void received(Part part, String text) { hook.received(part, text); }
                     @Override public void calling(Runnable cancel) { hook.calling(cancel); }
                     @Override public void billed(LlmResponse.Usage usage) {
                         billedWithoutReply.add(usage);

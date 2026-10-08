@@ -581,6 +581,22 @@
         }
         .activity-toggle.open { transform: rotate(180deg) }
 
+        /* The latest line of a model's reasoning while its call runs, under the label that says
+           which model, what for and how far: whole, and scrolled within when it is long. */
+        #activity-live {
+            display: none;
+            margin: -4px 14px 8px 39px;
+            font-size: 12px;
+            font-style: italic;
+            color: var(--text-3);
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 6em;
+            overflow-y: auto;
+        }
+        #activity-live.visible { display: block }
+
         #activity-steps {
             display: none;
             border-top: 1px solid var(--border);
@@ -2613,6 +2629,7 @@
             <span id="activity-elapsed"></span>
             <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
         </div>
+        <div id="activity-live"></div>
         <div id="activity-steps"></div>
         <div id="activity-stats">
             <span class="stat-item"><span class="stat-label">Steps </span><span class="stat-value" id="stat-steps">0</span></span>
@@ -2719,6 +2736,7 @@
     var activityLabel   = document.getElementById('activity-label');
     var activityTokens  = document.getElementById('activity-tokens');
     var activityElapsed = document.getElementById('activity-elapsed');
+    var activityLive    = document.getElementById('activity-live');
     var activityStepsEl = document.getElementById('activity-steps');
     var activityToggle  = document.getElementById('activity-toggle');
     var activityHeader  = document.getElementById('activity-header');
@@ -5252,6 +5270,7 @@
     });
 
     function showActivity(text, detailData) {
+        hideLiveLine();
         activityWrap.style.display = 'block';
         // Reflect the open state on the panel itself, so a default-open trace is actually
         // rendered rather than only being marked open in a variable.
@@ -5351,6 +5370,7 @@
             showActivity(text, null);
             return;
         }
+        hideLiveLine();
         activityWrap.style.display = 'block';
         activityLabel.textContent = text;
         if (activityStepList.length > 0) {
@@ -5361,6 +5381,25 @@
         var span = last.querySelector('.step-dot + span');
             if (span) span.textContent = text;
         }
+    }
+
+    /**
+     * A model call's live state (a LIVE status), in place of the frame before it: the label and
+     * the latest step say which model, what for, what it is doing, for how long and how much it
+     * has written, and the latest line of its reasoning goes under the label, whole. The frame
+     * that says the call has ended says how long it ran, and takes the line away.
+     */
+    function showLive(live, content) {
+        updateActivity(live && live.summary ? live.summary : content);
+        var line = live && !live.ended && live.line ? live.line : '';
+        activityLive.textContent = line ? '“' + line + '”' : '';
+        activityLive.classList.toggle('visible', !!line);
+    }
+
+    /** The line of a model call's reasoning goes when anything else is shown in its place. */
+    function hideLiveLine() {
+        activityLive.classList.remove('visible');
+        activityLive.textContent = '';
     }
 
     /**
@@ -5435,6 +5474,7 @@
         activityElapsed.textContent = '';
         activityStepsEl.innerHTML = '';
         activityStepList = [];
+        hideLiveLine();
         activityToggle.classList.remove('open');
         activityStepsEl.classList.remove('visible');
         activityStats.classList.remove('visible');
@@ -5474,7 +5514,8 @@
         var sub = data.status || '';
         updateTokens(data.data);
         if (data.data.totalSteps != null) updateStats(data.data);
-        if (sub === 'progress') updateActivity(content);
+        if (sub === 'live') showLive(data.data.live, content);
+        else if (sub === 'progress') updateActivity(content);
         else showActivity(content, data.data.category ? data.data : null);
         if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') doneActivity();
     }
@@ -5793,9 +5834,14 @@
                     // showed an idle chat with an enabled Send button -- which reads as "the
                     // request was lost", and the natural response is to send it again and run
                     // the whole thing twice.
+                    // And show what that task is doing now, as the status this page would
+                    // otherwise wait for says it -- its model call under way, or the step it is
+                    // on: a reload during a long local call used to show only that a task was
+                    // running, until the call ended.
                     if (data.taskRunning) {
                         setThinking(true);
-                        showActivity('Working — reconnected to a task already running', null);
+                        if (data.doing) showStatus(data.doing);
+                        else showActivity('Working — reconnected to a task already running', null);
                     }
                 } else if (type === 'session_updated') {
                     // The id is the point, and it used to be discarded.
@@ -5839,57 +5885,7 @@
                     } else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
                     updateComposer();
                 } else if (type === 'status') {
-                    // Unattended work -- a scheduled run, /bg -- is shown apart: its statuses
-                    // filled the activity strip of whatever chat was open, and started its spinner.
-                    if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }
-                    var sub = data.status || '';
-                    var detail = data.data && data.data.category ? data.data : null;
-                    // Claim this window's working state for the first task we hear from. A task
-                    // that was queued behind the one whose trace is shown starts a trace of its own.
-                    if (data.taskId && !activeTaskId
-                            && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
-                        if (traceTaskId && traceTaskId !== data.taskId) resetActivity();
-                        activeTaskId = traceTaskId = data.taskId;
-                    }
-                    // Update token counter whenever data.data has token info
-                    if (data.data) updateTokens(data.data);
-                    // Update stats bar whenever data.data carries stats fields
-                    if (data.data && data.data.totalSteps != null) updateStats(data.data);
-                    // A message the running task ended without reading: it runs as its own task.
-                    if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);
-                    if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
-                            || sub === 'need_input') {
-                        // Only the task we are actually following may end the working state.
-                        // When either side has no id, behave as before rather than risk a
-                        // spinner that never stops.
-                        if (data.taskId && activeTaskId && data.taskId !== activeTaskId) {
-                            showActivity(content, null);   // note it, but keep working
-                        } else {
-                            showActivity(content, null);
-                            setThinking(false);
-                            doneActivity();
-                            activeTaskId = null;
-                        }
-                    } else if (sub === 'scheduled' || sub === 'warning') {
-                        // Notices, not evidence that work is in flight. The scheduler emits
-                        // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
-                        // has already delivered its result, and budget warnings arrive whenever a
-                        // threshold is crossed. Both fell into the catch-all below, which calls
-                        // setThinking(true) -- so the spinner restarted with nothing left to stop
-                        // it, for the full 15-minute safety timeout, after every single recurring
-                        // task.
-                        resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
-                        showActivity(content, detail);
-                    } else if (sub === 'progress') {
-                        // PROGRESS updates the last step in-place (no new entry)
-                        setThinking(true);
-                        resetThinkingSafetyTimer();
-                        updateActivity(content);
-                    } else {
-                        setThinking(true);
-                        resetThinkingSafetyTimer();
-                        showActivity(content, detail);
-                    }
+                    showStatus(data);
                 } else if (type === 'input_request') {
                     // A task is waiting for an answer: the working state is over. It used to
                     // disable the Send button, and clicking Send did nothing.
@@ -5967,6 +5963,70 @@
                 addMsg('response', e.data);
             }
         };
+    }
+
+    /**
+     * A task's status: a frame of its own, or what a session_info says the running task is doing
+     * now (its "doing").
+     */
+    function showStatus(data) {
+        var content = data.content || '';
+        // Unattended work -- a scheduled run, /bg -- is shown apart: its statuses
+        // filled the activity strip of whatever chat was open, and started its spinner.
+        if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }
+        var sub = data.status || '';
+        var detail = data.data && data.data.category ? data.data : null;
+        // Claim this window's working state for the first task we hear from. A task
+        // that was queued behind the one whose trace is shown starts a trace of its own.
+        if (data.taskId && !activeTaskId
+                && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
+            if (traceTaskId && traceTaskId !== data.taskId) resetActivity();
+            activeTaskId = traceTaskId = data.taskId;
+        }
+        // Update token counter whenever data.data has token info
+        if (data.data) updateTokens(data.data);
+        // Update stats bar whenever data.data carries stats fields
+        if (data.data && data.data.totalSteps != null) updateStats(data.data);
+        // A message the running task ended without reading: it runs as its own task.
+        if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);
+        if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
+                || sub === 'need_input') {
+            // Only the task we are actually following may end the working state.
+            // When either side has no id, behave as before rather than risk a
+            // spinner that never stops.
+            if (data.taskId && activeTaskId && data.taskId !== activeTaskId) {
+                showActivity(content, null);   // note it, but keep working
+            } else {
+                showActivity(content, null);
+                setThinking(false);
+                doneActivity();
+                activeTaskId = null;
+            }
+        } else if (sub === 'scheduled' || sub === 'warning') {
+            // Notices, not evidence that work is in flight. The scheduler emits
+            // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
+            // has already delivered its result, and budget warnings arrive whenever a
+            // threshold is crossed. Both fell into the catch-all below, which calls
+            // setThinking(true) -- so the spinner restarted with nothing left to stop
+            // it, for the full 15-minute safety timeout, after every single recurring
+            // task.
+            resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
+            showActivity(content, detail);
+        } else if (sub === 'live') {
+            // A model call's live state, in place of the one before it: the work goes on.
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            showLive(data.data && data.data.live, content);
+        } else if (sub === 'progress') {
+            // PROGRESS updates the last step in-place (no new entry)
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            updateActivity(content);
+        } else {
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            showActivity(content, detail);
+        }
     }
 
     /**

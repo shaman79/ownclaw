@@ -464,9 +464,11 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var stop = new IllegalStateException("stopped by the owner");
         var handed = new ArrayList<Runnable>();
+        var heard = new ArrayList<String>();
         LlmProgress hook = new LlmProgress() {
             @Override public void onProgress() { throw stop; }
             @Override public void calling(Runnable cancel) { handed.add(cancel); }
+            @Override public void received(Part part, String text) { heard.add(part + ":" + text); }
         };
         var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
                 .withProgress(hook);
@@ -476,6 +478,9 @@ class CloudGatewayTest {
         Runnable cancel = () -> { };
         provider.configs.get(0).progress().calling(cancel);
         assertEquals(List.of(cancel), handed, "the caller's hook is handed the cancel of what the call waits on");
+        provider.configs.get(0).progress().received(LlmProgress.Part.REASONING, "Checking the router.");
+        assertEquals(List.of("REASONING:Checking the router."), heard,
+                "and told what each event carried, which the owner is shown and the loop guard reads");
         assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
 
         var withTools = cfg.withTools(List.of(new ToolSpec("fx_rates", "Rates.", Map.of("type", "object"))));

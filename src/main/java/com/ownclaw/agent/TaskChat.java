@@ -27,7 +27,8 @@ import java.util.function.BiConsumer;
  * of the loop, one before each tool call of a delegation, a note after a step whose result the
  * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
  * as reasoning extraction is asked again, one when the task moves to the local model because its
- * cloud model cannot be reached, the local model's summary of each
+ * cloud model cannot be reached, one when a model's reply is ended because it had become a loop,
+ * the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
  * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
@@ -227,6 +228,21 @@ public final class TaskChat {
                 + "task runs on the local model: slower, and best effort.");
     }
 
+    /**
+     * A model call of the task was ended because its reply had become a verbatim loop
+     * ({@link LiveCall}): which call, what was seen -- figures only, nothing of the text -- and
+     * what follows. Said, because the owner watched the reply grow for minutes and would otherwise
+     * see it simply stop.
+     *
+     * @param then what follows, as a clause: "the cloud model takes over"
+     */
+    void repeated(com.ownclaw.llm.RepeatedOutput looped, LiveCall call, String then) {
+        if (sessionId == null) return;
+        String purpose = call.purpose();
+        note("🔁 " + Character.toUpperCase(purpose.charAt(0)) + purpose.substring(1) + ": " + looped.seen()
+                + ". It was repeating itself, so its reply was ended, and " + then + ".");
+    }
+
     /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
     static String described(Redactor.Tally t) {
         var parts = new java.util.ArrayList<String>();
@@ -413,7 +429,7 @@ public final class TaskChat {
 
     /**
      * A line about the task that is no step of it -- the filter's counts, a step asked again, the
-     * move to the local model --
+     * move to the local model, a reply ended as a loop --
      * posted without a header, so it is not read as one more step. The page draws a row without
      * one as its text.
      */

@@ -75,9 +75,8 @@ public class ThinkingEngine {
                 !nativeTools
         );
         // On whose behalf. Without this the gateway refuses the call -- which is the point:
-        // a call site that forgets is stopped, not silently unscanned. The task's progress hook
-        // keeps its stall watchdog from taking a long call for silence, and lets its Stop end it.
-        requestConfig = requestConfig.withEgress(context.egress("think")).withProgress(context.progress());
+        // a call site that forgets is stopped, not silently unscanned.
+        requestConfig = requestConfig.withEgress(context.egress("think"));
         // At the task's thinking effort. On the local model, running the task itself, low means
         // answering without reasoning first.
         requestConfig = requestConfig.withEffort(context.options().effort());
@@ -93,8 +92,17 @@ public class ThinkingEngine {
             context.setOfferedTools(null);
         }
 
+        // The task's progress hook keeps its stall watchdog from taking a long call for silence,
+        // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
+        // runs, and ends a reply that has become a loop (LiveCall).
+        LiveCall live = context.call(provider, mode.local(), context.atStep(null));
         try {
-            LlmResponse response = provider.chat(messages, requestConfig);
+            LlmResponse response;
+            try {
+                response = provider.chat(messages, requestConfig.withProgress(live));
+            } finally {
+                live.close();
+            }
             log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
                     truncate(response.content(), 200));
 
@@ -193,6 +201,9 @@ public class ThinkingEngine {
                 throw e;
             }
             log.error("ThinkingEngine LLM call failed: {}", e.getMessage());
+            // A reply that had become a loop was ended, and the owner is told, as he is shown the
+            // reply while it runs: a step that goes on for minutes and then runs nothing says why.
+            if (e instanceof RepeatedOutput looped) context.chat().repeated(looped, live, "the step ran nothing");
             return new ThinkResult(unusable("", "Your previous reply never came: the call to the "
                             + "model failed (" + e.getMessage() + "), so nothing was run.",
                     "Continue from where the task stands."), messages, "ERROR: " + e.getMessage(),

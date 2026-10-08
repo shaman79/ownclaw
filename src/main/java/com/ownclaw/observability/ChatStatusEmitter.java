@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -60,6 +61,49 @@ public class ChatStatusEmitter {
         } finally {
             background.remove(taskId);
         }
+    }
+
+    /**
+     * What a task running now is doing, for a page that connects while it runs ({@link #doing}):
+     * whose task it is, what its model call under way looks like now (null while none is), and
+     * the step or progress status it emitted last.
+     */
+    private record Running(String userId, Supplier<StatusMessage> live, AtomicReference<StatusMessage> last) {}
+
+    /** The tasks running now, by id ({@link #running}). */
+    private final Map<String, Running> running = new ConcurrentHashMap<>();
+
+    /**
+     * A task has begun running: from now until {@link #ended}, its latest step or progress status
+     * is kept, and {@code live} is asked for the state of its model call under way, so a page that
+     * connects or opens a chat meanwhile is told at once what the task is doing ({@link #doing}).
+     * Statuses are otherwise live only: one sent while no page was connected is not sent again.
+     *
+     * @param live the task's model call under way, as a LIVE status, or null while none is
+     */
+    public void running(String userId, String taskId, Supplier<StatusMessage> live) {
+        running.put(taskId, new Running(userId, live, new AtomicReference<>()));
+    }
+
+    /** The task has ended: nothing of it is kept for a page any more. */
+    public void ended(String taskId) {
+        running.remove(taskId);
+    }
+
+    /**
+     * What this user's attended task running now is doing: its model call under way as a LIVE
+     * status -- what the next live frame would say -- or, between calls, the step or progress
+     * status it emitted last; null when no such task is running or it has emitted none. Unattended
+     * work is nobody's working state ({@link #BACKGROUND}), so it is not asked about.
+     */
+    public StatusMessage doing(String userId) {
+        for (var task : running.entrySet()) {
+            Running r = task.getValue();
+            if (!r.userId().equals(userId) || background.contains(task.getKey())) continue;
+            StatusMessage live = r.live().get();
+            return live != null ? live : r.last().get();
+        }
+        return null;
     }
 
     /**
@@ -121,7 +165,8 @@ public class ChatStatusEmitter {
 
     /**
      * Emit attributed to a specific task, with structured data -- marked {@link #BACKGROUND} when
-     * that task is unattended work running now ({@link #inBackground}).
+     * that task is unattended work running now ({@link #inBackground}). A step or progress status
+     * of a task running now is kept as what it is doing ({@link #doing}).
      */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text,
                             Map<String, Object> data) {
@@ -130,7 +175,12 @@ public class ChatStatusEmitter {
             marked.put(BACKGROUND, true);
             data = marked;
         }
-        emit(userId, new StatusMessage(type, text, data, taskId));
+        var message = new StatusMessage(type, text, data, taskId);
+        Running task = taskId == null ? null : running.get(taskId);
+        if (task != null && (type == StatusMessage.Type.STEP || type == StatusMessage.Type.PROGRESS)) {
+            task.last().set(message);
+        }
+        emit(userId, message);
     }
 
     /**
@@ -181,7 +231,15 @@ public class ChatStatusEmitter {
              * Telegram. Carries the chat it was saved in, and the owner's text when only he may
              * read it, as a result does.
              */
-            PROGRESS_MESSAGE
+            PROGRESS_MESSAGE,
+            /**
+             * What a running task's model call is doing at this moment -- which model, what for,
+             * since when, how much it has written, the latest line of its reasoning -- sent as the
+             * call begins, every so often while it runs, and as it ends ({@code AgentLoop}). The
+             * page shows it in place of the one before; it is never saved, and never sent to
+             * Telegram. Its data's "live" is the call's state ({@code LiveCall#shown}).
+             */
+            LIVE
         }
 
         /** Format with icon prefix for display. */
@@ -202,6 +260,7 @@ public class ChatStatusEmitter {
                 case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
                 case RESULT     -> text;                    // the answer, not a note about it
                 case PROGRESS_MESSAGE -> text;              // a message of its own, written whole
+                case LIVE       -> text;                    // opens with the model's own chip
             };
         }
     }

@@ -317,9 +317,13 @@ public class AgentLoop {
         // provider reports them (LlmProgress#billed).
         context.setBilledWithoutReply(usage -> account(context, false, llmRouter.cloud(),
                 LlmResponse.billedFor(List.of(usage))));
+        // Each model call of the task is shown in its chat while it runs (showLive), and a page
+        // that connects meanwhile is told at once what the task is doing.
+        context.setCallWatch(call -> watch(context, call));
 
         AgentResult result;
         inFlight.put(taskId, context);
+        statusEmitter.running(userId, taskId, () -> liveStatus(context));
         try {
             result = runLoop(context);
         } catch (TaskCancellationService.TaskCancelledException stop) {
@@ -333,6 +337,7 @@ public class AgentLoop {
             result = AgentResult.error(internalError(e, context), context.trajectory(), context.elapsedMs());
         } finally {
             inFlight.remove(taskId);
+            statusEmitter.ended(taskId);
             context.chat().close();
         }
         return end(context, result, true);
@@ -684,6 +689,8 @@ public class AgentLoop {
             // watchdog (cancelStalledTasks) -- between steps. Inside one, a model call hears it on
             // its progress hook and a tool through the supplier it was handed.
             if (context.isCancelled()) return stopped(context);
+            // The step its model calls are made for, as the owner is shown them (LiveCall).
+            context.setStep(step + 1);
 
             boolean debug = debugService.isEnabled(context.userId());
 
@@ -757,8 +764,7 @@ public class AgentLoop {
                     "Step " + (step + 1) + " · " + providerLabel,
                     tokenData(context));
 
-            ScheduledFuture<?> thinkHeartbeat = startLlmHeartbeat(context,
-                    "Step " + (step + 1) + " · " + providerLabel);
+            // While the call runs, its chat is shown what it is doing (AgentContext#call).
             ThinkResult thinkResult;
             try {
                 // On the local model, when the cloud is not available: work the task waits on.
@@ -803,8 +809,6 @@ public class AgentLoop {
                     continue;
                 }
                 return noAnswer(context, local, provider, noReply.reply(), noReply);
-            } finally {
-                stopHeartbeat(thinkHeartbeat);
             }
             context.markProgress(); // LLM responded — task is alive
             if (!local && thinkResult.reply() != null) context.cloudAnswered();
@@ -1128,7 +1132,7 @@ public class AgentLoop {
             emitActDetail(context, action, step + 1);
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Running " + action.tool() + "...");
-            ScheduledFuture<?> toolHeartbeat = startLlmHeartbeat(context,
+            ScheduledFuture<?> toolHeartbeat = startToolHeartbeat(context,
                     "Running " + action.tool());
             AgentObservation observation;
             try {
@@ -1543,10 +1547,14 @@ public class AgentLoop {
             case "list" -> skillManager.listSkills();
             case "analyze" -> {
                 LlmProvider provider = llmRouter.selectProvider(context);
-                java.util.function.Supplier<String> analysis = () -> skillManager.analyzeSkills(provider,
-                        context.egress("analyze"), context.progress(), accountOf(context));
-                // On the local model: work the task waits on, as its steps are.
-                yield llmRouter.isLocal(provider) ? lane.foreground(analysis) : analysis.get();
+                // While the call runs, its chat is shown what it is doing (AgentContext#call).
+                try (LiveCall live = context.call(provider, llmRouter.isLocal(provider),
+                        context.atStep("the analysis of the skill library"))) {
+                    java.util.function.Supplier<String> analysis = () -> skillManager.analyzeSkills(provider,
+                            context.egress("analyze"), live, accountOf(context));
+                    // On the local model: work the task waits on, as its steps are.
+                    yield llmRouter.isLocal(provider) ? lane.foreground(analysis) : analysis.get();
+                }
             }
             default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
         };
@@ -2262,7 +2270,6 @@ public class AgentLoop {
         // work. On the local model, low means the code is written without reasoning first.
         LlmRequestConfig codeGenConfig = new LlmRequestConfig(null, 0.2, false)
                 .withEgress(context.egress("codegen"))
-                .withProgress(context.progress())
                 .withEffort(context.options().effort());
 
         List<LlmMessage> prompt = spec;
@@ -2273,13 +2280,16 @@ public class AgentLoop {
                         "Repairing syntax error · " + providerLabel + " (attempt " + attempt + "/" + SYNTAX_REPAIRS + ")",
                         tokenData(context));
             }
-            ScheduledFuture<?> heartbeat = startLlmHeartbeat(context,
-                    (attempt == 0 ? "Generating code for '" : "Repairing code for '") + name + "'");
+            // The task's own hook goes with the call, and while it runs its chat is shown what it is
+            // doing (AgentContext#call).
+            LiveCall live = context.call(provider, local, context.atStep(
+                    (attempt == 0 ? "the code of skill '" : "repairing the code of skill '") + name + "'"));
             LlmResponse reply;
             try {
                 LlmProvider writer = provider;
                 List<LlmMessage> asked = prompt;
-                java.util.function.Supplier<LlmResponse> call = () -> writer.chat(asked, codeGenConfig);
+                LlmRequestConfig asking = codeGenConfig.withProgress(live);
+                java.util.function.Supplier<LlmResponse> call = () -> writer.chat(asked, asking);
                 // On the local model, when the cloud is not available: work the task waits on.
                 reply = local ? lane.foreground(call) : call.get();
             } catch (TaskCancellationService.TaskCancelledException stop) {
@@ -2306,13 +2316,16 @@ public class AgentLoop {
                         continue;
                     }
                     // Written from the start on the local model, whose prompt is its own.
-                    stopHeartbeat(heartbeat);
+                    live.close();
                     return generateSkillCode(originalParams, context);
+                }
+                if (callFailed instanceof RepeatedOutput looped) {
+                    context.chat().repeated(looped, live, "the code of '" + name + "' was not written");
                 }
                 return Codegen.failed("the request for the code of '" + name + "' failed ("
                         + callFailed.getMessage() + "), so nothing was created.");
             } finally {
-                stopHeartbeat(heartbeat);
+                live.close();
             }
             // A reply came back: the task is alive, whatever the reply holds.
             context.markProgress();
@@ -3019,14 +3032,15 @@ public class AgentLoop {
             });
 
     /**
-     * Start a periodic heartbeat that emits PROGRESS status messages while a model or tool call
-     * is running. Keeps the UI activity indicator alive so users know the system isn't hung.
+     * Start a periodic heartbeat that emits PROGRESS status messages while a tool call is
+     * running. Keeps the UI activity indicator alive so users know the system isn't hung. A model
+     * call is shown by its own live state instead ({@link #watch}).
      *
      * @param context     the task the call is made for, whose user is sent the messages
-     * @param description what's happening (e.g. "Generating code")
+     * @param description what's happening (e.g. "Running openwrt_run")
      * @return a ScheduledFuture to cancel when the call completes
      */
-    private ScheduledFuture<?> startLlmHeartbeat(AgentContext context, String description) {
+    private ScheduledFuture<?> startToolHeartbeat(AgentContext context, String description) {
         ScheduledExecutorService scheduler = HEARTBEAT_SCHEDULER;
         long[] startMs = { System.currentTimeMillis() };
         return scheduler.scheduleAtFixedRate(() -> {
@@ -3048,5 +3062,77 @@ public class AgentLoop {
         if (heartbeat != null) {
             heartbeat.cancel(false);
         }
+    }
+
+    // ── What a model call is doing, as the owner is shown it ──
+
+    /**
+     * How often the chat of a task is sent the live state of its model call under way: every 15
+     * seconds, and once as the call begins and once as it ends. Often enough that the owner sees
+     * the call move -- the local model writes a few hundred characters in that time -- and no
+     * chat is flooded: a frame takes the place of the one before it on the page, and is never
+     * saved.
+     */
+    static final long LIVE_EVERY_MS = 15_000;
+
+    /** How often a call's live state is sent: {@link #LIVE_EVERY_MS}, which a test shortens. */
+    volatile long liveEveryMs = LIVE_EVERY_MS;
+
+    /**
+     * The task's {@link AgentContext#setCallWatch}: while {@code call} runs, its chat is sent the
+     * call's live state ({@link LiveCall#shown}) as it begins and every {@link #liveEveryMs}, as a
+     * LIVE status the page shows in place of the one before -- marked as unattended work's for a
+     * scheduled run, as every status of one is ({@link ChatStatusEmitter#inBackground}); once it
+     * has ended, how long it ran, and nothing after that. The sends take turns, so the one saying
+     * it ended is the last.
+     */
+    private Runnable watch(AgentContext context, LiveCall call) {
+        Object turn = new Object();
+        showLive(context, call.shown());
+        ScheduledFuture<?> beat = HEARTBEAT_SCHEDULER.scheduleAtFixedRate(() -> {
+            synchronized (turn) {
+                LiveCall.Shown shown = call.shown();
+                if (!shown.ended()) showLive(context, shown);
+            }
+        }, liveEveryMs, liveEveryMs, TimeUnit.MILLISECONDS);
+        return () -> {
+            beat.cancel(false);
+            synchronized (turn) {
+                showLive(context, call.shown());
+            }
+        };
+    }
+
+    /** One live frame for the task's chat; a frame that cannot be sent costs only itself. */
+    private void showLive(AgentContext context, LiveCall.Shown shown) {
+        try {
+            statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.LIVE,
+                    shown.text(), Map.of("live", shown.data()));
+        } catch (RuntimeException e) {
+            log.warn("Task {}: the live state of its model call could not be sent: {}",
+                    context.taskId(), e.getMessage());
+        }
+    }
+
+    /**
+     * What a page that connects is told of the task's model call under way, as the live frame it
+     * would otherwise wait for says it; null while none is ({@link ChatStatusEmitter#doing}).
+     */
+    private StatusMessage liveStatus(AgentContext context) {
+        LiveCall call = context.liveCall();
+        if (call == null) return null;
+        LiveCall.Shown shown = call.shown();
+        return shown.ended() ? null : new StatusMessage(StatusMessage.Type.LIVE, shown.text(),
+                Map.of("live", shown.data()), context.taskId());
+    }
+
+    /**
+     * The model call under way of a task running now, as the ops API shows it
+     * ({@link LiveCall#forOps}), or null when the task is not running or is between calls.
+     */
+    public Map<String, Object> liveCallOf(String taskId) {
+        AgentContext context = inFlight.get(taskId);
+        LiveCall call = context == null ? null : context.liveCall();
+        return call == null ? null : call.forOps();
     }
 }

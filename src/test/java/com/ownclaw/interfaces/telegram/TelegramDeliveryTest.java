@@ -22,6 +22,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -460,7 +461,7 @@ class TelegramDeliveryTest {
     }
 
     @Test
-    @DisplayName("the steps, progress and debug output of a running task are not sent; its warnings and failures are")
+    @DisplayName("the steps, progress, live state and debug output of a running task are not sent; its warnings and failures are")
     void notTheHeartbeat(@TempDir Path tmp) throws Exception {
         start(tmp, "unused");
         jdbc.update("INSERT INTO system_settings (key, value) VALUES (?, ?)", "telegram.chat." + owner, String.valueOf(ME));
@@ -471,6 +472,9 @@ class TelegramDeliveryTest {
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.QUEUED, "Task queued (position 2)", null));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.STEP, "Think", null, "abcd1234"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.PROGRESS, "writing code… 20s", null, "abcd1234"));
+        emitter.emitForTask(owner, "abcd1234", StatusMessage.Type.LIVE,
+                "🏠 Local model · step 6, delegation turn 1 · reasoning · 23m 5s · 41,200 characters so far",
+                Map.of("live", Map.of("phase", "reasoning")));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.DEBUG, "PROMPT: the whole of it", null));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.COMPLETED, "Done in 3 steps", null, "abcd1234"));
         emitter.emit(owner, new StatusMessage(StatusMessage.Type.WARNING, "No progress for 600s", null, "abcd1234"));

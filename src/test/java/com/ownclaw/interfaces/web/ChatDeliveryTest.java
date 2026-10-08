@@ -376,6 +376,57 @@ class ChatDeliveryTest {
         // Mutation: count unattended work as running again -> taskRunning is true at connect.
     }
 
+    @Test
+    @DisplayName("on connect and on opening a chat, the page is told what the running task is doing now: its model call under way, else its last step")
+    void sessionInfoSaysWhatTheTaskIsDoing(@TempDir Path tmp) throws Exception {
+        tasks = db -> {
+            var q = new TaskQueue(null, new com.ownclaw.observability.EventLogService(db), emitter,
+                    new OwnClawConfig(), new com.ownclaw.core.TaskCancellationService());
+            q.submit(USER, "audit the routers", 1);   // attended, not started: the page's working state
+            return q;
+        };
+        var call = new java.util.concurrent.atomic.AtomicReference<ChatStatusEmitter.StatusMessage>();
+        var line = Map.<String, Object>of("live", Map.of("summary",
+                "🏠 Local model · step 6, delegation turn 1 · reasoning · 23m 5s · 41,200 characters so far",
+                "line", "Let me check the second router.", "ended", false));
+        call.set(new ChatStatusEmitter.StatusMessage(ChatStatusEmitter.StatusMessage.Type.LIVE,
+                "🏠 Local model · step 6, delegation turn 1 · reasoning · 23m 5s · 41,200 characters so far "
+                        + "· “Let me check the second router.”", line, "t1"));
+        emitter.running(USER, "t1", call::get);
+        connect(tmp);
+
+        var doing = frames("session_info").getLast().path("doing");
+        assertEquals("status", doing.path("type").asText(), doing.toString());
+        assertEquals("live", doing.path("status").asText());
+        assertEquals("t1", doing.path("taskId").asText());
+        assertEquals(call.get().text(), doing.path("content").asText(), "what the next live frame would say");
+        assertEquals("Let me check the second router.", doing.path("data").path("live").path("line").asText());
+
+        // A live frame reaches the page as a status of its own, written as it was.
+        emitter.emitForTask(USER, "t1", ChatStatusEmitter.StatusMessage.Type.LIVE, call.get().text(), line);
+        var frame = frames("status").getLast();
+        assertEquals("live", frame.path("status").asText(), frame.toString());
+        assertEquals(call.get().text(), frame.path("content").asText(), "it opens with the model's own chip");
+
+        // Between calls: the step it emitted last.
+        emitter.emitForTask(USER, "t1", ChatStatusEmitter.StatusMessage.Type.STEP, "Running openwrt_run...");
+        call.set(null);
+        String open = conversations.getCurrentSession(USER);
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("type", "switch_session", "message", open))));
+        doing = frames("session_info").getLast().path("doing");
+        assertEquals("step", doing.path("status").asText(), doing.toString());
+        assertEquals("→ Running openwrt_run...", doing.path("content").asText());
+
+        // Ended: nothing more is said of it.
+        emitter.ended("t1");
+        chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
+                Map.of("type", "switch_session", "message", open))));
+        assertTrue(frames("session_info").getLast().path("doing").isMissingNode(),
+                frames("session_info").getLast().toString());
+        // Mutation: leave doing out of session_info -> a reload shows a bare spinner.
+    }
+
     /** What the page sends for a message: the text, the name it gave the bubble, and queue when asked. */
     private void sendFromPage(String text, String clientId, boolean queued) throws Exception {
         var json = new java.util.LinkedHashMap<String, Object>(Map.of("message", text, "clientId", clientId));
