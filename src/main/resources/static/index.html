@@ -2768,6 +2768,10 @@
     var lastMsgSender = null;
     var heartbeatTimer = null;
     var thinkingSafetyTimer = null;
+    /** How long the page hears nothing of a running task before it asks whether it still runs. */
+    var THINKING_SAFETY_MS = 900000;
+    /** Set while the page waits for the server to say whether its task still runs (stillRunning). */
+    var askedStillRunning = false;
     var activeSessionId = null;
     var currentView = 'chat'; // 'chat' or 'tasks'
     var thinkingStartedAt = null;
@@ -5910,7 +5914,12 @@
                     // The row that says the task read messages sent while it worked names them.
                     (data.read || []).forEach(function(id) { markFate(bubbleOf(id), 'Read by the task.'); });
                 } else if (type === 'pong' || type === 'ping') {
-                    // heartbeat
+                    // The heartbeat's. One that comes while the page asks whether its task still
+                    // runs answers that (stillRunning): ended only when no task runs.
+                    if (type === 'pong' && askedStillRunning && typeof data.taskRunning === 'boolean') {
+                        askedStillRunning = false;
+                        if (!data.taskRunning) { setThinking(false); doneActivity(); }
+                    }
                 } else {
                     // 'system' is how a slash-command result comes back. send() starts the spinner
                     // for every message including commands, and nothing here cleared it: /help
@@ -6035,7 +6044,7 @@
      * it runs as a task of its own after it (updateComposer). Stop stays beside them.
      */
     function setThinking(on) {
-        if (!on) { stopPressed = false; steeredChatId = null; }
+        if (!on) { stopPressed = false; steeredChatId = null; askedStillRunning = false; }
         if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
         stopBtn.classList.toggle('visible', on);
         if (on) {
@@ -6046,11 +6055,8 @@
                 thinkingStartedAt = Date.now();
                 startElapsedTimer();
             }
-            // Safety net: auto-hide if no messages arrive for 15 minutes
-            thinkingSafetyTimer = setTimeout(function() {
-                setThinking(false);
-                doneActivity();
-            }, 900000);
+            // Fifteen minutes without a word of the task: ask whether it still runs (stillRunning).
+            thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
         } else {
             thinkingEl.classList.remove('active');
             thinkingStartedAt = null;
@@ -6091,11 +6097,23 @@
     function resetThinkingSafetyTimer() {
         if (thinkingSafetyTimer) {
             clearTimeout(thinkingSafetyTimer);
-            thinkingSafetyTimer = setTimeout(function() {
-                setThinking(false);
-                doneActivity();
-            }, 900000);
+            thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
         }
+    }
+
+    /**
+     * Nothing has been heard of the task for THINKING_SAFETY_MS: ask the server whether it still
+     * runs, with a ping, whose pong says (taskRunning), and end the working state only when it
+     * does not. The silence was taken for the task's end: on 2026-10-08 a local model reasoned for
+     * two and a half hours without a word, and the spinner and Stop went after fifteen minutes,
+     * while the task ran on. Asked again each THINKING_SAFETY_MS, so a lost pong is asked about
+     * again; a page that cannot ask keeps its state, and its reconnect's session_info says.
+     */
+    function stillRunning() {
+        askedStillRunning = true;
+        try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }
+        catch (e) {}
+        thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
     }
 
     function startElapsedTimer() {

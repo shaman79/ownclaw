@@ -63,9 +63,16 @@ class ChatDeliveryTest {
         final List<Boolean> queued = new ArrayList<>();
         final List<CompletableFuture<AgentResult>> futures = new ArrayList<>();
         volatile Fate fate = Fate.STARTED;
+        /** Whether an attended task of the user runs, as the test sets it. */
+        volatile boolean busy;
 
         Queue() {
             super(null, null, null, new OwnClawConfig(), null);
+        }
+
+        @Override
+        public boolean isAttendedBusyFor(String userId) {
+            return busy;
         }
 
         @Override
@@ -518,6 +525,21 @@ class ChatDeliveryTest {
         queue.futures.getFirst().complete(AgentResult.completed("the real answer", new AgentTrajectory(), 1));
 
         assertEquals(List.of("the real answer"), frames("response").stream().map(f -> f.path("content").asText()).toList());
+    }
+
+    @Test
+    @DisplayName("a pong says whether a task of the user runs: a page that has heard nothing of its task for long asks so")
+    void aPongSaysWhetherATaskRuns(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        TextMessage ping = new TextMessage(mapper.writeValueAsString(Map.of("type", "ping")));
+
+        chat.handleMessage(socket, ping);
+        assertFalse(frames("pong").getLast().path("taskRunning").asBoolean(true), String.valueOf(sent));
+
+        queue.busy = true;
+        chat.handleMessage(socket, ping);
+        assertTrue(frames("pong").getLast().path("taskRunning").asBoolean(false), String.valueOf(sent));
+        // Mutation: a pong without taskRunning -> the page cannot tell, and the first assertion fails.
     }
 
     @Test

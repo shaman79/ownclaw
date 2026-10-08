@@ -243,7 +243,8 @@ class ChatPageTest {
                         + "steeredOptions = data.options; } else if (!data.queue && data.sessionId === steeredChatId) "
                         + "steeredChatId = null; updateComposer();"),
                 "the fate of a message names the chat where Send reaches the task, or says it takes nothing more");
-        assertTrue(page.contains("if (!on) { stopPressed = false; steeredChatId = null; }"), "and no task runs once it ends");
+        assertTrue(page.contains("if (!on) { stopPressed = false; steeredChatId = null; askedStillRunning = false; }"),
+                "and no task runs once it ends");
         assertTrue(page.contains("if (listed) listed.classList.remove('unread'); updateComposer();"),
                 "opening another chat says what Send does there");
         assertTrue(page.contains("displayedSessionId = null; updateComposer();"), "as New Chat does");

@@ -273,7 +273,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // taken for the heartbeat, it was neither saved nor answered, and the page, which had
         // drawn it and started waiting, waited for nothing.
         if ("ping".equalsIgnoreCase(messageType)) {
-            sendToSession(session, "pong", "");
+            // With whether an attended task of this user is running, as session_info says it: a
+            // page that has heard nothing of its task for a long time asks this rather than take
+            // the silence for the task's end.
+            var pong = new LinkedHashMap<String, Object>();
+            pong.put("type", "pong");
+            pong.put("content", "");
+            pong.put("taskRunning", taskQueue.isAttendedBusyFor(userId));
+            send(session, pong);
             return;
         }
 
