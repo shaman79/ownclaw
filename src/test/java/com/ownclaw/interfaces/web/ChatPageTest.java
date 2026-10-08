@@ -28,7 +28,7 @@ class ChatPageTest {
     @DisplayName("a delivered result is appended only in its own chat; otherwise that chat is marked unread")
     void resultsGoToTheirChat() {
         assertTrue(page.contains("if (type === 'result') { if (currentView === 'chat' && data.sessionId === "
-                + "displayedSessionId) { addMsg('response', content, data.taskId); } else { "
+                + "displayedSessionId) { addMsg('response', content, data.taskId, null, data.timestamp); } else { "
                 + "markUnread(data.sessionId); } return; }"), "the routing of a result");
         assertTrue(page.contains("(s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '')"),
                 "the pinned chat and an unread one are marked in the list");
@@ -134,10 +134,10 @@ class ChatPageTest {
         String handler = page.substring(page.indexOf("} else if (type === 'progress') {"));
         handler = handler.substring(0, handler.indexOf("} else if (type === 'pong'"));
         assertTrue(handler.contains("if (currentView === 'chat' && data.sessionId === displayedSessionId) { "
-                + "addProgress(content, data.progress); }"), "only in the chat it belongs to: " + handler);
+                + "addProgress(content, data.progress, null, data.timestamp); }"), "only in the chat it belongs to: " + handler);
         assertFalse(handler.contains("setThinking(false)") || handler.contains("doneActivity()"),
                 "progress is not the end of the work: " + handler);
-        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress, before); return; }"),
+        assertTrue(page.contains("if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }"),
                 "a saved progress row is drawn as one after a reload, with the header it was saved with");
         assertTrue(page.contains(".msg.progress {"), "and styled as secondary");
         // Mutation: draw it as a response -> after a reload every step reads as an answer.
@@ -165,10 +165,10 @@ class ChatPageTest {
     @Test
     @DisplayName("a progress row's header is the line the server wrote, its emoji drawn as a chip for who acts; a row without one is its text")
     void progressHeadersAreChips() {
-        String draw = page.substring(page.indexOf("function addProgress(text, header, before) {"));
+        String draw = page.substring(page.indexOf("function addProgress(text, header, before, timestamp) {"));
         draw = draw.substring(0, draw.indexOf("// Chat messages are persisted"));
         assertTrue(draw.contains("if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) { "
-                + "addMsg('progress', text, null, before); return; }"), "a row saved before headers were kept: " + draw);
+                + "addMsg('progress', text, null, before, timestamp); return; }"), "a row saved before headers were kept: " + draw);
         assertTrue(draw.contains("var line = lineBreak < 0 ? text : text.slice(0, lineBreak); "
                 + "var space = line.indexOf(' '); "
                 + "var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);"),
@@ -254,7 +254,7 @@ class ChatPageTest {
     @Test
     @DisplayName("a message drawn from the history is named by its row, so a task still running marks it read after a reload")
     void historyBubblesAreNamedByTheirRows() {
-        assertTrue(page.contains("var drawn = addMsg(type, m.content, m.task_id, before);"), "the bubble a reload draws");
+        assertTrue(page.contains("var drawn = addMsg(type, m.content, m.task_id, before, m.timestamp);"), "the bubble a reload draws");
         assertTrue(page.contains("if (type === 'user') drawn.dataset.messageId = m.id;"),
                 "named as bubbleOf finds it");
         assertTrue(page.contains("'.msg.user[data-message-id=\"' + CSS.escape(messageId) + '\"]'"));

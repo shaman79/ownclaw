@@ -580,6 +580,35 @@ class ProgressMessagesTest {
     }
 
     @Test
+    @DisplayName("a progress row is shown live with when it was saved, as a reload reads it: a step's and a note's alike")
+    void theLiveRowSaysWhenItWasSaved(@TempDir Path tmp) throws Exception {
+        var jdbc = com.ownclaw.conversation.MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new com.ownclaw.conversation.ConversationService(jdbc);
+        var emitter = new com.ownclaw.observability.ChatStatusEmitter();
+        var seen = new CopyOnWriteArrayList<StatusMessage>();
+        emitter.subscribe("u1", seen, seen::add);
+        String session = conversations.createSession("u1", "Routers");
+        com.ownclaw.conversation.MigratedDatabase.eachRowAtItsOwnMoment(jdbc);
+        var chat = new TaskChat(new AgentContext("u1", "a1b2c3d4", "check the routers"), session,
+                TaskChat.Channel.WEB, conversations, emitter, null, null, null);
+
+        chat.read(1, List.of("row7"), false);
+        chat.onLocalModel("anthropic", "no connection to it");
+
+        var saved = conversations.getSessionMessages("u1", session, null, null).messages().stream()
+                .map(row -> row.get("timestamp")).toList();
+        assertEquals(List.of("2026-10-08 06:35:08", "2026-10-08 06:36:08"), saved, "each at its own moment");
+        assertEquals(saved, seen.stream().map(m -> m.data().get("timestamp")).toList(),
+                "the step's frame and the note's, each with its own row's");
+
+        conversations.deleteSession("u1", session);
+        chat.read(2, List.of("row8"), false);
+        chat.onLocalModel("anthropic", "no connection to it");
+        assertEquals(2, seen.size(), "a chat deleted meanwhile: neither saved nor shown");
+        // Mutation: emit before saving -> the frame has no time, and the page shows its own clock's.
+    }
+
+    @Test
     @DisplayName("what the filter took from a result is said in counts, each part only when it is not zero")
     void theFilterNote() {
         var redactor = new com.ownclaw.privacy.Redactor(null);

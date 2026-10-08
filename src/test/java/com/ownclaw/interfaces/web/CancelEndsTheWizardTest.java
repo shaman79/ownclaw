@@ -58,6 +58,7 @@ class CancelEndsTheWizardTest {
     private final ChatDeliveryTest.Queue queue = new ChatDeliveryTest.Queue();
     private final List<String> sent = new CopyOnWriteArrayList<>();
     private ChatWebSocketHandler chat;
+    private ConversationService conversations;
     private WebSocketSession socket;
 
     @AfterEach
@@ -67,7 +68,7 @@ class CancelEndsTheWizardTest {
     }
 
     private void connect(Path tmp) throws Exception {
-        var conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
+        conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override public Optional<String> validateToken(String token) { return Optional.of(token); }
             @Override public boolean isOwner(String userId) { return "owner".equals(userId); }
@@ -121,6 +122,21 @@ class CancelEndsTheWizardTest {
         assertEquals(List.of(), wizard.answers, "and not the wizard's answer");
         // Mutations: /cancel without cancelPending -> the wizard takes the question as the API
         // key; the wait cancelled as a CancellationException -> the wizard ends without a word.
+    }
+
+    @Test
+    @DisplayName("the wizard's question is kept in the chat, and its frame says when it was saved, as the chat's history reads it")
+    void theQuestionSaysWhenItWasSaved(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        assertTrue(within(() -> sent.stream().anyMatch(s -> s.contains("paste your cloud API key"))), "the wizard asks: " + sent);
+
+        var frame = new ObjectMapper().readTree(sent.stream().filter(s -> s.contains("paste your cloud API key"))
+                .findFirst().orElseThrow());
+        var rows = conversations.getSessionMessages("owner", conversations.getCurrentSession("owner"), null, null).messages();
+        assertEquals(1, rows.size(), String.valueOf(rows));
+        assertEquals("system", rows.getFirst().get("role"));
+        assertEquals(rows.getFirst().get("timestamp"), frame.path("timestamp").asText(), frame.toString());
+        // Mutation: send it without the time its row was saved -> the page shows its own clock's.
     }
 
     @Test

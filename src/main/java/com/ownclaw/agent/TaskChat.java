@@ -420,16 +420,17 @@ public final class TaskChat {
     private void note(String content) {
         synchronized (this) {
             if (ended) return;
+            String savedAt = null;
             try {
-                if (!conversations.saveProgress(task.userId(), sessionId, content, task.taskId(), null, null)) {
-                    return;
-                }
+                savedAt = conversations.saveProgress(task.userId(), sessionId, content, task.taskId(), null, null);
+                if (savedAt == null) return;
             } catch (RuntimeException e) {
                 log.warn("Task {}: a progress message could not be saved: {}", task.taskId(), e.getMessage());
             }
             if (channel == Channel.OPS) return;
             var data = new HashMap<String, Object>();
             data.put("sessionId", sessionId);
+            if (savedAt != null) data.put("timestamp", savedAt);
             if (channel == Channel.TELEGRAM) data.put("telegram", true);
             emitter.emitForTask(task.userId(), task.taskId(), StatusMessage.Type.PROGRESS_MESSAGE, content, data);
         }
@@ -440,12 +441,12 @@ public final class TaskChat {
     }
 
     /**
-     * Save the row in the task's chat, then show it: in the page, with its chat, task and header,
-     * and in Telegram for a task that came from there. Its content is the header's line with
-     * {@code body} under it; {@code ownerBody}, when there is one, goes under the header in the
-     * row's private content instead. A row for a chat the owner has deleted is neither saved nor
-     * shown; one that cannot be saved for another reason is still shown; and none is either once
-     * the task has ended.
+     * Save the row in the task's chat, then show it: in the page, with its chat, task, header and
+     * when it was saved, and in Telegram for a task that came from there. Its content is the
+     * header's line with {@code body} under it; {@code ownerBody}, when there is one, goes under
+     * the header in the row's private content instead. A row for a chat the owner has deleted is
+     * neither saved nor shown; one that cannot be saved for another reason is still shown, without
+     * a time of its own; and none is either once the task has ended.
      *
      * @param read the owner's rows the task has just read ({@link #read}), named in the live frame; or null
      */
@@ -454,11 +455,11 @@ public final class TaskChat {
         String ownerText = ownerBody == null ? null : header.line() + "\n\n" + ownerBody;
         synchronized (this) {
             if (ended) return;
+            String savedAt = null;
             try {
-                if (!conversations.saveProgress(task.userId(), sessionId, content, task.taskId(), ownerText,
-                        header.data())) {
-                    return;
-                }
+                savedAt = conversations.saveProgress(task.userId(), sessionId, content, task.taskId(), ownerText,
+                        header.data());
+                if (savedAt == null) return;
             } catch (RuntimeException e) {
                 log.warn("Task {}: a progress message could not be saved: {}", task.taskId(), e.getMessage());
             }
@@ -466,6 +467,7 @@ public final class TaskChat {
             var data = new HashMap<String, Object>();
             data.put("sessionId", sessionId);
             data.put("progress", header.data());
+            if (savedAt != null) data.put("timestamp", savedAt);
             if (ownerText != null) data.put("ownerText", ownerText);
             if (read != null) data.put("read", read);
             if (channel == Channel.TELEGRAM) data.put("telegram", true);

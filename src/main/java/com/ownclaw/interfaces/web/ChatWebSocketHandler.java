@@ -167,6 +167,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 if (msg.data() != null && msg.data().get("read") != null) {
                     payload.put("read", msg.data().get("read"));
                 }
+                // When the row was saved, so the page shows the time a reload of the chat will.
+                if (msg.data() != null && msg.data().get("timestamp") != null) {
+                    payload.put("timestamp", msg.data().get("timestamp"));
+                }
                 send(session, payload);
             } else {
                 // Include the raw status sub-type so the frontend can detect terminal statuses
@@ -373,6 +377,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // history is available when AgentLoop loads context for the LLM.
         String currentMessageId = conversationService.saveMessage(userId, currentSessionId, "user",
                 userMessage, attachmentIds);
+        // When it was saved, for the frame that says what became of it (below): the page shows it
+        // on the bubble it drew as the message was sent, as a reload of the chat will.
+        String sentAt = conversationService.timestampOf(currentMessageId);
 
         // Immediately refresh the sidebar so message count and preview update
         sendToSession(session, "session_updated", currentSessionId);
@@ -395,16 +402,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     // Two texts. The history every later prompt is built from gets the safe one;
                     // a private answer is kept beside it, for this chat and its reload only.
                     // Saving is one half of delivering it, and failing it must not also lose the
-                    // other: the answer is still sent.
+                    // other: the answer is still sent, without a time of its own.
+                    String answeredAt = null;
                     try {
-                        conversationService.saveAnswer(userId, currentSessionId, result);
+                        answeredAt = conversationService.timestampOf(
+                                conversationService.saveAnswer(userId, currentSessionId, result));
                     } catch (Exception e) {
                         log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
                     }
                     // A question is routed as a question, so the client can offer a reply box
                     // instead of presenting it as the finished answer.
                     sendToUser(userId, result.awaitingUser() ? "input_request" : "response",
-                                result.shown(), currentSessionId, result.taskId());
+                                result.shown(), currentSessionId, result.taskId(), answeredAt);
                     // The chat list has changed (count, preview), so every window fetches it
                     // again. The frame names the chat open now, which a window follows -- not the
                     // one this answer is saved in, which the owner may have left while the task
@@ -431,6 +440,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         said.put("fate", fate.name().toLowerCase(java.util.Locale.ROOT));
         if (fate.line() != null) said.put("content", fate.line());
         said.put("messageId", currentMessageId);
+        said.put("timestamp", sentAt);
         said.put("sessionId", currentSessionId);
         said.put("options", chosen);
         said.put("queue", queue);
@@ -574,9 +584,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void sendSystemToUser(String userId, String message) {
         String sessionId = conversationService.getCurrentSession(userId);
-        conversationService.saveMessage(userId, sessionId, "system", message);
+        String savedAt = conversationService.timestampOf(
+                conversationService.saveMessage(userId, sessionId, "system", message));
 
-        sendToUser(userId, "system", message);
+        sendToUser(userId, "system", message, null, null, savedAt);
     }
 
     private void sendStatusToSession(WebSocketSession session, ChatStatusEmitter.StatusMessage msg) {
@@ -628,11 +639,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void sendToUser(String userId, String type, String content, String sessionId) {
-        sendToUser(userId, type, content, sessionId, null);
+        sendToUser(userId, type, content, sessionId, null, null);
     }
 
     private void sendToUser(String userId, String type, String content, String sessionId,
-                            String taskId) {
+                            String taskId, String timestamp) {
         Set<WebSocketSession> open = sessions.get(userId);
         if (open == null || open.isEmpty()) {
             log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
@@ -643,7 +654,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         int sent = 0;
         for (WebSocketSession live : open) {
             if (live.isOpen()) {
-                sendToSession(live, type, content, sessionId, taskId);
+                sendToSession(live, type, content, sessionId, taskId, timestamp);
                 sent++;
             }
         }
@@ -666,17 +677,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      */
     private void sendToSession(WebSocketSession session, String type, String content,
                                String sessionId) {
-        sendToSession(session, type, content, sessionId, null);
+        sendToSession(session, type, content, sessionId, null, null);
     }
 
-    /** @param taskId the agent task a message is the outcome of, so the chat can link to it */
+    /**
+     * @param taskId    the agent task a message is the outcome of, so the chat can link to it
+     * @param timestamp when the row the message shows was saved ({@link ConversationService#timestampOf}),
+     *                  so the page shows the time a reload of the chat will; null for one not kept,
+     *                  which the page shows with its own clock's
+     */
     private void sendToSession(WebSocketSession session, String type, String content,
-                               String sessionId, String taskId) {
+                               String sessionId, String taskId, String timestamp) {
         var payload = new LinkedHashMap<String, Object>();
         payload.put("type", type);
         payload.put("content", content);
         if (sessionId != null) payload.put("sessionId", sessionId);
         if (taskId != null) payload.put("taskId", taskId);
+        if (timestamp != null) payload.put("timestamp", timestamp);
         send(session, payload);
     }
 

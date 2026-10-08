@@ -436,8 +436,11 @@
         }
 
         /* ───── Progress messages ───── */
-        /* A running task's steps, in its chat: compact and secondary to the answer. */
+        /* A running task's steps, in its chat: compact and secondary to the answer. As wide as the
+           line leaves it beside its margin: the full width of a row, it ran 42px past the chat,
+           which a phone scrolled sideways, and its time at the end of the header went out of sight. */
         .msg.progress {
+            width: auto;
             margin: 2px 0 2px 42px;
             padding: 3px 12px;
             border-left: 2px solid var(--border-mid);
@@ -469,6 +472,22 @@
         .progress-what { color: var(--text-2) }
         .progress-body { margin-top: 2px; min-width: 0 }
         .progress-body pre { max-width: 100%; overflow-x: auto }
+
+        /* ───── When a row was saved ───── */
+        /* Small and muted, the whole date and time in its tooltip: beside a message's bubble, in
+           the corner of an answer, a note or a system line, at the end of a progress row's header. */
+        .msg-time {
+            font-size: 11px;
+            line-height: 16px;
+            color: var(--text-3);
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+            user-select: none;
+        }
+        .msg.user > .msg-time { align-self: flex-end; flex-shrink: 0; margin: 0 8px 2px 0 }
+        .msg-body > .msg-time, .msg.system > .msg-time, .msg.progress > .msg-time { float: right; margin-left: 12px }
+        .msg-body > .msg-time { margin-top: 4px }
+        .progress-head > .msg-time { margin-left: auto }
 
         /*  Connection banner  */
         #conn-banner {
@@ -2942,9 +2961,9 @@
      * page, the oldest row on screen for an earlier one.
      */
     function drawRow(m, before) {
-        if (m.role === 'progress') { addProgress(m.content, m.progress, before); return; }
+        if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }
         var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
-        var drawn = addMsg(type, m.content, m.task_id, before);
+        var drawn = addMsg(type, m.content, m.task_id, before, m.timestamp);
         // Named by its row, as a bubble drawn live is once its fate comes: a task still
         // running marks it read, or handed on, after a reload or a switch back too.
         if (type === 'user') drawn.dataset.messageId = m.id;
@@ -5807,6 +5826,10 @@
                     delete sentBubbles[data.clientId];
                     if (sentBubble && data.messageId) sentBubble.dataset.messageId = data.messageId;
                     markFate(sentBubble, content);
+                    // Drawn as it was sent, it shows when it was saved from now on, as a reload will.
+                    var savedAt = tdTime(data.timestamp);
+                    var sentAt = sentBubble ? sentBubble.querySelector('time.msg-time') : null;
+                    if (sentAt && savedAt) showTime(sentAt, savedAt);
                     // And where Send reaches the running task: the chat this message started or
                     // reached it in. Sent there without Queue and not taken, it says that task
                     // takes nothing more from here.
@@ -5876,7 +5899,7 @@
                     setThinking(false);
                     doneActivity();
                     ensureChatView();   // unanswerable, then deleted, if Settings is open
-                    addMsg('input_request', content, data.taskId);
+                    addMsg('input_request', content, data.taskId, null, data.timestamp);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
                     addMsg('debug', content);
@@ -5886,7 +5909,7 @@
                     // and evidence that the work goes on -- never the end of it.
                     resetThinkingSafetyTimer();
                     if (currentView === 'chat' && data.sessionId === displayedSessionId) {
-                        addProgress(content, data.progress);
+                        addProgress(content, data.progress, null, data.timestamp);
                     }
                     // The row that says the task read messages sent while it worked names them.
                     (data.read || []).forEach(function(id) { markFate(bubbleOf(id), 'Read by the task.'); });
@@ -5906,7 +5929,7 @@
                     // turned up in the middle of an unrelated conversation.
                     if (type === 'result') {
                         if (currentView === 'chat' && data.sessionId === displayedSessionId) {
-                            addMsg('response', content, data.taskId);
+                            addMsg('response', content, data.taskId, null, data.timestamp);
                         } else {
                             markUnread(data.sessionId);
                         }
@@ -5933,7 +5956,7 @@
                         setThinking(false);
                         doneActivity();
                     }
-                    var drawnMsg = addMsg(type, content, data.taskId);
+                    var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);
                     // The server's echo of a slash text this page sent: "/queue ..." is a message,
                     // and what became of it is said under this bubble.
                     if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;
@@ -6054,15 +6077,17 @@
     var traceTaskId = null;
 
     /**
-     * @param before for a saved row of the chat, the element it is drawn before; whoever draws a
-     *               page of them sets the scroll position once it is drawn
+     * @param before    for a saved row of the chat, the element it is drawn before; whoever draws a
+     *                  page of them sets the scroll position once it is drawn
+     * @param timestamp when the row was saved, as the server sends it with the row (rowTime)
      */
-    function addMsg(type, text, taskId, before) {
+    function addMsg(type, text, taskId, before, timestamp) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
         var senderKey = isUserMsg ? 'user' : (isAiMsg ? 'ai' : null);
         var firstInRun = senderKey !== null && senderKey !== lastMsgSender;
         if (senderKey) lastMsgSender = senderKey;
+        var at = rowTime(timestamp, before);
 
         var div = document.createElement('div');
         div.className = 'msg ' + type + (firstInRun ? ' first-in-run' : '');
@@ -6071,6 +6096,7 @@
             var bubble = document.createElement('div');
             bubble.className = 'bubble';
             bubble.textContent = text;
+            if (at) div.appendChild(timeOf(at));
             div.appendChild(bubble);
         } else if (isAiMsg) {
             var avatar = document.createElement('div');
@@ -6082,6 +6108,7 @@
             body.className = 'msg-body md';
             body.innerHTML = renderMarkdown(text);
             body.querySelectorAll('pre').forEach(wrapCodeBlock);
+            if (at) body.insertBefore(timeOf(at), body.firstChild);
 
             // After the markdown, never inside it: mdSanitize forces target=_blank on every <a>,
             // and this opens a page in this window rather than leaving it.
@@ -6099,6 +6126,7 @@
             div.classList.add('md');
             div.querySelectorAll('pre').forEach(wrapCodeBlock);
             if (text.indexOf('\n') === -1 && text.length < 80) div.classList.add('short');
+            if (at) div.insertBefore(timeOf(at), div.firstChild);
         }
 
         if (before) { messagesEl.insertBefore(div, before); return div; }
@@ -6116,11 +6144,12 @@
      * has run and what it has cost. The page draws the emoji as a chip, styled by who acts from
      * the data sent with the row, and the rest of the line as it is; the rest of the text under
      * the header. A row saved before the header was kept comes without the data, and is drawn as
-     * its text. A saved row is drawn before the element given, as addMsg draws one.
+     * its text. A saved row is drawn before the element given, as addMsg draws one; when it was
+     * saved ends the header.
      */
-    function addProgress(text, header, before) {
+    function addProgress(text, header, before, timestamp) {
         if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) {
-            addMsg('progress', text, null, before);
+            addMsg('progress', text, null, before, timestamp);
             return;
         }
         var div = node('div', 'msg progress');
@@ -6132,6 +6161,8 @@
         chip.title = header.actor === 'local' ? 'The local model, on this machine' : 'The cloud model';
         head.appendChild(chip);
         head.appendChild(node('span', 'progress-what', line.slice(space + 1)));
+        var at = rowTime(timestamp, before);
+        if (at) head.appendChild(timeOf(at));
         div.appendChild(head);
         var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();
         if (body) {
@@ -6143,6 +6174,45 @@
         if (before) { messagesEl.insertBefore(div, before); return; }
         messagesEl.insertBefore(div, thinkingEl);
         scrollBottom(false);
+    }
+
+    /**
+     * When a row was saved, from the timestamp the server sends with it: SQLite's datetime('now'),
+     * UTC to the second with no zone (tdTime). A row drawn live without one is not kept -- a
+     * command's reply, a failed upload -- or its frame does not say, and came as it is drawn: this
+     * page's clock says when. A saved row drawn without one shows no time.
+     *
+     * @param before the element a saved row is drawn before (addMsg); none for a row drawn live
+     */
+    function rowTime(timestamp, before) {
+        return tdTime(timestamp) || (before ? null : new Date());
+    }
+
+    /**
+     * A row's time: a <time>, which the markdown of a row's text never makes (MD_ALLOWED), so the
+     * one a row holds is its own.
+     */
+    function timeOf(at) {
+        return showTime(node('time', 'msg-time'), at);
+    }
+
+    /**
+     * Show a moment as a row's time, in this browser's language: the time, with the date when it
+     * was not today, and the year when not this year; the whole date and time, to the second, in
+     * its tooltip.
+     */
+    function showTime(time, at) {
+        var now = new Date();
+        var shown = { hour: '2-digit', minute: '2-digit' };
+        if (at.toDateString() !== now.toDateString()) {
+            shown.day = 'numeric';
+            shown.month = 'numeric';
+            if (at.getFullYear() !== now.getFullYear()) shown.year = 'numeric';
+        }
+        time.textContent = at.toLocaleString(undefined, shown);
+        time.dateTime = at.toISOString();
+        time.title = at.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' });
+        return time;
     }
 
     // Chat messages are persisted and re-rendered on every load, so anything unsafe here is

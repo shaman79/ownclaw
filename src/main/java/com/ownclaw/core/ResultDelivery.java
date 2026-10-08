@@ -137,16 +137,19 @@ public class ResultDelivery {
         String owner = ownerText == null ? null : withHeader(header, ownerText);
 
         String sessionId = null;
+        String savedAt = null;
         try {
             sessionId = chat.get();
-            conversations.saveMessage(userId, sessionId, "assistant", message, java.util.List.of(),
-                    taskId, owner);
+            savedAt = conversations.timestampOf(conversations.saveMessage(userId, sessionId, "assistant", message,
+                    java.util.List.of(), taskId, owner));
         } catch (Exception e) {
             // Persisting is the more important half, but failing it must not also lose the push.
             log.warn("Could not persist a background result for {}: {}", userId, e.getMessage());
         }
         var data = new java.util.HashMap<String, Object>();
         if (sessionId != null) data.put("sessionId", sessionId);
+        // When it was saved, so the page shows the time a reload of the chat will.
+        if (savedAt != null) data.put("timestamp", savedAt);
         if (owner != null) data.put("ownerText", owner);
         if (taskId == null) statusEmitter.emit(userId, StatusMessage.Type.RESULT, message, data);
         else statusEmitter.emitForTask(userId, taskId, StatusMessage.Type.RESULT, message, data);

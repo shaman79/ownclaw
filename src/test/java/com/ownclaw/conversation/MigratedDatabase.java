@@ -70,4 +70,19 @@ public final class MigratedDatabase {
                             new ClassLoaderResourceAccessor(), database)));
         }
     }
+
+    /**
+     * Every row of a chat saved from now on at a moment of its own, a minute after the one before
+     * -- the first at 06:35:08 on 8 October 2026, UTC -- as rows saved seconds apart are, where a
+     * test saves several in one second: a frame carrying another row's time, or the time it was
+     * sent, then says a time no row of the chat has.
+     */
+    public static void eachRowAtItsOwnMoment(JdbcTemplate jdbc) {
+        jdbc.execute("""
+            CREATE TRIGGER each_row_at_its_own_moment AFTER INSERT ON conversations BEGIN
+                UPDATE conversations SET timestamp = datetime('2026-10-08 06:34:08',
+                    '+' || (SELECT COUNT(*) FROM conversations) || ' minutes') WHERE id = NEW.id;
+            END
+            """);
+    }
 }

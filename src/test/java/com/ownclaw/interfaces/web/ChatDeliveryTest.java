@@ -547,6 +547,49 @@ class ChatDeliveryTest {
     }
 
     @Test
+    @DisplayName("a frame showing a kept row says when the row was saved, as the chat's history reads it; one not kept says nothing")
+    void framesSayWhenTheirRowWasSaved(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        MigratedDatabase.eachRowAtItsOwnMoment(jdbc);
+        String asked = conversations.getCurrentSession(USER);
+        sendFromPage("check the router", "m1", false);
+        queue.futures.getFirst().complete(AgentResult.completed("the router is up", new AgentTrajectory(), 1));
+        queue.fate = TaskQueue.Fate.QUEUED;
+        sendFromPage("/queue and the printer", "m2", false);
+        type("/bg check the weather");
+        queue.futures.getLast().complete(AgentResult.completed("Sunny, 21 degrees.", new AgentTrajectory(), 1));
+
+        var saved = new HashMap<String, Object>();
+        for (var row : conversations.getSessionMessages(USER, asked, null, null).messages()) {
+            saved.put(String.valueOf(row.get("content")), row.get("timestamp"));
+        }
+        assertEquals(4, saved.size(), String.valueOf(saved));
+        assertEquals(4, new java.util.HashSet<>(saved.values()).size(), "each at its own moment: " + saved);
+        var fates = frames("fate");
+        assertEquals(saved.get("check the router"), fates.get(0).path("timestamp").asText(), "the message's: " + fates);
+        assertEquals(saved.get("and the printer"), fates.get(1).path("timestamp").asText(), "a queued one's: " + fates);
+        assertEquals(saved.get("the router is up"), frames("response").getLast().path("timestamp").asText(), "the answer's");
+        String result = frames("result").getLast().path("content").asText();
+        assertEquals(saved.get(result), frames("result").getLast().path("timestamp").asText(), "a background result's");
+        assertTrue(String.valueOf(saved.get(result)).matches("\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d"),
+                "as SQLite keeps it, UTC with no zone, which the page reads as UTC: " + saved.get(result));
+
+        emitter.emitForTask(USER, "abcd1234", ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE,
+                "☁️ Step 1 · ping · 2.0s · $0.01", Map.of("sessionId", asked, "timestamp", "2026-10-08 06:59:08"));
+        assertEquals("2026-10-08 06:59:08", frames("progress").getLast().path("timestamp").asText(), "a progress row's");
+
+        assertFalse(frames("system").isEmpty(), "the /bg reply");
+        assertFalse(frames("user").isEmpty(), "the /queue echo, which its fate stamps");
+        for (var f : sent) {
+            if (List.of("system", "user").contains(f.path("type").asText())) {
+                assertTrue(f.path("timestamp").isMissingNode(), "not kept: the page's own clock says when: " + f);
+            }
+        }
+        // Mutations: send the answer without the time its row was saved -> the page shows its own
+        // clock live and the saved time after a reload; leave it out of the result -> the same.
+    }
+
+    @Test
     @DisplayName("a command's reply is shown, not kept: it is no message of the chat's later prompts")
     void commandRepliesAreNotKept(@TempDir Path tmp) throws Exception {
         connect(tmp);

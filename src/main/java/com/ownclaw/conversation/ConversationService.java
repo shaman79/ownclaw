@@ -95,10 +95,10 @@ public class ConversationService {
      *
      * @param header what the row is about, as data ({@code TaskChat.Header}): kept in the row's
      *               metadata beside its task, so the page draws it again after a reload
-     * @return whether it was saved: false when the chat is gone
+     * @return when it was saved ({@link #timestampOf}); null when the chat is gone, and nothing was
      */
-    public boolean saveProgress(String userId, String sessionId, String content, String taskId,
-                                String privateContent, Map<String, Object> header) {
+    public String saveProgress(String userId, String sessionId, String content, String taskId,
+                               String privateContent, Map<String, Object> header) {
         var metadata = new LinkedHashMap<String, Object>();
         if (isTaskId(taskId)) metadata.put("taskId", taskId);
         metadata.put("progress", header);
@@ -108,15 +108,30 @@ public class ConversationService {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("a progress row's metadata is not JSON: " + e.getOriginalMessage(), e);
         }
+        String messageId = UUID.randomUUID().toString();
         int saved = jdbc.update("""
             INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
             SELECT ?, ?, ?, 'progress', ?, ?, ?
             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?)
-            """, UUID.randomUUID().toString(), userId, sessionId, content, json,
+            """, messageId, userId, sessionId, content, json,
                 privateContent, sessionId, userId);
-        if (saved == 0) return false;
+        if (saved == 0) return null;
         touch(sessionId, "progress", content);
-        return true;
+        return timestampOf(messageId);
+    }
+
+    /**
+     * When a row was saved: its timestamp as a chat's rows are read with it
+     * ({@link #getSessionMessages}) -- SQLite's {@code datetime('now')}, UTC to the second with no
+     * zone, "2026-10-08 12:12:55". The frame that shows a row live carries it, so the page shows
+     * the time a reload of the chat will.
+     *
+     * @return null when there is no such row
+     */
+    public String timestampOf(String messageId) {
+        List<String> at = jdbc.queryForList("SELECT timestamp FROM conversations WHERE id = ?",
+                String.class, messageId);
+        return at.isEmpty() ? null : at.getFirst();
     }
 
     /** A row's metadata (JSON): its task, when it has a well-formed 8-character task id. */
