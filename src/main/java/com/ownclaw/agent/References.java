@@ -55,7 +55,7 @@ final class References {
      * {@link #resolveInText}, which fills those in too.
      */
     static Resolved resolve(Map<String, Object> written, List<Artifact> namespace) {
-        return resolve(written, namespace, false);
+        return resolve(written, namespace, false, Map.of());
     }
 
     /**
@@ -66,10 +66,25 @@ final class References {
      * failed, or a field it does not have, is refused, as a whole value is.
      */
     static Resolved resolveInText(Map<String, Object> written, List<Artifact> namespace) {
-        return resolve(written, namespace, true);
+        return resolve(written, namespace, true, Map.of());
     }
 
-    private static Resolved resolve(Map<String, Object> written, List<Artifact> namespace, boolean inText) {
+    /**
+     * As {@link #resolveInText}, for a delegation's tool arguments, with the texts the cloud
+     * handed it by name ({@link DelegationPlan#texts}): {@code {{name}}} anywhere in an argument's
+     * text -- the whole of it or inside it, at the top level or in a list or an object -- is
+     * replaced with that text exactly. One pass over what the model wrote: nothing inserted, a
+     * text or a result, is read for references again, so a script holding "{{1}}" or a template
+     * holding "{{name}}" goes in as it is. A name that is no text is left as text, as a handle
+     * past the last result is.
+     */
+    static Resolved resolveInText(Map<String, Object> written, List<Artifact> namespace,
+                                  Map<String, String> texts) {
+        return resolve(written, namespace, true, texts);
+    }
+
+    private static Resolved resolve(Map<String, Object> written, List<Artifact> namespace, boolean inText,
+                                    Map<String, String> texts) {
         if (written == null || written.isEmpty()) return new Resolved(Map.of(), List.of(), null, null);
         var out = new LinkedHashMap<String, Object>(written);
         var used = new ArrayList<Artifact>();
@@ -77,11 +92,19 @@ final class References {
             Object v = e.getValue();
             if (v instanceof String s) {
                 ArtifactRef ref = ArtifactRef.parse(s);
-                if (ref == null && inText && ArtifactRef.TOKEN.matcher(s).find()) {
-                    var m = ArtifactRef.TOKEN.matcher(s);
+                if (ref == null && inText && ArtifactRef.TOKEN_OR_NAME.matcher(s).find()) {
+                    var m = ArtifactRef.TOKEN_OR_NAME.matcher(s);
                     var filled = new StringBuilder();
                     var mentioned = new ArrayList<Artifact>();
+                    boolean inserted = false;
                     while (m.find()) {
+                        if (m.group(1) != null) {
+                            String text = texts.get(m.group(1));
+                            if (text == null) continue;   // text: a template's own placeholder
+                            m.appendReplacement(filled, java.util.regex.Matcher.quoteReplacement(text));
+                            inserted = true;
+                            continue;
+                        }
                         ArtifactRef inner = ArtifactRef.parse(m.group());
                         if (inner == null || inner.handle() > namespace.size()) continue;   // text
                         Artifact a = namespace.get(inner.handle() - 1);
@@ -97,7 +120,7 @@ final class References {
                         m.appendReplacement(filled, java.util.regex.Matcher.quoteReplacement(value));
                         mentioned.add(a);
                     }
-                    if (!mentioned.isEmpty()) {
+                    if (inserted || !mentioned.isEmpty()) {
                         m.appendTail(filled);
                         e.setValue(filled.toString());
                         for (Artifact a : mentioned) if (!used.contains(a)) used.add(a);
@@ -141,9 +164,40 @@ final class References {
                             + "object. A reference only works as the whole value of a top-level "
                             + "parameter.");
                 }
+                if (!texts.isEmpty()) e.setValue(withTexts(v, texts));
             }
         }
         return new Resolved(out, List.copyOf(used), null, null);
+    }
+
+    /**
+     * A list's or an object's values with every {@code {{name}}} of a text replaced with it, in
+     * one pass over each string, at any depth. A reference to a result there is left as written:
+     * one that is the whole of a value is refused before this ({@link #nestedReference}), and one
+     * inside text is text.
+     */
+    private static Object withTexts(Object v, Map<String, String> texts) {
+        if (v instanceof String s) {
+            var m = ArtifactRef.TOKEN_OR_NAME.matcher(s);
+            var filled = new StringBuilder();
+            while (m.find()) {
+                String text = m.group(1) == null ? null : texts.get(m.group(1));
+                if (text != null) m.appendReplacement(filled, java.util.regex.Matcher.quoteReplacement(text));
+            }
+            m.appendTail(filled);
+            return filled.toString();
+        }
+        if (v instanceof Map<?, ?> map) {
+            var out = new LinkedHashMap<Object, Object>();
+            map.forEach((k, x) -> out.put(k, withTexts(x, texts)));
+            return out;
+        }
+        if (v instanceof Collection<?> list) {
+            var out = new ArrayList<Object>();
+            for (Object x : list) out.add(withTexts(x, texts));
+            return out;
+        }
+        return v;
     }
 
     /**

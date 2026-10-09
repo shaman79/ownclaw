@@ -28,7 +28,8 @@ import java.util.function.BiConsumer;
  * privacy filter changes before the cloud model reads it, a note when a step the provider stopped
  * as reasoning extraction is asked again, one when the task moves to the local model because its
  * cloud model cannot be reached, one when a model's reply is ended because it had become a loop,
- * the local model's summary of each
+ * one when a delegation is not started because the local model would have had to retype a block
+ * of its plan, the local model's summary of each
  * private result the cloud's own calls produced, and one when the task reads what the owner sent
  * it while it worked. Each is a row of role {@code progress} in the
  * chat the task's own message was saved in, never the answer, which is delivered as before.
@@ -250,6 +251,23 @@ public final class TaskChat {
                 + ". It was repeating itself, so its reply was ended, and " + then + ".");
     }
 
+    /**
+     * The delegation of step {@code step} was not started: its plan holds a block of lines the
+     * local model would have had to retype ({@link LiteralBlocks}), and the model that delegated
+     * is asked to hand it over by name instead. Said, because otherwise the step row is followed
+     * by the next step with nothing between them. Where and what, and how many lines -- nothing of
+     * the block itself.
+     *
+     * @param local whether the local model delegated, the cloud not being available
+     */
+    void notStarted(int step, LiteralBlocks.Block block, boolean local) {
+        if (sessionId == null) return;
+        note(String.format(Locale.ROOT, "↩️ The delegation of step %d was not started: %s holds %s of "
+                        + "%,d lines, which the local model would have had to retype. The %s model is asked to "
+                        + "hand it over by name instead.", step, block.where(), block.kind(), block.lines(),
+                local ? "local" : "cloud"));
+    }
+
     /** "2 secrets removed, 9 identifiers replaced" -- each part only when it is not zero. */
     static String described(Redactor.Tally t) {
         var parts = new java.util.ArrayList<String>();
@@ -436,7 +454,7 @@ public final class TaskChat {
 
     /**
      * A line about the task that is no step of it -- the filter's counts, a step asked again, the
-     * move to the local model, a reply ended as a loop --
+     * move to the local model, a reply ended as a loop, a delegation not started --
      * posted without a header, so it is not read as one more step. The page draws a row without
      * one as its text.
      */

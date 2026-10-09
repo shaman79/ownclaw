@@ -128,7 +128,7 @@ public final class SpecialActionSchemas {
                             "max_runs", ToolParam.optional("integer", "Stop after this many runs."),
                             "task_id", ToolParam.optional("integer", "Which task, for cancel/pause/resume."))),
 
-            spec(AgentAction.DELEGATE,
+            withTextsAsStrings(spec(AgentAction.DELEGATE,
                     // The cloud's; the local model running a task itself is given its own below.
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
                             + "tools you name and your credentials, and costs nothing. It reads "
@@ -147,16 +147,40 @@ public final class SpecialActionSchemas {
                             + "Observations name results as {{N}}. When you have a tool that "
                             + "takes a result, put {{N}} or {{N.field}} in that argument -- as the "
                             + "whole value, or inside text such as a message body -- and the result "
-                            + "is filled in when the call runs, without your reading it.",
+                            + "is filled in when the call runs, without your reading it. Any text "
+                            + "it must use exactly -- a script, a configuration file, a message body "
+                            + "-- goes in 'texts' under a name, and the goal says where by writing "
+                            + "{{name}}: the local model writes {{name}} in its tool call and the text "
+                            + "is put there exactly, never retyped. It does not retype long text "
+                            + "exactly, so a goal holding a heredoc or a fenced block of more than "
+                            + "one line is refused.",
                     params(
                             "goal", ToolParam.required("string", "What to achieve, stated fully, "
-                                    + "with the handle of each earlier result it should read."),
+                                    + "with the handle of each earlier result it should read, and "
+                                    + "{{name}} where each of the texts is to be used."),
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
                                     + "the tools it will need. Only these, and any the goal or an "
                                     + "unattended (scheduled or /bg) task names, are loaded: every tool "
-                                    + "definition takes room in the local model's context that the work needs."))));
+                                    + "definition takes room in the local model's context that the work needs."),
+                            "texts", ToolParam.optional("object", "Exact texts by name, as in "
+                                    + "{\"watchdog_script\": \"#!/bin/sh\\n...\"}. A name is a lowercase "
+                                    + "letter, then lowercase letters, digits and underscores. Each "
+                                    + "text is inserted exactly where the local model writes its "
+                                    + "{{name}} in a tool call.")))));
+
+    /**
+     * The spec with its 'texts' parameter declared an object of strings, which {@link ToolParam}
+     * has no way to say: a text that is not a string is refused (LocalExecutor#texts), so the
+     * schema says so first.
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withTextsAsStrings(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get("texts").put("additionalProperties", Map.of("type", "string"));
+        return spec;
+    }
 
     /**
      * The local model running a task itself is given the tools likeliest to fit it, not all of

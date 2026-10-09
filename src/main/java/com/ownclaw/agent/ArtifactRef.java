@@ -17,6 +17,10 @@ import java.util.regex.Pattern;
  * syntax a model reaches for on its own; a reviewer's probes found the model writing
  * {@code {{$1.body_text}}} unprompted, which is accepted. The old {@code $1} form is not a
  * reference at all any more, and nothing teaches it.
+ * <p>
+ * In a delegation's tool arguments, {@code {{name}}} -- a {@link #NAME}, never a number -- is a
+ * text the cloud handed the delegation by that name ({@link DelegationPlan#texts}), put in by
+ * {@code References#resolveInText}. Everywhere else it is text.
  *
  * @param handle 1-based position in whichever list the reference is resolved against — the
  *               delegation's own results for the local model, the task's for the cloud
@@ -49,12 +53,29 @@ public record ArtifactRef(int handle, String field) {
     /** A letter or a digit: what makes the rest of a value text. */
     private static final Pattern WORDY = Pattern.compile("[\\p{L}\\p{N}]");
 
+    /** What follows the opening braces of a well-formed reference to a result. */
+    private static final String RESULT = "\\$?" + SP + "\\d{1,9}" + SP + "(?:\\.[^{}]*)?";
+
     /**
      * A well-formed reference inside prose, for taking one out of a place where it cannot work:
      * a delegation's goal naming results the delegation cannot see.
      */
-    static final Pattern TOKEN = Pattern.compile(
-            "\\{\\{" + SP + "\\$?" + SP + "\\d{1,9}" + SP + "(\\.[^{}]*)?\\}\\}");
+    static final Pattern TOKEN = Pattern.compile("\\{\\{" + SP + RESULT + "\\}\\}");
+
+    /**
+     * The name of a text a delegation is handed ({@link DelegationPlan#texts}): a lowercase letter,
+     * then lowercase letters, digits and underscores. It never begins with a digit, so
+     * {@code {{name}}} is never also a result's handle.
+     */
+    static final Pattern NAME = Pattern.compile("[a-z][a-z0-9_]*");
+
+    /**
+     * A well-formed reference inside text, to a result or, by its name, to a text: what a
+     * delegation's tool arguments are resolved by. Group 1 is the name, for a text; null for a
+     * result, which {@link #parse} reads.
+     */
+    static final Pattern TOKEN_OR_NAME = Pattern.compile(
+            "\\{\\{" + SP + "(?:" + RESULT + "|(" + NAME.pattern() + ")" + SP + ")\\}\\}");
 
     /**
      * The reference that IS the whole value, or null.
@@ -105,6 +126,11 @@ public record ArtifactRef(int handle, String field) {
     /** How the n-th result is named to whoever is reading. */
     public static String handle(int n) {
         return "{{" + n + "}}";
+    }
+
+    /** How the text called {@code name} is written to insert it. */
+    public static String handle(String name) {
+        return "{{" + name + "}}";
     }
 
     /**

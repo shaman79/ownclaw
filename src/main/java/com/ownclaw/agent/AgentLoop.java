@@ -1075,10 +1075,45 @@ public class AgentLoop {
             // === DELEGATE TO LOCAL LLM (special action) ===
             if (action.isDelegate()) {
                 long startMs = System.currentTimeMillis();
-                DelegationPlan plan = LocalExecutor.parsePlan(action.params());
+                DelegationPlan plan;
+                try {
+                    plan = LocalExecutor.parsePlan(action.params());
+                } catch (IllegalArgumentException malformed) {
+                    AgentResult end = notStarted(context, action, "ERROR: " + malformed.getMessage(),
+                            Map.of(), step, nothing);
+                    if (end != null) return end;
+                    continue;
+                }
+                // The goal and the texts the cloud wrote, for the step's row, whether the delegation
+                // runs or not (stepDetails). Ones the local model wrote, the cloud not being
+                // available, can quote what it has read.
+                Map<String, Object> asked = new LinkedHashMap<>();
+                if (!local) {
+                    asked.put("goal", plan.goal());
+                    if (!plan.texts().isEmpty()) asked.put("texts", plan.texts());
+                }
                 if (plan.goal().isBlank()) {
-                    AgentResult end = stepRanNothing(context, action,
-                            "ERROR: 'goal' parameter is required for delegate action.", null, step, nothing);
+                    AgentResult end = notStarted(context, action,
+                            "ERROR: 'goal' parameter is required for delegate action.", asked, step, nothing);
+                    if (end != null) return end;
+                    continue;
+                }
+                // A block of lines the local model would have to retype -- refused before anything
+                // runs, with what to do instead: hand it over by name (LiteralBlocks).
+                LiteralBlocks.Block block = LiteralBlocks.first(plan);
+                if (block != null) {
+                    log.warn("Task {} step {}: delegation not started — {} holds {} of {} lines.",
+                            context.taskId(), step + 1, block.where(), block.kind(), block.lines());
+                    context.chat().notStarted(step + 1, block, local);
+                    AgentResult end = notStarted(context, action, LiteralBlocks.refusal(block), asked, step, nothing);
+                    if (end != null) return end;
+                    continue;
+                }
+                // A text is inserted exactly, so one holding a secret the filter removed would
+                // write the marker in the secret's place -- in every call that uses it.
+                if (Redactor.holdsRemovedSecret(plan.texts())) {
+                    AgentResult end = notStarted(context, action, "Not started: a text holds a removed "
+                            + "secret. " + REMOVED_SECRET, asked, step, nothing);
                     if (end != null) return end;
                     continue;
                 }
@@ -1106,7 +1141,7 @@ public class AgentLoop {
                 }
                 // Which skills really ran, so curation and scheduled_task_runs.skills_used see
                 // the work instead of a single 'delegate' entry.
-                Map<String, Object> structured = new LinkedHashMap<>();
+                Map<String, Object> structured = new LinkedHashMap<>(asked);
                 if (!outcome.toolsRun().isEmpty()) structured.put("delegatedTools", outcome.toolsRun());
                 if (!outcome.produced().isEmpty()) {
                     structured.put("artifacts", outcome.produced().stream().map(a -> Map.of(
@@ -1114,9 +1149,6 @@ public class AgentLoop {
                             "chars", a.output().length(), "why", a.why(),
                             "indexed", a.indexed())).toList());
                 }
-                // The goal, for the step's row (stepDetails), when the cloud wrote it. One the
-                // local model wrote, the cloud not being available, can quote what it has read.
-                if (!local) structured.put("goal", plan.goal());
                 AgentObservation obs = ok
                         ? AgentObservation.success(action.tool(), result, structured, durationMs)
                         : AgentObservation.failure(action.tool(), result, structured, durationMs);
@@ -1210,18 +1242,47 @@ public class AgentLoop {
     }
 
     /**
+     * Marks a delegate step that was refused before the local model was given anything
+     * ({@link #notStarted}): the local tier has not had its turn, so it is no failed delegation
+     * (ThinkingEngine#delegationFailed).
+     */
+    static final String NOT_STARTED = "notStarted";
+
+    /**
+     * A delegation refused before the local model was given anything: texts that are not an
+     * object of names to texts, a missing goal, a block the local model would have to retype
+     * ({@link LiteralBlocks}), a text holding a removed secret. A step that ran nothing
+     * ({@link #stepRanNothing}), recorded with what the cloud asked ({@code asked}) and
+     * {@link #NOT_STARTED}.
+     */
+    private AgentResult notStarted(AgentContext context, AgentAction action, String told,
+                                   Map<String, Object> asked, int step, RunOfNothing run) {
+        var structured = new LinkedHashMap<String, Object>(asked);
+        structured.put(NOT_STARTED, true);
+        return stepRanNothing(context, action, told, null, step, run, structured);
+    }
+
+    /**
      * A step that ran nothing: a reply with nothing to run in it, or no reply because the call
      * failed ({@code callFailed}); an answer or a question that was not delivered; a call the
-     * critic blocked; a delegation with no goal. What the model is told about it is recorded as
-     * the step -- with a warning when one more would stop the task -- and the model is asked
-     * again, until {@link #NOTHING_TO_RUN_IN_A_ROW} of them come in a row. However many there are
-     * in a long task that keeps making progress between them, they do not end it.
+     * critic blocked; a delegation refused before it started ({@link #notStarted}). What the
+     * model is told about it is recorded as the step -- with a warning when one more would stop
+     * the task -- and the model is asked again, until {@link #NOTHING_TO_RUN_IN_A_ROW} of them
+     * come in a row. However many there are in a long task that keeps making progress between
+     * them, they do not end it.
      *
      * @param callFailed how the call to the model failed, or null when it did not
      * @return the task's end when this step is the last one allowed in a row, or null to go on
      */
     private AgentResult stepRanNothing(AgentContext context, AgentAction action, String told,
                                        String callFailed, int step, RunOfNothing run) {
+        return stepRanNothing(context, action, told, callFailed, step, run, Map.of());
+    }
+
+    /** As above, the step recorded with {@code structured}. */
+    private AgentResult stepRanNothing(AgentContext context, AgentAction action, String told,
+                                       String callFailed, int step, RunOfNothing run,
+                                       Map<String, Object> structured) {
         // A new run of them starts wherever a step that ran reset the count.
         if (++run.steps == 1) run.failedCalls = 0;
         if (callFailed != null) {
@@ -1233,7 +1294,8 @@ public class AgentLoop {
         }
         // Recorded before any stop, so the task's steps hold every one of them -- the one that
         // ends the task too -- under their own name.
-        recordAndEmitObservation(context, action, AgentObservation.failure(action.tool(), told, 0), step + 1);
+        recordAndEmitObservation(context, action, AgentObservation.failure(action.tool(), told, structured, 0),
+                step + 1);
         // failureLimit, not completed: an abort. Recording it as COMPLETED marked the event log
         // "info" and stored the episode with a [SUCCESS] prefix, so the memory layer later
         // recalled a failed task as a worked example.
@@ -2803,12 +2865,25 @@ public class AgentLoop {
                 && SKILL_MANAGE_ACTIONS.contains(what)) {
             details.put("skillAction", what);
         }
-        // A delegation's goal, without the vault's values: the task page shows it, so the chat
-        // need not (LocalExecutor says only that the local model works). Only one the cloud
-        // wrote, which the loop puts beside the delegation's result.
+        // A delegation's goal and the texts it was handed, whole, without the vault's values: the
+        // task page shows them, so the chat need not (LocalExecutor says only that the local model
+        // works). Only ones the cloud wrote, which the loop puts beside the delegation's result --
+        // or beside why it was not started.
         if (action.isDelegate() && obs.structured() != null
                 && obs.structured().get("goal") instanceof String goal) {
             details.put("goal", com.ownclaw.privacy.Redactor.scrubVault(goal, context.secretValues()).text());
+        }
+        if (action.isDelegate() && obs.structured() != null
+                && obs.structured().get("texts") instanceof Map<?, ?> texts) {
+            var scrubbed = new LinkedHashMap<String, String>();
+            texts.forEach((name, text) -> scrubbed.put(String.valueOf(name),
+                    com.ownclaw.privacy.Redactor.scrubVault(String.valueOf(text), context.secretValues()).text()));
+            details.put("texts", scrubbed);
+        }
+        // And one that was refused before the local model was given anything, said as such.
+        if (action.isDelegate() && obs.structured() != null
+                && Boolean.TRUE.equals(obs.structured().get(NOT_STARTED))) {
+            details.put(NOT_STARTED, true);
         }
         details.put("success", obs.success());
         details.put("durationMs", obs.durationMs());

@@ -645,11 +645,18 @@ public class ThinkingEngine {
                 .noneMatch(t -> t.observation() != null && t.observation().success());
     }
 
-    /** Whether the local tier has already been given this task and could not finish a step. */
+    /**
+     * Whether the local tier has already been given this task and could not finish a step. A
+     * delegation refused before the local model was given anything ({@link AgentLoop#NOT_STARTED})
+     * is not one: the cloud is told what to change and delegates again, and the local tier has its
+     * turn then.
+     */
     private static boolean delegationFailed(AgentContext context) {
         return context.trajectory().turns().stream().anyMatch(t ->
                 t.action() != null && AgentAction.DELEGATE.equals(t.action().tool())
-                        && t.observation() != null && !t.observation().success());
+                        && t.observation() != null && !t.observation().success()
+                        && (t.observation().structured() == null
+                                || !Boolean.TRUE.equals(t.observation().structured().get(AgentLoop.NOT_STARTED))));
     }
 
     /** What the debug panel shows for a native call, where there is no raw JSON to display. */
@@ -900,6 +907,11 @@ public class ThinkingEngine {
         sb.append("  tools: comma-separated exact names of the tools it will need. Only these,\n");
         sb.append("    and any the goal or an unattended (scheduled or /bg) task names, are loaded -- every tool\n");
         sb.append("    definition takes room in its context that the work needs.\n");
+        sb.append("  texts: {name: exact text} for any text it must use exactly -- a script, a\n");
+        sb.append("    configuration file, a message body -- with {{name}} in the goal where each\n");
+        sb.append("    goes. It writes {{name}} in its tool call and the text is put there exactly,\n");
+        sb.append("    never retyped: it does not retype long text exactly, so a goal holding a\n");
+        sb.append("    heredoc or a fenced block of more than one line is refused.\n");
         sb.append("  checkpoints: what to verify before it says it is done\n\n");
         }
 

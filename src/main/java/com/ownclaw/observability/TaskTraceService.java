@@ -163,6 +163,11 @@ public class TaskTraceService {
                     // delegate: what the cloud asked the local model to do. Absent on rows from
                     // before it was recorded, and where the local model wrote the goal itself.
                     s.put("goal", d.hasNonNull("goal") ? d.path("goal").asText() : null);
+                    // delegate: the texts the cloud handed it by name, whole, in their order. Absent
+                    // where it handed none, and on the same rows as the goal.
+                    s.put("texts", d.path("texts").isObject() ? texts(d.path("texts")) : null);
+                    // delegate: refused before the local model was given anything.
+                    s.put("notStarted", d.path("notStarted").asBoolean(false));
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));
@@ -335,6 +340,13 @@ public class TaskTraceService {
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
         c.put("tools", Map.of("count", toolCount, "chars", toolChars));
         return c;
+    }
+
+    /** A delegation's texts, name to text, in the order the row holds them. */
+    private static Map<String, String> texts(JsonNode texts) {
+        var out = new LinkedHashMap<String, String>();
+        texts.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     private static List<Map<String, Object>> stepArtifacts(JsonNode d) {

@@ -199,7 +199,8 @@ public class LocalExecutor {
      * which is how a second delegation once forwarded the first one's traceback as the body of
      * the morning email. A reference to no result is taken out and counted. Step PARAMETERS are
      * left alone: in a plan, {{1}} there means the plan's own step 1, which is exactly how the
-     * delegation numbers.
+     * delegation numbers. So are the texts, and a text's {{name}} wherever it is written: it is
+     * no result's handle, and the local model writes it in a call to insert the text.
      */
     static Given given(DelegationPlan plan, List<Artifact> results) {
         var named = new java.util.LinkedHashMap<Integer, Artifact>();
@@ -230,7 +231,7 @@ public class LocalExecutor {
         }
         var checkpoints = plan.checkpoints() == null ? List.<String>of()
                 : plan.checkpoints().stream().map(inWords).toList();
-        return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools()),
+        return new Given(new DelegationPlan(goal, steps, checkpoints, plan.tools(), plan.texts()),
                 List.copyOf(named.values()), missing[0]);
     }
 
@@ -573,8 +574,9 @@ public class LocalExecutor {
 
         // One resolution of the arguments, used by every check below and by the call itself.
         // It was once computed twice, which is how a guard and the thing it guards drift
-        // apart.
-        References.Resolved refs = References.resolveInText(action.params, mine);
+        // apart. The texts the cloud handed the delegation are put in here too, by name: retyped,
+        // a 33-line script install came back with a line broken in five calls of seven (2026-10-08).
+        References.Resolved refs = References.resolveInText(action.params, mine, plan.texts());
         Map<String, Object> params = refs.params();
 
         // A reference that could not be resolved: out of range, a missing field, a failed
@@ -701,6 +703,9 @@ public class LocalExecutor {
 
     /**
      * Parse a DelegationPlan from the params map of a delegate action.
+     *
+     * @throws IllegalArgumentException when 'texts' is not an object of names to texts, with why,
+     *                                  in words the model can act on
      */
     @SuppressWarnings("unchecked")
     public static DelegationPlan parsePlan(Map<String, Object> params) {
@@ -742,7 +747,46 @@ public class LocalExecutor {
                 : toolsObj instanceof String s ? s : "";
         for (String name : listed.split("[^A-Za-z0-9_-]+")) if (!name.isBlank()) tools.add(name);
 
-        return new DelegationPlan(goal, steps, checkpoints, tools);
+        return new DelegationPlan(goal, steps, checkpoints, tools, texts(params.get("texts")));
+    }
+
+    /**
+     * The texts of a delegate action, by name, in its order: an object of names to texts -- or
+     * that object written as a JSON string, as a model will sometimes send one. Every name is
+     * {@link ArtifactRef#NAME}, and every text a string, taken exactly as written; anything else
+     * is refused, never guessed at: a text is inserted exactly, so a number or an object turned
+     * into text would be inserted as something nobody wrote.
+     */
+    static Map<String, String> texts(Object value) {
+        if (value == null) return Map.of();
+        Object object = value;
+        if (value instanceof String s) {
+            if (s.isBlank()) return Map.of();
+            try {
+                object = TextCalls.MAPPER.readValue(s, Object.class);
+            } catch (Exception e) {
+                object = s;
+            }
+        }
+        if (!(object instanceof Map<?, ?> map)) {
+            throw new IllegalArgumentException("'texts' must be an object of names to texts, as in "
+                    + "\"texts\": {\"script\": \"the exact text\"}.");
+        }
+        var texts = new LinkedHashMap<String, String>();
+        for (var e : map.entrySet()) {
+            String name = String.valueOf(e.getKey());
+            if (!ArtifactRef.NAME.matcher(name).matches()) {
+                throw new IllegalArgumentException("'" + name + "' cannot name a text: a name is a "
+                        + "lowercase letter, then lowercase letters, digits and underscores, as in "
+                        + "watchdog_script -- never a number, which is a result's handle.");
+            }
+            if (!(e.getValue() instanceof String text)) {
+                throw new IllegalArgumentException("texts." + name + " must be a string: the exact "
+                        + "text, as it is to be inserted.");
+            }
+            texts.put(name, text);
+        }
+        return texts;
     }
 
     // ── Private helpers ──
@@ -793,6 +837,7 @@ public class LocalExecutor {
         // The plan
         sb.append("## Plan\n");
         sb.append("**Goal:** ").append(plan.goal()).append("\n\n");
+        texts(sb, plan.texts());
 
         // Whole, on this machine: reading what the cloud is shown only as a description is what
         // the local model is for. Named in words, as the goal names them, so a handle never means
@@ -865,6 +910,13 @@ public class LocalExecutor {
         sb.append("  an envelope into an email body rather than the whole envelope.\n");
         sb.append("  Never retype a result: retyping is where a wrong date or a dropped line\n");
         sb.append("  comes from, and it costs you the whole output again.\n");
+        if (!plan.texts().isEmpty()) {
+            sb.append("- To use a text you were handed, write its handle, e.g. ")
+              .append(ArtifactRef.handle(plan.texts().keySet().iterator().next()))
+              .append(", in the argument --\n");
+            sb.append("  as the whole value or inside it -- and the exact text is put there when the\n");
+            sb.append("  call runs. Never type a text out yourself.\n");
+        }
         if (fileTask) {
             // The rule below is false here: a file task's results are withheld from the cloud,
             // so nothing is passed on underneath the summary, and the summary is what the user
@@ -889,6 +941,30 @@ public class LocalExecutor {
             sb.append(context.originalMessage()).append("\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * The texts the delegation is handed, each under its handle and its size, whole. The model
+     * only has to write a handle, but a text can also be one to read -- a configuration to check
+     * against, an error to look into -- and unread it is no use. Shown whole, it was not copied:
+     * in a replay of the 2026-10-08 watchdog goal with the script handed over by name, ten seeds
+     * with the script shown whole and ten with only its size and first line, every call the model
+     * made held the handle, it never retyped the script into its reasoning, and it took about as
+     * long either way.
+     */
+    private static void texts(StringBuilder sb, Map<String, String> texts) {
+        if (texts.isEmpty()) return;
+        sb.append("**Texts you are handed** -- each to be used exactly. Write its handle in a tool\n");
+        sb.append("argument and the text is put there, exactly, when the call runs. It is shown here\n");
+        sb.append("for you to read; never type it out.\n\n");
+        for (var e : texts.entrySet()) {
+            String text = e.getValue();
+            long lines = text.lines().count();
+            sb.append("### ").append(ArtifactRef.handle(e.getKey())).append(" (")
+              .append(String.format(Locale.ROOT, "%,d characters in %,d line%s", text.length(), lines,
+                      lines == 1 ? "" : "s"))
+              .append(")\n").append(text).append("\n\n");
+        }
     }
 
     /**
@@ -1055,10 +1131,11 @@ public class LocalExecutor {
         return null;
     }
 
-    /** What the local model is given to work from, as its prompt shows it: the plan's text. */
+    /** What the local model is given to work from: the plan's text, and the texts it is handed. */
     static List<String> planText(DelegationPlan plan) {
         var given = new ArrayList<String>();
         given.add(plan.goal());
+        given.addAll(plan.texts().values());
         for (var step : plan.steps()) {
             given.add(step.description());
             if (step.params() != null) {
