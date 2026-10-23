@@ -217,6 +217,14 @@ class VaultScrubbingTest {
         changes("a JSON line break before a short value is no part of a word", "admin12", "{\"stderr\":\"Password:\\nadmin12\\nOK\"}", true);
         changes("an escaped backslash and n are letters of the word", "admin12", "{\"path\":\"C:\\\\nadmin12\\\\x\"}", false);
         changes("a long identifier in lower case is no key material", "{\n\"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n\"private_key_id\": \"Zq7b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9\"\n}", "the auth_provider_x509_cert_url field", false);
+        changes("a key after NAME=, printed alone", "WG_PRIVATE_KEY=yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nWG_ADDRESS=10.0.0.2/24", "using yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk= now", true);
+        changes("a kubeconfig's token, printed alone", "apiVersion: v1\nusers:\n- name: admin\n  user:\n    token: eyJhbGciOiJSUzI1NiIsImtpZCI6IkZBS0UifQ.eyJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQifQ.RkFLRS1TSUdOQVRVUkUtMTIzNDU2", "Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IkZBS0UifQ.eyJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQifQ.RkFLRS1TSUdOQVRVUkUtMTIzNDU2", true);
+        changes(".netrc's password, in a failed curl", "machine git.local login bob password s3cr3tPassw0rd\nmachine nas login bob password Other9Pass", "Command '['curl', '-u', 'bob:s3cr3tPassw0rd', 'https://git.local']' returned non-zero exit status 1.", true);
+        changes(".pgpass's password, alone", "db01.internal:5432:app:app:Pg9xLm2Qw7\n*:*:*:backup:Bk7zQ2", "PGPASSWORD=Pg9xLm2Qw7 psql", true);
+        changes("a .env password under sixteen characters, alone", "DB_HOST=db01.internal\nDB_PASSWORD=Xk9#mP2vLq", "{\"pw\": \"Xk9#mP2vLq\"}", true);
+        changes("a word of prose after a secret's name is no secret", "router notes\nthe token value is in the drawer", "pick a value from the list", false);
+        changes("a key after a name that is no secret's, printed alone", "ORG_ID=acme\nWEBHOOK=yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", "using yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk= now", true);
+        changes("a JSON Web Token after a name that is no secret's, alone", "kind: Config\nid-data: eyJhbGciOiJSUzI1NiIsImtpZCI6IkZBS0UifQ.eyJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQifQ.RkFLRS1TSUdOQVRVUkUtMTIzNDU2", "jwt eyJhbGciOiJSUzI1NiIsImtpZCI6IkZBS0UifQ.eyJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQifQ.RkFLRS1TSUdOQVRVUkUtMTIzNDU2 used", true);
     }
 
     @Test

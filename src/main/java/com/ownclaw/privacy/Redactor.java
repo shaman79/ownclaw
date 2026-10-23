@@ -310,7 +310,9 @@ public final class Redactor {
             for (String base : bases) pieces.addAll(piecesOf(base));
             pieces.removeAll(bases);
             var seen = new java.util.HashSet<String>();
-            for (String base : bases) {
+            var texts = new java.util.LinkedHashSet<String>(bases);
+            texts.addAll(pieces);
+            for (String base : texts) {
                 // What a value itself is not removed as -- fewer than MIN_VAULT_WORD characters, a
                 // word like "true" -- none of its forms is, judged for each base, without the
                 // quotes it was typed in: a vault value "<" took every "&lt;" out, and a stored
@@ -321,20 +323,22 @@ public final class Redactor {
                     if (seen.add(form)) forms.add(new VaultForm(e.getKey(), form, shortValue && form.equals(base)));
                 }
             }
-            for (String piece : pieces) {
-                for (String form : encodings(piece)) {
-                    if (seen.add(form)) forms.add(new VaultForm(e.getKey(), form, false));
-                }
-            }
         }
         forms.sort(Comparator.comparingInt((VaultForm f) -> -f.form().length())
                 .thenComparing(VaultForm::key).thenComparing(VaultForm::form));
         return List.copyOf(forms);
     }
 
-    /** What splits a line into the words that can be key material: blanks, and what stands around a value. */
+    /**
+     * What splits a line into the words that can be key material: blanks, what stands around a
+     * value, and an '=' that is no padding -- "WG_PRIVATE_KEY=yAnz...=" is a name and a key.
+     */
     private static final java.util.regex.Pattern PIECE_SPLIT = java.util.regex.Pattern.compile(
-            "[\\s\\p{Cf}:,;'\"()\\[\\]{}<>]+", java.util.regex.Pattern.UNICODE_CHARACTER_CLASS);
+            "[\\s\\p{Cf}:,;'\"()\\[\\]{}<>]+|=(?=[^=])", java.util.regex.Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** A JSON Web Token: three base64url segments joined by dots. */
+    private static final java.util.regex.Pattern JWT = java.util.regex.Pattern.compile(
+            "[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}");
 
     /** Key material's alphabet: base64's, base64url's and hex's. */
     private static final java.util.regex.Pattern KEY_ALPHABET = java.util.regex.Pattern.compile("[A-Za-z0-9+/=_-]+");
@@ -344,7 +348,8 @@ public final class Redactor {
      * {@link #MIN_SECRET_LENGTH} characters or more but a PEM block's armor -- a text shown a line
      * at a time, the live call's reasoning, held an SSH key whole, a line in each frame; a
      * config's "PrivateKey = ...=" line, alone, held its key -- and each word of a line that is
-     * key material ({@link #keyLike}), printed without its line. Lines are split also at "\n"
+     * key material ({@link #keyLike}), printed without its line, and the value a line pairs with
+     * a secret's name ({@link #pairedValue}). Lines are split also at "\n"
      * written inside the value, as a JSON credential writes its key. Not a PEM armor line: it is
      * every such key's, and taken as this one's, no other key's block was found by it
      * (secretsIn). Other lines of a structured credential -- a kubeconfig's "clusters:" -- are
@@ -359,19 +364,57 @@ public final class Redactor {
             for (String word : PIECE_SPLIT.split(l)) {
                 if (keyLike(word)) out.add(word);
             }
+            String paired = pairedValue(l);
+            if (paired != null) out.add(paired);
         }
         return out;
     }
 
     /**
-     * Whether a word is key material: sixteen characters or more of base64's or hex's alphabet,
-     * letters and digits both, and of both cases or thirty-two characters long -- a WireGuard
-     * key, a token. Not a host name with a digit, a version, a path or an identifier
+     * The value a line pairs with a secret's name, however short: "DB_PASSWORD=Xk9#mP2v",
+     * "password: Xk9#mP2v", .netrc's "... password Xk9#mP2v", and the last field of a .pgpass
+     * line, "host:port:db:user:password" -- printed alone, in a curl -u or a URL, it was found by
+     * no form. Read by hand, a character at a time: a line's length is no one's to cap.
+     */
+    private static String pairedValue(String line) {
+        int sep = -1;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '=' || c == ':') { sep = i; break; }
+            if (!(Character.isLetterOrDigit(c) || c == '_' || c == '.' || c == '-')) break;
+        }
+        if (sep > 0 && isSecretName(line.substring(0, sep))) return unquoted(line.substring(sep + 1).strip());
+        String[] words = line.split("[\\s\\p{Cf}]+");
+        for (int i = 0; i + 1 < words.length; i++) {
+            // Not a word of prose after one: "the token value" -- a password has more than
+            // lower-case letters in it.
+            if (isSecretName(words[i]) && !words[i + 1].chars().allMatch(Character::isLowerCase)) {
+                return unquoted(words[i + 1]);
+            }
+        }
+        String[] fields = line.split(":", -1);
+        if (fields.length == 5 && !fields[4].isEmpty() && fields[4].indexOf(' ') < 0) return fields[4];
+        return null;
+    }
+
+    /** {@code s} without the quotes around it, if it is in a pair of them. */
+    private static String unquoted(String s) {
+        return s.length() >= 2 && "\"'`".indexOf(s.charAt(0)) >= 0 && s.charAt(s.length() - 1) == s.charAt(0)
+                ? s.substring(1, s.length() - 1) : s;
+    }
+
+    /**
+     * Whether a word is key material: a JSON Web Token, or sixteen characters or more of base64's
+     * or hex's alphabet, letters and digits both, and of both cases or thirty-two characters long
+     * -- a WireGuard key, a token. Not a host name with a digit, a version, a path or an identifier
      * ("db01.internal", "v1.2.3-rc4", "auth_provider_x509_cert_url"), which, taken as the
      * value's own, were replaced in every unrelated text.
      */
     private static boolean keyLike(String word) {
-        String w = word.replaceFirst("=+$", "");
+        int end = word.length();
+        while (end > 0 && word.charAt(end - 1) == '=') end--;
+        String w = word.substring(0, end);
+        if (w.length() >= 32 && JWT.matcher(w).matches()) return true;
         if (w.length() < 16 || !KEY_ALPHABET.matcher(w).matches()) return false;
         boolean digit = w.chars().anyMatch(Character::isDigit);
         boolean upper = w.chars().anyMatch(Character::isUpperCase), lower = w.chars().anyMatch(Character::isLowerCase);
