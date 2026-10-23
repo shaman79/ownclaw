@@ -10,6 +10,7 @@ import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.UserMessage;
 import com.ownclaw.observability.OpsService;
+import com.ownclaw.privacy.VaultSecrets;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -616,11 +617,13 @@ public class OpsController {
                 var step = new LinkedHashMap<String, Object>();
                 step.put("step", i + 1);
                 step.put("tool", turn.action().tool());
-                step.put("reasoning", turn.action().reasoning());
-                step.put("params", turn.action().params());
+                step.put("reasoning", VaultSecrets.scrub(userId, turn.action().reasoning()));
+                step.put("params", VaultSecrets.scrubDeep(userId, turn.action().params()));
                 step.put("success", turn.observation().success());
                 step.put("durationMs", turn.observation().durationMs());
-                String output = turn.observation().output();
+                // The trajectory holds each tool's output as it came; this trace is read by
+                // whoever holds the ops token -- a cloud model's session among them.
+                String output = VaultSecrets.scrub(userId, turn.observation().output());
                 step.put("outputLength", output == null ? 0 : output.length());
                 step.put("output", output);
                 steps.add(step);

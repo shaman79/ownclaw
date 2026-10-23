@@ -4,6 +4,7 @@ import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -126,6 +127,7 @@ public class LongRunningTaskManager {
         if (hb != null) {
             hb.lastHeartbeatMs = System.currentTimeMillis();
         }
+        message = scrubbed(taskId, hb, message);
 
         // Persist to DB. Progress from a task marked 'stalled' REVIVES it.
         //
@@ -183,6 +185,7 @@ public class LongRunningTaskManager {
      * whole tool output is no status line, and a cut one is a result with its end missing.
      */
     public void complete(String taskId, String resultSummary) {
+        resultSummary = scrubbed(taskId, activeHeartbeats.get(taskId), resultSummary);
         jdbc.update("""
             UPDATE long_running_tasks
             SET status = 'completed', completed_at = datetime('now'),
@@ -204,6 +207,7 @@ public class LongRunningTaskManager {
      * a result (see {@link #complete}).
      */
     public void fail(String taskId, String errorMessage) {
+        errorMessage = scrubbed(taskId, activeHeartbeats.get(taskId), errorMessage);
         jdbc.update("""
             UPDATE long_running_tasks
             SET status = 'failed', completed_at = datetime('now'), error_message = ?
@@ -217,6 +221,19 @@ public class LongRunningTaskManager {
             eventLog.error(hb.userId, taskId, "task.long_running.failed", line);
         }
         log.error(line);
+    }
+
+    /**
+     * {@code text} with the secret vault values of the task's user replaced: what the row keeps
+     * of a skill's progress, result or error, and what the page is shown of its progress. The
+     * ops API reads the row back, and it held a password a skill had printed, as printed.
+     */
+    private String scrubbed(String taskId, TaskHeartbeat hb, String text) {
+        if (text == null) return null;
+        String userId = hb != null ? hb.userId
+                : jdbc.queryForList("SELECT user_id FROM long_running_tasks WHERE task_id = ?", String.class, taskId)
+                        .stream().findFirst().orElse(null);
+        return VaultSecrets.scrub(userId, text);
     }
 
     /** "Long-running task finished, 12,345 chars — task abc": where the text is, and its size. */

@@ -37,4 +37,15 @@ public record EgressContext(String userId, String taskId, String purpose, Privat
         toolOf = toolOf == null ? n -> null : toolOf;
         purpose = purpose == null ? "unspecified" : purpose;
     }
+
+    /**
+     * Without the vault values -- their names only. A record's own toString prints every
+     * component, and so every decrypted secret, into whatever logs the context or a request
+     * config holding it.
+     */
+    @Override
+    public String toString() {
+        return "EgressContext[userId=" + userId + ", taskId=" + taskId + ", purpose=" + purpose
+                + ", secretValues=" + secretValues.keySet() + "]";
+    }
 }

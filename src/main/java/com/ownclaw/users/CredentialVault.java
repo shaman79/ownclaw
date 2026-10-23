@@ -1,5 +1,7 @@
 package com.ownclaw.users;
 
+import com.ownclaw.privacy.Redactor;
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -38,6 +40,38 @@ public class CredentialVault {
     /** System-level master key, loaded on startup. */
     private String masterKey;
 
+    private static final java.util.regex.Pattern NAME = java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]*");
+
+    /**
+     * Why a name is refused, wherever {@link #validName} says no. It does not repeat the name: a
+     * value typed where the name goes -- "/cred set SMTP_PASS=hunter2 x" -- would be shown back,
+     * and the name it was stored under went to the cloud model with every prompt, as one of the
+     * keys the vault holds.
+     */
+    public static final String NAME_RULE = "a credential's name is upper-case letters, digits and "
+            + "underscores, starting with a letter: the skill reads it from the variable of that name.";
+
+    /**
+     * Whether {@code name} may name a credential: upper-case letters, digits and underscores,
+     * starting with a letter -- the name of the variable a skill finds it in. Checked where a
+     * name is stored, so a value cannot be stored as a name.
+     */
+    public static boolean validName(String name) {
+        return name != null && NAME.matcher(name).matches();
+    }
+
+    /**
+     * Why {@code key} (upper-cased) and {@code value} cannot be stored, or null when they can: the
+     * one rule, for {@link #storeCredential} and for {@code /cred set}, which answers with it.
+     * A NUL cannot be in a variable's value, and the JDK's refusal to put one there quoted the
+     * whole value, into the log and the task's result.
+     */
+    public static String refusal(String key, String value) {
+        if (!validName(key)) return NAME_RULE;
+        if (value != null && value.indexOf('\u0000') >= 0) return "a credential's value cannot hold a NUL character.";
+        return null;
+    }
+
     public CredentialVault(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
@@ -62,6 +96,15 @@ public class CredentialVault {
             masterKey = (String) rows.getFirst().get("value");
             log.info("Loaded vault master key from system_settings");
         }
+        // What every text that leaves is scrubbed with, from the first: the log included.
+        VaultSecrets.clear();
+        try {
+            for (String userId : jdbc.queryForList("SELECT DISTINCT user_id FROM credential_vault", String.class)) {
+                publishSecrets(userId);
+            }
+        } catch (Exception e) {
+            log.error("Could not read the vault's users for scrubbing: {}", e.getMessage());
+        }
     }
 
     /**
@@ -70,9 +113,13 @@ public class CredentialVault {
      * @param userId the user ID
      * @param key    credential key (e.g. SMTP_HOST, OPENAI_API_KEY)
      * @param value  plaintext credential value
+     * @throws IllegalArgumentException when the key, upper-cased, is not a {@link #validName};
+     *                                  nothing is stored
      */
     public void storeCredential(String userId, String key, String value) {
-        key = key.strip().toUpperCase();
+        key = key.strip().toUpperCase(Locale.ROOT);
+        String refused = refusal(key, value);
+        if (refused != null) throw new IllegalArgumentException(refused);
         value = value.strip();
         try {
             String salt = getOrCreateUserSalt(userId);
@@ -103,6 +150,7 @@ public class CredentialVault {
             log.error("Failed to encrypt credential: {}", e.getMessage());
             throw new RuntimeException("Failed to store credential", e);
         }
+        publishSecrets(userId);
     }
 
     /**
@@ -169,6 +217,22 @@ public class CredentialVault {
         key = key.strip().toUpperCase();
         jdbc.update("DELETE FROM credential_vault WHERE user_id = ? AND credential_key = ?", userId, key);
         log.info("Deleted credential: user={}, key={}", userId, key);
+        publishSecrets(userId);
+    }
+
+    /**
+     * Put what the vault holds for {@code userId} now -- the values of the keys
+     * {@link Redactor#isSecretName} calls secrets -- where every text that leaves is scrubbed
+     * with them ({@link VaultSecrets}). A failure is logged and leaves the last values there:
+     * a scrub that removes a value no longer stored does no harm.
+     */
+    private void publishSecrets(String userId) {
+        try {
+            List<String> secret = listCredentialKeys(userId).stream().filter(Redactor::isSecretName).toList();
+            VaultSecrets.set(userId, secret.isEmpty() ? Map.of() : getCredentials(userId, secret));
+        } catch (Exception e) {
+            log.error("Could not read the secret credentials of user {} for scrubbing: {}", userId, e.getMessage());
+        }
     }
 
     /**

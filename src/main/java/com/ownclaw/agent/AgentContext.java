@@ -90,7 +90,7 @@ public class AgentContext {
     private final List<Artifact> artifacts = new java.util.ArrayList<>();
     /** The canary index over every PRIVATE artifact's bytes. */
     private final com.ownclaw.privacy.PrivateIndex privateIndex = new com.ownclaw.privacy.PrivateIndex();
-    /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door. */
+    /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door (see {@link #secretValues}). */
     private Map<String, String> secretValues = Map.of();
 
     /** See {@link #setSkillSource}. */
@@ -793,7 +793,20 @@ public class AgentContext {
     /** Whether the task's answer or question shows this result in full. See {@link #markShown}. */
     public boolean isShown(Artifact a) { return shown.contains(a.n()); }
 
-    public Map<String, String> secretValues() { return secretValues; }
+    /**
+     * The secret vault values this task's text is scrubbed of: those decrypted as it started,
+     * and those the vault holds now ({@link com.ownclaw.privacy.VaultSecrets}) -- a password
+     * stored with /cred set while the task runs reaches its skills at once, and is scrubbed
+     * from what it says from then on, not only from the next task's.
+     */
+    public Map<String, String> secretValues() {
+        Map<String, String> now = com.ownclaw.privacy.VaultSecrets.of(userId);
+        if (now.isEmpty() || now.equals(secretValues)) return secretValues;
+        if (secretValues.isEmpty()) return now;
+        var both = new java.util.HashMap<>(secretValues);
+        both.putAll(now);
+        return Map.copyOf(both);
+    }
     public void setSecretValues(Map<String, String> values) {
         this.secretValues = values == null ? Map.of() : Map.copyOf(values);
     }
@@ -1002,7 +1015,7 @@ public class AgentContext {
      */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues, new Excuses(), this::toolOf);
+                secretValues(), new Excuses(), this::toolOf);
     }
 
     /** The tool that produced result {@code n}, or null when there is no such result. */

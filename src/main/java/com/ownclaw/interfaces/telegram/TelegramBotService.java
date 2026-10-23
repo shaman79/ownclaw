@@ -254,21 +254,32 @@ public class TelegramBotService {
             return;
         }
 
+        // A secret command anywhere but on its own -- "/bg /cred set KEY VALUE", "store this:
+        // /cred set KEY VALUE" -- is removed from the chat and goes nowhere: run, queued or
+        // handed to the agent, its secret would have gone on as text.
+        if (CommandHandler.misplacedSecret(text)) {
+            deleteSecret(chatId, message.path("message_id").asLong());
+            sendMessage(chatId, CommandHandler.MISPLACED_SECRET_ANSWER);
+            return;
+        }
+
         // "/queue <message>" queues its message instead of handing it to the running task, as the
         // web chat's Queue button does.
         String queued = CommandHandler.queued(text);
         if (queued != null) text = queued;
 
         // Handle slash commands consistently with the Web UI
-        if (queued == null && text.startsWith("/")) {
+        // Leading blanks first, as the web chat reads them: " /cred set KEY VALUE" was no command,
+        // and was saved and run as a task.
+        if (queued == null && text.stripLeading().startsWith("/")) {
             // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
             // on, unless it is removed -- asked for first, whatever storing it then does.
             if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
-            var cmdResult = commandHandler.handle(userId, text);
+            var cmdResult = commandHandler.handle(userId, text.strip());
             if (cmdResult.isPresent()) {
                 sendMessage(chatId, cmdResult.get());
                 // Session commands: send active session info
-                if (commandHandler.isSessionCommand(text)) {
+                if (commandHandler.isSessionCommand(text.strip())) {
                     String sessionId = conversationService.getCurrentSession(userId);
                     sendMessage(chatId, "\uD83D\uDCC2 Active session: " + sessionId);
                 }

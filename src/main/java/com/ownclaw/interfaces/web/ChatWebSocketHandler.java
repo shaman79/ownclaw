@@ -326,6 +326,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        // A secret command anywhere but on its own -- "/bg /cred set KEY VALUE", "/queue then
+        // /cred set ...", "store this: /cred set KEY VALUE" -- is answered and goes nowhere: not
+        // into the chat, the queue, a running task or the agent, which would have been handed
+        // the secret as text. A slash text's bubble is drawn here, masked; the page draws its own
+        // for any other, on this screen alone.
+        if (CommandHandler.misplacedSecret(userMessage)) {
+            if (userMessage.strip().startsWith("/")) {
+                sendToSession(session, "user", CommandHandler.displayed(userMessage));
+            }
+            sendToSession(session, "system", CommandHandler.MISPLACED_SECRET_ANSWER);
+            return;
+        }
+
         // "/queue <message>" queues its message, as the page's Queue button does. The page draws
         // no slash text: this is its bubble, as typed, under the page's name for it.
         String queued = CommandHandler.queued(userMessage);
@@ -347,7 +360,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // real commands working while a question waits, without deciding by punctuation what
         // the user meant.
         boolean waiting = queued == null && interactionHandler.hasPending(userId);
-        if (queued == null && userMessage.startsWith("/")) {
+        // Leading blanks first: the page trims what it sends, another client need not, and
+        // " /cred set KEY VALUE" was no command -- it was saved and run as a task, its secret
+        // handed to the cloud model.
+        if (queued == null && userMessage.stripLeading().startsWith("/")) {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
             var handledAsCommand = commandHandler.handle(userId, userMessage.trim());

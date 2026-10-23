@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Spring Boot's own logging (its base.xml: the console, and the file logging.file.name names, rolled
+as logging.logback.rollingpolicy says), with one change: the message and the exception of every
+line are written by converters that take every user's secret vault values out of them first
+(com.ownclaw.privacy.VaultSecrets). A rule registered here takes the place of logback's own %m,
+%msg and %message, and of Spring's %wEx, in every pattern below it.
+-->
+<configuration>
+	<include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+	<conversionRule conversionWord="m" class="com.ownclaw.privacy.ScrubbedMessageConverter"/>
+	<conversionRule conversionWord="msg" class="com.ownclaw.privacy.ScrubbedMessageConverter"/>
+	<conversionRule conversionWord="message" class="com.ownclaw.privacy.ScrubbedMessageConverter"/>
+	<conversionRule conversionWord="wEx" class="com.ownclaw.privacy.ScrubbedThrowableConverter"/>
+	<property name="LOG_FILE" value="${LOG_FILE:-${LOG_PATH:-${LOG_TEMP:-${java.io.tmpdir:-/tmp}}}/spring.log}"/>
+	<include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+	<include resource="org/springframework/boot/logging/logback/file-appender.xml"/>
+	<root level="INFO">
+		<appender-ref ref="CONSOLE"/>
+		<appender-ref ref="FILE"/>
+	</root>
+</configuration>

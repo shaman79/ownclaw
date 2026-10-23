@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.privacy.VaultSecrets;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -138,7 +139,10 @@ public class DebugController {
         try {
             AgentResult result = agentLoop.executeFull(userId, message);
 
-            Map<String, Object> trace = buildTrace(result, message, capturedMessages);
+            // The trajectory holds each tool's output and parameters as they came, and the trace
+            // is kept for a day to be fetched again: the user's secret vault values go first.
+            Map<String, Object> trace = VaultSecrets.scrubDeep(userId,
+                    buildTrace(result, message, capturedMessages));
             trace.put("userId", userId);   // so a trace can be scoped to whoever produced it
             String taskId = (String) trace.get("taskId");
             storeTrace(taskId, trace);

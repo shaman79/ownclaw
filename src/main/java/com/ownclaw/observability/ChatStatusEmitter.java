@@ -1,5 +1,6 @@
 package com.ownclaw.observability;
 
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -139,6 +140,7 @@ public class ChatStatusEmitter {
     public void emit(String userId, StatusMessage message) {
         Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
         if (forUser == null) return;
+        message = scrubbed(userId, message);
         for (Map.Entry<Object, Consumer<StatusMessage>> e : forUser.entrySet()) {
             try {
                 e.getValue().accept(message);
@@ -146,6 +148,18 @@ public class ChatStatusEmitter {
                 log.debug("Status listener {} failed for {}: {}", e.getKey(), userId, ex.toString());
             }
         }
+    }
+
+    /**
+     * The message with the user's secret vault values replaced, in its text and in every text of
+     * its data. A step's frame carries the tool's whole output and the whole prompt, the debug
+     * frames the raw model output, and the page keeps the last of them to show the next tab that
+     * opens: each of those held a password a skill had printed, as printed.
+     */
+    private static StatusMessage scrubbed(String userId, StatusMessage message) {
+        if (VaultSecrets.of(userId).isEmpty()) return message;
+        return new StatusMessage(message.type(), VaultSecrets.scrub(userId, message.text()),
+                VaultSecrets.scrubDeep(userId, message.data()), message.taskId());
     }
 
     /** Convenience overload — text only (no structured data). */
@@ -175,7 +189,7 @@ public class ChatStatusEmitter {
             marked.put(BACKGROUND, true);
             data = marked;
         }
-        var message = new StatusMessage(type, text, data, taskId);
+        var message = scrubbed(userId, new StatusMessage(type, text, data, taskId));
         Running task = taskId == null ? null : running.get(taskId);
         if (task != null && (type == StatusMessage.Type.STEP || type == StatusMessage.Type.PROGRESS)) {
             task.last().set(message);

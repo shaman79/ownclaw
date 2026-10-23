@@ -187,4 +187,26 @@ class ChatSecretTest {
                 "the bubble is the answer as typed: " + sent);
         assertTrue(sent.stream().noneMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
     }
+
+    @Test
+    @DisplayName("a secret command inside another command or a message goes nowhere: not run, queued, kept or sent on")
+    void aMisplacedSecretCommandGoesNowhere() throws Exception {
+        List<String> forms = List.of("/bg /cred set OPENWRT_PASS %s", "/queue then /cred set OPENWRT_PASS %s",
+                "/schedule in 1 hour /user add bob %s", "store this: /cred set OPENWRT_PASS %s",
+                "/bg /cred@OwnClawBot set OPENWRT_PASS %s");
+        for (String form : forms) type(form.formatted(SECRET));
+        assertTrue(stored.isEmpty(), "stored: " + stored);
+        assertNowhere(SECRET);
+        assertEquals(forms.size(), sent.stream().filter(s -> s.contains("Not run, and not kept")).count(), "answered: " + sent);
+        assertTrue(sent.stream().anyMatch(s -> s.contains("\"type\":\"user\"") && s.contains("/bg \u2026")),
+                "a slash text's bubble, masked: " + sent);
+    }
+
+    @Test
+    @DisplayName("blanks before /cred set do not make it a message: it is stored and masked, not saved and run")
+    void blanksBeforeTheCommand() throws Exception {
+        type("  /cred set OPENWRT_PASS " + SECRET);
+        assertEquals(List.of("OPENWRT_PASS=" + SECRET), stored);
+        assertNowhere(SECRET);
+    }
 }

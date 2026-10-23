@@ -174,4 +174,31 @@ class TelegramSecretTest {
         }
         // Mutation: Telegram's own /cancel back -> its own reply, and a wait ended unheard.
     }
+
+    @Test
+    @DisplayName("a secret command inside another command or a message is deleted from the chat and goes nowhere")
+    void aMisplacedSecretCommandIsDeleted() throws Exception {
+        receive(90, "/bg /cred set OPENWRT_PASS " + SECRET);
+        receive(91, "store this: /cred set OPENWRT_PASS " + SECRET);
+        assertTrue(stored.isEmpty(), "stored: " + stored);
+        assertEquals(List.of(90L, 91L), telegram.bodies("deleteMessage").stream()
+                .map(b -> {
+                    try { return new ObjectMapper().readTree(b).path("message_id").asLong(); }
+                    catch (Exception e) { throw new IllegalStateException(e); }
+                }).toList(), "calls: " + telegram.calls);
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM conversations", Integer.class), "nothing kept");
+        assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
+        assertEquals(2, telegram.bodies("sendMessage").stream().filter(b -> b.contains("Not run, and not kept")).count(),
+                "calls: " + telegram.calls);
+    }
+
+    @Test
+    @DisplayName("Telegram's /cred@BotName set, and one with blanks before it, are stored and deleted")
+    void botNameAndBlanks() throws Exception {
+        receive(92, "/cred@OwnClawBot set OPENWRT_PASS " + SECRET);
+        receive(93, " /cred set SMTP_PASS " + SECRET);
+        assertEquals(List.of("OPENWRT_PASS=" + SECRET, "SMTP_PASS=" + SECRET), stored);
+        assertEquals(2, telegram.bodies("deleteMessage").size(), "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
+    }
 }

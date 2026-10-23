@@ -201,7 +201,15 @@ public final class Redactor {
         }
         String out = text;
         int count = 0;
-        for (var e : vault.entrySet()) {
+        // Longest first: a value inside another -- a PIN inside the password it starts -- taken
+        // first broke the longer one up with its marker, the longer one was no longer found,
+        // and the rest of it stayed in the text. Then by name, so the order is the same on
+        // every run, as Map.copyOf's is not.
+        var values = new ArrayList<>(vault.entrySet());
+        values.sort(Comparator.comparingInt((Map.Entry<String, String> e) ->
+                        e.getValue() == null ? 0 : -e.getValue().length())
+                .thenComparing(Map.Entry::getKey));
+        for (var e : values) {
             String value = e.getValue();
             if (vaultValueAt(out, value, 0) < 0) continue;
             String marker = VAULT_MARK + e.getKey() + "»";

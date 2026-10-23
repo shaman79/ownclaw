@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -144,5 +145,62 @@ class SecretCommandTest {
                 }, null, null, null, null, null, null);
         assertEquals("Only the owner can manage accounts.", notTheOwner.handle("guest", "/user add eve Pw12-long").orElse(""));
         assertTrue(kept.isEmpty(), "no account made");
+    }
+
+    /** What a secret command was typed inside: another command, or a message. */
+    static final String[] WRAPPERS = {"/bg ", "/BG\t", "/queue then ", "/schedule in 1 hour ",
+            "/schedule every day at 3am : ", "store this: ", "please\n", "/creds "};
+
+    @Test
+    @DisplayName("a secret command inside another command or a message is never run, queued, kept or shown, however it is spelled")
+    void misplacedSecretCommands() {
+        Random r = new Random(20261023);
+        int forms = 0;
+        for (int i = 0; i < 20_000; i++) {
+            String typed = pick(r, SECRETS);
+            String inner = pick(r, HEADS) + " " + pick(r, VERBS) + pick(r, GAPS) + pick(r, NAMES) + pick(r, GAPS) + typed;
+            if (!CommandHandler.carriesSecret(inner)) continue;
+            String text = pick(r, WRAPPERS) + inner;
+            forms++;
+            kept.clear();
+            assertTrue(CommandHandler.carriesSecret(text), text);
+            assertTrue(CommandHandler.misplacedSecret(text), text);
+            assertNull(CommandHandler.queued(text), "queued: " + text);
+            String shown = CommandHandler.displayed(text);
+            assertTrue(shown.endsWith(" \u2026"), "shown: " + shown);
+            assertFalse(shown.contains("Zq7"), "typed " + text + " and showed " + shown);
+            var answer = commands.handle("owner", text);
+            if (text.startsWith("/")) {
+                assertEquals(Optional.of(CommandHandler.MISPLACED_SECRET_ANSWER), answer, text);
+            } else {
+                assertEquals(Optional.empty(), answer, "a message is no command; the chat refuses it: " + text);
+            }
+            assertTrue(kept.isEmpty(), "kept " + kept + " from " + text);
+        }
+        assertTrue(forms > 1_000, "the generator must reach the secret forms: " + forms);
+    }
+
+    @Test
+    @DisplayName("a secret command typed on its own is read with blanks before it, and with Telegram's @BotName")
+    void blanksAndBotNames() {
+        for (String text : List.of("  /cred set K Zq7-a", "\t/cred set K Zq7-b", "/cred@OwnClawBot set K Zq7-c",
+                "/CRED@ownclaw_bot SET K Zq7-d")) {
+            kept.clear();
+            assertTrue(CommandHandler.carriesSecret(text), text);
+            assertFalse(CommandHandler.misplacedSecret(text), text);
+            assertFalse(CommandHandler.displayed(text).contains("Zq7"), CommandHandler.displayed(text));
+            assertTrue(commands.handle("owner", text.strip()).orElse("").startsWith("\u2705"), text);
+            assertEquals(1, kept.size(), text);
+        }
+        assertFalse(CommandHandler.misplacedSecret("how do I use /cred list?"), "no secret command in it");
+    }
+
+    @Test
+    @DisplayName("/bg runs a task said in words, not a command: \"/bg /creds set K V\" ran the mistyped command as a task")
+    void aCommandIsNoBackgroundTask() {
+        assertEquals("Not run: a task is said in words. A command is run by typing it on its own, not as another "
+                + "command's task.", commands.handle("owner", "/bg /creds set OPENWRT_PASS Zq7-secret").orElse(""));
+        assertEquals(commands.handle("owner", "/bg /creds set OPENWRT_PASS Zq7-secret"),
+                commands.handle("owner", "/bg /status"));
     }
 }

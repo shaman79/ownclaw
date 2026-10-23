@@ -8,6 +8,7 @@ import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolExecutionContext;
 import com.ownclaw.agent.tools.ToolParam;
 import com.ownclaw.agent.tools.ToolResult;
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ownclaw.users.AuthService;
@@ -283,15 +284,17 @@ public class SkillController {
             ToolResult result = skill.execute(params, context);
             long duration = System.currentTimeMillis() - start;
 
+            // The page is shown what the skill printed, its stderr included -- but not the
+            // owner's own secret vault values, which no page shows.
             return ResponseEntity.ok(Map.of(
-                    "output", result.output(),
+                    "output", VaultSecrets.scrub(userId, result.output()),
                     "durationMs", duration,
                     "success", result.success()
             ));
         } catch (Exception e) {
             log.error("Test-run of skill '{}' failed: {}", name, e.getMessage());
             return ResponseEntity.ok(Map.of(
-                    "output", e.getMessage() != null ? e.getMessage() : "Unknown error",
+                    "output", e.getMessage() != null ? VaultSecrets.scrub(userId, e.getMessage()) : "Unknown error",
                     "durationMs", 0,
                     "success", false
             ));

@@ -93,6 +93,7 @@ public class CommandHandler {
         if (message == null || !message.startsWith("/")) {
             return Optional.empty();
         }
+        if (misplacedSecret(message)) return Optional.of(MISPLACED_SECRET_ANSWER);
         Matcher secret = SECRET_COMMAND.matcher(message);
         if (secret.matches()) {
             boolean cred = secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred");
@@ -194,13 +195,58 @@ public class CommandHandler {
      * that works, so it is hidden and deleted the same way; shown as typed, the password stayed on
      * the screen and in the Telegram chat.
      * <p>
+     * Blanks before the command are read as none, and the command may carry Telegram's
+     * {@code @BotName}: " /cred set KEY VALUE" from a client that does not trim, and
+     * "/cred@OwnClawBot set KEY VALUE" from Telegram's command menu, were no command, and were
+     * kept in the chat as typed -- the first saved and run as a task.
+     * <p>
      * Neighbouring parts never match the same character, so a text splits one way only and a
      * long run of spaces cannot make the matcher try every split; the second reading is tried
      * only once the first has failed. The time is linear in the text.
      */
     private static final Pattern SECRET_COMMAND = Pattern.compile(
-            "(/cred\\s+set|/user\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
+            "\\s*(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /**
+     * One of the two secret commands where it is not the whole text: after a blank, inside
+     * another command -- "/bg /cred set KEY VALUE", "/schedule in 1 hour /user add bob pw",
+     * "/queue then /cred set KEY VALUE" -- or in a message -- "store this: /cred set KEY VALUE".
+     * Whatever holds it would hand it on as text: as a task, to the cloud model, into the chat,
+     * the queue and the schedule's own row, run after run.
+     */
+    private static final Pattern MISPLACED_SECRET = Pattern.compile(
+            "(?<=\\s)(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?=\\s|$)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** What a text with a {@link #MISPLACED_SECRET} is answered, wherever it was typed. */
+    public static final String MISPLACED_SECRET_ANSWER = "Not run, and not kept: a secret goes in a "
+            + "`/cred set KEY VALUE` (or `/user add NAME PASSWORD`) typed on its own. Inside another "
+            + "command or a message it would have been passed on as text.";
+
+    /** What /bg and /schedule answer a command given as their task: no task is a command. */
+    static final String COMMAND_AS_TASK = "Not run: a task is said in words. A command is run by "
+            + "typing it on its own, not as another command's task.";
+
+    /**
+     * Where a {@link #MISPLACED_SECRET} starts in {@code text}, stripped, or -1 -- also when the
+     * whole text is a secret command, which {@link #handle} stores.
+     */
+    private static int misplacedSecretAt(String text) {
+        if (text == null) return -1;
+        String s = text.strip();
+        if (SECRET_COMMAND.matcher(s).matches()) return -1;
+        Matcher m = MISPLACED_SECRET.matcher(s);
+        return m.find() ? m.start() : -1;
+    }
+
+    /**
+     * Whether {@code text} holds a secret command anywhere but on its own: answered with
+     * {@link #MISPLACED_SECRET_ANSWER}, and never run, queued, kept or handed to the agent.
+     */
+    public static boolean misplacedSecret(String text) {
+        return misplacedSecretAt(text) >= 0;
+    }
 
     /** {@code /queue <message>}: its message, read once (group 1). */
     private static final Pattern QUEUE_COMMAND = Pattern.compile("/queue(?:\\s+(.*))?",
@@ -218,6 +264,7 @@ public class CommandHandler {
      * answers a bare {@code /queue} with its usage.
      */
     public static String queued(String text) {
+        if (misplacedSecret(text)) return null;
         Matcher m = text == null ? null : QUEUE_COMMAND.matcher(text.strip());
         if (m == null || !m.matches() || m.group(1) == null) return null;
         String message = m.group(1).strip();
@@ -233,6 +280,8 @@ public class CommandHandler {
      * else as sent.
      */
     public static String displayed(String message) {
+        int misplaced = misplacedSecretAt(message);
+        if (misplaced >= 0) return message.strip().substring(0, misplaced).stripTrailing() + " \u2026";
         Matcher m = message == null ? null : SECRET_COMMAND.matcher(message);
         if (m == null || !m.matches()) return message;
         return m.group(2) != null ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022"
@@ -244,7 +293,7 @@ public class CommandHandler {
      * command it cannot read.
      */
     public static boolean carriesSecret(String message) {
-        return message != null && SECRET_COMMAND.matcher(message).matches();
+        return message != null && (SECRET_COMMAND.matcher(message).matches() || misplacedSecret(message));
     }
 
     // ── Help ──
@@ -266,6 +315,9 @@ public class CommandHandler {
             return "Usage: `/bg <task>` — runs it in the background and tells you when it is done.\n"
                     + "Use it for anything you do not want to sit and wait for.";
         }
+        // "/bg /creds set KEY VALUE" ran "/creds set KEY VALUE" as a task: the cloud model was
+        // handed a password the mistyped command was meant to store.
+        if (task.startsWith("/")) return COMMAND_AS_TASK;
         // Where it was typed, read now: minutes later the open chat can be another one, and the
         // answer would be saved under a conversation it has nothing to do with.
         String sessionId = conversationService.getCurrentSession(userId);
@@ -662,6 +714,8 @@ public class CommandHandler {
     /** A well-formed {@code /cred set}, as SECRET_COMMAND read it. */
     private String storeCredential(String userId, String key, String value) {
         key = key.toUpperCase(Locale.ROOT);
+        String refused = CredentialVault.refusal(key, value);
+        if (refused != null) return "Not stored: " + refused;
         credentialVault.storeCredential(userId, key, value.strip());
         return "\u2705 Credential '" + key + "' stored (encrypted).";
     }
@@ -735,6 +789,7 @@ public class CommandHandler {
             }
         }
 
+        if (taskDesc != null && taskDesc.startsWith("/")) return COMMAND_AS_TASK;
         if (runAt == null) {
             return "Could not parse time expression. Examples:\n"
                     + "  `/schedule in 2 hours check server status`\n"
@@ -767,6 +822,7 @@ public class CommandHandler {
         if (taskDesc.isBlank()) {
             return "Task description is required after the `:`";
         }
+        if (taskDesc.startsWith("/")) return COMMAND_AS_TASK;
 
         String cronExpr;
         if (schedulePart.toLowerCase().startsWith("cron ")) {
