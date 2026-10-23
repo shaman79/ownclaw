@@ -276,9 +276,19 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
      */
     public synchronized Map<String, Object> forOps() {
         var out = new LinkedHashMap<>(shown().data());
-        out.put("reasoningTail", tail(Redactor.scrubVault(reasoning.toString(), task.secretValues()).text()));
-        out.put("answerTail", tail(Redactor.scrubVault(answer.toString(), task.secretValues()).text()));
+        out.put("reasoningTail", tail(Redactor.scrubVault(wholeLines(reasoning), task.secretValues()).text()));
+        out.put("answerTail", tail(Redactor.scrubVault(wholeLines(answer), task.secretValues()).text()));
         return out;
+    }
+
+    /**
+     * What a text holds of whole lines while the call runs, and all of it once it has ended: a
+     * value the model is still writing matches no form of it, and its beginning was shown.
+     */
+    private String wholeLines(StringBuilder text) {
+        if (closed) return text.toString();
+        int end = text.lastIndexOf("\n");
+        return end < 0 ? "" : text.substring(0, end + 1);
     }
 
     /**

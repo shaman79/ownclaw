@@ -242,10 +242,15 @@ public class SecretCommandTest {
     void aCommandInsideAnother() {
         assertEquals("/bg \u2026", CommandHandler.displayed("/bg /creds set OPENWRT_PASS Zq7-secret"));
         assertEquals("/schedule in 1 hour \u2026", CommandHandler.displayed("/schedule in 1 hour /creds set K Zq7-secret"));
-        assertTrue(CommandHandler.startsWithCommand("/creds set K V"));
-        assertTrue(CommandHandler.startsWithCommand("/status"));
+        for (String command : List.of("/creds set K V", "/status", "/cred-set K pw", "/creds: set K pw",
+                "/cred.set K pw", "/creds, set K pw", "/creds\u200bset K pw", "\u00a0/creds set K pw", "\uFF0Fcreds set")) {
+            assertTrue(CommandHandler.startsWithCommand(command), escaped(command));
+        }
         assertFalse(CommandHandler.startsWithCommand("/var/log/syslog: summarise the errors"));
         assertFalse(CommandHandler.startsWithCommand("/home/me/report.pdf send it"));
+        assertFalse(CommandHandler.startsWithCommand("summarise /var/log/syslog"));
+        assertEquals(commands.handle("owner", "/bg /status"), commands.handle("owner", "/bg /cred-set K Zq7-secret"),
+                "a command typed wrong is no task either");
         assertEquals("/bg summarise /var/log/syslog", CommandHandler.displayed("/bg summarise /var/log/syslog"));
     }
 
@@ -268,8 +273,41 @@ public class SecretCommandTest {
     @DisplayName("/bg runs a task said in words, not a command: \"/bg /creds set K V\" ran the mistyped command as a task")
     void aCommandIsNoBackgroundTask() {
         assertEquals("Not run: a task is said in words. A command is run by typing it on its own, not as another "
-                + "command's task.", commands.handle("owner", "/bg /creds set OPENWRT_PASS Zq7-secret").orElse(""));
-        assertEquals(commands.handle("owner", "/bg /creds set OPENWRT_PASS Zq7-secret"),
-                commands.handle("owner", "/bg /status"));
+                + "command's task.", commands.handle("owner", "/bg /status").orElse(""));
+        assertEquals(Optional.of(CommandHandler.MISPLACED_SECRET_ANSWER),
+                commands.handle("owner", "/bg /creds set OPENWRT_PASS Zq7-secret"), "a mistyped secret command is one");
+    }
+
+    @Test
+    @DisplayName("a secret command mistyped -- the wrong verb, a plural, a blank before @BotName -- carries a secret: hidden, answered, never stored or run")
+    void mistypedSecretCommands() {
+        for (String text : List.of("/cred add API_KEY Zq7-secret", "/creds set K Zq7-secret", "/cred store K Zq7-secret",
+                "/users add bob Zq7-secret", "/user create bob Zq7-secret", "/cred @OwnClawBot set K Zq7-secret",
+                "/CREDS\tSET K Zq7-secret")) {
+            kept.clear();
+            assertTrue(CommandHandler.carriesSecret(text), text);
+            assertFalse(CommandHandler.misplacedSecret(text), "its own command, answered: " + text);
+            assertFalse(CommandHandler.displayed(text).contains("Zq7"), CommandHandler.displayed(text));
+            assertTrue(CommandHandler.displayed(text).endsWith(" \u2026"), CommandHandler.displayed(text));
+            assertEquals(Optional.of(CommandHandler.MISTYPED_SECRET_ANSWER), commands.handle("owner", text), text);
+            assertTrue(kept.isEmpty(), text);
+        }
+        for (String text : List.of("/bg please /creds set API_KEY Zq7-secret", "/schedule in 1 hour do /cred add K Zq7-secret",
+                "/queue store:/users add bob Zq7-secret", "ok \u2215cred set K Zq7-secret")) {
+            assertTrue(CommandHandler.misplacedSecret(text), text);
+        }
+        assertFalse(CommandHandler.carriesSecret("/cred delete OLD_KEY"), "deleting carries no secret");
+        assertFalse(CommandHandler.carriesSecret("/users list"));
+    }
+
+    @Test
+    @DisplayName("a zero-width space between a secret command's words is a blank: the command is read, and stored")
+    void zeroWidthBetweenWords() {
+        kept.clear();
+        String text = "/cred set\u200bK1\u200bZq7-secret";
+        assertTrue(CommandHandler.carriesSecret(text));
+        String answer = commands.handle("owner", text).orElse("");
+        assertTrue(answer.startsWith("\u2705"), answer);
+        assertEquals(List.of("Zq7-secret"), kept);
     }
 }

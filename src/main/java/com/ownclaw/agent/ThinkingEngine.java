@@ -103,8 +103,10 @@ public class ThinkingEngine {
             } finally {
                 live.close();
             }
-            log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
-                    truncate(response.content(), 200));
+            if (log.isDebugEnabled()) {
+                log.debug("ThinkingEngine LLM response ({} tokens): {}", response.totalTokens(),
+                        truncate(response.content(), 200));
+            }
 
             // A refused reply, one cut off by a limit of the model, and one holding a tool call
             // that cannot be run never get this far: the provider path throws ProviderRefused,

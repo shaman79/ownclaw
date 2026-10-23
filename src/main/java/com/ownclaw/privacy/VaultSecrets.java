@@ -17,9 +17,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * starts, and whenever a credential is stored or deleted -- so a value stored while a task runs
  * is removed from that task's text from then on, too.
  * <p>
- * A value is never dropped while the service runs: one replaced or deleted stays, under its
- * name with {@code ~prev} added. A skill started before a password was changed can still print
- * the old one, and a task's earlier results, read again for every model call, still hold it.
+ * A value replaced stays while the service runs, under its name with {@code ~prev} added: a
+ * skill started before a password was changed can still print the old one, and a task's earlier
+ * results, read again for every model call, still hold it. A deleted credential's values go:
+ * deleting is how a value stored by mistake -- "admin" as a password -- stops being replaced in
+ * every text, "ssh admin@router" among them.
  */
 public final class VaultSecrets {
 
@@ -41,22 +43,25 @@ public final class VaultSecrets {
      */
     public static synchronized void set(String userId, Map<String, String> values) {
         if (userId == null) return;
-        Map<String, String> held = withRetired(values == null ? Map.of() : values, of(userId));
+        Map<String, String> held = withRetired(values == null ? Map.of() : values, of(userId), false);
         if (held.isEmpty()) byUser.remove(userId);
         else byUser.put(userId, Map.copyOf(held));
         everyone = merged();
     }
 
     /**
-     * {@code now}, and each value of {@code before} that is not among them, under its name -- with
-     * {@code ~prev} added while the name is taken. A changed password's old value is no less a
-     * secret, and a deleted one may still be in use elsewhere.
+     * {@code now}, and each value of {@code before} that is not among them, under its name with
+     * {@code ~prev} added: a changed password's old value is no less a secret. With
+     * {@code deleted} false, only those whose credential {@code now} still holds -- replaced, not
+     * deleted.
      */
-    public static Map<String, String> withRetired(Map<String, String> now, Map<String, String> before) {
+    public static Map<String, String> withRetired(Map<String, String> now, Map<String, String> before,
+                                                  boolean deleted) {
         var out = new LinkedHashMap<String, String>(now);
         for (var e : before.entrySet()) {
-            if (out.containsValue(e.getValue())) continue;
-            String name = e.getKey();
+            String base = e.getKey().replaceFirst("(~prev)+$", "");
+            if (out.containsValue(e.getValue()) || !deleted && !now.containsKey(base)) continue;
+            String name = now.containsKey(base) ? base + "~prev" : e.getKey();
             while (out.containsKey(name)) name += "~prev";
             out.put(name, e.getValue());
         }

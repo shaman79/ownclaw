@@ -276,9 +276,16 @@ class LiveCallTest {
 
         // A value the cut goes through: cut first, its end was shown.
         LiveCall straddled = ctx.call(OLLAMA, true, ctx.atStep(null));
-        straddled.received(Part.REASONING, "Kolibri-2291" + distinct("pad", 200).substring(0, LiveCall.OPS_TAIL - 6));
+        straddled.received(Part.REASONING, "Kolibri-2291" + distinct("pad", 200).substring(0, LiveCall.OPS_TAIL - 7) + "\n");
         assertFalse(((String) straddled.forOps().get("reasoningTail")).contains("2291"),
                 "no part of the value at the start of the tail");
+
+        // A value still being written: the line it is on is not shown until it ends.
+        LiveCall writing = ctx.call(OLLAMA, true, ctx.atStep(null));
+        writing.received(Part.REASONING, "Logging in.\nThe password is Kolib");
+        assertEquals("Logging in.\n", writing.forOps().get("reasoningTail"));
+        writing.received(Part.REASONING, "ri-2291, done.\n");
+        assertEquals("Logging in.\nThe password is «vault:WIFI_PSK», done.\n", writing.forOps().get("reasoningTail"));
     }
 
     @Test

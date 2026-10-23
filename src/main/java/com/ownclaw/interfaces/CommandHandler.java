@@ -96,6 +96,9 @@ public class CommandHandler {
         }
         if (misplacedSecret(message)) return Optional.of(MISPLACED_SECRET_ANSWER);
         Matcher secret = SECRET_COMMAND.matcher(message);
+        if (!secret.matches() && MISTYPED_SECRET.matcher(message).lookingAt()) {
+            return Optional.of(MISTYPED_SECRET_ANSWER);
+        }
         if (secret.matches()) {
             boolean cred = secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred");
             if (secret.group(2) == null) {
@@ -207,8 +210,38 @@ public class CommandHandler {
      * only once the first has failed. The time is linear in the text.
      */
     private static final Pattern SECRET_COMMAND = Pattern.compile(
-            "(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
+            "(/cred(?:@\\w+)?" + Blank.ANY + "+set|/user(?:@\\w+)?" + Blank.ANY + "+add)(?:" + Blank.ANY + "+("
+                    + Blank.NONE + "+)" + Blank.ANY + "+(" + Blank.NONE + ".*)|" + Blank.ANY + "+(" + Blank.NONE + ".*))",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /**
+     * What every pattern here reads as a blank between words -- Unicode's blanks and its format
+     * characters: a zero-width space between "set" and the name made "/cred set KEY VALUE" no
+     * command and no secret -- and as a slash: the full-width one a phone keyboard gives, and the
+     * division and fraction slashes a paste can bring.
+     */
+    private static final class Blank {
+        static final String ANY = "[\\s\\p{Cf}]";
+        static final String NONE = "[^\\s\\p{Cf}]";
+        static final String SLASH = "[/\\uFF0F\\u2215\\u2044]";
+    }
+
+    /**
+     * A secret command's head, spelled as it is meant or as it is mistyped: /cred, /creds, /user
+     * or /users, with Telegram's @BotName (a blank before it too), and a verb that stores or adds
+     * -- "/cred add KEY VALUE", "/creds set KEY VALUE", "/user create bob pw" -- with something
+     * after it. Typed wrong, it carries a secret as surely as typed right.
+     */
+    private static final String SECRET_HEAD = Blank.SLASH + "(?:creds?|users?)(?:" + Blank.ANY + "*@\\w+)?"
+            + Blank.ANY + "+(?:set|add|put|store|save|new|create|update)(?=" + Blank.ANY + "+" + Blank.NONE + ")";
+
+    /** A {@link #SECRET_HEAD} that begins the text: stored when it is a {@link #SECRET_COMMAND}, answered when not. */
+    private static final Pattern MISTYPED_SECRET = Pattern.compile(SECRET_HEAD,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** What a {@link #MISTYPED_SECRET} that is no {@link #SECRET_COMMAND} is answered. Nothing is stored. */
+    public static final String MISTYPED_SECRET_ANSWER = "Not stored: a credential is stored with "
+            + "`/cred set KEY VALUE`, an account added with `/user add NAME PASSWORD`, each typed on its own.";
 
     /**
      * One of the two secret commands where it is not the whole text, with something after it:
@@ -221,17 +254,13 @@ public class CommandHandler {
      * row, run after run.
      */
     private static final Pattern MISPLACED_SECRET = Pattern.compile(
-            "(?<![\\p{L}\\p{N}_./\\\\-])[/\\uFF0F](?:cred(?:@\\w+)?\\s+set|user(?:@\\w+)?\\s+add)(?=\\s+\\S)",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+            "(?<![\\p{L}\\p{N}_./\\\\-])" + SECRET_HEAD, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
 
     /**
-     * A word shaped like a command: a slash and a name -- "/status", "/creds" -- with Telegram's
-     * {@code @BotName}, and not a path, which goes on with another slash or a dot.
+     * A word shaped like a command after a blank -- a slash and a name, "/status", "/creds", with
+     * Telegram's {@code @BotName}, and not a path, which goes on with another slash or a dot: one
+     * command inside another one's text, where {@link #displayed} cuts it.
      */
-    private static final Pattern COMMAND_WORD = Pattern.compile(
-            "[/\\uFF0F]\\p{L}[\\p{L}\\p{N}_]*(?:@\\w+)?(?=\\s|$)", Pattern.UNICODE_CHARACTER_CLASS);
-
-    /** A {@link #COMMAND_WORD} after a blank: one command inside another one's text. */
     private static final Pattern INNER_COMMAND = Pattern.compile(
             "(?<=\\s)[/\\uFF0F]\\p{L}[\\p{L}\\p{N}_]*(?:@\\w+)?(?=\\s|$)", Pattern.UNICODE_CHARACTER_CLASS);
 
@@ -261,9 +290,19 @@ public class CommandHandler {
         return s != null && s.startsWith("/");
     }
 
-    /** Whether {@code task} begins with a {@link #COMMAND_WORD}: no task /bg or /schedule runs. */
+    /**
+     * Whether {@code task}, {@link #unblanked}, begins with a slash whose first word is no path --
+     * has no second slash -- which no task /bg, /queue or /schedule runs is: a command, mistyped
+     * or not. "/cred-set K pw", "/creds: set K pw" are commands typed wrong; read as a task, the
+     * password went to the model. "/var/log/syslog: summarise it" is a task.
+     */
     static boolean startsWithCommand(String task) {
-        return task != null && COMMAND_WORD.matcher(task).lookingAt();
+        String s = unblanked(task);
+        if (s == null || s.isEmpty() || (s.charAt(0) != '/' && s.charAt(0) != '\uFF0F')) return false;
+        int end = 1;
+        while (end < s.length() && !blank(s.charAt(end))) end++;
+        String first = s.substring(0, end);
+        return first.indexOf('/', 1) < 0 && first.indexOf('\uFF0F', 1) < 0;
     }
 
     /** What a text with a {@link #MISPLACED_SECRET} is answered, wherever it was typed. */
@@ -283,7 +322,12 @@ public class CommandHandler {
         String s = unblanked(text);
         if (s == null || SECRET_COMMAND.matcher(s).matches()) return -1;
         Matcher m = MISPLACED_SECRET.matcher(s);
-        return m.find() ? m.start() : -1;
+        while (m.find()) {
+            if (m.start() > 0) return m.start();
+        }
+        // At the start it is the text's own command, which handle() stores or answers -- unless no
+        // chat reads the text as a command: one begun with another slash than '/'.
+        return !s.startsWith("/") && MISTYPED_SECRET.matcher(s).lookingAt() ? 0 : -1;
     }
 
     /**
@@ -337,6 +381,8 @@ public class CommandHandler {
                     ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022"
                     : m.group(1) + " \u2026";
         }
+        Matcher mistyped = s == null ? null : MISTYPED_SECRET.matcher(s);
+        if (mistyped != null && mistyped.lookingAt()) return cutAt(s, mistyped.end());
         Matcher inner = s != null && s.startsWith("/") ? INNER_COMMAND.matcher(s) : null;
         if (inner != null && inner.find()) return cutAt(s, inner.start());
         return message;
@@ -359,11 +405,13 @@ public class CommandHandler {
 
     /**
      * Whether this text carries a secret: one {@link #handle} stores, one typed into a secret
-     * command it cannot read, or one misplaced ({@link #misplacedSecret}).
+     * command it cannot read or one mistyped ({@link #MISTYPED_SECRET}), or one misplaced
+     * ({@link #misplacedSecret}).
      */
     public static boolean carriesSecret(String message) {
         String s = unblanked(message);
-        return s != null && (SECRET_COMMAND.matcher(s).matches() || misplacedSecretAt(s) >= 0);
+        return s != null && (SECRET_COMMAND.matcher(s).matches() || misplacedSecretAt(s) >= 0
+                || MISTYPED_SECRET.matcher(s).lookingAt());
     }
 
     // ── Help ──

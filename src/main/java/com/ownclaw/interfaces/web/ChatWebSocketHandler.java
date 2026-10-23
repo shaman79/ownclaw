@@ -375,9 +375,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             String typed = CommandHandler.unblanked(userMessage);
             sendToSession(session, "user", handledAsCommand.isPresent() || waiting
                     ? CommandHandler.displayed(typed)
-                    : typed.split("(?U)\\s", 2)[0] + (typed.matches("(?U)\\S+") ? "" : " \u2026"));
+                    : typed.split("(?U)[\\s\\p{Cf}]", 2)[0] + (typed.matches("(?U)[^\\s\\p{Cf}]+") ? "" : " \u2026"));
             if (handledAsCommand.isPresent() || !waiting) {
-                handleCommand(userId, userMessage, handledAsCommand, session);
+                handleCommand(userId, typed, handledAsCommand, session);
                 return;
             }
             // Not a command, and something is waiting for an answer: it is the answer.

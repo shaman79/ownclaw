@@ -87,8 +87,8 @@ class VaultScrubbingTest {
         assertEquals(Map.of(), VaultSecrets.of("u9"), "and nothing the vault does not hold");
 
         restarted.deleteCredential("u1", "SSH_PRIVATE_KEY");
-        assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"),
-                "a deleted value is still scrubbed while the service runs: it may still be in use");
+        assertEquals(Map.of(), VaultSecrets.of("u1"),
+                "deleting is how a value stored by mistake stops being replaced in every text");
     }
 
     @Test
@@ -100,6 +100,10 @@ class VaultScrubbingTest {
                 VaultSecrets.of("u1"));
         assertEquals("old \u00abvault:ROUTER_PASSWORD~prev\u00bb, new \u00abvault:ROUTER_PASSWORD\u00bb",
                 VaultSecrets.scrub("u1", "old old-pass-123, new new-pass-456"));
+        VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "third-pass-789"));
+        assertEquals(3, VaultSecrets.of("u1").size(), "each value it held: " + VaultSecrets.of("u1"));
+        VaultSecrets.set("u1", Map.of());
+        assertEquals(Map.of(), VaultSecrets.of("u1"), "deleted: every value it held goes with it");
 
         VaultSecrets.clear();
         var ctx = new AgentContext("u1", "t1", "check the router");
@@ -121,16 +125,16 @@ class VaultScrubbingTest {
     @Test
     @DisplayName("a value is scrubbed in every form a text holds it in: JSON, Python's, a URL's, HTML's, CR LF, a line at a time, unquoted")
     void everyForm() throws Exception {
-        String v = "Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\slash\nZq7 second line\n\tZq7-third";
+        String v = "Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\slash\nZq7-second-line\n\tZq7-third";
         var vault = Map.of("SSH_PRIVATE_KEY", v);
         var texts = new ArrayList<String>();
         texts.add(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of("stderr", v)));
-        texts.add("{\"k\": \"Zq7-p\\u0159\\u00edli\\u0161 \\\"quoted\\\" back\\\\slash\\nZq7 second line\\n\\tZq7-third\"}");
-        texts.add("Command '['ssh', '-o', 'Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\\\slash\\nZq7 second line\\n\\tZq7-third']' returned 255");
+        texts.add("{\"k\": \"Zq7-p\\u0159\\u00edli\\u0161 \\\"quoted\\\" back\\\\slash\\nZq7-second-line\\n\\tZq7-third\"}");
+        texts.add("Command '['ssh', '-o', 'Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\\\slash\\nZq7-second-line\\n\\tZq7-third']' returned 255");
         texts.add("https://h/?k=" + java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8));
         texts.add("<pre>" + v.replace("&", "&amp;").replace("\"", "&quot;") + "</pre>");
         texts.add(v.replace("\n", "\r\n"));
-        texts.add("the live call's latest line: Zq7 second line");
+        texts.add("the live call's latest line: Zq7-second-line");
         for (String text : texts) {
             String out = Redactor.scrubVault(text, vault).text();
             assertFalse(out.contains("Zq7"), "left in: " + out);
@@ -141,6 +145,51 @@ class VaultScrubbingTest {
                 "lines too short to be removed one by one, ended by CR LF");
         assertEquals("<b>\u00abvault:K\u00bb</b>", Redactor.scrubVault("<b>a&amp;b&lt;c&gt;d</b>", Map.of("K", "a&b<c>d")).text(),
                 "with HTML's entities");
+    }
+
+    @Test
+    @DisplayName("a value is scrubbed as Python prints it: repr with both quotes and unprintables, inside JSON, quoted for a URL or a shell")
+    void pythonsForms() {
+        String v = "pa'ss\"word~1*2 x\u00a0y\u001b";
+        var vault = Map.of("P", v);
+        for (String text : List.of(
+                // repr / str(list) / CalledProcessError: both quotes, so single, the single escaped
+                "Command '['curl', '-u', 'user:pa\\'ss\"word~1*2 x\\xa0y\\x1b']' returned 22",
+                // the runner's json.dumps of a result holding that repr
+                "{\"error\": \"Command '['curl', 'pa\\\\'ss\\\"word~1*2 x\\\\xa0y\\\\x1b']'\"}",
+                // json.dumps, ensure_ascii as by default: lower-case escapes, NBSP escaped
+                "{\"pw\": \"pa'ss\\\"word~1*2 x\\u00a0y\\u001b\"}",
+                // requests' query string: quote_plus keeps '~', encodes '*'
+                "401 Client Error for url: https://h/api?p=pa%27ss%22word~1%2A2+x%C2%A0y%1B",
+                // shlex.quote
+                "ssh -o 'pa'\"'\"'ss\"word~1*2 x\u00a0y\u001b' host",
+                // html.escape
+                "<td>pa&#x27;ss&quot;word~1*2 x\u00a0y\u001b</td>")) {
+            String out = Redactor.scrubVault(text, vault).text();
+            assertFalse(out.contains("ss") && out.contains("word~1"), "left in: " + out);
+        }
+        String json = "{\"type\": \"service_account\", \"private_key\": \"-----BEGIN PRIVATE KEY-----\\nRkFLRS1HQ1AtS0VZLUJPRFktTElORQ==\\n-----END PRIVATE KEY-----\\n\"}";
+        String printed = "key:\nRkFLRS1HQ1AtS0VZLUJPRFktTElORQ==\n";
+        assertFalse(Redactor.scrubVault(printed, Map.of("GCP_KEY", json)).text().contains("RkFLRS1HQ1A"),
+                "a JSON credential's key, printed decoded, a line at a time");
+        assertEquals("the \"type\": \"service_account\", here",
+                Redactor.scrubVault("the \"type\": \"service_account\", here",
+                        Map.of("GCP_KEY", "{\n\"type\": \"service_account\",\n\"k\": \"RkFLRS1HQ1AtS0VZ\"\n}")).text(),
+                "a line with a blank in it is no secret of its own");
+    }
+
+    @Test
+    @DisplayName("another private key's PEM block is still found by its armor and removed whole, though the vault holds a key of its kind")
+    void anotherKeyOfTheSameKind() throws Exception {
+        JdbcTemplate jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        String armor = "-----BEGIN OPENSSH PRIVATE KEY-----";
+        String shared = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW";
+        String mine = armor + "\n" + shared + "\nRkFLRS1NWS1PV04tS0VZLUJPRFk=\n-----END OPENSSH PRIVATE KEY-----";
+        String other = armor + "\n" + shared + "\nRkFLRS1PVEhFUi1LRVktQk9EWQ==\n-----END OPENSSH PRIVATE KEY-----";
+        String out = new Redactor(jdbc).filter("u1", "a new key for the NAS:\n" + other + "\ndone",
+                Map.of("SSH_PRIVATE_KEY", mine), new Redactor.Tally());
+        assertFalse(out.contains("RkFLRS1PVEhFUi1LRVktQk9EWQ"), "its body went out: " + out);
+        assertTrue(out.endsWith("done"), out);
     }
 
     @Test
@@ -169,8 +218,9 @@ class VaultScrubbingTest {
     @DisplayName("the prompts name only the vault's keys that a name may be: one stored as a typed value is not sent")
     void promptsNameOnlyNames() {
         var ctx = new AgentContext("u1", "t1", "hello");
-        ctx.setCredentialKeys(List.of("SMTP_PASS=HUNTER2", "SMTP_HOST", "SSH_PRIVATE_KEY"));
-        assertEquals(List.of("SMTP_HOST", "SSH_PRIVATE_KEY"), ctx.credentialKeys());
+        ctx.setCredentialKeys(List.of("SMTP_PASS=HUNTER2", "SMTP_HOST", "ROUTER-PASS", "IMAP:PW"));
+        assertEquals(List.of("SMTP_HOST", "ROUTER-PASS"), ctx.credentialKeys(),
+                "a name of an older spelling stays: a skill still reads it");
     }
 
     @Test

@@ -115,7 +115,7 @@ class TelegramSecretTest {
     }
 
     @Test
-    @DisplayName("a command that is not one is answered, not handed to the agent, kept or titled")
+    @DisplayName("a mistyped secret command is answered with the right form, deleted, and not handed to the agent, kept or titled")
     void mistypedCommandGoesNowhere() throws Exception {
         receive(79, "/creds set OPENWRT_PASS " + SECRET);
         assertTrue(stored.isEmpty());
@@ -123,7 +123,9 @@ class TelegramSecretTest {
         for (Map<String, Object> row : jdbc.queryForList("SELECT title, preview FROM chat_sessions")) {
             assertFalse(String.valueOf(row).contains(SECRET), "titled: " + row);
         }
-        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains(CommandHandler.UNKNOWN_COMMAND)),
+        assertEquals(79, new ObjectMapper().readTree(telegram.bodies("deleteMessage").getFirst()).path("message_id").asLong(),
+                "it carries a secret, as the form that works does: deleted");
+        assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Not stored: a credential is stored with")),
                 "calls: " + telegram.calls);
         assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
     }

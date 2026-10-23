@@ -237,9 +237,9 @@ public final class Redactor {
      *   <li>as Python's {@code repr} writes it, inside the command line a failed
      *       {@code subprocess} call prints: each backslash doubled;</li>
      *   <li>percent-encoded, as in a URL, and with HTML's entities;</li>
-     *   <li>each line of a value of more than one, from {@link #MIN_SECRET_LENGTH} characters:
-     *       a text shown a line at a time -- the live call's reasoning -- held an SSH key whole,
-     *       one line in each frame;</li>
+     *   <li>each line of a value of more than one, from {@link #MIN_SECRET_LENGTH} characters,
+     *       but a PEM block's armor: a text shown a line at a time -- the live call's reasoning --
+     *       held an SSH key whole, one line in each frame;</li>
      *   <li>without the quotes it was typed in: {@code /cred set P "hunter2"} stores them.</li>
      * </ul>
      * The one list {@link #scrubVault} removes and the cloud gateway checks that it did.
@@ -251,22 +251,32 @@ public final class Redactor {
      */
     public static List<Map.Entry<String, String>> vaultForms(Map<String, String> vault) {
         if (vault == null || vault.isEmpty()) return List.of();
-        Object[] cached = lastForms;
-        if (cached != null && cached[0].equals(vault)) {
-            @SuppressWarnings("unchecked")
-            var forms = (List<Map.Entry<String, String>>) cached[1];
-            return forms;
+        for (var e : vault.entrySet()) {
+            if (e.getKey() == null || e.getValue() == null) return formsOf(vault);   // no copy of it
+        }
+        synchronized (recentForms) {
+            var forms = recentForms.get(vault);
+            if (forms != null) return forms;
         }
         var forms = formsOf(vault);
-        lastForms = new Object[] {Map.copyOf(vault), forms};
+        synchronized (recentForms) {
+            recentForms.put(Map.copyOf(vault), forms);
+        }
         return forms;
     }
 
     /**
-     * The vault {@link #vaultForms} last worked out the forms of, and they: the same vault is
-     * scrubbed with for every frame of a task, and an SSH key has some three hundred forms.
+     * The vaults {@link #vaultForms} last worked out the forms of, and they: the same vaults are
+     * scrubbed with for every frame of a task and every log line -- a user's own, and everyone's
+     * for the log -- and an SSH key has some hundreds of forms.
      */
-    private static volatile Object[] lastForms;
+    private static final Map<Map<String, String>, List<Map.Entry<String, String>>> recentForms =
+            new LinkedHashMap<>(8, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Map<String, String>, List<Map.Entry<String, String>>> e) {
+                    return size() > 8;
+                }
+            };
 
     private static List<Map.Entry<String, String>> formsOf(Map<String, String> vault) {
         var forms = new ArrayList<Map.Entry<String, String>>();
@@ -281,22 +291,41 @@ public final class Redactor {
             }
             for (String base : List.copyOf(bases)) {
                 bases.add(base.replace("\r\n", "\n").replace("\n", "\r\n"));
-                if (base.indexOf('\n') >= 0) {
-                    for (String line : base.split("\r?\n")) {
-                        if (line.strip().length() >= MIN_SECRET_LENGTH) bases.add(line.strip());
+                // Each line, as stored and as a JSON credential writes its key's lines -- "\n"
+                // inside the string. Not a line with a blank in it -- a JSON credential's
+                // "type": "service_account", -- which is no secret and was replaced in every text,
+                // and not a PEM block's armor: "-----BEGIN OPENSSH PRIVATE KEY-----" is every such
+                // key's, and taken as this one's, no other key's block was found by its armor
+                // (secretsIn), and its body went out whole.
+                for (String line : base.split("\r?\n|\\\\n")) {
+                    String l = line.strip();
+                    if (!l.equals(base.strip()) && l.length() >= MIN_SECRET_LENGTH && !l.startsWith("-----")
+                            && l.codePoints().noneMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c))) {
+                        bases.add(l);
                     }
                 }
             }
             var each = new java.util.LinkedHashSet<String>();
             for (String base : bases) {
+                String repr = pythonRepr(base);
                 each.add(base);
-                each.add(jsonString(base, false));
-                each.add(jsonString(base, true));
-                each.add(base.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"));
+                each.add(jacksonString(base));
+                each.add(pythonJson(base, false));
+                each.add(pythonJson(base, true));
+                each.add(repr);
+                // Composed, as this service composes them: a repr in a skill's result, which the
+                // runner writes as JSON; a JSON stderr kept inside a JSON column.
+                each.add(jacksonString(repr));
+                each.add(pythonJson(repr, false));
+                each.add(jacksonString(jacksonString(base)));
                 each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8));
-                each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
-                each.add(base.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        .replace("\"", "&quot;").replace("'", "&#39;"));
+                each.add(percentEncoded(base, "_.-~", true));    // Python's quote_plus, requests' query
+                each.add(percentEncoded(base, "_.-~/", false));  // Python's quote
+                String html = base.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace("\"", "&quot;");
+                each.add(html.replace("'", "&#39;"));
+                each.add(html.replace("'", "&#x27;"));           // Python's html.escape
+                each.add(base.replace("'", "'\"'\"'"));         // inside shlex.quote's quotes
             }
             for (String form : each) {
                 if (!form.isEmpty()) forms.add(Map.entry(e.getKey(), form));
@@ -307,20 +336,86 @@ public final class Redactor {
         return List.copyOf(forms);
     }
 
+    /** {@code s} as the inside of a JSON string, as Jackson writes it. */
+    private static String jacksonString(String s) {
+        return new String(com.fasterxml.jackson.core.io.JsonStringEncoder.getInstance().quoteAsString(s));
+    }
+
     /**
-     * {@code s} as the inside of a JSON string: Jackson's escapes, which Python's are for these
-     * characters; with {@code ascii}, as Python's {@code json.dumps} writes it unless told
-     * otherwise -- everything past ASCII as a backslash, a {@code u} and four hex digits, in
-     * lower case.
+     * {@code s} as the inside of a JSON string, as Python's {@code json.dumps} writes it: a
+     * control character as a backslash, a {@code u} and four lower-case hex digits; with
+     * {@code ascii} -- its default -- DEL and everything past ASCII so too, a letter past the
+     * basic plane as its two halves.
      */
-    private static String jsonString(String s, boolean ascii) {
-        String quoted = new String(com.fasterxml.jackson.core.io.JsonStringEncoder.getInstance().quoteAsString(s));
-        if (!ascii) return quoted;
-        var sb = new StringBuilder(quoted.length());
-        for (int i = 0; i < quoted.length(); i++) {
-            char c = quoted.charAt(i);
-            if (c < 0x80) sb.append(c);
-            else sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+    private static String pythonJson(String s, boolean ascii) {
+        var sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                default -> {
+                    if (c < 0x20 || ascii && c >= 0x7f) sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+                    else sb.append(c);
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * {@code s} as Python's {@code repr} writes it, without its quotes: in single quotes, or in
+     * double ones when it holds a single quote and no double; the quote it is in, and a
+     * backslash, escaped; tab, line feed and carriage return as such; another character Python
+     * does not print as itself as a backslash, an x, u or U and its hex digits. What a failed
+     * {@code subprocess} call prints its command line in, and {@code str()} of a list or a dict.
+     */
+    private static String pythonRepr(String s) {
+        char quote = s.indexOf('\'') >= 0 && s.indexOf('"') < 0 ? '"' : '\'';
+        var sb = new StringBuilder(s.length() + 8);
+        s.codePoints().forEach(c -> {
+            if (c == '\\') sb.append("\\\\");
+            else if (c == quote) sb.append('\\').append(quote);
+            else if (c == '\t') sb.append("\\t");
+            else if (c == '\n') sb.append("\\n");
+            else if (c == '\r') sb.append("\\r");
+            else if (c == ' ' || c >= 0x20 && c < 0x7f) sb.appendCodePoint(c);
+            else if (!pythonPrintable(c)) {
+                sb.append(c <= 0xff ? String.format(Locale.ROOT, "\\x%02x", c)
+                        : c <= 0xffff ? String.format(Locale.ROOT, "\\u%04x", c)
+                        : String.format(Locale.ROOT, "\\U%08x", c));
+            } else sb.appendCodePoint(c);
+        });
+        return sb.toString();
+    }
+
+    /** Whether Python's {@code str.isprintable} holds for the character: not a control, format, separator or unassigned one. */
+    private static boolean pythonPrintable(int c) {
+        return switch (Character.getType(c)) {
+            case Character.CONTROL, Character.FORMAT, Character.SURROGATE, Character.PRIVATE_USE,
+                 Character.UNASSIGNED, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
+                 Character.SPACE_SEPARATOR -> false;
+            default -> true;
+        };
+    }
+
+    /**
+     * {@code s} percent-encoded as Python's {@code urllib.parse} does it -- and so {@code requests}
+     * -- leaving letters, digits and {@code safe} as they are, a blank as {@code +} when
+     * {@code plus}: Java's URLEncoder encodes '~' and leaves '*', and Python the other way.
+     */
+    private static String percentEncoded(String s, String safe, boolean plus) {
+        var sb = new StringBuilder(s.length() * 2);
+        for (byte b : s.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            int c = b & 0xff;
+            if (c < 0x80 && (Character.isLetterOrDigit(c) || safe.indexOf(c) >= 0)) sb.append((char) c);
+            else if (c == ' ' && plus) sb.append('+');
+            else sb.append(String.format(Locale.ROOT, "%%%02X", c));
         }
         return sb.toString();
     }

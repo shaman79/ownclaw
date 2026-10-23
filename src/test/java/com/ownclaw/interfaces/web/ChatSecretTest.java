@@ -133,15 +133,16 @@ class ChatSecretTest {
     }
 
     @Test
-    @DisplayName("a mistyped command is not repeated back, kept or sent on: the reply does not quote it")
+    @DisplayName("a mistyped secret command is not repeated back, kept or sent on: the bubble is its head, the reply its right form")
     void unknownCommandsAreNotRepeated() throws Exception {
         type("/creds set OPENWRT_PASS " + SECRET);
         type("/users add bob " + SECRET);
         assertTrue(stored.isEmpty());
         assertNowhere(SECRET);
-        assertTrue(sent.stream().anyMatch(s -> s.contains("\"type\":\"user\"") && s.contains("/creds …")),
-                "the page's bubble names the command it did not know: " + sent);
-        assertTrue(sent.stream().anyMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
+        assertTrue(sent.stream().anyMatch(s -> s.contains("\"type\":\"user\"") && s.contains("/creds set …")),
+                "the page's bubble is the command as far as its verb: " + sent);
+        assertEquals(2, sent.stream().filter(s -> s.contains("Not stored: a credential is stored with")).count(),
+                "and it is told the right form: " + sent);
     }
 
     @Test
@@ -164,8 +165,9 @@ class ChatSecretTest {
         type("/creds\u2003set OPENWRT_PASS " + SECRET);
         assertTrue(stored.isEmpty());
         assertNowhere(SECRET);
-        assertEquals(2, sent.stream().filter(s -> s.contains("\"type\":\"user\"") && s.contains("/creds \u2026")).count(),
-                "the bubble is the first word, however the words are spaced: " + sent);
+        assertEquals(2, sent.stream().filter(s -> s.contains("\"type\":\"user\"") && s.contains("/creds")
+                        && s.contains("set …")).count(),
+                "the bubble is the command as far as its verb, however the words are spaced: " + sent);
     }
 
     @Test

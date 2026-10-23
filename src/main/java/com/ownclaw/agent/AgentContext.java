@@ -332,14 +332,14 @@ public class AgentContext {
 
     public List<String> credentialKeys() { return credentialKeys; }
     /**
-     * The names the vault holds, as the prompts name them -- those a name may be
-     * ({@link com.ownclaw.users.CredentialVault#validName}). One stored before /cred set checked
-     * names can be a value typed where the name goes, "SMTP_PASS=HUNTER2", and every prompt
-     * carried it to the cloud model.
+     * The names the vault holds, as the prompts name them -- not one with a '=' or ':' in it.
+     * One stored before /cred set checked names can be a value typed where the name goes,
+     * "SMTP_PASS=HUNTER2", and every prompt carried it to the cloud model. A name of an older
+     * spelling that is only a name -- "ROUTER-PASS" -- stays: a skill still reads it.
      */
     public void setCredentialKeys(List<String> keys) {
         this.credentialKeys = keys == null ? List.of()
-                : keys.stream().filter(com.ownclaw.users.CredentialVault::validName).toList();
+                : keys.stream().filter(k -> k.indexOf('=') < 0 && k.indexOf(':') < 0).toList();
     }
 
     /** The owner's most used skills, best first: some of the tools the local model starts with. */
@@ -806,14 +806,15 @@ public class AgentContext {
      * The secret vault values this task's text is scrubbed of: those the vault holds now
      * ({@link com.ownclaw.privacy.VaultSecrets}), and every one decrypted as it started -- a
      * password stored with /cred set while the task runs reaches its skills at once, and is
-     * scrubbed from what it says from then on; the one it replaced still is, for the task's
-     * earlier results hold it and are read again for every model call.
+     * scrubbed from what it says from then on; the one it replaced still is, and so is one
+     * deleted while it runs, for the task's earlier results hold them and are read again for
+     * every model call.
      */
     public Map<String, String> secretValues() {
         Map<String, String> now = com.ownclaw.privacy.VaultSecrets.of(userId);
         if (now.isEmpty() || now.equals(secretValues)) return secretValues;
         if (secretValues.isEmpty()) return now;
-        return Map.copyOf(com.ownclaw.privacy.VaultSecrets.withRetired(now, secretValues));
+        return Map.copyOf(com.ownclaw.privacy.VaultSecrets.withRetired(now, secretValues, true));
     }
     public void setSecretValues(Map<String, String> values) {
         this.secretValues = values == null ? Map.of() : Map.copyOf(values);
