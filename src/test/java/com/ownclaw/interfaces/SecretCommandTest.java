@@ -249,6 +249,9 @@ public class SecretCommandTest {
         assertFalse(CommandHandler.startsWithCommand("/var/log/syslog: summarise the errors"));
         assertFalse(CommandHandler.startsWithCommand("/home/me/report.pdf send it"));
         assertFalse(CommandHandler.startsWithCommand("summarise /var/log/syslog"));
+        for (String task : List.of("/tmp: clean it", "/ is 95% full", "/24 subnet scan of the LAN", "/tmp is full")) {
+            assertFalse(CommandHandler.startsWithCommand(task), "a task about a path: " + task);
+        }
         assertEquals(commands.handle("owner", "/bg /status"), commands.handle("owner", "/bg /cred-set K Zq7-secret"),
                 "a command typed wrong is no task either");
         assertEquals("/bg summarise /var/log/syslog", CommandHandler.displayed("/bg summarise /var/log/syslog"));
@@ -296,8 +299,21 @@ public class SecretCommandTest {
                 "/queue store:/users add bob Zq7-secret", "ok \u2215cred set K Zq7-secret")) {
             assertTrue(CommandHandler.misplacedSecret(text), text);
         }
-        assertFalse(CommandHandler.carriesSecret("/cred delete OLD_KEY"), "deleting carries no secret");
+        assertEquals("/cred \u2026", CommandHandler.displayed("/cred delete OLD_KEY"),
+                "of the family, with two words after it: only its first word is shown");
+        assertFalse(CommandHandler.carriesSecret("/cred list"));
         assertFalse(CommandHandler.carriesSecret("/users list"));
+        for (String text : List.of("/cred K Zq7-secret", "/cred sett K Zq7-secret", "/cred set: K Zq7-secret",
+                "/credset K Zq7-secret", "/cred-set K Zq7-secret", "/credentials set K Zq7-secret",
+                "/useradd bob Zq7-secret")) {
+            assertTrue(CommandHandler.carriesSecret(text), "Telegram deletes it: " + text);
+            assertFalse(CommandHandler.displayed(text).contains("Zq7"), CommandHandler.displayed(text));
+            assertTrue(commands.handle("owner", text).isPresent(), "answered: " + text);
+        }
+        for (String prose : List.of("Why is my PUT /users update endpoint slow?", "In the docs, /users new shows the form",
+                "C:/Users add the report there")) {
+            assertFalse(CommandHandler.misplacedSecret(prose), prose);
+        }
     }
 
     @Test

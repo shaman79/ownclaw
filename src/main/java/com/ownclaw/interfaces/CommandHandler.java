@@ -99,6 +99,11 @@ public class CommandHandler {
         if (!secret.matches() && MISTYPED_SECRET.matcher(message).lookingAt()) {
             return Optional.of(MISTYPED_SECRET_ANSWER);
         }
+        // One of the family no handler here reads -- "/creds K V", "/cred\tK V", "/useradd bob pw".
+        if (!secret.matches() && FAMILY_WITH_ARGS.matcher(message).lookingAt()
+                && !OWN_FAMILY.matcher(message).lookingAt()) {
+            return Optional.of(MISTYPED_SECRET_ANSWER);
+        }
         if (secret.matches()) {
             boolean cred = secret.group(1).toLowerCase(Locale.ROOT).startsWith("/cred");
             if (secret.group(2) == null) {
@@ -235,6 +240,28 @@ public class CommandHandler {
     private static final String SECRET_HEAD = Blank.SLASH + "(?:creds?|users?)(?:" + Blank.ANY + "*@\\w+)?"
             + Blank.ANY + "+(?:set|add|put|store|save|new|create|update)(?=" + Blank.ANY + "+" + Blank.NONE + ")";
 
+    /**
+     * A {@link #SECRET_HEAD} as a message or another command's task holds one: a /cred, /creds of
+     * any of the verbs, and a /user, /users only with {@code add}, the one verb that adds an
+     * account -- "PUT /users update" and "/users new shows the form" are prose.
+     */
+    private static final String MISPLACED_HEAD = Blank.SLASH + "(?:creds?(?:" + Blank.ANY + "*@\\w+)?" + Blank.ANY
+            + "+(?:set|add|put|store|save|new|create|update)|users?(?:" + Blank.ANY + "*@\\w+)?" + Blank.ANY
+            + "+add)(?=" + Blank.ANY + "+" + Blank.NONE + ")";
+
+    /**
+     * A command of the secret commands' family, typed right or wrong, with two words or more after
+     * it: "/cred K hunter2" (the verb forgotten), "/cred sett K v", "/credset K v", "/cred-set K v",
+     * "/useradd bob pw". Any of them can hold a secret, so it is shown only as its first word, and
+     * Telegram removes it; "/cred delete KEY", "/user disable bob" lose nothing by that.
+     */
+    private static final Pattern FAMILY_WITH_ARGS = Pattern.compile(Blank.SLASH
+            + "(?:cred|user)[\\p{L}\\p{N}_-]*(?:@\\w+)?[:;,.!?]*(?:" + Blank.ANY + "+" + Blank.NONE + "+){2,}",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** The two of that family {@link #handle} has handlers for, as it reads them: "/cred " and "/user ". */
+    private static final Pattern OWN_FAMILY = Pattern.compile("/(?:cred|user) ", Pattern.CASE_INSENSITIVE);
+
     /** A {@link #SECRET_HEAD} that begins the text: stored when it is a {@link #SECRET_COMMAND}, answered when not. */
     private static final Pattern MISTYPED_SECRET = Pattern.compile(SECRET_HEAD,
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
@@ -254,7 +281,8 @@ public class CommandHandler {
      * row, run after run.
      */
     private static final Pattern MISPLACED_SECRET = Pattern.compile(
-            "(?<![\\p{L}\\p{N}_./\\\\-])" + SECRET_HEAD, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+            "(?<![\\p{L}\\p{N}_./\\\\-])(?<!(?:^|[^\\p{L}\\p{N}_])(?-i:[A-Z]):)" + MISPLACED_HEAD,
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
 
     /**
      * A word shaped like a command after a blank -- a slash and a name, "/status", "/creds", with
@@ -291,19 +319,35 @@ public class CommandHandler {
     }
 
     /**
-     * Whether {@code task}, {@link #unblanked}, begins with a slash whose first word is no path --
-     * has no second slash -- which no task /bg, /queue or /schedule runs is: a command, mistyped
-     * or not. "/cred-set K pw", "/creds: set K pw" are commands typed wrong; read as a task, the
-     * password went to the model. "/var/log/syslog: summarise it" is a task.
+     * Whether {@code task}, {@link #unblanked}, begins with a command: one of this chat's, or of the
+     * secret commands' family typed right or wrong -- "/cred-set K pw", "/creds: set K pw", read as
+     * a task, handed the password to the model. Not a path, a "/tmp:" or a "/24": "/var/log/syslog:
+     * summarise it" is a task.
      */
     static boolean startsWithCommand(String task) {
         String s = unblanked(task);
-        if (s == null || s.isEmpty() || (s.charAt(0) != '/' && s.charAt(0) != '\uFF0F')) return false;
-        int end = 1;
-        while (end < s.length() && !blank(s.charAt(end))) end++;
-        String first = s.substring(0, end);
-        return first.indexOf('/', 1) < 0 && first.indexOf('\uFF0F', 1) < 0;
+        if (s == null) return false;
+        Matcher m = FIRST_WORD.matcher(s.substring(0, firstBlank(s)));
+        if (!m.matches()) return false;
+        String name = m.group(1).toLowerCase(Locale.ROOT);
+        return COMMANDS.contains(name) || name.startsWith("cred") || name.startsWith("user");
     }
+
+    /** Where the first blank of {@code s} is ({@link #blank}), or its length. */
+    private static int firstBlank(String s) {
+        int end = 0;
+        while (end < s.length() && !blank(s.charAt(end))) end++;
+        return end;
+    }
+
+    /** The commands, by name: this handler's and the web chat's own. */
+    private static final java.util.Set<String> COMMANDS = java.util.Set.of("help", "skills", "cancel", "status",
+            "tokens", "history", "queue", "new", "switch", "log", "grant", "revoke", "cred", "files", "bg",
+            "schedule", "local", "user", "setup", "debug");
+
+    /** A first word that is a command's: a slash, its name, Telegram's @BotName, punctuation after it. */
+    private static final Pattern FIRST_WORD = Pattern.compile(
+            Blank.SLASH + "([\\p{L}\\p{N}_.-]+?)(?:@\\w+)?[:;,.!?]*", Pattern.UNICODE_CHARACTER_CLASS);
 
     /** What a text with a {@link #MISPLACED_SECRET} is answered, wherever it was typed. */
     public static final String MISPLACED_SECRET_ANSWER = "Not run, and not kept: a secret goes in a "
@@ -383,6 +427,7 @@ public class CommandHandler {
         }
         Matcher mistyped = s == null ? null : MISTYPED_SECRET.matcher(s);
         if (mistyped != null && mistyped.lookingAt()) return cutAt(s, mistyped.end());
+        if (s != null && FAMILY_WITH_ARGS.matcher(s).lookingAt()) return cutAt(s, firstBlank(s));
         Matcher inner = s != null && s.startsWith("/") ? INNER_COMMAND.matcher(s) : null;
         if (inner != null && inner.find()) return cutAt(s, inner.start());
         return message;
@@ -411,7 +456,7 @@ public class CommandHandler {
     public static boolean carriesSecret(String message) {
         String s = unblanked(message);
         return s != null && (SECRET_COMMAND.matcher(s).matches() || misplacedSecretAt(s) >= 0
-                || MISTYPED_SECRET.matcher(s).lookingAt());
+                || MISTYPED_SECRET.matcher(s).lookingAt() || FAMILY_WITH_ARGS.matcher(s).lookingAt());
     }
 
     // ── Help ──

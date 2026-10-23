@@ -176,13 +176,13 @@ public final class CloudGateway implements LlmProvider {
         // in, a JSON string's included.
         for (var sv : Redactor.vaultForms(vault)) {
             for (Part part : parts) {
-                int at = Redactor.vaultValueAt(part.text(), sv.getValue(), 0);
+                int at = sv.at(part.text(), 0);
                 if (at < 0) continue;
                 ledger.record(row(egress, providerName, model, EgressLedger.Decision.REFUSED,
-                        parts, tally, null, List.of(), 0, "vault:" + sv.getKey() + " survived scrubbing"));
+                        parts, tally, null, List.of(), 0, "vault:" + sv.key() + " survived scrubbing"));
                 log.error("Cloud call REFUSED for task {}: vault value {} survived scrubbing",
-                        egress.taskId(), sv.getKey());
-                throw new EgressRefused(providerName, 0, "vault:" + sv.getKey(), part.index(),
+                        egress.taskId(), sv.key());
+                throw new EgressRefused(providerName, 0, "vault:" + sv.key(), part.index(),
                         part.kind(), at);
             }
         }

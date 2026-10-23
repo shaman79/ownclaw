@@ -19,9 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>
  * A value replaced stays while the service runs, under its name with {@code ~prev} added: a
  * skill started before a password was changed can still print the old one, and a task's earlier
- * results, read again for every model call, still hold it. A deleted credential's values go:
- * deleting is how a value stored by mistake -- "admin" as a password -- stops being replaced in
- * every text, "ssh admin@router" among them.
+ * results, read again for every model call, still hold it. A deleted credential's values stay
+ * too -- a task started before the delete can still print them -- but one shorter than
+ * {@link Redactor#MIN_SECRET_LENGTH}: deleting is how a value stored by mistake -- "admin" as a
+ * password -- stops being replaced in every text, "ssh admin@router" among them.
  */
 public final class VaultSecrets {
 
@@ -50,17 +51,19 @@ public final class VaultSecrets {
     }
 
     /**
-     * {@code now}, and each value of {@code before} that is not among them, under its name with
-     * {@code ~prev} added: a changed password's old value is no less a secret. With
-     * {@code deleted} false, only those whose credential {@code now} still holds -- replaced, not
-     * deleted.
+     * {@code now}, and each value of {@code before} that is not among them -- under its name with
+     * {@code ~prev} added when it was replaced, as it was when it was deleted: a changed
+     * password's old value is no less a secret. With {@code shortDeleted} false, not a deleted
+     * credential's value shorter than {@link Redactor#MIN_SECRET_LENGTH}.
      */
     public static Map<String, String> withRetired(Map<String, String> now, Map<String, String> before,
-                                                  boolean deleted) {
+                                                  boolean shortDeleted) {
         var out = new LinkedHashMap<String, String>(now);
         for (var e : before.entrySet()) {
             String base = e.getKey().replaceFirst("(~prev)+$", "");
-            if (out.containsValue(e.getValue()) || !deleted && !now.containsKey(base)) continue;
+            boolean dropped = !now.containsKey(base) && !shortDeleted
+                    && e.getValue().length() < Redactor.MIN_SECRET_LENGTH;
+            if (out.containsValue(e.getValue()) || dropped) continue;
             String name = now.containsKey(base) ? base + "~prev" : e.getKey();
             while (out.containsKey(name)) name += "~prev";
             out.put(name, e.getValue());

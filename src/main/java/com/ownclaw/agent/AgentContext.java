@@ -332,14 +332,14 @@ public class AgentContext {
 
     public List<String> credentialKeys() { return credentialKeys; }
     /**
-     * The names the vault holds, as the prompts name them -- not one with a '=' or ':' in it.
-     * One stored before /cred set checked names can be a value typed where the name goes,
-     * "SMTP_PASS=HUNTER2", and every prompt carried it to the cloud model. A name of an older
-     * spelling that is only a name -- "ROUTER-PASS" -- stays: a skill still reads it.
+     * The names the vault holds, as the prompts name them -- those made of letters, digits, '_',
+     * '.' and '-'. One stored before /cred set checked names can be a value typed where the name
+     * goes, "SMTP_PASS=HUNTER2", "P@SSW0RD!", and every prompt carried it to the cloud model. A
+     * name of an older spelling that is only a name -- "ROUTER-PASS" -- stays: a skill reads it.
      */
     public void setCredentialKeys(List<String> keys) {
         this.credentialKeys = keys == null ? List.of()
-                : keys.stream().filter(k -> k.indexOf('=') < 0 && k.indexOf(':') < 0).toList();
+                : keys.stream().filter(k -> k.matches("[A-Za-z][A-Za-z0-9_.-]*")).toList();
     }
 
     /** The owner's most used skills, best first: some of the tools the local model starts with. */

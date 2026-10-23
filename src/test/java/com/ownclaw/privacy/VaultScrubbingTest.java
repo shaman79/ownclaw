@@ -87,8 +87,13 @@ class VaultScrubbingTest {
         assertEquals(Map.of(), VaultSecrets.of("u9"), "and nothing the vault does not hold");
 
         restarted.deleteCredential("u1", "SSH_PRIVATE_KEY");
-        assertEquals(Map.of(), VaultSecrets.of("u1"),
-                "deleting is how a value stored by mistake stops being replaced in every text");
+        assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"),
+                "a task started before the delete can still print it");
+        restarted.storeCredential("u1", "ROUTER_PASSWORD", "admin");
+        assertTrue(VaultSecrets.of("u1").containsValue("admin"));
+        restarted.deleteCredential("u1", "ROUTER_PASSWORD");
+        assertFalse(VaultSecrets.of("u1").containsValue("admin"),
+                "deleting is how a short value stored by mistake stops being replaced in every text");
     }
 
     @Test
@@ -103,7 +108,10 @@ class VaultScrubbingTest {
         VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "third-pass-789"));
         assertEquals(3, VaultSecrets.of("u1").size(), "each value it held: " + VaultSecrets.of("u1"));
         VaultSecrets.set("u1", Map.of());
-        assertEquals(Map.of(), VaultSecrets.of("u1"), "deleted: every value it held goes with it");
+        assertEquals(3, VaultSecrets.of("u1").size(), "deleted: each long value it held is still scrubbed");
+        VaultSecrets.set("u2", Map.of("ROUTER_PIN", "4821"));
+        VaultSecrets.set("u2", Map.of());
+        assertEquals(Map.of(), VaultSecrets.of("u2"), "a short one goes: \"4821\" is in many a text");
 
         VaultSecrets.clear();
         var ctx = new AgentContext("u1", "t1", "check the router");
@@ -175,7 +183,34 @@ class VaultScrubbingTest {
         assertEquals("the \"type\": \"service_account\", here",
                 Redactor.scrubVault("the \"type\": \"service_account\", here",
                         Map.of("GCP_KEY", "{\n\"type\": \"service_account\",\n\"k\": \"RkFLRS1HQ1AtS0VZ\"\n}")).text(),
-                "a line with a blank in it is no secret of its own");
+                "a line with no word of letters and digits both is no secret of its own");
+    }
+
+    /** Scrubbed of {@code value}: changed when {@code changes}, and then holding none of its secret's characters' run. */
+    private static void changes(String why, String value, String text, boolean changes) {
+        String out = Redactor.scrubVault(text, Map.of("K", value)).text();
+        if (changes) assertTrue(out.contains("\u00abvault:K"), why + ": " + out);
+        else assertEquals(text, out, why);
+    }
+
+    @Test
+    @DisplayName("each form a value is printed in, one by one, and what is no form of it")
+    void formByForm() throws Exception {
+        changes("json.dumps of a repr, ASCII escapes as by default", "Zq7-p\u0159\u00edli\u0161\\heslo", "{\"error\": \"Command '['curl', '-u', 'user:Zq7-p\\u0159\\u00edli\\u0161\\\\\\\\heslo']' returned non-zero exit status 1.\"}", true);
+        changes("json.dumps of json.dumps", "Zq7-p\u0159\u00edli\u0161\\heslo", "{\"row\": \"{\\\"stderr\\\": \\\"Zq7-p\\\\u0159\\\\u00edli\\\\u0161\\\\\\\\heslo\\\"}\"}", true);
+        changes("Jackson's escapes: control characters in upper case", "Zq7\u001bx\u007fy-secret", new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of("k", "Zq7\u001bx\u007fy-secret")), true);
+        changes("json.dumps escapes DEL", "Zq7\u001bx\u007fy-secret", "{\"k\": \"Zq7\\u001bx\\u007fy-secret\"}", true);
+        changes("Java's URLEncoder: '*' kept, '~' encoded", "Zq7 x*y~z-secret", "q=" + java.net.URLEncoder.encode("Zq7 x*y~z-secret", java.nio.charset.StandardCharsets.UTF_8), true);
+        changes("Python's quote: a blank as %20", "Zq7 x*y~z-secret", "https://h/Zq7%20x%2Ay~z-secret", true);
+        changes("HTML with &#39;", "Zq7'apos-secret", "<td>Zq7&#39;apos-secret</td>", true);
+        changes("repr in double quotes: a single quote and no double", "Zq7'it\\s-secret", "['ssh', \"Zq7'it\\\\s-secret\"]", true);
+        changes("a WireGuard config's key line, alone", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/24", "PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", true);
+        changes(".netrc line, alone", "machine git.local login bob password s3cr3tPassw0rd\nmachine nas login bob password Other9Pass", "machine git.local login bob password s3cr3tPassw0rd", true);
+        changes("a config's structure is no secret", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nclusters:", "[Interface]\nclusters:\nAddress = 10.0.0.9/24", false);
+        changes("a short value's form is found as a word", "p@ss12", "q=p%40ss123&r=1", false);
+        changes("... and is removed as one", "p@ss12", "q=p%40ss12&r=1", true);
+        changes("a value too short to remove has no forms", "<", "&lt;b&gt;", false);
+        changes("a JSON line break before a short value is no part of a word", "admin12", "{\"stderr\":\"Password:\\nadmin12\\nOK\"}", true);
     }
 
     @Test
@@ -218,7 +253,7 @@ class VaultScrubbingTest {
     @DisplayName("the prompts name only the vault's keys that a name may be: one stored as a typed value is not sent")
     void promptsNameOnlyNames() {
         var ctx = new AgentContext("u1", "t1", "hello");
-        ctx.setCredentialKeys(List.of("SMTP_PASS=HUNTER2", "SMTP_HOST", "ROUTER-PASS", "IMAP:PW"));
+        ctx.setCredentialKeys(List.of("SMTP_PASS=HUNTER2", "SMTP_HOST", "ROUTER-PASS", "IMAP:PW", "P@SSW0RD!"));
         assertEquals(List.of("SMTP_HOST", "ROUTER-PASS"), ctx.credentialKeys(),
                 "a name of an older spelling stays: a skill still reads it");
     }
