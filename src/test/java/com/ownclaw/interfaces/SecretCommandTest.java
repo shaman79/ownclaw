@@ -320,6 +320,8 @@ public class SecretCommandTest {
         }
         // Accepted: prose that reads as a mistyped secret command is held back with it.
         assertTrue(CommandHandler.misplacedSecret("Why is my PUT /users update endpoint slow?"));
+        assertTrue(CommandHandler.misplacedSecret("/bg check disk then /user create bob Zq7-secret"),
+                "every storing verb counts for /user too, inside a task");
     }
 
     @Test
