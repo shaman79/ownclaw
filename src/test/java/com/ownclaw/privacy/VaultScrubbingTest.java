@@ -137,6 +137,10 @@ class VaultScrubbingTest {
         }
         assertEquals("pw \u00abvault:P\u00bb", Redactor.scrubVault("pw hunter22x", Map.of("P", "\"hunter22x\"")).text(),
                 "typed in quotes, printed without them");
+        assertEquals("pw \u00abvault:K\u00bb", Redactor.scrubVault("pw abc1\r\nxy2\r\nz3!", Map.of("K", "abc1\nxy2\nz3!")).text(),
+                "lines too short to be removed one by one, ended by CR LF");
+        assertEquals("<b>\u00abvault:K\u00bb</b>", Redactor.scrubVault("<b>a&amp;b&lt;c&gt;d</b>", Map.of("K", "a&b<c>d")).text(),
+                "with HTML's entities");
     }
 
     @Test
