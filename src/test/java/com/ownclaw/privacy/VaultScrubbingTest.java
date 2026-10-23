@@ -203,13 +203,13 @@ class VaultScrubbingTest {
         changes("Java's URLEncoder: '*' kept, '~' encoded", "Zq7 x*y~z-secret", "q=" + java.net.URLEncoder.encode("Zq7 x*y~z-secret", java.nio.charset.StandardCharsets.UTF_8), true);
         changes("Python's quote: a blank as %20", "Zq7 x*y~z-secret", "https://h/Zq7%20x%2Ay~z-secret", true);
         changes("HTML with &#39;", "Zq7'apos-secret", "<td>Zq7&#39;apos-secret</td>", true);
-        changes("repr in double quotes: a single quote and no double", "Zq7'it\\s-secret", "['ssh', \"Zq7'it\\\\s-secret\"]", true);
+        changes("repr in double quotes: a single quote and no double", "Zq7'it\u00a0x-secret", "['ssh', \"Zq7'it\\xa0x-secret\"]", true);
         changes("a WireGuard config's key line, alone", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/24", "PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", true);
         changes(".netrc line, alone", "machine git.local login bob password s3cr3tPassw0rd\nmachine nas login bob password Other9Pass", "machine git.local login bob password s3cr3tPassw0rd", true);
         changes("a config's structure is no secret", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nclusters:", "[Interface]\nclusters:\nAddress = 10.0.0.9/24", false);
         changes("a short value's form is found as a word", "p@ss12", "q=p%40ss123&r=1", false);
         changes("... and is removed as one", "p@ss12", "q=p%40ss12&r=1", true);
-        changes("a value too short to remove has no forms", "<", "&lt;b&gt;", false);
+        changes("a value too short to remove has no forms", "<", "a &lt; b", false);
         changes("a JSON line break before a short value is no part of a word", "admin12", "{\"stderr\":\"Password:\\nadmin12\\nOK\"}", true);
     }
 
