@@ -1188,8 +1188,14 @@ public class ThinkingEngine {
         return os;
     }
 
+    /**
+     * The start of a text for a log line, scrubbed of the vault's values before it is cut: the
+     * log's own scrub sees only the cut text, and a value that straddled the cut left its first
+     * part there.
+     */
     private String truncate(String s, int maxLen) {
         if (s == null) return "null";
+        s = com.ownclaw.privacy.VaultSecrets.scrubAll(s);
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 }

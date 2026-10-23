@@ -354,7 +354,8 @@ public class ProcessSandbox implements SandboxManager {
 
     /**
      * Replaces the inherited environment with the allow-listed subset plus the variables the
-     * caller explicitly asked for (the skill's declared credentials).
+     * caller explicitly asked for -- the encoding, a skill's virtualenv. Not its credentials:
+     * those reach the runner on stdin (DynamicSkill's CREDENTIALS).
      */
     private static void applyEnvironment(ProcessBuilder pb, Map<String, String> envVars) {
         Map<String, String> env = pb.environment();

@@ -9,6 +9,7 @@ import com.ownclaw.conversation.ConversationService;
 import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
 import com.ownclaw.core.UserMessage;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.OpsService;
 import com.ownclaw.privacy.VaultSecrets;
 import com.ownclaw.users.AuthService;
@@ -499,6 +500,11 @@ public class OpsController {
         String message = raw == null ? "" : String.valueOf(raw).trim();
         if (message.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "message is required"));
+        }
+        // A secret command is typed into a chat, where it is stored and never kept as text; run
+        // as a task here, its secret would go to the model and into the chat and the events.
+        if (CommandHandler.carriesSecret(message)) {
+            return ResponseEntity.badRequest().body(Map.of("error", CommandHandler.MISPLACED_SECRET_ANSWER));
         }
 
         Object requested = body.get("userId");

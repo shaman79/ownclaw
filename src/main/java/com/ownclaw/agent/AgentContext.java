@@ -331,7 +331,16 @@ public class AgentContext {
     public void setOfferedTools(java.util.Set<String> names) { this.offeredTools = names; }
 
     public List<String> credentialKeys() { return credentialKeys; }
-    public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }
+    /**
+     * The names the vault holds, as the prompts name them -- those a name may be
+     * ({@link com.ownclaw.users.CredentialVault#validName}). One stored before /cred set checked
+     * names can be a value typed where the name goes, "SMTP_PASS=HUNTER2", and every prompt
+     * carried it to the cloud model.
+     */
+    public void setCredentialKeys(List<String> keys) {
+        this.credentialKeys = keys == null ? List.of()
+                : keys.stream().filter(com.ownclaw.users.CredentialVault::validName).toList();
+    }
 
     /** The owner's most used skills, best first: some of the tools the local model starts with. */
     private volatile List<String> usualTools = List.of();
@@ -794,18 +803,17 @@ public class AgentContext {
     public boolean isShown(Artifact a) { return shown.contains(a.n()); }
 
     /**
-     * The secret vault values this task's text is scrubbed of: those decrypted as it started,
-     * and those the vault holds now ({@link com.ownclaw.privacy.VaultSecrets}) -- a password
-     * stored with /cred set while the task runs reaches its skills at once, and is scrubbed
-     * from what it says from then on, not only from the next task's.
+     * The secret vault values this task's text is scrubbed of: those the vault holds now
+     * ({@link com.ownclaw.privacy.VaultSecrets}), and every one decrypted as it started -- a
+     * password stored with /cred set while the task runs reaches its skills at once, and is
+     * scrubbed from what it says from then on; the one it replaced still is, for the task's
+     * earlier results hold it and are read again for every model call.
      */
     public Map<String, String> secretValues() {
         Map<String, String> now = com.ownclaw.privacy.VaultSecrets.of(userId);
         if (now.isEmpty() || now.equals(secretValues)) return secretValues;
         if (secretValues.isEmpty()) return now;
-        var both = new java.util.HashMap<>(secretValues);
-        both.putAll(now);
-        return Map.copyOf(both);
+        return Map.copyOf(com.ownclaw.privacy.VaultSecrets.withRetired(now, secretValues));
     }
     public void setSecretValues(Map<String, String> values) {
         this.secretValues = values == null ? Map.of() : Map.copyOf(values);

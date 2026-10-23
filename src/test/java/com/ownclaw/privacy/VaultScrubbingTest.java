@@ -80,13 +80,93 @@ class VaultScrubbingTest {
         assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"),
                 "the secret, and not the server's name, which is no secret");
 
-        VaultSecrets.clear();
+        VaultSecrets.set("u9", Map.of("OLD_PASS", "from-before-a-restart"));
         var restarted = new CredentialVault(jdbc);
         restarted.init();
         assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"), "loaded as the vault starts");
+        assertEquals(Map.of(), VaultSecrets.of("u9"), "and nothing the vault does not hold");
 
         restarted.deleteCredential("u1", "SSH_PRIVATE_KEY");
-        assertEquals(Map.of(), VaultSecrets.of("u1"));
+        assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"),
+                "a deleted value is still scrubbed while the service runs: it may still be in use");
+    }
+
+    @Test
+    @DisplayName("a changed value's old one stays scrubbed, at every door and in a running task")
+    void rotation() {
+        VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "old-pass-123"));
+        VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "new-pass-456"));
+        assertEquals(Map.of("ROUTER_PASSWORD", "new-pass-456", "ROUTER_PASSWORD~prev", "old-pass-123"),
+                VaultSecrets.of("u1"));
+        assertEquals("old \u00abvault:ROUTER_PASSWORD~prev\u00bb, new \u00abvault:ROUTER_PASSWORD\u00bb",
+                VaultSecrets.scrub("u1", "old old-pass-123, new new-pass-456"));
+
+        VaultSecrets.clear();
+        var ctx = new AgentContext("u1", "t1", "check the router");
+        ctx.setSecretValues(Map.of("ROUTER_PASSWORD", "old-pass-123"));
+        VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "new-pass-456"));
+        assertTrue(ctx.secretValues().containsValue("old-pass-123"), "the task's earlier results hold it");
+        assertTrue(ctx.secretValues().containsValue("new-pass-456"));
+    }
+
+    @Test
+    @DisplayName("the log is scrubbed of every user's values at once, the longest first across users too")
+    void everyUserAtOnce() {
+        VaultSecrets.set("u1", Map.of("PIN", "hunter22"));
+        VaultSecrets.set("u2", Map.of("PASSWORD", "hunter22-and-more"));
+        String out = VaultSecrets.scrubAll("u2 typed hunter22-and-more, u1 typed hunter22");
+        assertFalse(out.contains("and-more") || out.contains("hunter22"), out);
+    }
+
+    @Test
+    @DisplayName("a value is scrubbed in every form a text holds it in: JSON, Python's, a URL's, HTML's, CR LF, a line at a time, unquoted")
+    void everyForm() throws Exception {
+        String v = "Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\slash\nZq7 second line\n\tZq7-third";
+        var vault = Map.of("SSH_PRIVATE_KEY", v);
+        var texts = new ArrayList<String>();
+        texts.add(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of("stderr", v)));
+        texts.add("{\"k\": \"Zq7-p\\u0159\\u00edli\\u0161 \\\"quoted\\\" back\\\\slash\\nZq7 second line\\n\\tZq7-third\"}");
+        texts.add("Command '['ssh', '-o', 'Zq7-p\u0159\u00edli\u0161 \"quoted\" back\\\\slash\\nZq7 second line\\n\\tZq7-third']' returned 255");
+        texts.add("https://h/?k=" + java.net.URLEncoder.encode(v, java.nio.charset.StandardCharsets.UTF_8));
+        texts.add("<pre>" + v.replace("&", "&amp;").replace("\"", "&quot;") + "</pre>");
+        texts.add(v.replace("\n", "\r\n"));
+        texts.add("the live call's latest line: Zq7 second line");
+        for (String text : texts) {
+            String out = Redactor.scrubVault(text, vault).text();
+            assertFalse(out.contains("Zq7"), "left in: " + out);
+        }
+        assertEquals("pw \u00abvault:P\u00bb", Redactor.scrubVault("pw hunter22x", Map.of("P", "\"hunter22x\"")).text(),
+                "typed in quotes, printed without them");
+    }
+
+    @Test
+    @DisplayName("what the ops and debug APIs answer is scrubbed on the way out: rows and log lines written before their door scrubbed")
+    void tracesOnTheWayOut() {
+        holds("u1");
+        var body = new LinkedHashMap<String, Object>();
+        body.put("logs", List.of("2026-10-01 INFO reasoning: " + SECRET));
+        body.put("rows", List.of(Map.of("progress_msg", "logged in with " + SECRET, "pct", 50)));
+        Object out = new com.ownclaw.interfaces.web.ScrubbedTraces().beforeBodyWrite(body, null, null, null, null, null);
+        assertClean(out);
+        assertTrue(String.valueOf(out).contains("pct=50"), String.valueOf(out));
+    }
+
+    @Test
+    @DisplayName("a frame kept to show the next tab is scrubbed as it is shown, of a value stored after it was kept")
+    void aKeptFrameIsScrubbedWhenShown() {
+        var emitter = new ChatStatusEmitter();
+        emitter.running("u1", "t1", () -> null);
+        emitter.emitForTask("u1", "t1", StatusMessage.Type.STEP, "read " + SECRET, null);
+        holds("u1");
+        assertClean(emitter.doing("u1"));
+    }
+
+    @Test
+    @DisplayName("the prompts name only the vault's keys that a name may be: one stored as a typed value is not sent")
+    void promptsNameOnlyNames() {
+        var ctx = new AgentContext("u1", "t1", "hello");
+        ctx.setCredentialKeys(List.of("SMTP_PASS=HUNTER2", "SMTP_HOST", "SSH_PRIVATE_KEY"));
+        assertEquals(List.of("SMTP_HOST", "SSH_PRIVATE_KEY"), ctx.credentialKeys());
     }
 
     @Test

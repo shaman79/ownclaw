@@ -193,6 +193,19 @@ class TelegramSecretTest {
     }
 
     @Test
+    @DisplayName("whatever blank, control or format character comes before /cred set, the bot reads the command: stored and deleted")
+    void anythingBlankBefore() throws Exception {
+        int n = 0;
+        for (String before : com.ownclaw.interfaces.SecretCommandTest.BEFORE) {
+            receive(200 + n, before + "/cred set K" + (++n) + " " + SECRET);
+        }
+        assertEquals(n, stored.size(), "stored: " + stored);
+        assertEquals(n, telegram.bodies("deleteMessage").size(), "calls: " + telegram.calls);
+        assertTrue(telegram.bodies("sendMessage").stream().noneMatch(b -> b.contains(SECRET)));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM conversations", Integer.class), "nothing kept");
+    }
+
+    @Test
     @DisplayName("Telegram's /cred@BotName set, and one with blanks before it, are stored and deleted")
     void botNameAndBlanks() throws Exception {
         receive(92, "/cred@OwnClawBot set OPENWRT_PASS " + SECRET);

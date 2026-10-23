@@ -2147,8 +2147,14 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * The start of a text for a log line, scrubbed of the vault's values before it is cut: the
+     * log's own scrub sees only the cut text, and a value that straddled the cut left its first
+     * part there.
+     */
     private static String truncate(String s, int maxLen) {
         if (s == null) return "";
+        s = com.ownclaw.privacy.VaultSecrets.scrubAll(s);
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 

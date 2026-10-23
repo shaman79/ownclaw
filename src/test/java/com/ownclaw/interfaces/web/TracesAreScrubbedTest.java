@@ -88,6 +88,9 @@ class TracesAreScrubbedTest {
         var ops = new OpsController(service, loop, auth, null, null, null, null, new ConversationService(jdbc),
                 queue, System::currentTimeMillis);
 
+        var refused = ops.runAgent(Map.of("message", "check (/cred set K hunter2-Xq9)", "userId", "u1"));
+        assertEquals(400, refused.getStatusCode().value(), "a secret command is no task: " + refused.getBody());
+
         Map<String, Object> run = OpsControllerTest.body(ops.runAgent(Map.of("message", "check", "userId", "u1")));
         assertNotNull(run.get("steps"), String.valueOf(run));
         assertClean(run);
@@ -114,6 +117,8 @@ class TracesAreScrubbedTest {
         var debug = new DebugController(loop, null, null, new DebugSessionService(), emitter,
                 jdbc, new AuthService(jdbc, null, new OwnClawConfig()), System::currentTimeMillis);
 
+        assertEquals(400, debug.submitPrompt(Map.of("message", "/cred set K hunter2-Xq9"), "owner")
+                .getStatusCode().value(), "a secret command is no prompt");
         Object trace = debug.submitPrompt(Map.of("message", "check"), "owner").getBody();
         assertTrue(String.valueOf(trace).contains("TOOL RESULT: " + MARK), "the status line was caught: " + trace);
         assertClean(trace);
@@ -141,5 +146,18 @@ class TracesAreScrubbedTest {
         var body = controller.runSkill("ssh_uptime", Map.of(), "owner").getBody();
         assertClean(body);
         assertEquals("logged in with " + MARK, body.get("output"));
+
+        var failing = new DynamicSkill("ssh_uptime", "runs uptime", Map.of(), Path.of("."), false, false, 30,
+                null, null, List.of(), null, List.of(), null, null, null) {
+            @Override public ToolResult execute(Map<String, Object> params, ToolExecutionContext context) {
+                throw new IllegalStateException("could not log in with " + SECRET);
+            }
+        };
+        var failingRegistry = new DynamicSkillRegistry(null, null, null, null, null, null, null) {
+            @Override public Optional<DynamicSkill> getDynamic(String name) { return Optional.of(failing); }
+        };
+        var thrown = new SkillController(null, failingRegistry, null, auth).runSkill("ssh_uptime", Map.of(), "owner").getBody();
+        assertClean(thrown);
+        assertEquals("could not log in with " + MARK, thrown.get("output"));
     }
 }

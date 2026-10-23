@@ -269,17 +269,17 @@ public class TelegramBotService {
         if (queued != null) text = queued;
 
         // Handle slash commands consistently with the Web UI
-        // Leading blanks first, as the web chat reads them: " /cred set KEY VALUE" was no command,
-        // and was saved and run as a task.
-        if (queued == null && text.stripLeading().startsWith("/")) {
+        // Blanks first, as the command grammar reads them (CommandHandler.unblanked), as the web
+        // chat does: " /cred set KEY VALUE" was no command, and was saved and run as a task.
+        if (queued == null && CommandHandler.isCommand(text)) {
             // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
             // on, unless it is removed -- asked for first, whatever storing it then does.
             if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
-            var cmdResult = commandHandler.handle(userId, text.strip());
+            var cmdResult = commandHandler.handle(userId, text);
             if (cmdResult.isPresent()) {
                 sendMessage(chatId, cmdResult.get());
                 // Session commands: send active session info
-                if (commandHandler.isSessionCommand(text.strip())) {
+                if (commandHandler.isSessionCommand(CommandHandler.unblanked(text))) {
                     String sessionId = conversationService.getCurrentSession(userId);
                     sendMessage(chatId, "\uD83D\uDCC2 Active session: " + sessionId);
                 }

@@ -5,6 +5,7 @@ import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.agent.SkillManager;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
@@ -119,6 +120,10 @@ public class DebugController {
         String message = body.get("message");
         if (message == null || message.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Message is required"));
+        }
+        // As on the ops API: a secret command is the chat's, not a prompt's.
+        if (CommandHandler.carriesSecret(message)) {
+            return ResponseEntity.badRequest().body(Map.of("error", CommandHandler.MISPLACED_SECRET_ANSWER));
         }
 
         log.info("Debug API prompt from user={}: {} chars", userId, message.length());

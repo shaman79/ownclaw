@@ -276,12 +276,16 @@ public final class LiveCall implements LlmProgress, AutoCloseable {
      */
     public synchronized Map<String, Object> forOps() {
         var out = new LinkedHashMap<>(shown().data());
-        out.put("reasoningTail", Redactor.scrubVault(tail(reasoning), task.secretValues()).text());
-        out.put("answerTail", Redactor.scrubVault(tail(answer), task.secretValues()).text());
+        out.put("reasoningTail", tail(Redactor.scrubVault(reasoning.toString(), task.secretValues()).text()));
+        out.put("answerTail", tail(Redactor.scrubVault(answer.toString(), task.secretValues()).text()));
         return out;
     }
 
-    private static String tail(StringBuilder text) {
+    /**
+     * The end of a text already scrubbed. Cut first, a value that straddled the cut was no longer
+     * whole, and its end was shown.
+     */
+    private static String tail(String text) {
         return text.substring(Math.max(0, text.length() - OPS_TAIL));
     }
 

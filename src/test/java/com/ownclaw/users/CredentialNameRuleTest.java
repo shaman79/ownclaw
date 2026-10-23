@@ -43,6 +43,21 @@ class CredentialNameRuleTest {
     }
 
     @Test
+    @DisplayName("what a credential cannot be: a name in mixed case, a value with a NUL, a value holding another secret command")
+    void refusals() {
+        assertNull(CredentialVault.refusal("smtp_pass", "x"));
+        assertNull(CredentialVault.refusal("SMTP_PASS", "line one\nline two"));
+        assertEquals(CredentialVault.NAME_RULE, CredentialVault.refusal("Tr0ub4dor", "OPENWRT_PASS"));
+        assertEquals(CredentialVault.NAME_RULE, CredentialVault.refusal("Smtp_Pass", "x"));
+        assertNotNull(CredentialVault.refusal("K", "hunter2\u0000x"));
+        assertNotNull(CredentialVault.refusal("A", "x\n/cred set B y"), "two commands in one message");
+        assertNotNull(CredentialVault.refusal("A", "x\n  /USER add bob pw"));
+        assertNull(CredentialVault.refusal("A", "x\n/credentials are kept elsewhere"), "a word that starts so");
+        var vault = new CredentialVault(null);
+        assertThrows(IllegalArgumentException.class, () -> vault.storeCredential("u1", "A", "x\n/cred set B y"));
+    }
+
+    @Test
     @DisplayName("/cred set refuses a bad name, stores nothing, and does not repeat what was typed")
     void credSetRefuses() {
         List<String> stored = new ArrayList<>();

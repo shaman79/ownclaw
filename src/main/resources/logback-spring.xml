@@ -4,9 +4,10 @@ Spring Boot's own logging (its base.xml: the console, and the file logging.file.
 as logging.logback.rollingpolicy says), with one change: the message and the exception of every
 line are written by converters that take every user's secret vault values out of them first
 (com.ownclaw.privacy.VaultSecrets). A rule registered here takes the place of logback's own %m,
-%msg and %message, and of Spring's %wEx, in every pattern below it.
+%msg and %message, and of Spring's %wEx, in every pattern below it. packagingData, as Spring
+Boot's own configuration sets it: a stack frame names its jar and version.
 -->
-<configuration>
+<configuration packagingData="true">
 	<include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 	<conversionRule conversionWord="m" class="com.ownclaw.privacy.ScrubbedMessageConverter"/>
 	<conversionRule conversionWord="msg" class="com.ownclaw.privacy.ScrubbedMessageConverter"/>

@@ -172,8 +172,9 @@ public final class CloudGateway implements LlmProvider {
         // (Redactor.vaultValueAt). A marker is built from the key name and a value can be a
         // substring of its own replacement, so the fallback marker was itself unverified -- a
         // value of "redacted" would have been written out inside «vault:redacted». Whatever the
-        // markers are, no vault value survives this point.
-        for (var sv : vault.entrySet()) {
+        // markers are, no vault value survives this point -- in any of the forms it is removed
+        // in, a JSON string's included.
+        for (var sv : Redactor.vaultForms(vault)) {
             for (Part part : parts) {
                 int at = Redactor.vaultValueAt(part.text(), sv.getValue(), 0);
                 if (at < 0) continue;

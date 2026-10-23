@@ -1,6 +1,7 @@
 package com.ownclaw.core;
 
 import com.ownclaw.conversation.ConversationService;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
@@ -106,6 +107,18 @@ public class ScheduledTaskService {
     // ──────────────────────────────────────────────────────────────────────
 
     /**
+     * A task's text never holds a secret command ({@link CommandHandler#carriesSecret}): run, it
+     * would hand the secret to the model on every run, and the row keeps it. The chats refuse
+     * one as it is typed; this refuses it wherever else a task's text comes from -- the page's
+     * edit form, the agent's own schedule actions.
+     */
+    private static void refuseSecret(String description) {
+        if (CommandHandler.carriesSecret(description)) {
+            throw new IllegalArgumentException(CommandHandler.MISPLACED_SECRET_ANSWER);
+        }
+    }
+
+    /**
      * Schedule a one-shot deferred task.
      *
      * @param userId    the user who owns this task
@@ -114,6 +127,7 @@ public class ScheduledTaskService {
      * @return the created task ID
      */
     public long scheduleDeferred(String userId, String description, Instant runAt) {
+        refuseSecret(description);
         long taskId = insertReturningId(
                 "INSERT INTO scheduled_tasks (user_id, task_type, description, next_run_at, status) "
                         + "VALUES (?, 'deferred', ?, ?, 'active')",
@@ -139,6 +153,7 @@ public class ScheduledTaskService {
      */
     public long scheduleRecurring(String userId, String description, String cronExpression,
                                   Integer maxRuns) {
+        refuseSecret(description);
         // Validate the cron expression
         CronExpression cron = CronExpression.parse(cronExpression);
         LocalDateTime nextRun = cron.next(LocalDateTime.now());
@@ -395,6 +410,7 @@ public class ScheduledTaskService {
      */
     public boolean updateTask(String userId, long taskId, String description,
                               String cronExpression) {
+        refuseSecret(description);
         var task = getTask(userId, taskId);
         if (task.isEmpty()) return false;
 
@@ -525,6 +541,19 @@ public class ScheduledTaskService {
             String userId = String.valueOf(task.get("user_id"));
             String description = String.valueOf(task.get("description"));
             String taskType = String.valueOf(task.get("task_type"));
+
+            // A row made before the scheduler refused one (refuseSecret) can still hold a secret
+            // command: run, it would hand the secret to the model every time. It is paused, and
+            // the owner told which, by number -- not by its text.
+            if (CommandHandler.carriesSecret(description)) {
+                jdbc.update("UPDATE scheduled_tasks SET status = 'paused', updated_at = datetime('now') "
+                        + "WHERE id = ? AND status = 'active'", taskId);
+                log.warn("Scheduled task #{} holds a secret command: paused, not run", taskId);
+                background(userId, StatusMessage.Type.WARNING, "Scheduled task #" + taskId
+                        + " was paused, not run: its text holds a /cred set or /user add, which would "
+                        + "have gone to the model as text. Edit or cancel it.");
+                continue;
+            }
 
             log.info("Firing scheduled task #{} for user {}", taskId, userId);
 

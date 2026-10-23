@@ -268,11 +268,17 @@ class LiveCallTest {
         assertFalse(call.shown().text().contains("Kolibri-2291"));
         var ops = call.forOps();
         String tail = (String) ops.get("reasoningTail");
-        assertEquals(LiveCall.OPS_TAIL - "Kolibri-2291".length() + "«vault:WIFI_PSK»".length(), tail.length());
+        assertEquals(LiveCall.OPS_TAIL, tail.length(), "scrubbed, then cut");
         assertTrue(tail.endsWith("The wifi password is «vault:WIFI_PSK», so I can log in.\n"), tail);
         assertEquals(answer.substring(answer.length() - LiveCall.OPS_TAIL), ops.get("answerTail"));
         assertEquals("step 3", ops.get("purpose"));
         assertEquals("writing the answer", ops.get("phase"));
+
+        // A value the cut goes through: cut first, its end was shown.
+        LiveCall straddled = ctx.call(OLLAMA, true, ctx.atStep(null));
+        straddled.received(Part.REASONING, "Kolibri-2291" + distinct("pad", 200).substring(0, LiveCall.OPS_TAIL - 6));
+        assertFalse(((String) straddled.forOps().get("reasoningTail")).contains("2291"),
+                "no part of the value at the start of the tail");
     }
 
     @Test

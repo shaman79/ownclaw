@@ -90,6 +90,7 @@ public class CommandHandler {
      * @return response text, or empty if not a command
      */
     public Optional<String> handle(String userId, String message) {
+        message = unblanked(message);
         if (message == null || !message.startsWith("/")) {
             return Optional.empty();
         }
@@ -195,29 +196,75 @@ public class CommandHandler {
      * that works, so it is hidden and deleted the same way; shown as typed, the password stayed on
      * the screen and in the Telegram chat.
      * <p>
-     * Blanks before the command are read as none, and the command may carry Telegram's
-     * {@code @BotName}: " /cred set KEY VALUE" from a client that does not trim, and
+     * It reads a text as {@link #unblanked} leaves it, as every other part of this grammar does,
+     * and the command may carry Telegram's {@code @BotName}: " /cred set KEY VALUE" from a client
+     * that does not trim, a no-break space or a zero-width one pasted before it, and
      * "/cred@OwnClawBot set KEY VALUE" from Telegram's command menu, were no command, and were
-     * kept in the chat as typed -- the first saved and run as a task.
+     * kept in the chat as typed -- the first ones saved and run as a task.
      * <p>
      * Neighbouring parts never match the same character, so a text splits one way only and a
      * long run of spaces cannot make the matcher try every split; the second reading is tried
      * only once the first has failed. The time is linear in the text.
      */
     private static final Pattern SECRET_COMMAND = Pattern.compile(
-            "\\s*(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
+            "(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?:\\s+(\\S+)\\s+(\\S.*)|\\s+(\\S.*))",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL | Pattern.UNICODE_CHARACTER_CLASS);
 
     /**
-     * One of the two secret commands where it is not the whole text: after a blank, inside
-     * another command -- "/bg /cred set KEY VALUE", "/schedule in 1 hour /user add bob pw",
-     * "/queue then /cred set KEY VALUE" -- or in a message -- "store this: /cred set KEY VALUE".
-     * Whatever holds it would hand it on as text: as a task, to the cloud model, into the chat,
-     * the queue and the schedule's own row, run after run.
+     * One of the two secret commands where it is not the whole text, with something after it:
+     * inside another command -- "/bg /cred set KEY VALUE", "/schedule in 1 hour /user add bob pw",
+     * "/queue then /cred set KEY VALUE" -- or in a message -- "store this: /cred set KEY VALUE",
+     * "store this:/cred set ...", "(/cred set ...)". Before it anything but a letter, a digit or
+     * what a path is made of: a blank, a colon, a bracket, a quote, a zero-width space. The
+     * full-width slash a phone keyboard gives counts as a slash. Whatever holds it would hand it
+     * on as text: as a task, to the cloud model, into the chat, the queue and the schedule's own
+     * row, run after run.
      */
     private static final Pattern MISPLACED_SECRET = Pattern.compile(
-            "(?<=\\s)(/cred(?:@\\w+)?\\s+set|/user(?:@\\w+)?\\s+add)(?=\\s|$)",
+            "(?<![\\p{L}\\p{N}_./\\\\-])[/\\uFF0F](?:cred(?:@\\w+)?\\s+set|user(?:@\\w+)?\\s+add)(?=\\s+\\S)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+
+    /**
+     * A word shaped like a command: a slash and a name -- "/status", "/creds" -- with Telegram's
+     * {@code @BotName}, and not a path, which goes on with another slash or a dot.
+     */
+    private static final Pattern COMMAND_WORD = Pattern.compile(
+            "[/\\uFF0F]\\p{L}[\\p{L}\\p{N}_]*(?:@\\w+)?(?=\\s|$)", Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** A {@link #COMMAND_WORD} after a blank: one command inside another one's text. */
+    private static final Pattern INNER_COMMAND = Pattern.compile(
+            "(?<=\\s)[/\\uFF0F]\\p{L}[\\p{L}\\p{N}_]*(?:@\\w+)?(?=\\s|$)", Pattern.UNICODE_CHARACTER_CLASS);
+
+    /**
+     * {@code text} without what stands before and after it that is no part of it: every blank
+     * this grammar reads as one -- the no-break spaces included, which {@link String#strip} keeps
+     * -- and control and format characters: a zero-width space or a byte-order mark pasted with
+     * it. The one rule every caller decides by whether a text is a command
+     * ({@link #isCommand}), and every reading here begins with.
+     */
+    public static String unblanked(String text) {
+        if (text == null) return null;
+        int start = 0, end = text.length();
+        while (start < end && blank(text.charAt(start))) start++;
+        while (end > start && blank(text.charAt(end - 1))) end--;
+        return text.substring(start, end);
+    }
+
+    private static boolean blank(char c) {
+        return Character.isWhitespace(c) || Character.isSpaceChar(c) || Character.isISOControl(c)
+                || Character.getType(c) == Character.FORMAT;
+    }
+
+    /** Whether the text, {@link #unblanked}, is a slash command's: what each chat routes by. */
+    public static boolean isCommand(String text) {
+        String s = unblanked(text);
+        return s != null && s.startsWith("/");
+    }
+
+    /** Whether {@code task} begins with a {@link #COMMAND_WORD}: no task /bg or /schedule runs. */
+    static boolean startsWithCommand(String task) {
+        return task != null && COMMAND_WORD.matcher(task).lookingAt();
+    }
 
     /** What a text with a {@link #MISPLACED_SECRET} is answered, wherever it was typed. */
     public static final String MISPLACED_SECRET_ANSWER = "Not run, and not kept: a secret goes in a "
@@ -229,13 +276,12 @@ public class CommandHandler {
             + "typing it on its own, not as another command's task.";
 
     /**
-     * Where a {@link #MISPLACED_SECRET} starts in {@code text}, stripped, or -1 -- also when the
-     * whole text is a secret command, which {@link #handle} stores.
+     * Where a {@link #MISPLACED_SECRET} starts in {@code text}, {@link #unblanked}, or -1 -- also
+     * when the whole text is a secret command, which {@link #handle} stores.
      */
     private static int misplacedSecretAt(String text) {
-        if (text == null) return -1;
-        String s = text.strip();
-        if (SECRET_COMMAND.matcher(s).matches()) return -1;
+        String s = unblanked(text);
+        if (s == null || SECRET_COMMAND.matcher(s).matches()) return -1;
         Matcher m = MISPLACED_SECRET.matcher(s);
         return m.find() ? m.start() : -1;
     }
@@ -265,10 +311,10 @@ public class CommandHandler {
      */
     public static String queued(String text) {
         if (misplacedSecret(text)) return null;
-        Matcher m = text == null ? null : QUEUE_COMMAND.matcher(text.strip());
+        Matcher m = text == null ? null : QUEUE_COMMAND.matcher(unblanked(text));
         if (m == null || !m.matches() || m.group(1) == null) return null;
-        String message = m.group(1).strip();
-        return message.isEmpty() || message.startsWith("/") ? null : message;
+        String message = unblanked(m.group(1));
+        return message.isEmpty() || startsWithCommand(message) ? null : message;
     }
 
     /** What a chat shows for an unknown command. The text itself is not repeated: it may hold a secret. */
@@ -276,24 +322,48 @@ public class CommandHandler {
 
     /**
      * The text as a chat may show, log or keep it: a secret command's secret masked -- all that
-     * follows the command when the grammar cannot read a name and a secret in it -- and anything
-     * else as sent.
+     * follows the command when the grammar cannot read a name and a secret in it, or when what
+     * stands where the name goes is no name ("SMTP_PASS=hunter2") -- everything from a misplaced
+     * secret command or a command inside another command on ("/bg /creds set KEY VALUE"), and
+     * anything else as sent.
      */
     public static String displayed(String message) {
-        int misplaced = misplacedSecretAt(message);
-        if (misplaced >= 0) return message.strip().substring(0, misplaced).stripTrailing() + " \u2026";
-        Matcher m = message == null ? null : SECRET_COMMAND.matcher(message);
-        if (m == null || !m.matches()) return message;
-        return m.group(2) != null ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022"
-                : m.group(1) + " \u2026";
+        String s = unblanked(message);
+        int misplaced = misplacedSecretAt(s);
+        if (misplaced >= 0) return cutAt(s, misplaced);
+        Matcher m = s == null ? null : SECRET_COMMAND.matcher(s);
+        if (m != null && m.matches()) {
+            return m.group(2) != null && nameShown(m.group(1), m.group(2))
+                    ? m.group(1) + " " + m.group(2) + " \u2022\u2022\u2022\u2022\u2022\u2022"
+                    : m.group(1) + " \u2026";
+        }
+        Matcher inner = s != null && s.startsWith("/") ? INNER_COMMAND.matcher(s) : null;
+        if (inner != null && inner.find()) return cutAt(s, inner.start());
+        return message;
+    }
+
+    /** {@code s} up to {@code at}, and an ellipsis for the rest. */
+    private static String cutAt(String s, int at) {
+        return unblanked(s.substring(0, at)) + " \u2026";
     }
 
     /**
-     * Whether this text carries a secret: one {@link #handle} stores, or one typed into a secret
-     * command it cannot read.
+     * Whether a secret command's name may be shown: a credential's name the vault would take, an
+     * account name with no ':' or '=' in it -- not a value typed where the name goes.
+     */
+    private static boolean nameShown(String command, String name) {
+        return command.toLowerCase(Locale.ROOT).startsWith("/cred")
+                ? CredentialVault.refusal(name, null) == null
+                : name.indexOf(':') < 0 && name.indexOf('=') < 0;
+    }
+
+    /**
+     * Whether this text carries a secret: one {@link #handle} stores, one typed into a secret
+     * command it cannot read, or one misplaced ({@link #misplacedSecret}).
      */
     public static boolean carriesSecret(String message) {
-        return message != null && (SECRET_COMMAND.matcher(message).matches() || misplacedSecret(message));
+        String s = unblanked(message);
+        return s != null && (SECRET_COMMAND.matcher(s).matches() || misplacedSecretAt(s) >= 0);
     }
 
     // ── Help ──
@@ -317,7 +387,7 @@ public class CommandHandler {
         }
         // "/bg /creds set KEY VALUE" ran "/creds set KEY VALUE" as a task: the cloud model was
         // handed a password the mistyped command was meant to store.
-        if (task.startsWith("/")) return COMMAND_AS_TASK;
+        if (startsWithCommand(task)) return COMMAND_AS_TASK;
         // Where it was typed, read now: minutes later the open chat can be another one, and the
         // answer would be saved under a conversation it has nothing to do with.
         String sessionId = conversationService.getCurrentSession(userId);
@@ -702,7 +772,7 @@ public class CommandHandler {
         }
 
         if (args.startsWith("delete ")) {
-            String key = args.substring(7).strip().toUpperCase();
+            String key = args.substring(7).strip().toUpperCase(Locale.ROOT);
             if (key.isEmpty()) return "Usage: `/cred delete <KEY>`";
             credentialVault.deleteCredential(userId, key);
             return "\u274c Credential '" + key + "' deleted.";
@@ -713,9 +783,9 @@ public class CommandHandler {
 
     /** A well-formed {@code /cred set}, as SECRET_COMMAND read it. */
     private String storeCredential(String userId, String key, String value) {
-        key = key.toUpperCase(Locale.ROOT);
         String refused = CredentialVault.refusal(key, value);
         if (refused != null) return "Not stored: " + refused;
+        key = key.toUpperCase(Locale.ROOT);
         credentialVault.storeCredential(userId, key, value.strip());
         return "\u2705 Credential '" + key + "' stored (encrypted).";
     }
@@ -789,7 +859,7 @@ public class CommandHandler {
             }
         }
 
-        if (taskDesc != null && taskDesc.startsWith("/")) return COMMAND_AS_TASK;
+        if (startsWithCommand(taskDesc)) return COMMAND_AS_TASK;
         if (runAt == null) {
             return "Could not parse time expression. Examples:\n"
                     + "  `/schedule in 2 hours check server status`\n"
@@ -822,7 +892,7 @@ public class CommandHandler {
         if (taskDesc.isBlank()) {
             return "Task description is required after the `:`";
         }
-        if (taskDesc.startsWith("/")) return COMMAND_AS_TASK;
+        if (startsWithCommand(taskDesc)) return COMMAND_AS_TASK;
 
         String cronExpr;
         if (schedulePart.toLowerCase().startsWith("cron ")) {

@@ -332,7 +332,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // the secret as text. A slash text's bubble is drawn here, masked; the page draws its own
         // for any other, on this screen alone.
         if (CommandHandler.misplacedSecret(userMessage)) {
-            if (userMessage.strip().startsWith("/")) {
+            if (CommandHandler.isCommand(userMessage)) {
                 sendToSession(session, "user", CommandHandler.displayed(userMessage));
             }
             sendToSession(session, "system", CommandHandler.MISPLACED_SECRET_ANSWER);
@@ -360,18 +360,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // real commands working while a question waits, without deciding by punctuation what
         // the user meant.
         boolean waiting = queued == null && interactionHandler.hasPending(userId);
-        // Leading blanks first: the page trims what it sends, another client need not, and
-        // " /cred set KEY VALUE" was no command -- it was saved and run as a task, its secret
-        // handed to the cloud model.
-        if (queued == null && userMessage.stripLeading().startsWith("/")) {
+        // Blanks first, as the command grammar reads them (CommandHandler.unblanked): the page
+        // trims what it sends, another client need not, a no-break or zero-width space survives
+        // the page's trim, and " /cred set KEY VALUE" was no command -- it was saved and run as a
+        // task, its secret handed to the cloud model.
+        if (queued == null && CommandHandler.isCommand(userMessage)) {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
-            var handledAsCommand = commandHandler.handle(userId, userMessage.trim());
+            var handledAsCommand = commandHandler.handle(userId, userMessage);
             // The page does not draw a slash text itself; this is its bubble. A secret command's
             // secret is masked by the grammar that reads it, a well-formed one or not; a command
             // nobody knows shows its first word only, as nothing can say which part of
             // "/creds set KEY VALUE" is the secret.
-            String typed = userMessage.trim();
+            String typed = CommandHandler.unblanked(userMessage);
             sendToSession(session, "user", handledAsCommand.isPresent() || waiting
                     ? CommandHandler.displayed(typed)
                     : typed.split("(?U)\\s", 2)[0] + (typed.matches("(?U)\\S+") ? "" : " \u2026"));

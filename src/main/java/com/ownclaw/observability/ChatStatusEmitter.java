@@ -102,7 +102,8 @@ public class ChatStatusEmitter {
             Running r = task.getValue();
             if (!r.userId().equals(userId) || background.contains(task.getKey())) continue;
             StatusMessage live = r.live().get();
-            return live != null ? live : r.last().get();
+            // Scrubbed as it is shown: a value stored after the frame was kept is not in it.
+            return live != null ? live : scrubbed(userId, r.last().get());
         }
         return null;
     }
@@ -138,9 +139,13 @@ public class ChatStatusEmitter {
      * should never be able to silence Telegram.
      */
     public void emit(String userId, StatusMessage message) {
+        deliver(userId, scrubbed(userId, message));
+    }
+
+    /** {@link #emit}, of a message already scrubbed. */
+    private void deliver(String userId, StatusMessage message) {
         Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
         if (forUser == null) return;
-        message = scrubbed(userId, message);
         for (Map.Entry<Object, Consumer<StatusMessage>> e : forUser.entrySet()) {
             try {
                 e.getValue().accept(message);
@@ -157,7 +162,7 @@ public class ChatStatusEmitter {
      * opens: each of those held a password a skill had printed, as printed.
      */
     private static StatusMessage scrubbed(String userId, StatusMessage message) {
-        if (VaultSecrets.of(userId).isEmpty()) return message;
+        if (message == null || VaultSecrets.of(userId).isEmpty()) return message;
         return new StatusMessage(message.type(), VaultSecrets.scrub(userId, message.text()),
                 VaultSecrets.scrubDeep(userId, message.data()), message.taskId());
     }
@@ -194,7 +199,7 @@ public class ChatStatusEmitter {
         if (task != null && (type == StatusMessage.Type.STEP || type == StatusMessage.Type.PROGRESS)) {
             task.last().set(message);
         }
-        emit(userId, message);
+        deliver(userId, message);
     }
 
     /**

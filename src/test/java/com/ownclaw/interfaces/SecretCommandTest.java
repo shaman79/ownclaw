@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * exactly as sent. Checked as a property over spellings, spacing and case, because the gaps between
  * two readings of the same text are always in the spellings nobody listed.
  */
-class SecretCommandTest {
+public class SecretCommandTest {
 
     final List<String> kept = new ArrayList<>();
 
@@ -147,9 +147,14 @@ class SecretCommandTest {
         assertTrue(kept.isEmpty(), "no account made");
     }
 
-    /** What a secret command was typed inside: another command, or a message. */
+    /** What a secret command was typed inside: another command, or a message, up to it. */
     static final String[] WRAPPERS = {"/bg ", "/BG\t", "/queue then ", "/schedule in 1 hour ",
-            "/schedule every day at 3am : ", "store this: ", "please\n", "/creds "};
+            "/schedule every day at 3am : ", "store this: ", "please\n", "/creds ", "store this:",
+            "(", "\"", "`", "note -- ", "/bg \"", "/queue x:", "keep it\u3000", "keep\u200b"};
+
+    /** The secret commands' heads, each a real one: the property is not its own oracle. */
+    static final String[] SECRET_HEADS = {"/cred set", "/CRED SET", "/Cred\tset", "/cred@OwnClawBot set",
+            "/user add", "/USER  ADD", "\uFF0Fcred set"};
 
     @Test
     @DisplayName("a secret command inside another command or a message is never run, queued, kept or shown, however it is spelled")
@@ -158,8 +163,8 @@ class SecretCommandTest {
         int forms = 0;
         for (int i = 0; i < 20_000; i++) {
             String typed = pick(r, SECRETS);
-            String inner = pick(r, HEADS) + " " + pick(r, VERBS) + pick(r, GAPS) + pick(r, NAMES) + pick(r, GAPS) + typed;
-            if (!CommandHandler.carriesSecret(inner)) continue;
+            if (typed.isEmpty()) continue;
+            String inner = pick(r, SECRET_HEADS) + " " + pick(r, NAMES) + (r.nextBoolean() ? " " : "\t") + typed;
             String text = pick(r, WRAPPERS) + inner;
             forms++;
             kept.clear();
@@ -170,7 +175,7 @@ class SecretCommandTest {
             assertTrue(shown.endsWith(" \u2026"), "shown: " + shown);
             assertFalse(shown.contains("Zq7"), "typed " + text + " and showed " + shown);
             var answer = commands.handle("owner", text);
-            if (text.startsWith("/")) {
+            if (CommandHandler.isCommand(text)) {
                 assertEquals(Optional.of(CommandHandler.MISPLACED_SECRET_ANSWER), answer, text);
             } else {
                 assertEquals(Optional.empty(), answer, "a message is no command; the chat refuses it: " + text);
@@ -178,6 +183,70 @@ class SecretCommandTest {
             assertTrue(kept.isEmpty(), "kept " + kept + " from " + text);
         }
         assertTrue(forms > 1_000, "the generator must reach the secret forms: " + forms);
+    }
+
+    /**
+     * What can stand before a command and be no part of it: every kind of blank Unicode has --
+     * the no-break ones, which String.strip keeps -- and control and format characters, a
+     * zero-width space or a byte-order mark pasted with it.
+     */
+    public static final String[] BEFORE = {" ", "\t", "\n", "\u00a0", "\u2007", "\u202f", "\u0085", "\u001c",
+            "\u001f", "\u3000", "\u2003", "\u1680", "\u200b", "\u2060", "\ufeff", "\u00ad", " \u00a0\u200b "};
+
+    @Test
+    @DisplayName("whatever blank, control or format character stands before a secret command, it is the command: read, stored and hidden alike")
+    void anythingBlankBefore() {
+        for (String before : BEFORE) {
+            String text = before + "/cred set K1 Zq7-secret" + before;
+            kept.clear();
+            assertTrue(CommandHandler.isCommand(text), "routed as a command: " + escaped(text));
+            assertTrue(CommandHandler.carriesSecret(text), escaped(text));
+            assertFalse(CommandHandler.misplacedSecret(text), escaped(text));
+            assertFalse(CommandHandler.displayed(text).contains("Zq7"), CommandHandler.displayed(text));
+            assertEquals("/cred set K1", CommandHandler.unblanked(text).substring(0, 12));
+            assertTrue(commands.handle("owner", text).orElse("").startsWith("\u2705"), escaped(text));
+            assertEquals(List.of("Zq7-secret"), kept, escaped(text));
+        }
+    }
+
+    static String escaped(String s) {
+        var sb = new StringBuilder();
+        for (char c : s.toCharArray()) sb.append(c < 0x20 || c > 0x7e ? String.format("\\u%04x", (int) c) : String.valueOf(c));
+        return sb.toString();
+    }
+
+    @Test
+    @DisplayName("what stands where a name goes is shown only when it is a name; one that is not is refused")
+    void aValueWhereTheNameGoes() {
+        for (String text : List.of("/cred set SMTP_PASS=Zq7-secret x", "/cred set Tr0ub4dorZq7 OPENWRT_PASS",
+                "/user add bob:Zq7-secret pw12345long")) {
+            assertEquals(text.startsWith("/cred") ? "/cred set \u2026" : "/user add \u2026", CommandHandler.displayed(text));
+        }
+        kept.clear();
+        assertTrue(commands.handle("owner", "/cred set Tr0ub4dorZq7 OPENWRT_PASS").orElse("").startsWith("Not stored"));
+        assertTrue(kept.isEmpty(), "stored " + kept);
+        assertEquals("/cred set OPENWRT_PASS \u2022\u2022\u2022\u2022\u2022\u2022",
+                CommandHandler.displayed("/cred set OPENWRT_PASS Zq7-secret"));
+    }
+
+    @Test
+    @DisplayName("a mention of a secret command with nothing after it is no secret; with anything after, it is held back")
+    void aBareMention() {
+        assertFalse(CommandHandler.misplacedSecret("I typed /cred set"));
+        assertFalse(CommandHandler.misplacedSecret("see /home/me/cred set up"), "a path's own word");
+        assertTrue(CommandHandler.misplacedSecret("what does /cred set do?"), "\"do?\" could be the secret");
+    }
+
+    @Test
+    @DisplayName("a command shown inside another one is cut there; /bg refuses a command as its task but not a path")
+    void aCommandInsideAnother() {
+        assertEquals("/bg \u2026", CommandHandler.displayed("/bg /creds set OPENWRT_PASS Zq7-secret"));
+        assertEquals("/schedule in 1 hour \u2026", CommandHandler.displayed("/schedule in 1 hour /creds set K Zq7-secret"));
+        assertTrue(CommandHandler.startsWithCommand("/creds set K V"));
+        assertTrue(CommandHandler.startsWithCommand("/status"));
+        assertFalse(CommandHandler.startsWithCommand("/var/log/syslog: summarise the errors"));
+        assertFalse(CommandHandler.startsWithCommand("/home/me/report.pdf send it"));
+        assertEquals("/bg summarise /var/log/syslog", CommandHandler.displayed("/bg summarise /var/log/syslog"));
     }
 
     @Test

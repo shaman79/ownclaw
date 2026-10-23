@@ -129,6 +129,29 @@ class CredentialHandoverTest {
     }
 
     @Test
+    @DisplayName("a key the skill prints to stderr, kept as JSON with its line breaks escaped, is scrubbed as the key")
+    void anEscapedKeyIsScrubbed() throws Exception {
+        Path dir = Files.createDirectories(tmp.resolve("skills/ssh_debug"));
+        Files.writeString(dir.resolve("skill.py"), String.join("\n",
+                "import os, sys",
+                "def run(params):",
+                "    print('using ' + os.environ['SSH_PRIVATE_KEY'], file=sys.stderr)",
+                "    return {'output': {'key': os.environ['SSH_PRIVATE_KEY']}}",
+                ""));
+        var env = new PythonEnvironmentService(new OwnClawConfig());
+        var skill = new DynamicSkill("ssh_debug", "prints its key", Map.of(), dir, false, false, 30,
+                new ProcessSandbox(env, new ObjectMapper()), env, List.of("SSH_PRIVATE_KEY"), VAULT,
+                List.of(), null, null, null);
+
+        ToolResult result = run(skill);
+
+        assertTrue(result.output().contains("Zq7-first-line\\nZq7 second line"),
+                "the key, as JSON holds it: " + result.output());
+        String scrubbed = com.ownclaw.privacy.Redactor.scrubVault(result.output(), Map.of("SSH_PRIVATE_KEY", SECRET)).text();
+        assertFalse(scrubbed.contains("Zq7"), scrubbed);
+    }
+
+    @Test
     @DisplayName("a parameter named like the credentials from the caller never reaches the runner's environment")
     void aCallerCannotSetTheEnvironment() throws Exception {
         Path dir = Files.createDirectories(tmp.resolve("skills/echo_env"));

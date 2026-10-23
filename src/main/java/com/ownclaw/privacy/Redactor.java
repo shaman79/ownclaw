@@ -190,8 +190,8 @@ public final class Redactor {
     }
 
     /**
-     * Replace every vault value in {@code text} with {@code «vault:KEY»}, wherever
-     * {@link #vaultValueAt} finds it. Deterministic, so a prompt's cached prefix stays
+     * Replace every vault value in {@code text}, in each of its {@link #vaultForms}, with
+     * {@code «vault:KEY»}, wherever {@link #vaultValueAt} finds it. Deterministic, so a prompt's cached prefix stays
      * byte-stable across steps. Also what everything stored for display is scrubbed with: the
      * owner's chat, the task record, the usage rows.
      */
@@ -201,15 +201,7 @@ public final class Redactor {
         }
         String out = text;
         int count = 0;
-        // Longest first: a value inside another -- a PIN inside the password it starts -- taken
-        // first broke the longer one up with its marker, the longer one was no longer found,
-        // and the rest of it stayed in the text. Then by name, so the order is the same on
-        // every run, as Map.copyOf's is not.
-        var values = new ArrayList<>(vault.entrySet());
-        values.sort(Comparator.comparingInt((Map.Entry<String, String> e) ->
-                        e.getValue() == null ? 0 : -e.getValue().length())
-                .thenComparing(Map.Entry::getKey));
-        for (var e : values) {
+        for (var e : vaultForms(vault)) {
             String value = e.getValue();
             if (vaultValueAt(out, value, 0) < 0) continue;
             String marker = VAULT_MARK + e.getKey() + "»";
@@ -230,6 +222,107 @@ public final class Redactor {
             out = sb.append(out, from, out.length()).toString();
         }
         return new Scrubbed(out, count);
+    }
+
+    /**
+     * Each vault value in every form a text holds it in, by name. A value is removed wherever it
+     * stands as the program that printed it wrote it, and those forms passed every door as no
+     * value at all:
+     * <ul>
+     *   <li>as stored, and with its lines ended by CR LF, as a program on another host prints it;</li>
+     *   <li>as a JSON string holds it -- a skill's stderr and a result without an {@code output}
+     *       are kept as JSON, where an SSH key's line breaks are {@code \n} and a quote is
+     *       {@code \"} -- and as Python's {@code json.dumps} writes it by default, every letter
+     *       past ASCII as a backslash, a {@code u} and four hex digits;</li>
+     *   <li>as Python's {@code repr} writes it, inside the command line a failed
+     *       {@code subprocess} call prints: each backslash doubled;</li>
+     *   <li>percent-encoded, as in a URL, and with HTML's entities;</li>
+     *   <li>each line of a value of more than one, from {@link #MIN_SECRET_LENGTH} characters:
+     *       a text shown a line at a time -- the live call's reasoning -- held an SSH key whole,
+     *       one line in each frame;</li>
+     *   <li>without the quotes it was typed in: {@code /cred set P "hunter2"} stores them.</li>
+     * </ul>
+     * The one list {@link #scrubVault} removes and the cloud gateway checks that it did.
+     * <p>
+     * Longest first: a value inside another -- a PIN inside the password it starts -- taken
+     * first broke the longer one up with its marker, the longer one was no longer found, and the
+     * rest of it stayed in the text. Then by name and form, so the order is the same on every
+     * run, as Map.copyOf's is not.
+     */
+    public static List<Map.Entry<String, String>> vaultForms(Map<String, String> vault) {
+        if (vault == null || vault.isEmpty()) return List.of();
+        Object[] cached = lastForms;
+        if (cached != null && cached[0].equals(vault)) {
+            @SuppressWarnings("unchecked")
+            var forms = (List<Map.Entry<String, String>>) cached[1];
+            return forms;
+        }
+        var forms = formsOf(vault);
+        lastForms = new Object[] {Map.copyOf(vault), forms};
+        return forms;
+    }
+
+    /**
+     * The vault {@link #vaultForms} last worked out the forms of, and they: the same vault is
+     * scrubbed with for every frame of a task, and an SSH key has some three hundred forms.
+     */
+    private static volatile Object[] lastForms;
+
+    private static List<Map.Entry<String, String>> formsOf(Map<String, String> vault) {
+        var forms = new ArrayList<Map.Entry<String, String>>();
+        for (var e : vault.entrySet()) {
+            String value = e.getValue();
+            if (value == null || e.getKey() == null) continue;
+            var bases = new java.util.LinkedHashSet<String>();
+            bases.add(value);
+            if (value.length() >= 2 && "\"'`".indexOf(value.charAt(0)) >= 0
+                    && value.charAt(value.length() - 1) == value.charAt(0)) {
+                bases.add(value.substring(1, value.length() - 1));
+            }
+            for (String base : List.copyOf(bases)) {
+                bases.add(base.replace("\r\n", "\n").replace("\n", "\r\n"));
+                if (base.indexOf('\n') >= 0) {
+                    for (String line : base.split("\r?\n")) {
+                        if (line.strip().length() >= MIN_SECRET_LENGTH) bases.add(line.strip());
+                    }
+                }
+            }
+            var each = new java.util.LinkedHashSet<String>();
+            for (String base : bases) {
+                each.add(base);
+                each.add(jsonString(base, false));
+                each.add(jsonString(base, true));
+                each.add(base.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"));
+                each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8));
+                each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
+                each.add(base.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace("\"", "&quot;").replace("'", "&#39;"));
+            }
+            for (String form : each) {
+                if (!form.isEmpty()) forms.add(Map.entry(e.getKey(), form));
+            }
+        }
+        forms.sort(Comparator.comparingInt((Map.Entry<String, String> e) -> -e.getValue().length())
+                .thenComparing(Map.Entry::getKey).thenComparing(Map.Entry::getValue));
+        return List.copyOf(forms);
+    }
+
+    /**
+     * {@code s} as the inside of a JSON string: Jackson's escapes, which Python's are for these
+     * characters; with {@code ascii}, as Python's {@code json.dumps} writes it unless told
+     * otherwise -- everything past ASCII as a backslash, a {@code u} and four hex digits, in
+     * lower case.
+     */
+    private static String jsonString(String s, boolean ascii) {
+        String quoted = new String(com.fasterxml.jackson.core.io.JsonStringEncoder.getInstance().quoteAsString(s));
+        if (!ascii) return quoted;
+        var sb = new StringBuilder(quoted.length());
+        for (int i = 0; i < quoted.length(); i++) {
+            char c = quoted.charAt(i);
+            if (c < 0x80) sb.append(c);
+            else sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+        }
+        return sb.toString();
     }
 
     /**

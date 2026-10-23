@@ -203,6 +203,17 @@ class ChatSecretTest {
     }
 
     @Test
+    @DisplayName("whatever blank, control or format character comes before /cred set, the chat reads the command: stored, masked, nowhere")
+    void anythingBlankBefore() throws Exception {
+        int n = 0;
+        for (String before : com.ownclaw.interfaces.SecretCommandTest.BEFORE) {
+            type(before + "/cred set K" + (++n) + " " + SECRET);
+        }
+        assertEquals(n, stored.size(), "stored: " + stored);
+        assertNowhere(SECRET);
+    }
+
+    @Test
     @DisplayName("blanks before /cred set do not make it a message: it is stored and masked, not saved and run")
     void blanksBeforeTheCommand() throws Exception {
         type("  /cred set OPENWRT_PASS " + SECRET);
