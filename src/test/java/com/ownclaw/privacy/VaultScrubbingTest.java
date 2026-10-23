@@ -216,6 +216,7 @@ class VaultScrubbingTest {
         changes("a value too short to remove has no forms", "<", "a &lt; b", false);
         changes("a JSON line break before a short value is no part of a word", "admin12", "{\"stderr\":\"Password:\\nadmin12\\nOK\"}", true);
         changes("an escaped backslash and n are letters of the word", "admin12", "{\"path\":\"C:\\\\nadmin12\\\\x\"}", false);
+        changes("a long identifier in lower case is no key material", "{\n\"auth_provider_x509_cert_url\": \"https://www.googleapis.com/oauth2/v1/certs\",\n\"private_key_id\": \"Zq7b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9\"\n}", "the auth_provider_x509_cert_url field", false);
     }
 
     @Test
