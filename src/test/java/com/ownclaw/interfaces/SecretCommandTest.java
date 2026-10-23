@@ -249,8 +249,12 @@ public class SecretCommandTest {
         assertFalse(CommandHandler.startsWithCommand("/var/log/syslog: summarise the errors"));
         assertFalse(CommandHandler.startsWithCommand("/home/me/report.pdf send it"));
         assertFalse(CommandHandler.startsWithCommand("summarise /var/log/syslog"));
-        for (String task : List.of("/tmp: clean it", "/ is 95% full", "/24 subnet scan of the LAN", "/tmp is full")) {
+        for (String task : List.of("/ is 95% full", "/24 subnet scan of the LAN", "/var/log: clean it")) {
             assertFalse(CommandHandler.startsWithCommand(task), "a task about a path: " + task);
+        }
+        for (String command : List.of("/crde set K pw", "/c red set K pw", "/cr3d set K pw", "/\u0441red set K pw",
+                "/tmp: clean it")) {
+            assertTrue(CommandHandler.startsWithCommand(command), "a slash and a name is a command's: " + escaped(command));
         }
         assertEquals(commands.handle("owner", "/bg /status"), commands.handle("owner", "/bg /cred-set K Zq7-secret"),
                 "a command typed wrong is no task either");
@@ -310,10 +314,12 @@ public class SecretCommandTest {
             assertFalse(CommandHandler.displayed(text).contains("Zq7"), CommandHandler.displayed(text));
             assertTrue(commands.handle("owner", text).isPresent(), "answered: " + text);
         }
-        for (String prose : List.of("Why is my PUT /users update endpoint slow?", "In the docs, /users new shows the form",
-                "C:/Users add the report there")) {
-            assertFalse(CommandHandler.misplacedSecret(prose), prose);
+        for (String prose : List.of("see /usr/local/cred set up", "the /users list is long", "I typed /cred set",
+                "/credits left this month", "/userguide for the router")) {
+            assertFalse(CommandHandler.carriesSecret(prose), prose);
         }
+        // Accepted: prose that reads as a mistyped secret command is held back with it.
+        assertTrue(CommandHandler.misplacedSecret("Why is my PUT /users update endpoint slow?"));
     }
 
     @Test
@@ -325,5 +331,29 @@ public class SecretCommandTest {
         String answer = commands.handle("owner", text).orElse("");
         assertTrue(answer.startsWith("\u2705"), answer);
         assertEquals(List.of("Zq7-secret"), kept);
+    }
+
+    @Test
+    @DisplayName("a long message of the family is read in time proportional to it, and never overflows the stack")
+    void longFamilyMessages() {
+        String words = "/cred K " + "a ".repeat(200_000);
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(5), () -> {
+            assertTrue(CommandHandler.carriesSecret(words));
+            assertEquals("/cred \u2026", CommandHandler.displayed(words));
+            assertTrue(CommandHandler.startsWithCommand("/a" + ".".repeat(200_000) + "b"));
+            assertFalse(CommandHandler.startsWithCommand("/" + "1".repeat(200_000)));
+        });
+    }
+
+    @Test
+    @DisplayName("a no-break space after a command's word is a space: /cred delete is run, not answered as a typo")
+    void aNoBreakSpaceAfterTheCommand() {
+        List<String> deleted = new ArrayList<>();
+        var handler = new CommandHandler(null, null, null, null,
+                new CredentialVault(null) {
+                    @Override public void deleteCredential(String userId, String key) { deleted.add(key); }
+                }, null, null, null, null, null, null, null, null, null, null);
+        assertTrue(handler.handle("owner", "/cred\u00a0delete OLD_KEY").orElse("").contains("deleted"));
+        assertEquals(List.of("OLD_KEY"), deleted);
     }
 }

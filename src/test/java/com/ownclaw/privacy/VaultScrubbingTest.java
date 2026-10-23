@@ -87,13 +87,12 @@ class VaultScrubbingTest {
         assertEquals(Map.of(), VaultSecrets.of("u9"), "and nothing the vault does not hold");
 
         restarted.deleteCredential("u1", "SSH_PRIVATE_KEY");
-        assertEquals(Map.of("SSH_PRIVATE_KEY", SECRET), VaultSecrets.of("u1"),
-                "a task started before the delete can still print it");
+        assertEquals(Map.of(), VaultSecrets.of("u1"),
+                "deleting is how a value stored by mistake stops being replaced in every text");
         restarted.storeCredential("u1", "ROUTER_PASSWORD", "admin");
         assertTrue(VaultSecrets.of("u1").containsValue("admin"));
         restarted.deleteCredential("u1", "ROUTER_PASSWORD");
-        assertFalse(VaultSecrets.of("u1").containsValue("admin"),
-                "deleting is how a short value stored by mistake stops being replaced in every text");
+        assertFalse(VaultSecrets.of("u1").containsValue("admin"), "a short one alike");
     }
 
     @Test
@@ -108,7 +107,7 @@ class VaultScrubbingTest {
         VaultSecrets.set("u1", Map.of("ROUTER_PASSWORD", "third-pass-789"));
         assertEquals(3, VaultSecrets.of("u1").size(), "each value it held: " + VaultSecrets.of("u1"));
         VaultSecrets.set("u1", Map.of());
-        assertEquals(3, VaultSecrets.of("u1").size(), "deleted: each long value it held is still scrubbed");
+        assertEquals(Map.of(), VaultSecrets.of("u1"), "deleted: every value it held goes with it");
         VaultSecrets.set("u2", Map.of("ROUTER_PIN", "4821"));
         VaultSecrets.set("u2", Map.of());
         assertEquals(Map.of(), VaultSecrets.of("u2"), "a short one goes: \"4821\" is in many a text");
@@ -180,10 +179,10 @@ class VaultScrubbingTest {
         String printed = "key:\nRkFLRS1HQ1AtS0VZLUJPRFktTElORQ==\n";
         assertFalse(Redactor.scrubVault(printed, Map.of("GCP_KEY", json)).text().contains("RkFLRS1HQ1A"),
                 "a JSON credential's key, printed decoded, a line at a time");
-        assertEquals("the \"type\": \"service_account\", here",
-                Redactor.scrubVault("the \"type\": \"service_account\", here",
+        assertEquals("the type is service_account here",
+                Redactor.scrubVault("the type is service_account here",
                         Map.of("GCP_KEY", "{\n\"type\": \"service_account\",\n\"k\": \"RkFLRS1HQ1AtS0VZ\"\n}")).text(),
-                "a line with no word of letters and digits both is no secret of its own");
+                "a word of a line is no form of its own, but key material");
     }
 
     /** Scrubbed of {@code value}: changed when {@code changes}, and then holding none of its secret's characters' run. */
@@ -205,12 +204,18 @@ class VaultScrubbingTest {
         changes("HTML with &#39;", "Zq7'apos-secret", "<td>Zq7&#39;apos-secret</td>", true);
         changes("repr in double quotes: a single quote and no double", "Zq7'it\u00a0x-secret", "['ssh', \"Zq7'it\\xa0x-secret\"]", true);
         changes("a WireGuard config's key line, alone", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/24", "PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", true);
+        changes("... and its key, printed without its line", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/24", "peer key yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk= used", true);
         changes(".netrc line, alone", "machine git.local login bob password s3cr3tPassw0rd\nmachine nas login bob password Other9Pass", "machine git.local login bob password s3cr3tPassw0rd", true);
-        changes("a config's structure is no secret", "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nclusters:", "[Interface]\nclusters:\nAddress = 10.0.0.9/24", false);
-        changes("a short value's form is found as a word", "p@ss12", "q=p%40ss123&r=1", false);
-        changes("... and is removed as one", "p@ss12", "q=p%40ss12&r=1", true);
+        changes("a .env's password line, alone", "DB_HOST=db01.internal\nVERSION=v1.2.3-rc4\nDB_PASSWORD=P@ssword!", "DB_PASSWORD=P@ssword!", true);
+        changes("backup codes, one of them", "47291836\n18273645\n55102938", "use backup code 18273645 now", true);
+        changes("a word of a config's lines is no form of its own", "DB_HOST=db01.internal\nVERSION=v1.2.3-rc4\nDB_PASSWORD=P@ssword!", "ping db01.internal, version v1.2.3-rc4", false);
+        changes("a short value's encoded form, inside text encoded alike", "@dmin1", "payload=%7B%22pw%22%3A%22%40dmin1%22%7D", true);
+        changes("a quoted value is judged without its quotes: too short", "\"12\"", "at 12:30, 12 files", false);
+        changes("... and a short one as a word", "\"admin1\"", "sysadmin1 and admin10", false);
+        changes("... found as one", "\"admin1\"", "pw admin1.", true);
         changes("a value too short to remove has no forms", "<", "a &lt; b", false);
         changes("a JSON line break before a short value is no part of a word", "admin12", "{\"stderr\":\"Password:\\nadmin12\\nOK\"}", true);
+        changes("an escaped backslash and n are letters of the word", "admin12", "{\"path\":\"C:\\\\nadmin12\\\\x\"}", false);
     }
 
     @Test

@@ -58,7 +58,7 @@ public final class Redactor {
     public static final String SECRET_REMOVED = "«secret removed»";
 
     /** A vault value from this length up is removed wherever it stands, inside a word too. */
-    static final int MIN_SECRET_LENGTH = 8;
+    private static final int MIN_SECRET_LENGTH = 8;
 
     /**
      * A shorter vault value from this length up is removed where it stands as a word of its own:
@@ -278,10 +278,11 @@ public final class Redactor {
             };
 
     /**
-     * One form of a vault value, and how it is found: as a word of its own when the value is
-     * shorter than {@link #MIN_SECRET_LENGTH}, as {@link #vaultValueAt} finds the value -- a
-     * six-character password percent-encoded is eight characters, and found anywhere it was taken
-     * out of a longer one -- and anywhere when it is not.
+     * One form of a vault value, and how it is found: as a word of its own when it is the very
+     * text of a value shorter than {@link #MIN_SECRET_LENGTH}, as {@link #vaultValueAt} finds such
+     * a value; anywhere when it is not. A short value's encoded forms -- "%40dmin1", a JSON
+     * string's escapes -- are found anywhere: their neighbours in a text encoded alike are
+     * escapes too, which end in a letter or a digit, and as words they were never found.
      */
     public record VaultForm(String key, String form, boolean word) {
         /** Where the form stands in {@code text}, from {@code from} on, or -1. */
@@ -296,10 +297,6 @@ public final class Redactor {
         for (var e : vault.entrySet()) {
             String value = e.getValue();
             if (value == null || e.getKey() == null) continue;
-            // What the value itself is not removed as -- fewer than MIN_VAULT_WORD characters, a
-            // word like "true" -- none of its forms is: a vault value "<" took every "&lt;" out.
-            if (value.length() < MIN_VAULT_WORD || NOT_VALUES.contains(value.toLowerCase(Locale.ROOT))) continue;
-            boolean word = value.length() < MIN_SECRET_LENGTH;
             var bases = new java.util.LinkedHashSet<String>();
             bases.add(value);
             if (value.length() >= 2 && "\"'`".indexOf(value.charAt(0)) >= 0
@@ -312,76 +309,98 @@ public final class Redactor {
             var pieces = new java.util.LinkedHashSet<String>();
             for (String base : bases) pieces.addAll(piecesOf(base));
             pieces.removeAll(bases);
-            for (String form : encodings(bases)) forms.add(new VaultForm(e.getKey(), form, word));
-            for (String form : encodings(pieces)) forms.add(new VaultForm(e.getKey(), form, false));
+            var seen = new java.util.HashSet<String>();
+            for (String base : bases) {
+                // What a value itself is not removed as -- fewer than MIN_VAULT_WORD characters, a
+                // word like "true" -- none of its forms is, judged for each base, without the
+                // quotes it was typed in: a vault value "<" took every "&lt;" out, and a stored
+                // "12" every 12 of a date.
+                if (base.length() < MIN_VAULT_WORD || NOT_VALUES.contains(base.toLowerCase(Locale.ROOT))) continue;
+                boolean shortValue = base.length() < MIN_SECRET_LENGTH;
+                for (String form : encodings(base)) {
+                    if (seen.add(form)) forms.add(new VaultForm(e.getKey(), form, shortValue && form.equals(base)));
+                }
+            }
+            for (String piece : pieces) {
+                for (String form : encodings(piece)) {
+                    if (seen.add(form)) forms.add(new VaultForm(e.getKey(), form, false));
+                }
+            }
         }
         forms.sort(Comparator.comparingInt((VaultForm f) -> -f.form().length())
                 .thenComparing(VaultForm::key).thenComparing(VaultForm::form));
         return List.copyOf(forms);
     }
 
-    /** What splits a line into the words a secret of its own can be: blanks, and what stands around a value. */
+    /** What splits a line into the words that can be key material: blanks, and what stands around a value. */
     private static final java.util.regex.Pattern PIECE_SPLIT = java.util.regex.Pattern.compile(
-            "[\\s\\p{Cf}=:,;'\"()\\[\\]{}<>]+", java.util.regex.Pattern.UNICODE_CHARACTER_CLASS);
+            "[\\s\\p{Cf}:,;'\"()\\[\\]{}<>]+", java.util.regex.Pattern.UNICODE_CHARACTER_CLASS);
+
+    /** Key material's alphabet: base64's, base64url's and hex's. */
+    private static final java.util.regex.Pattern KEY_ALPHABET = java.util.regex.Pattern.compile("[A-Za-z0-9+/=_-]+");
 
     /**
-     * The parts of a value of more than one line that are secrets of their own: each line, and
-     * each word of a line, that is one by {@link #secretPiece}. A text shown a line at a time --
-     * the live call's reasoning -- held an SSH key whole, a line in each frame; a config's
-     * "PrivateKey = yAnz...=" line, alone, held its key. Lines are split also at "\n" written
-     * inside the value, as a JSON credential writes its key.
+     * The parts of a value of more than one line that a text can hold on their own: each line of
+     * {@link #MIN_SECRET_LENGTH} characters or more but a PEM block's armor -- a text shown a line
+     * at a time, the live call's reasoning, held an SSH key whole, a line in each frame; a
+     * config's "PrivateKey = ...=" line, alone, held its key -- and each word of a line that is
+     * key material ({@link #keyLike}), printed without its line. Lines are split also at "\n"
+     * written inside the value, as a JSON credential writes its key. Not a PEM armor line: it is
+     * every such key's, and taken as this one's, no other key's block was found by it
+     * (secretsIn). Other lines of a structured credential -- a kubeconfig's "clusters:" -- are
+     * replaced where the very line stands elsewhere: store a token, not the whole config.
      */
     private static java.util.Set<String> piecesOf(String value) {
         var out = new java.util.LinkedHashSet<String>();
         if (value.indexOf('\n') < 0 && !value.contains("\\n")) return out;
         for (String line : value.split("\r?\n|\\\\n")) {
             String l = line.strip();
-            if (secretPiece(l)) out.add(l);
-            for (String part : PIECE_SPLIT.split(l)) {
-                if (secretPiece(part)) out.add(part);
+            if (l.length() >= MIN_SECRET_LENGTH && !l.startsWith("-----")) out.add(l);
+            for (String word : PIECE_SPLIT.split(l)) {
+                if (keyLike(word)) out.add(word);
             }
         }
         return out;
     }
 
     /**
-     * Whether a part of a value is a secret of its own: from {@link #MIN_SECRET_LENGTH} characters,
-     * with no blank in it, and letters and digits both -- key material and passwords are; a
-     * config's structure, "[Interface]", "clusters:", "service_account", a PEM block's armor, is
-     * not, and taken as the value's own it was replaced in every unrelated text, and another key
-     * of the same kind lost the armor line its block is found by (secretsIn).
+     * Whether a word is key material: sixteen characters or more of base64's or hex's alphabet,
+     * letters and digits both, and of both cases or thirty-two characters long -- a WireGuard
+     * key, a token. Not a host name with a digit, a version, a path or an identifier
+     * ("db01.internal", "v1.2.3-rc4", "auth_provider_x509_cert_url"), which, taken as the
+     * value's own, were replaced in every unrelated text.
      */
-    private static boolean secretPiece(String s) {
-        return s.length() >= MIN_SECRET_LENGTH
-                && s.codePoints().noneMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c))
-                && s.codePoints().anyMatch(Character::isLetter) && s.codePoints().anyMatch(Character::isDigit);
+    private static boolean keyLike(String word) {
+        String w = word.replaceFirst("=+$", "");
+        if (w.length() < 16 || !KEY_ALPHABET.matcher(w).matches()) return false;
+        boolean digit = w.chars().anyMatch(Character::isDigit);
+        boolean upper = w.chars().anyMatch(Character::isUpperCase), lower = w.chars().anyMatch(Character::isLowerCase);
+        return digit && (upper || lower) && (upper && lower || w.length() >= 32);
     }
 
-    /** Each text in every form a program writes it in ({@link #vaultForms}). */
-    private static java.util.Set<String> encodings(java.util.Set<String> texts) {
+    /** A text in every form a program writes it in ({@link #vaultForms}), itself first. */
+    private static java.util.Set<String> encodings(String base) {
         var each = new java.util.LinkedHashSet<String>();
-        for (String base : texts) {
-            String repr = pythonRepr(base);
-            each.add(base);
-            each.add(jacksonString(base));
-            each.add(pythonJson(base, false));
-            each.add(pythonJson(base, true));
-            each.add(repr);
-            // Composed, as this service composes them: a repr in a skill's result or progress,
-            // which the runner writes with json.dumps; a JSON stderr kept inside a JSON column.
-            each.add(pythonJson(repr, false));
-            each.add(pythonJson(repr, true));
-            each.add(jacksonString(jacksonString(base)));
-            each.add(pythonJson(pythonJson(base, true), true));
-            each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8));
-            each.add(percentEncoded(base, "_.-~", true));    // Python's quote_plus, requests' query
-            each.add(percentEncoded(base, "_.-~/", false));  // Python's quote
-            String html = base.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    .replace("\"", "&quot;");
-            each.add(html.replace("'", "&#39;"));
-            each.add(html.replace("'", "&#x27;"));           // Python's html.escape
-            each.add(base.replace("'", "'\"'\"'"));         // inside shlex.quote's quotes
-        }
+        String repr = pythonRepr(base);
+        each.add(base);
+        each.add(jacksonString(base));
+        each.add(pythonJson(base, false));
+        each.add(pythonJson(base, true));
+        each.add(repr);
+        // Composed, as this service composes them: a repr in a skill's result or progress,
+        // which the runner writes with json.dumps; a JSON stderr kept inside a JSON column.
+        each.add(pythonJson(repr, false));
+        each.add(pythonJson(repr, true));
+        each.add(jacksonString(jacksonString(base)));
+        each.add(pythonJson(pythonJson(base, true), true));
+        each.add(java.net.URLEncoder.encode(base, java.nio.charset.StandardCharsets.UTF_8));
+        each.add(percentEncoded(base, "_.-~", true));    // Python's quote_plus, requests' query
+        each.add(percentEncoded(base, "_.-~/", false));  // Python's quote
+        String html = base.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;");
+        each.add(html.replace("'", "&#39;"));
+        each.add(html.replace("'", "&#x27;"));           // Python's html.escape
+        each.add(base.replace("'", "'\"'\"'"));         // inside shlex.quote's quotes
         each.remove("");
         return each;
     }
@@ -488,11 +507,21 @@ public final class Redactor {
      * just before or after it -- from {@code from} on, or -1. A JSON escape before it is no part
      * of a word: in {@code "Password:\nadmin12"} the {@code n} is the line break's.
      */
+    /**
+     * Whether a JSON escape ends just before {@code at}: n, t, r, b or f after a backslash that is
+     * not itself escaped -- in {@code C:\\nadmin12} the n is a letter of the word.
+     */
+    private static boolean escapeBefore(String text, int at) {
+        if (at < 2 || "ntrbf".indexOf(text.charAt(at - 1)) < 0) return false;
+        int backslashes = 0;
+        for (int i = at - 2; i >= 0 && text.charAt(i) == '\\'; i--) backslashes++;
+        return backslashes % 2 == 1;
+    }
+
     private static int wordAt(String text, String value, int from) {
         for (int at = text.indexOf(value, from); at >= 0; at = text.indexOf(value, at + 1)) {
             int end = at + value.length();
-            boolean startsWord = at == 0 || !wordChar(text.charAt(at - 1))
-                    || at >= 2 && text.charAt(at - 2) == '\\' && "ntrbf".indexOf(text.charAt(at - 1)) >= 0;
+            boolean startsWord = at == 0 || !wordChar(text.charAt(at - 1)) || escapeBefore(text, at);
             if (startsWord && (end >= text.length() || !wordChar(text.charAt(end)))) {
                 return at;
             }
