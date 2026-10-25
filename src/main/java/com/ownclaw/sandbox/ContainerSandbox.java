@@ -259,6 +259,26 @@ public class ContainerSandbox {
         if (builtImages.contains(imageTag)) {
             return imageTag;
         }
+        // One build of an image at a time: a second task asking for the same one -- tasks of
+        // different chats run side by side -- waits for the first's build and finds it built,
+        // instead of building it again beside it for minutes.
+        synchronized (buildLocks.computeIfAbsent(imageTag, t -> new Object())) {
+            if (builtImages.contains(imageTag)) {
+                return imageTag;
+            }
+            return buildImage(candidates, imageTag, systemPackages, pipRequirements, skillDir, progressCallback);
+        }
+    }
+
+    /** One for each image being asked for, by its tag: see {@link #ensureImage}. */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> buildLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** {@link #ensureImage}, its image's build lock held. */
+    private String buildImage(List<String> candidates, String imageTag, List<String> systemPackages,
+                              String pipRequirements, Path skillDir,
+                              SandboxManager.ProgressCallback progressCallback)
+            throws IOException, InterruptedException {
 
         // Check if the image already exists in the local registry
         if (imageExists(imageTag)) {

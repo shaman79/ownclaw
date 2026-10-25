@@ -130,6 +130,20 @@ public class SkillManager {
      */
     public String createSkill(Map<String, Object> params) {
         String name = str(params, "name");
+        if (name == null) return createSkillHeld(params);
+        // Held to write while its files are written, checked and registered: another task's
+        // skill_create of the same name waits, and so does every run of it.
+        var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
+        changing.lock();
+        try {
+            return createSkillHeld(params);
+        } finally {
+            changing.unlock();
+        }
+    }
+
+    private String createSkillHeld(Map<String, Object> params) {
+        String name = str(params, "name");
         String description = str(params, "description");
         String code = str(params, "code");
         // --- Validate ---
@@ -239,7 +253,8 @@ public class SkillManager {
             if (skill == null) return "ERROR: Failed to load — check SKILL.yaml format.";
 
             boolean isUpdate = toolRegistry.find(name).isPresent();
-            dynamicSkillRegistry.unregister(name);
+            // Registered over the old one, not after unregistering it: in between, another task's
+            // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
@@ -318,6 +333,17 @@ public class SkillManager {
      */
     public String deleteSkill(String name) {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
+        // Held to write: the runs of it under way end first, and none starts while it goes.
+        var removing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
+        removing.lock();
+        try {
+            return deleteSkillHeld(name);
+        } finally {
+            removing.unlock();
+        }
+    }
+
+    private String deleteSkillHeld(String name) {
         if (!dynamicSkillRegistry.isDynamic(name)) {
             return "ERROR: '" + name + "' is not a modifiable skill.";
         }
@@ -391,7 +417,8 @@ public class SkillManager {
         Path checkScript = null;
         try {
             var resolution = pythonEnv.resolveExecution(skillDir, name);
-            checkScript = skillDir.resolve("_load_check.py");
+            // A name of its own: two checks of the same skill once deleted each other's script.
+            checkScript = skillDir.resolve("_load_check_" + Long.toHexString(System.nanoTime()) + ".py");
             Files.writeString(checkScript,
                     "import sys, importlib.util, traceback\n" +
                     "try:\n" +

@@ -349,7 +349,9 @@ public class PythonEnvironmentService {
     /** Remove a skill's environments now, because the skill itself is being removed. */
     public void removeEnvironments(String skillName) {
         if (envsDir == null) return;
-        removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+        synchronized (envLock(skillName)) {
+            removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+        }
     }
 
     /**
@@ -432,6 +434,24 @@ public class PythonEnvironmentService {
      * be made, the system Python as it is, with why in {@link PythonResolution#installError}.
      */
     public PythonResolution resolveExecution(Path skillDir, String skillName) {
+        synchronized (envLock(skillName)) {
+            return resolveExecutionHeld(skillDir, skillName);
+        }
+    }
+
+    /**
+     * One lock for each skill's environments, by its name: tasks of different chats run side by
+     * side, and two first runs of a skill made its venv and installed its requirements into it
+     * at once, and a self-heal's added package lost to another's rewrite of requirements.txt.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> envLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Object envLock(String skillName) {
+        return envLocks.computeIfAbsent(String.valueOf(skillName), n -> new Object());
+    }
+
+    private PythonResolution resolveExecutionHeld(Path skillDir, String skillName) {
         Path reqFile = skillDir.resolve("requirements.txt");
         if (!Files.exists(reqFile)) {
             return new PythonResolution(systemPython, Map.of(), null);
@@ -551,6 +571,12 @@ public class PythonEnvironmentService {
      *                     venv when the fallback target install was tried and failed too
      */
     public void installPackages(Path skillDir, String skillName, List<String> packages) throws IOException {
+        synchronized (envLock(skillName)) {
+            installPackagesHeld(skillDir, skillName, packages);
+        }
+    }
+
+    private void installPackagesHeld(Path skillDir, String skillName, List<String> packages) throws IOException {
         if (packages == null || packages.isEmpty()) return;
         try {
             Path venvDir = envsDir.resolve(skillName);
@@ -720,7 +746,12 @@ public class PythonEnvironmentService {
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
                 throw new IOException("Failed to download get-pip.py: HTTP " + resp.statusCode());
             }
-            Files.write(dest, resp.body(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            // Written aside and moved into place: another caller found a file of some size and ran
+            // it while it was still being written.
+            Path part = Files.createTempFile(dest.getParent(), "get-pip", ".part");
+            Files.write(part, resp.body(), StandardOpenOption.TRUNCATE_EXISTING);
+            Files.move(part, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             return dest;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

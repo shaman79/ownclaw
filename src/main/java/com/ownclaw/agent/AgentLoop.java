@@ -3135,9 +3135,11 @@ public class AgentLoop {
      * the process. Nothing surfaced it because the threads are daemons and idle.
      * <p>
      * A shared pool makes cancel() sufficient: the future stops, the threads stay and are reused.
+     * Four of them: tasks of different chats run side by side, each sending its live frames, and
+     * a page slow to take them held both threads of two.
      */
     private static final ScheduledExecutorService HEARTBEAT_SCHEDULER =
-            Executors.newScheduledThreadPool(2, r -> {
+            Executors.newScheduledThreadPool(4, r -> {
                 Thread t = new Thread(r, "llm-heartbeat");
                 t.setDaemon(true);
                 return t;

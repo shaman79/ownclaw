@@ -296,6 +296,17 @@ public class DynamicSkill implements Tool {
 
     @Override
     public ToolResult execute(Map<String, Object> params, ToolExecutionContext context) {
+        // Read-held for the run: a skill_create, delete or retirement of it waits for the run.
+        var running = SkillLocks.of(name).readLock();
+        running.lock();
+        try {
+            return run(params, context);
+        } finally {
+            running.unlock();
+        }
+    }
+
+    private ToolResult run(Map<String, Object> params, ToolExecutionContext context) {
         Path scriptPath = skillDir.resolve("skill.py");
         if (!Files.exists(scriptPath)) {
             return ToolResult.failure("Skill script not found: " + scriptPath);

@@ -50,9 +50,9 @@ class CommandDispatchOnceTest {
         }
 
         @Override
-        public Optional<String> handle(String userId, String message) {
+        public Optional<String> handle(String userId, String message, String sessionId) {
             asked.add(message);
-            return super.handle(userId, message);
+            return super.handle(userId, message, sessionId);
         }
     }
 

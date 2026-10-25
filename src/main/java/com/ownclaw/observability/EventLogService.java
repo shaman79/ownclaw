@@ -115,7 +115,7 @@ public class EventLogService {
     }
 
     /**
-     * Token usage for one task, or for whatever this user finished last if no id is given.
+     * Token usage for one task; none when no id is given.
      * <p>
      * The id matters. Without it this returns the newest task_completed row for the user, which
      * is a different task as soon as two can overlap — a scheduled digest finishing while a chat
@@ -124,22 +124,18 @@ public class EventLogService {
      * next task to finish first.
      */
     public long[] completedTaskTokens(String userId, String taskId) {
+        // No id, no tokens: a run that never got one -- refused for a full queue, dropped while it
+        // waited, broken before it began -- spent none, and the user's newest finished task is,
+        // with tasks of different chats side by side, another chat's.
+        if (taskId == null) return new long[]{0, 0};
         try {
-            var row = taskId != null
-                    ? jdbc.queryForMap("""
+            var row = jdbc.queryForMap("""
                 SELECT COALESCE(json_extract(details, '$.cloudTokens'), 0) AS cloud,
                        COALESCE(json_extract(details, '$.localTokens'), 0) AS local
                 FROM events
                 WHERE user_id = ? AND event_type = 'task_completed' AND task_id = ?
                 ORDER BY id DESC LIMIT 1
-                """, userId, taskId)
-                    : jdbc.queryForMap("""
-                SELECT COALESCE(json_extract(details, '$.cloudTokens'), 0) AS cloud,
-                       COALESCE(json_extract(details, '$.localTokens'), 0) AS local
-                FROM events
-                WHERE user_id = ? AND event_type = 'task_completed'
-                ORDER BY id DESC LIMIT 1
-                """, userId);
+                """, userId, taskId);
             return new long[]{
                     ((Number) row.get("cloud")).longValue(),
                     ((Number) row.get("local")).longValue()

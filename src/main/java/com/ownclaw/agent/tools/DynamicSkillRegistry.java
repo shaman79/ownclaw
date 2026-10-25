@@ -147,6 +147,21 @@ public class DynamicSkillRegistry {
         // that directory for the whole run -- which for a slow skill is minutes. The failure
         // would not be clean: the user gets a Python error about a path that existed a moment
         // ago. Retirement is never urgent, so the right answer is to skip and try next time.
+        // Held to write while it moves, taken only if nothing runs it -- any instance of it, the
+        // one registered before a skill_create among them, which its own count did not see.
+        var moving = SkillLocks.of(name).writeLock();
+        if (!moving.tryLock()) {
+            log.info("Not retiring '{}': it is running. It will be reconsidered on the next pass.", name);
+            return Optional.empty();
+        }
+        try {
+            return retireHeld(name, skill, reason);
+        } finally {
+            moving.unlock();
+        }
+    }
+
+    private Optional<Path> retireHeld(String name, DynamicSkill skill, String reason) {
         int running = skill.inFlight();
         if (running > 0) {
             log.info("Not retiring '{}': {} invocation(s) still running. It will be reconsidered "
@@ -434,12 +449,17 @@ public class DynamicSkillRegistry {
         return dynamicSkills.containsKey(name);
     }
 
-    /** Unregister all dynamic skills and re-scan the generated directory. */
+    /**
+     * Re-scan the generated directory: each skill found is registered over the one loaded before,
+     * and one no longer there is unregistered after. Unregistering them all first left every
+     * other task, running beside the reload, finding no such tool.
+     */
     public void reload() {
-        for (String name : new ArrayList<>(dynamicSkills.keySet())) {
-            unregister(name);
-        }
+        var before = new java.util.HashMap<>(dynamicSkills);
         init();
+        for (var e : before.entrySet()) {
+            if (dynamicSkills.get(e.getKey()) == e.getValue()) unregister(e.getKey());
+        }
     }
 
     private String getString(Map<String, Object> map, String key) {
