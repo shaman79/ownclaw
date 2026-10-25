@@ -147,6 +147,7 @@ class TabChatsTest {
         a.send("message", "and the second one?", null);
         assertEquals(List.of("is the router up?", "and the second one?"), asked(x),
                 "a frame naming no chat is in the chat its tab named last");
+        assertEquals(x, conversations.getCurrentSession(USER), "the chat last written in, whichever tab");
 
         String theirs = conversations.createSession("u2", "Theirs");
         a.send("message", "one more", theirs);
@@ -252,6 +253,15 @@ class TabChatsTest {
                 Map.of(ChatStatusEmitter.SESSION, y));
         assertEquals(y, a.last("progress").path("sessionId").asText(), "the chat it was saved in");
 
+        // Unattended work's too, marked as such.
+        emitter.running(USER, "bg1", x, () -> null);
+        emitter.inBackground("bg1", () -> {
+            emitter.emitForTask(USER, "bg1", StatusMessage.Type.PROGRESS_MESSAGE, "Fetched the digest",
+                    Map.of(ChatStatusEmitter.SESSION, y));
+            return null;
+        });
+        assertEquals(y, a.last("progress").path("sessionId").asText(), "the chat it was saved in, unattended or not");
+
         emitter.emitForTask(USER, "t2", StatusMessage.Type.STEP, "a task of no chat");
         assertTrue(a.last("status").path("sessionId").isMissingNode(), a.last("status").toString());
         emitter.ended("t1");
@@ -297,7 +307,7 @@ class TabChatsTest {
         Tab a = tab(x);
         conversations.deleteSession(USER, x);
         a.send("message", "hello?", null);
-        assertEquals(List.of("hello?"), asked(conversations.getCurrentSession(USER)),
-                "a deleted chat files nothing: the open one does");
+        assertEquals(List.of("hello?"), asked(y), "a deleted chat files nothing: the account's open one does");
+        assertEquals(y, conversations.getCurrentSession(USER), "and stays the open one");
     }
 }
