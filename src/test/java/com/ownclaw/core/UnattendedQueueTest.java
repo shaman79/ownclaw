@@ -79,10 +79,12 @@ class UnattendedQueueTest {
         queue.submit("u1", "check the router", 1);
         assertTrue(queue.isAttendedBusyFor("u1"), "a task asked for, waiting behind them, is");
 
-        assertEquals(List.of("Task queued (position 2)", "Task queued (position 3)"),
-                seen.stream().map(StatusMessage::text).toList());
-        assertTrue(marked(seen.get(0)), "the scheduled run's: " + seen.get(0));
-        assertNull(seen.get(1).data(), "the attended task's, as it always was: " + seen.get(1));
+        assertEquals(List.of("Task queued (position 1): every worker is busy.",
+                        "Task queued (position 2): every worker is busy.",
+                        "Task queued (position 1): every worker is busy."),
+                seen.stream().map(StatusMessage::text).toList(), "the task asked for waits ahead of them");
+        assertTrue(marked(seen.get(0)) && marked(seen.get(1)), "the scheduled runs': " + seen);
+        assertNull(seen.get(2).data(), "the attended task's, as it always was: " + seen.get(2));
         // Mutation: emit QUEUED unmarked again -> a scheduled run queued behind another started the
         // spinner of whatever chat was open, and nothing of that run stops it now.
     }

@@ -43,8 +43,10 @@ class QueuedStopTest {
                 return AgentResult.completed("done", new AgentTrajectory(), 1);
             }
         };
+        var config = new OwnClawConfig();
+        config.getQueue().setMaxConcurrentTasks(1);   // so the second waits for the first's worker
         var queue = new TaskQueue(loop, new EventLogService(MigratedDatabase.at(tmp.resolve("t.db"))),
-                new ChatStatusEmitter(), new OwnClawConfig(), cancellation);
+                new ChatStatusEmitter(), config, cancellation);
         queue.start();
         try {
             var first = queue.submit("u1", "first", 1);

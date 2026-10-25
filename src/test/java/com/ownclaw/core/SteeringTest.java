@@ -89,6 +89,10 @@ class SteeringTest {
     TaskQueue queue;
 
     void start(Path tmp) throws Exception {
+        // One worker: these are the rules within a chat, and of the order work runs in, with one
+        // command queue driving every task. Tasks of different chats side by side are
+        // ParallelChatsTest's.
+        config.getQueue().setMaxConcurrentTasks(1);
         var emitter = new ChatStatusEmitter();
         emitter.subscribe("u1", this, statuses::add);
         queue = new TaskQueue(loop, new EventLogService(MigratedDatabase.at(tmp.resolve("t.db"))), emitter,

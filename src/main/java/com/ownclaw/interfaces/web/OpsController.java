@@ -478,9 +478,9 @@ public class OpsController {
      * <p>
      * This is the loop that makes autonomous development possible: send a prompt, read the
      * result, then read {@code /logs?grep=Task+<id>} for the step trail. It runs outside the task
-     * queue's lanes -- on the calling thread, or on a thread of its own when async -- so it does
-     * not wait behind other work, and for the same reason nothing serializes it: avoid running
-     * several at once against one Ollama instance.
+     * queue's workers -- on the calling thread, or on a thread of its own when async -- so it does
+     * not wait for a free worker. Its local model calls wait their turn as every task's do (the
+     * agent loop's local lane), and a chat turn waits for a task of its chat ({@link TaskQueue#runChat}).
      * <p>
      * Defaults to the owner's account so context, memory and credentials match normal use.
      * <p>
@@ -492,7 +492,7 @@ public class OpsController {
      * While it runs, another turn sent in that chat goes to it, as a message sent in the web
      * chat goes to a task asked there ({@link TaskQueue#steer}), and starts no run. A task asked
      * from the web chat or Telegram takes no turn ({@link com.ownclaw.core.Inbox#offer}): one sent
-     * in its chat runs beside it.
+     * in its chat runs after it, as one task at a time runs in a chat.
      */
     @PostMapping("/agent/run")
     public ResponseEntity<?> runAgent(@RequestBody Map<String, Object> body) {

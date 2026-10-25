@@ -18,21 +18,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /**
- * The task queue: tasks are submitted and run asynchronously, in priority order, one at a time
- * per lane -- one lane, unless {@code separate-background-lane} gives background work a second.
+ * The task queue: tasks are submitted and run asynchronously, in priority order, on a pool of
+ * {@code max-concurrent-tasks} workers -- one task at a time per chat, tasks of different chats
+ * side by side. A task that comes from no chat, a scheduled run or /bg, is a chat of its own: it
+ * runs beside the chats, but never takes the last worker, so a message sent in a chat always
+ * finds one. With {@code max-concurrent-tasks: 1} every task runs after the one before it, as
+ * they all did until there was more than one worker.
  * <p>
- * It serializes tasks, not Ollama. With one lane no two queued tasks run at once; with two, an
- * interactive and a background task can both call Ollama. Beside them the local model writes its
- * summaries of the private results of attended tasks, ended ones too -- but only while no task's
- * work is on it: a summary under way makes way for that, and is written again afterwards
- * ({@code LocalLane}). Work outside the queue -- an agent run from the ops or debug API, the ops
- * Ollama probe, the setup benchmark -- can call it beside a task. Nothing else serializes local
- * calls: the Ollama server decides whether requests that arrive together run side by side or one
- * after the other.
+ * It does not serialize the local model: the agent loop's local lane does, one task at a time,
+ * from a task's first local call to its end ({@code LocalLane}).
  * <p>
  * A message the owner sends in a chat while a task of that chat runs goes to that task
  * ({@link #send}), which reads it before its next step -- when it came from where the task did
@@ -49,6 +50,8 @@ public class TaskQueue {
     private final ChatStatusEmitter statusEmitter;
     private final TaskCancellationService cancellationService;
     private final int maxQueuedTasks;
+    /** How many tasks run at once, at most: one per chat, of different chats. */
+    private final int workers;
 
     /** Priority 2 and above is background work — the scheduler and /bg submit at 2. */
     public static final int BACKGROUND_PRIORITY = 2;
@@ -56,21 +59,27 @@ public class TaskQueue {
     /** A message sent in a chat: interactive work. */
     private static final int CHAT_PRIORITY = 1;
 
-    /** Interactive work. When lanes are off, everything goes here and nothing changes. */
-    private final PriorityBlockingQueue<QueuedTask> interactiveQueue = new PriorityBlockingQueue<>();
-    /** Background work, drained by its own thread only when lanes are enabled. */
-    private final PriorityBlockingQueue<QueuedTask> backgroundQueue = new PriorityBlockingQueue<>();
+    /**
+     * Everything below is guarded by it: what waits, in the order it runs in -- priority, then the
+     * order it was sent in -- and what runs, by chat.
+     */
+    private final Object lock = new Object();
+    private final TreeSet<QueuedTask> waiting = new TreeSet<>();
+    /** The chats a task runs in now: a chat's next task waits for it. */
+    private final Map<Object, QueuedTask> runningByChat = new HashMap<>();
+    /** Tasks the pool runs now, and of them background ones. */
+    private int runningOnPool;
+    private int runningBackground;
+    /** Chat turns the ops API runs on its own thread now (#runChat): work going on, too. */
+    private int runningOutside;
+    private boolean stopped;
 
-    private final AtomicInteger queueSize = new AtomicInteger(0);
-    /** Count, not a flag: with two lanes there can be two tasks in flight. */
-    private final AtomicInteger running = new AtomicInteger(0);
     /**
      * The order work was sent in: of two tasks with the same priority, the one sent first runs
      * first -- a message handed to a running task that ended without reading it too, in the
      * place it took when it was sent ({@link #steer}).
      */
     private final AtomicLong added = new AtomicLong();
-    private final boolean separateBackgroundLane;
     private ExecutorService workerPool;
 
     /**
@@ -80,7 +89,8 @@ public class TaskQueue {
      */
     private final Map<Chat, Inbox> inboxes = new ConcurrentHashMap<>();
 
-    private record Chat(String userId, String sessionId) {}
+    /** A chat, by its user and its id: what one task at a time runs in. */
+    public record Chat(String userId, String sessionId) {}
 
     /**
      * What became of a message sent in a chat ({@link #send}), with the line its sender is shown:
@@ -119,35 +129,25 @@ public class TaskQueue {
         this.statusEmitter = statusEmitter;
         this.cancellationService = cancellationService;
         this.maxQueuedTasks = config.getQueue().getMaxQueuedTasks();
-        this.separateBackgroundLane = config.getQueue().isSeparateBackgroundLane();
+        this.workers = Math.max(1, config.getQueue().getMaxConcurrentTasks());
     }
 
     @PostConstruct
     public void start() {
-        // One thread per lane. The original comment here said tasks are serialized because
-        // "Ollama is the bottleneck" — that stopped being true when routing moved to
-        // cloud-first, and the cost of keeping it was that a background task running for
-        // minutes blocked every interactive message behind it on the same thread. What that
-        // leaves serialized is in the class comment.
-        int threads = separateBackgroundLane ? 2 : 1;
         var counter = new AtomicInteger();
-        workerPool = Executors.newFixedThreadPool(threads, r -> {
+        workerPool = Executors.newFixedThreadPool(workers, r -> {
             Thread t = new Thread(r, "task-queue-worker-" + counter.incrementAndGet());
             t.setDaemon(true);
             return t;
         });
-
-        workerPool.submit(() -> processLoop(interactiveQueue, "interactive"));
-        if (separateBackgroundLane) {
-            workerPool.submit(() -> processLoop(backgroundQueue, "background"));
-            log.info("Task queue started with separate interactive and background lanes");
-        } else {
-            log.info("Task queue started (single lane)");
-        }
+        log.info("Task queue started: {} worker(s), one task at a time per chat", workers);
     }
 
     @PreDestroy
     public void stop() {
+        synchronized (lock) {
+            stopped = true;
+        }
         if (workerPool != null) {
             workerPool.shutdownNow();
         }
@@ -164,7 +164,7 @@ public class TaskQueue {
     public CompletableFuture<AgentResult> submit(String userId, String message, int priority) {
         CompletableFuture<AgentResult> future = new CompletableFuture<>();
         add(new QueuedTask(userId, message, priority, System.currentTimeMillis(), added.incrementAndGet(),
-                future::complete, null));
+                future::complete, null, new Object()));
         return future;
     }
 
@@ -178,15 +178,18 @@ public class TaskQueue {
      * Telegram: given to the task running in its chat ({@link #steer}), unless he asked for it to
      * be queued; otherwise queued as a task of its own, answered through
      * {@link UserMessage#answer} -- by "System busy" at once when the queue is full. Its user row
-     * is saved before this is asked.
+     * is saved before this is asked. Queued it is only when it waits: behind a task of its own
+     * chat, or for a worker; one sent in a chat where nothing runs starts beside the others.
      *
      * @param queue the sender asked for a task of its own, after the work ahead of it
      */
     public Fate send(UserMessage message, boolean queue) {
         if (!queue && steer(message)) return Fate.STEERED;
-        boolean behind = isBusyFor(message.userId());
-        if (!enqueue(message, added.incrementAndGet())) return Fate.REFUSED;
-        return behind ? Fate.QUEUED : Fate.STARTED;
+        QueuedTask task = enqueue(message, added.incrementAndGet());
+        if (task == null) return Fate.REFUSED;
+        synchronized (lock) {
+            return waiting.contains(task) ? Fate.QUEUED : Fate.STARTED;
+        }
     }
 
     /**
@@ -207,16 +210,26 @@ public class TaskQueue {
      * Queue a chat message as a task of its own, in its place among the work queued.
      *
      * @param order its place: taken when it was sent
-     * @return false when the queue was full: it has been answered so
+     * @return the task queued, or null when the queue was full: it has been answered so
      */
-    private boolean enqueue(UserMessage message, long order) {
-        return add(new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
-                order, result -> answer(message, result), message));
+    private QueuedTask enqueue(UserMessage message, long order) {
+        var task = new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
+                order, result -> answer(message, result), message, new Chat(message.userId(), message.sessionId()));
+        return add(task) ? task : null;
     }
 
     /** @return false when the queue was full: the task has been answered so, and is not queued */
     private boolean add(QueuedTask task) {
-        if (queueSize.get() >= maxQueuedTasks) {
+        int ahead;
+        synchronized (lock) {
+            if (waiting.size() >= maxQueuedTasks) {
+                ahead = -1;
+            } else {
+                waiting.add(task);
+                ahead = 0;
+            }
+        }
+        if (ahead < 0) {
             eventLog.warn(task.userId(), null, "queue.full", "Queue full, task rejected");
             // An outcome, not a sentence. Returned as a bare string, "System busy" was
             // indistinguishable from an answer: the scheduler filed the run as completed and
@@ -225,36 +238,161 @@ public class TaskQueue {
                     "System busy — please try again later.", new AgentTrajectory(), 0));
             return false;
         }
+        dispatch();
 
-        // With lanes off, background work stays in the interactive queue and the behaviour is
-        // byte-for-byte what it was: one queue, one thread, priority order within it.
-        boolean background = separateBackgroundLane && task.priority() >= BACKGROUND_PRIORITY;
-        (background ? backgroundQueue : interactiveQueue).add(task);
-        int pos = queueSize.incrementAndGet();
-
-        if (pos > 1) {
-            statusEmitter.emit(task.userId(), StatusMessage.Type.QUEUED,
-                    "Task queued (position " + pos + ")", markOf(task));
+        // Said only of work that waits -- behind its chat's task, or for a worker -- and how much
+        // waits ahead of it.
+        int position = -1;
+        boolean behindItsChat = false;
+        synchronized (lock) {
+            if (waiting.contains(task)) {
+                position = waiting.headSet(task).size() + 1;
+                behindItsChat = runningByChat.containsKey(task.chatKey());
+            }
         }
-
-        eventLog.info(task.userId(), null, "task.queued",
-                "Priority P" + task.priority() + ", queue size " + pos);
+        if (position > 0) {
+            statusEmitter.emit(task.userId(), StatusMessage.Type.QUEUED, behindItsChat
+                    ? "Task queued: it runs after the task running in this chat."
+                    : "Task queued (position " + position + "): every worker is busy.", markOf(task));
+        }
+        eventLog.info(task.userId(), null, "task.queued", "Priority P" + task.priority()
+                + (position > 0 ? ", waiting at position " + position : ", started at once"));
         return true;
     }
 
     /**
-     * Run the task of a chat message on this thread and deliver its answer: the queue's worker
-     * runs a queued message here, and the ops API a chat turn. While it runs, what is sent in its
-     * chat goes to it, if it takes it ({@link #steer}); once it has ended, however it ended, and
-     * its answer has been delivered, what it did not read is queued as tasks of their own, each in
-     * the place it took when it was sent -- each answering its own row, its sender told -- so each
-     * finds that answer in the chat it reads. Queued then, they are not work a Stop that ended the
-     * task finds waiting: no message sent to a task is lost with it.
+     * Start what can start: in order, each task whose chat runs nothing, while a worker is free --
+     * and background work only while another worker stays free for a chat.
+     */
+    private void dispatch() {
+        var starting = new ArrayList<QueuedTask>();
+        synchronized (lock) {
+            if (stopped || workerPool == null) return;
+            for (QueuedTask task : waiting) {
+                if (runningOnPool + starting.size() >= workers) break;
+                if (runningByChat.containsKey(task.chatKey())) continue;
+                boolean background = task.priority() >= BACKGROUND_PRIORITY;
+                if (background && workers > 1 && runningBackground >= workers - 1) continue;
+                starting.add(task);
+                runningByChat.put(task.chatKey(), task);
+                if (background) runningBackground++;
+            }
+            waiting.removeAll(starting);
+            runningOnPool += starting.size();
+        }
+        for (QueuedTask task : starting) {
+            try {
+                workerPool.execute(() -> runOnPool(task));
+            } catch (RejectedExecutionException shutDown) {
+                finished(task, true);
+            }
+        }
+    }
+
+    /** A task of the pool, run on its worker; its chat is let go, and what waits started, after it. */
+    private void runOnPool(QueuedTask task) {
+        try {
+            // Drop work that was already waiting when the user stopped everything: asked with when
+            // it was queued, not when it would start, which is after the Stop. The answer says who
+            // stopped it -- Stop, /cancel, the ops API.
+            String stoppedBy = cancellationService.why(task.userId(), null, task.enqueuedAt());
+            if (stoppedBy != null) {
+                log.info("Dropping a queued task of {}, waiting when it was stopped: {}",
+                        task.userId(), stoppedBy);
+                task.done().accept(AgentResult.cancelled(
+                        "**Stopped:** " + stoppedBy + ", while it was still waiting in the "
+                                + "queue: it never started.", new AgentTrajectory(), 0));
+                return;
+            }
+            if (task.chat() != null) {
+                try {
+                    runChatHeld(task.chat());
+                } catch (RuntimeException e) {
+                    failed(task, e);   // runChatHeld has answered it, the error too
+                }
+                return;
+            }
+            // Priority is the origin signal: the scheduler and /bg submit at 2, and nobody is
+            // waiting on that.
+            boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
+            // The whole result, not only its text: the scheduler once kept only the response
+            // string, and so could not tell a finished job from one that gave up and recorded
+            // every run as completed.
+            task.done().accept(
+                    agentLoop.executeFull(task.userId(), task.message(), unattended, null, List.of(), null));
+        } catch (Exception e) {
+            failed(task, e);
+            task.done().accept(AgentResult.error(
+                    "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
+        } finally {
+            finished(task, true);
+        }
+    }
+
+    /** {@code task} has ended: its chat is let go, and what waits for a worker or for it starts. */
+    private void finished(QueuedTask task, boolean onPool) {
+        synchronized (lock) {
+            runningByChat.remove(task.chatKey(), task);
+            if (onPool) {
+                runningOnPool--;
+                if (task.priority() >= BACKGROUND_PRIORITY) runningBackground--;
+            } else {
+                runningOutside--;
+            }
+            lock.notifyAll();
+        }
+        dispatch();
+    }
+
+    /**
+     * Run the task of a chat message on this thread -- the ops API's chat turn -- once no task of
+     * its chat runs: it waits for the one that does, as a message queued in that chat would. Not
+     * beside it: the second task would take the chat's inbox from the first, and would not read
+     * the first one's answer.
      *
      * @throws RuntimeException what the task threw, once "Internal error" has been delivered as
      *                          its answer
      */
     public AgentResult runChat(UserMessage message) {
+        var held = new QueuedTask(message.userId(), message.text(), CHAT_PRIORITY, System.currentTimeMillis(),
+                added.incrementAndGet(), result -> {}, message, new Chat(message.userId(), message.sessionId()));
+        synchronized (lock) {
+            while (runningByChat.containsKey(held.chatKey()) || waitingIn(held.chatKey())) {
+                try {
+                    lock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted while waiting for the chat's task to end", e);
+                }
+            }
+            runningByChat.put(held.chatKey(), held);
+            runningOutside++;
+        }
+        try {
+            return runChatHeld(message);
+        } finally {
+            finished(held, false);
+        }
+    }
+
+    /** Whether a task of this chat waits in the queue. Under {@link #lock}. */
+    private boolean waitingIn(Object chatKey) {
+        for (QueuedTask t : waiting) {
+            if (chatKey.equals(t.chatKey())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Run the task of a chat message, its chat held, on this thread, and deliver its answer. While
+     * it runs, what is sent in its chat goes to it, if it takes it ({@link #steer}); once it has
+     * ended, however it ended, and its answer has been delivered, what it did not read is queued
+     * as tasks of their own, each in the place it took when it was sent -- each answering its own
+     * row, its sender told -- so each finds that answer in the chat it reads. Queued then, they
+     * are not work a Stop that ended the task finds waiting: no message sent to a task is lost
+     * with it. They wait for the chat, which is let go only after them.
+     */
+    private AgentResult runChatHeld(UserMessage message) {
         Chat chat = new Chat(message.userId(), message.sessionId());
         Inbox inbox = new Inbox(message.channel(), message.options());
         inboxes.put(chat, inbox);
@@ -274,12 +412,12 @@ public class TaskQueue {
             // the task did not read is queued, and one who does not find it comes after that.
             var queued = new ArrayList<UserMessage>();
             inbox.close((unread, order) -> {
-                if (enqueue(unread, order)) queued.add(unread);
+                if (enqueue(unread, order) != null) queued.add(unread);
             });
             inboxes.remove(chat, inbox);
             for (UserMessage unread : queued) {
                 statusEmitter.emit(unread.userId(), StatusMessage.Type.QUEUED, UNREAD,
-                        Map.of("requeued", unread.messageId()));
+                        Map.of("requeued", unread.messageId(), "sessionId", String.valueOf(unread.sessionId())));
             }
         }
     }
@@ -298,7 +436,7 @@ public class TaskQueue {
     }
 
     /**
-     * Whether this user has work running or waiting.
+     * Whether this user has work running or waiting, in any chat.
      * <p>
      * Needed because a browser that reconnects mid-task has no way to know one is in flight:
      * status messages are live-only and are not replayed, so a reload during a six-minute task
@@ -307,12 +445,15 @@ public class TaskQueue {
      */
     public boolean isBusyFor(String userId) {
         if (userId == null) return false;
-        for (var q : java.util.List.of(interactiveQueue, backgroundQueue)) {
-            for (QueuedTask t : q) {
+        synchronized (lock) {
+            for (QueuedTask t : waiting) {
+                if (userId.equals(t.userId())) return true;
+            }
+            for (QueuedTask t : runningByChat.values()) {
                 if (userId.equals(t.userId())) return true;
             }
         }
-        return runningUsers.contains(userId);
+        return false;
     }
 
     /**
@@ -322,86 +463,39 @@ public class TaskQueue {
      * (ChatStatusEmitter#BACKGROUND), so a spinner started for it would have nothing to stop it.
      */
     public boolean isAttendedBusyFor(String userId) {
-        if (userId == null) return false;
-        // The interactive queue only: the background queue holds unattended work alone.
-        for (QueuedTask t : interactiveQueue) {
-            if (userId.equals(t.userId()) && t.priority() < BACKGROUND_PRIORITY) return true;
-        }
-        return attendedUsers.contains(userId);
+        return attendedBusy(userId, null);
     }
 
-    /** Users whose tasks are executing right now. */
-    private final java.util.Set<String> runningUsers =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** {@link #isAttendedBusyFor(String)}, in one chat: what that chat's page shows as working. */
+    public boolean isAttendedBusyFor(String userId, String sessionId) {
+        return sessionId == null ? isAttendedBusyFor(userId) : attendedBusy(userId, new Chat(userId, sessionId));
+    }
+
+    private boolean attendedBusy(String userId, Chat chat) {
+        if (userId == null) return false;
+        synchronized (lock) {
+            for (QueuedTask t : waiting) {
+                if (attendedOf(t, userId, chat)) return true;
+            }
+            for (QueuedTask t : runningByChat.values()) {
+                if (attendedOf(t, userId, chat)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean attendedOf(QueuedTask t, String userId, Chat chat) {
+        return userId.equals(t.userId()) && t.priority() < BACKGROUND_PRIORITY
+                && (chat == null || chat.equals(t.chatKey()));
+    }
 
     /**
-     * Users whose attended tasks are executing right now. Attended work runs on the interactive
-     * lane alone, one task at a time, so the end of one cannot take out another still running.
-     */
-    private final java.util.Set<String> attendedUsers =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
-
-    /**
-     * Returns true if a task is currently being processed or waiting in the queue.
-     * Used by the deploy script to avoid restarting during active work.
+     * Returns true if a task is currently being processed or waiting in the queue -- the ops API's
+     * chat turns among them. Used by the deploy script to avoid restarting during active work.
      */
     public boolean isBusy() {
-        return running.get() > 0 || queueSize.get() > 0;
-    }
-
-    private void processLoop(PriorityBlockingQueue<QueuedTask> lane, String laneName) {
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                QueuedTask task = lane.take();
-                queueSize.decrementAndGet();
-                running.incrementAndGet();
-                runningUsers.add(task.userId());
-                boolean attended = task.priority() < BACKGROUND_PRIORITY;
-                if (attended) attendedUsers.add(task.userId());
-
-                try {
-                    // Drop work that was already waiting when the user stopped everything: asked
-                    // with when it was queued, not when it would start, which is after the Stop.
-                    // The answer says who stopped it -- Stop, /cancel, the ops API.
-                    String stoppedBy = cancellationService.why(task.userId(), null, task.enqueuedAt());
-                    if (stoppedBy != null) {
-                        log.info("Dropping a queued task of {}, waiting when it was stopped: {}",
-                                task.userId(), stoppedBy);
-                        task.done().accept(AgentResult.cancelled(
-                                "**Stopped:** " + stoppedBy + ", while it was still waiting in the "
-                                        + "queue: it never started.", new AgentTrajectory(), 0));
-                        continue;
-                    }
-
-                    if (task.chat() != null) {
-                        try {
-                            runChat(task.chat());
-                        } catch (RuntimeException e) {
-                            failed(task, laneName, e);   // runChat has answered it, the error too
-                        }
-                        continue;
-                    }
-                    // Priority is the origin signal: the scheduler and /bg submit at 2, and
-                    // nobody is waiting on that.
-                    boolean unattended = task.priority() >= BACKGROUND_PRIORITY;
-                    // The whole result, not only its text: the scheduler once kept only the
-                    // response string, and so could not tell a finished job from one that gave
-                    // up and recorded every run as completed.
-                    task.done().accept(
-                            agentLoop.executeFull(task.userId(), task.message(), unattended, null, List.of(), null));
-                } catch (Exception e) {
-                    failed(task, laneName, e);
-                    task.done().accept(AgentResult.error(
-                            "Internal error: " + e.getMessage(), new AgentTrajectory(), 0));
-                } finally {
-                    running.decrementAndGet();
-                    runningUsers.remove(task.userId());
-                    if (attended) attendedUsers.remove(task.userId());
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
+        synchronized (lock) {
+            return runningOnPool > 0 || runningOutside > 0 || !waiting.isEmpty();
         }
     }
 
@@ -410,35 +504,43 @@ public class TaskQueue {
      * the task's ending; what fails before the loop starts reaches here, and without this notice
      * a crash would go unannounced.
      */
-    private void failed(QueuedTask task, String laneName, Exception e) {
-        log.error("Task processing failed on the {} lane for user {}: {}",
-                laneName, task.userId(), e.getMessage(), e);
+    private void failed(QueuedTask task, Exception e) {
+        log.error("Task processing failed for user {}: {}", task.userId(), e.getMessage(), e);
         statusEmitter.emit(task.userId(), StatusMessage.Type.FAILED, "An unexpected error occurred.",
                 markOf(task));
     }
 
     /**
-     * What marks a status about this task as unattended work's (ChatStatusEmitter#BACKGROUND):
-     * null for attended work. Its statuses from here carry no task id for the emitter to know it
-     * by -- queued, it has none yet, and failed here, the queue never learned it -- so the mark is
-     * set here, by the rule the queue runs it by: its priority.
+     * What a status about this task from here says of it: unattended work's mark
+     * (ChatStatusEmitter#BACKGROUND), and the chat of a chat message's task, so a page shows it in
+     * that chat alone. Its statuses from here carry no task id for the emitter to know it by --
+     * queued, it has none yet, and failed here, the queue never learned it -- so they are set
+     * here, by the rule the queue runs it by.
      */
     private static Map<String, Object> markOf(QueuedTask task) {
-        return task.priority() >= BACKGROUND_PRIORITY ? Map.of(ChatStatusEmitter.BACKGROUND, true) : null;
+        var mark = new LinkedHashMap<String, Object>();
+        if (task.priority() >= BACKGROUND_PRIORITY) mark.put(ChatStatusEmitter.BACKGROUND, true);
+        if (task.chat() != null && task.chat().sessionId() != null) mark.put("sessionId", task.chat().sessionId());
+        return mark.isEmpty() ? null : mark;
     }
 
+    /** How many tasks wait. */
     public int getQueueSize() {
-        return queueSize.get();
+        synchronized (lock) {
+            return waiting.size();
+        }
     }
 
     /**
-     * A task waiting in the priority queue.
+     * A task waiting in the queue.
      *
      * @param enqueuedAt when it was queued: what a Stop is measured against
      * @param order      its place among the work of its priority: when it was sent ({@link #added})
      * @param done       what its result is handed to: the submitter's future, or the chat
      *                   message's answer
      * @param chat       the chat message it runs, or null for a task that comes from no chat
+     * @param chatKey    what one task at a time runs in: the message's {@link Chat}, or an object
+     *                   of its own for a task that comes from no chat
      */
     private record QueuedTask(
             String userId,
@@ -447,7 +549,8 @@ public class TaskQueue {
             long enqueuedAt,
             long order,
             Consumer<AgentResult> done,
-            UserMessage chat
+            UserMessage chat,
+            Object chatKey
     ) implements Comparable<QueuedTask> {
 
         @Override
