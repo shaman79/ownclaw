@@ -65,6 +65,8 @@ class ChatDeliveryTest {
         volatile Fate fate = Fate.STARTED;
         /** Whether an attended task of the user runs, as the test sets it. */
         volatile boolean busy;
+        /** The chats an attended task runs in, as the test sets them. */
+        volatile java.util.Set<String> busyChats = java.util.Set.of();
 
         Queue() {
             super(null, null, null, new OwnClawConfig(), null);
@@ -73,6 +75,16 @@ class ChatDeliveryTest {
         @Override
         public boolean isAttendedBusyFor(String userId) {
             return busy;
+        }
+
+        @Override
+        public boolean isAttendedBusyFor(String userId, String sessionId) {
+            return busy || sessionId != null && busyChats.contains(sessionId);
+        }
+
+        @Override
+        public java.util.SortedSet<String> attendedBusyChats(String userId) {
+            return new java.util.TreeSet<>(busyChats);
         }
 
         @Override
@@ -364,11 +376,13 @@ class ChatDeliveryTest {
         assertFalse(frames("session_info").getLast().path("taskRunning").asBoolean(true),
                 "a scheduled run waiting starts no spinner in the chat this page opens");
 
-        real.getFirst().submit(USER, "check the router", 1);
+        String open = conversations.getCurrentSession(USER);
+        real.getFirst().send(new UserMessage(USER, open, "row-1", "check the router", List.of(),
+                com.ownclaw.agent.TaskChat.Channel.WEB, ChatOptions.NONE, r -> {}), false);
         chat.handleMessage(socket, new TextMessage(mapper.writeValueAsString(
-                Map.of("type", "switch_session", "message", conversations.getCurrentSession(USER)))));
+                Map.of("type", "switch_session", "message", open))));
         assertTrue(frames("session_info").getLast().path("taskRunning").asBoolean(false),
-                "a task asked for, waiting behind it, does");
+                "a task asked for in the chat, waiting behind it, does");
 
         emitter.inBackground("bg123456", () -> {
             emitter.emitForTask(USER, "bg123456", ChatStatusEmitter.StatusMessage.Type.STEP, "Step 1 · anthropic",
@@ -386,12 +400,6 @@ class ChatDeliveryTest {
     @Test
     @DisplayName("on connect and on opening a chat, the page is told what the running task is doing now: its model call under way, else its last step")
     void sessionInfoSaysWhatTheTaskIsDoing(@TempDir Path tmp) throws Exception {
-        tasks = db -> {
-            var q = new TaskQueue(null, new com.ownclaw.observability.EventLogService(db), emitter,
-                    new OwnClawConfig(), new com.ownclaw.core.TaskCancellationService());
-            q.submit(USER, "audit the routers", 1);   // attended, not started: the page's working state
-            return q;
-        };
         var call = new java.util.concurrent.atomic.AtomicReference<ChatStatusEmitter.StatusMessage>();
         var line = Map.<String, Object>of("live", Map.of("summary",
                 "🏠 Local model · step 6, delegation turn 1 · reasoning · 23m 5s · 41,200 characters so far",
@@ -399,7 +407,16 @@ class ChatDeliveryTest {
         call.set(new ChatStatusEmitter.StatusMessage(ChatStatusEmitter.StatusMessage.Type.LIVE,
                 "🏠 Local model · step 6, delegation turn 1 · reasoning · 23m 5s · 41,200 characters so far "
                         + "· “Let me check the second router.”", line, "t1"));
-        emitter.running(USER, "t1", call::get);
+        tasks = db -> {
+            var q = new TaskQueue(null, new com.ownclaw.observability.EventLogService(db), emitter,
+                    new OwnClawConfig(), new com.ownclaw.core.TaskCancellationService());
+            // Attended, not started: the working state of the chat it was asked in.
+            String asked = conversations.getCurrentSession(USER);
+            q.send(new UserMessage(USER, asked, "row-1", "audit the routers", List.of(),
+                    com.ownclaw.agent.TaskChat.Channel.WEB, ChatOptions.NONE, r -> {}), false);
+            emitter.running(USER, "t1", asked, call::get);
+            return q;
+        };
         connect(tmp);
 
         var doing = frames("session_info").getLast().path("doing");

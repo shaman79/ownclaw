@@ -213,7 +213,7 @@ class LiveCallTaskTest {
         rig.cloud.think.add(c -> {
             taskId[0] = c.egress().taskId();
             return reasoning(12, () -> {
-                doingMidCall.set(rig.emitter.doing("u1"));
+                doingMidCall.set(rig.emitter.doing("u1", null));
                 opsMidCall.set(rig.loop.liveCallOf(taskId[0]));
             }).answer(c);
         });
@@ -258,7 +258,7 @@ class LiveCallTaskTest {
                 opsMidCall.get().toString());
         // Once the task has ended: no call under way, and nothing kept for a page.
         assertNull(rig.loop.liveCallOf(taskId[0]));
-        assertNull(rig.emitter.doing("u1"));
+        assertNull(rig.emitter.doing("u1", null));
         // Mutation: schedule only the first frame -> a few frames for half a second of reasoning.
     }
 
@@ -268,7 +268,7 @@ class LiveCallTaskTest {
         var seen = new AtomicReference<StatusMessage>();
         var emitter = new AtomicReference<ChatStatusEmitter>();
         var probe = tool("probe", List.of(), p -> {
-            seen.set(emitter.get().doing("u1"));
+            seen.set(emitter.get().doing("u1", null));
             return "probed";
         });
         var rig = new LoopRig(tmp, List.of(probe));
@@ -292,7 +292,7 @@ class LiveCallTaskTest {
         rig.loop.liveEveryMs = 50;
         var statuses = rig.statuses();
         var doingMidCall = new AtomicReference<StatusMessage>(new StatusMessage(StatusMessage.Type.STEP, "unset"));
-        rig.cloud.think.add(reasoning(6, () -> doingMidCall.set(rig.emitter.doing("u1"))));
+        rig.cloud.think.add(reasoning(6, () -> doingMidCall.set(rig.emitter.doing("u1", null))));
         rig.cloud.think.add(respond("Both routers answer."));
 
         AgentResult r = rig.loop.executeFull("u1", "check the routers", true);

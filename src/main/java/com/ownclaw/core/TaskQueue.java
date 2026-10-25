@@ -485,6 +485,24 @@ public class TaskQueue {
         return false;
     }
 
+    /**
+     * The chats of this user's with attended work running or waiting in them: what a page marks
+     * as working in its list of chats, beside the one it shows.
+     */
+    public java.util.SortedSet<String> attendedBusyChats(String userId) {
+        var chats = new TreeSet<String>();
+        if (userId == null) return chats;
+        synchronized (lock) {
+            for (QueuedTask t : waiting) {
+                if (attendedOf(t, userId, null) && t.chatKey() instanceof Chat c) chats.add(c.sessionId());
+            }
+            for (QueuedTask t : runningByChat.values()) {
+                if (attendedOf(t, userId, null) && t.chatKey() instanceof Chat c) chats.add(c.sessionId());
+            }
+        }
+        return chats;
+    }
+
     private static boolean attendedOf(QueuedTask t, String userId, Chat chat) {
         return userId.equals(t.userId()) && t.priority() < BACKGROUND_PRIORITY
                 && (chat == null || chat.equals(t.chatKey()));

@@ -338,7 +338,7 @@ public class AgentLoop {
 
         AgentResult result;
         inFlight.put(taskId, context);
-        statusEmitter.running(userId, taskId, () -> liveStatus(context));
+        statusEmitter.running(userId, taskId, context.chatSession(), () -> liveStatus(context));
         try {
             result = runLoop(context);
         } catch (TaskCancellationService.TaskCancelledException stop) {
@@ -754,7 +754,7 @@ public class AgentLoop {
                 context.chat().step(step + 1, action, null, llmRouter.isLocal(llmRouter.selectProvider(context)));
 
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "DETERMINISTIC SKILL_CREATE: " + hint.suggestedName()
                                     + " (bypassed ThinkingEngine, no LLM call)");
                 }
@@ -763,7 +763,7 @@ public class AgentLoop {
                 recordAndEmitObservation(context, action, obs, step + 1);
                 context.markProgress();
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "SKILL_CREATE [" + hint.suggestedName() + "] "
                                     + (obs.success() ? "OK" : "FAIL") + " (" + obs.durationMs() + "ms)\n"
                                     + obs.output());
@@ -853,7 +853,7 @@ public class AgentLoop {
 
             // Emit debug info when debug mode is active
             if (debug) {
-                emitDebugPrompt(context.userId(), thinkResult, step + 1);
+                emitDebugPrompt(context, thinkResult, step + 1);
             }
 
             log.info("Task {} step {}: tool={} reasoning={}", 
@@ -935,7 +935,7 @@ public class AgentLoop {
                     ? criticAgent.evaluate(action, context) : CriticAgent.Verdict.allow(List.of());
             if (!verdict.allowed()) {
                 log.warn("Task {} step {} blocked by critic: {}", context.taskId(), step + 1, verdict.blockReason());
-                if (debug) emitDebug(context.userId(), "CRITIC BLOCKED: " + verdict.blockReason());
+                if (debug) emitDebug(context, "CRITIC BLOCKED: " + verdict.blockReason());
                 AgentResult end = stepRanNothing(context, action, "BLOCKED: " + verdict.blockReason(), null, step, nothing);
                 if (end != null) return end;
                 continue;
@@ -969,7 +969,7 @@ public class AgentLoop {
                 context.markProgress();
                 nothing.steps = 0; // a step that ran
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "SKILL_CREATE [" + action.params().getOrDefault("name", "?") + "] "
                                     + (obs.success() ? "OK" : "FAIL") + " (" + obs.durationMs() + "ms)\n"
                                     + obs.output());
@@ -996,7 +996,7 @@ public class AgentLoop {
                 context.markProgress();
                 nothing.steps = 0; // a step that ran
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "SKILL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + result);
@@ -1031,7 +1031,7 @@ public class AgentLoop {
                 context.markProgress();
                 nothing.steps = 0; // a step that ran
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "MEMORY_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + result);
@@ -1062,7 +1062,7 @@ public class AgentLoop {
                 }
 
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "CREDENTIAL_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + result);
@@ -1083,7 +1083,7 @@ public class AgentLoop {
                 context.markProgress();
                 nothing.steps = 0; // a step that ran
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "SCHEDULE_MANAGE [" + action.params().getOrDefault("action", "?") + "] "
                                     + (ok ? "OK" : "FAIL") + " (" + durationMs + "ms)\n"
                                     + result);
@@ -1175,7 +1175,7 @@ public class AgentLoop {
                 context.markProgress();
                 nothing.steps = 0; // a step that ran
                 if (debug) {
-                    emitDebug(context.userId(),
+                    emitDebug(context,
                             "DELEGATE (" + durationMs + "ms, goal: "
                                     + plan.goal() + ")\n"
                                     + result);
@@ -1211,7 +1211,7 @@ public class AgentLoop {
             nothing.steps = 0; // a step that ran
 
             if (debug) {
-                emitDebug(context.userId(),
+                emitDebug(context,
                         "TOOL RESULT [" + action.tool() + "] "
                                 + (observation.success() ? "OK" : "FAIL")
                                 + " (" + observation.durationMs() + "ms)\n"
@@ -2149,8 +2149,12 @@ public class AgentLoop {
         // interactive task still running, telling the user their question was done when it was
         // not. Everything else emitted from inside a task already carries the id; this, the one
         // that ends the UI's story, did not.
-        statusEmitter.emitForTask(userId, context.taskId(), type, summary.toString(),
-                tokenData(context));
+        // With the chat it was asked in, as the task's statuses while it ran had it: this one is
+        // emitted after the task has ended (ChatStatusEmitter#ended), and a page showing another
+        // chat would take it for the end of the task it is following there.
+        Map<String, Object> data = new java.util.LinkedHashMap<>(tokenData(context));
+        if (context.chatSession() != null) data.put(ChatStatusEmitter.SESSION, context.chatSession());
+        statusEmitter.emitForTask(userId, context.taskId(), type, summary.toString(), data);
 
         // Persist token usage to the events table for auditing
         try {
@@ -3029,14 +3033,15 @@ public class AgentLoop {
 
     // ── Debug helpers ──
 
-    private void emitDebug(String userId, String text) {
-        statusEmitter.emit(userId, StatusMessage.Type.DEBUG, text);
+    /** For this task, so a page shows it in the task's chat and no other. */
+    private void emitDebug(AgentContext context, String text) {
+        statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.DEBUG, text);
     }
 
     /**
      * Emit the full prompt and raw LLM response for a thinking step.
      */
-    private void emitDebugPrompt(String userId, ThinkResult result, int step) {
+    private void emitDebugPrompt(AgentContext context, ThinkResult result, int step) {
         var sb = new StringBuilder();
         sb.append("### Step ").append(step).append(" — Thinking\n\n");
 
@@ -3053,7 +3058,7 @@ public class AgentLoop {
         sb.append("**Parsed action**: tool=`").append(result.action().tool())
                 .append("` reasoning=").append(result.action().reasoning());
 
-        emitDebug(userId, sb.toString());
+        emitDebug(context, sb.toString());
     }
 
     // ── Stall watchdog ──

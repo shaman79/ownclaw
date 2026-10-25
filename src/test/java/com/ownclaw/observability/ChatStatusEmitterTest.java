@@ -65,29 +65,29 @@ class ChatStatusEmitterTest {
     @DisplayName("what a running task is doing: its model call under way, else its last step or progress; not another's, not unattended work, not after it ended")
     void whatARunningTaskIsDoing() {
         var call = new java.util.concurrent.atomic.AtomicReference<StatusMessage>();
-        emitter.running("u1", "t1", call::get);
-        assertNull(emitter.doing("u1"), "nothing emitted yet, no call under way");
+        emitter.running("u1", "t1", null, call::get);
+        assertNull(emitter.doing("u1", null), "nothing emitted yet, no call under way");
 
         emitter.emitForTask("u1", "t1", StatusMessage.Type.STEP, "Step 2 · anthropic");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.PROGRESS, "Running ping (40s)");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.WARNING, "Daily budget at 80%");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.PROGRESS_MESSAGE, "☁️ Step 2 · ping");
-        assertEquals("Running ping (40s)", emitter.doing("u1").text(), "the last step or progress status");
-        assertNull(emitter.doing("u2"), "another account's task is not his");
+        assertEquals("Running ping (40s)", emitter.doing("u1", null).text(), "the last step or progress status");
+        assertNull(emitter.doing("u2", null), "another account's task is not his");
 
         var live = new StatusMessage(StatusMessage.Type.LIVE, "☁️ Cloud model · step 3 · reasoning · 4s", null, "t1");
         call.set(live);
-        assertSame(live, emitter.doing("u1"), "a call under way is what it is doing");
+        assertSame(live, emitter.doing("u1", null), "a call under way is what it is doing");
 
-        emitter.running("u1", "bg1", () -> live);
+        emitter.running("u1", "bg1", null, () -> live);
         emitter.ended("t1");
         emitter.inBackground("bg1", () -> {
-            assertNull(emitter.doing("u1"), "unattended work is nobody's working state");
+            assertNull(emitter.doing("u1", null), "unattended work is nobody's working state");
             return null;
         });
         emitter.ended("bg1");
         emitter.emitForTask("u1", "t1", StatusMessage.Type.STEP, "late");
-        assertNull(emitter.doing("u1"), "nothing is kept of a task that has ended");
+        assertNull(emitter.doing("u1", null), "nothing is kept of a task that has ended");
         // Mutation: keep every task's status -> "late" is what an ended task is doing.
     }
 }

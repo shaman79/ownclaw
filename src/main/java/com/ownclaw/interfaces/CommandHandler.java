@@ -191,7 +191,7 @@ public class CommandHandler {
                     yield Optional.of(handleFiles(userId, message.trim()));
                 }
                 if (command.equals("/bg") || command.startsWith("/bg ")) {
-                    yield Optional.of(handleBackground(userId, message.trim()));
+                    yield Optional.of(handleBackground(userId, message.trim(), sessionId));
                 }
                 if (command.startsWith("/schedule")) {
                     yield Optional.of(handleSchedule(userId, message.trim()));
@@ -495,7 +495,7 @@ public class CommandHandler {
      * the one Telegram messages are saved in, when typed there -- and arrives on every interface
      * you have attached, so starting something here and reading the answer on Telegram works.
      */
-    private String handleBackground(String userId, String fullMessage) {
+    private String handleBackground(String userId, String fullMessage, String typedIn) {
         String task = fullMessage.length() > 3 ? fullMessage.substring(3).strip() : "";
         if (task.isBlank()) {
             return "Usage: `/bg <task>` — runs it in the background and tells you when it is done.\n"
@@ -505,8 +505,9 @@ public class CommandHandler {
         // handed a password the mistyped command was meant to store.
         if (startsWithCommand(task)) return COMMAND_AS_TASK;
         // Where it was typed, read now: minutes later the open chat can be another one, and the
-        // answer would be saved under a conversation it has nothing to do with.
-        String sessionId = conversationService.getCurrentSession(userId);
+        // answer would be saved under a conversation it has nothing to do with. The chat of the
+        // tab it was typed in, which need not be the account's open one.
+        String sessionId = typedIn != null ? typedIn : conversationService.getCurrentSession(userId);
         // The future used to be discarded, so this promise was never kept: the task ran, the
         // answer was produced, and nothing delivered it. Only the status lines appeared.
         taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY)
@@ -704,11 +705,23 @@ public class CommandHandler {
 
     // ── Session management ──
 
+    /** How /new and /switch begin their answer when they have opened a chat. */
+    private static final String CREATED = "\u2705 New session created: **";
+    private static final String SWITCHED = "\u2705 Switched to session: **";
+
+    /**
+     * Whether this answer of /new or /switch says it opened a chat: the account's open chat is
+     * that one now, and the web tab it was typed in shows it.
+     */
+    public static boolean openedChat(String reply) {
+        return reply != null && (reply.startsWith(CREATED) || reply.startsWith(SWITCHED));
+    }
+
     private String handleNew(String userId, String raw) {
         String title = raw.length() > 4 ? raw.substring(4).strip() : "";
         if (title.isEmpty()) title = "New Chat";
-        String sessionId = conversationService.createSession(userId, title);
-        return "\u2705 New session created: **" + title + "**";
+        conversationService.createSession(userId, title);
+        return CREATED + title + "**";
     }
 
     private String handleHistory(String userId) {
@@ -749,7 +762,7 @@ public class CommandHandler {
         String sessionId = String.valueOf(target.get("id"));
         String title = String.valueOf(target.get("title"));
         conversationService.setActiveSession(userId, sessionId);
-        return "\u2705 Switched to session: **" + title + "**";
+        return SWITCHED + title + "**";
     }
 
     /**

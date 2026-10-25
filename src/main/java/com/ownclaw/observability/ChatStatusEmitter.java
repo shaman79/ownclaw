@@ -47,6 +47,12 @@ public class ChatStatusEmitter {
      */
     public static final String BACKGROUND = "background";
 
+    /**
+     * The key in a status's data naming the chat of the task it is about -- the chat it was asked
+     * in. Tasks of different chats run side by side, and a page shows a status in that chat only.
+     */
+    public static final String SESSION = "sessionId";
+
     /** The ids of the unattended tasks running now: every status emitted for one is marked. */
     private final Set<String> background = ConcurrentHashMap.newKeySet();
 
@@ -66,10 +72,11 @@ public class ChatStatusEmitter {
 
     /**
      * What a task running now is doing, for a page that connects while it runs ({@link #doing}):
-     * whose task it is, what its model call under way looks like now (null while none is), and
-     * the step or progress status it emitted last.
+     * whose task it is, in which chat (null for none), what its model call under way looks like
+     * now (null while none is), and the step or progress status it emitted last.
      */
-    private record Running(String userId, Supplier<StatusMessage> live, AtomicReference<StatusMessage> last) {}
+    private record Running(String userId, String sessionId, Supplier<StatusMessage> live,
+                           AtomicReference<StatusMessage> last) {}
 
     /** The tasks running now, by id ({@link #running}). */
     private final Map<String, Running> running = new ConcurrentHashMap<>();
@@ -80,10 +87,13 @@ public class ChatStatusEmitter {
      * connects or opens a chat meanwhile is told at once what the task is doing ({@link #doing}).
      * Statuses are otherwise live only: one sent while no page was connected is not sent again.
      *
+     * Every status emitted for it meanwhile names its chat ({@link #SESSION}).
+     *
+     * @param sessionId the chat the task was asked in, or null for none
      * @param live the task's model call under way, as a LIVE status, or null while none is
      */
-    public void running(String userId, String taskId, Supplier<StatusMessage> live) {
-        running.put(taskId, new Running(userId, live, new AtomicReference<>()));
+    public void running(String userId, String taskId, String sessionId, Supplier<StatusMessage> live) {
+        running.put(taskId, new Running(userId, sessionId, live, new AtomicReference<>()));
     }
 
     /** The task has ended: nothing of it is kept for a page any more. */
@@ -92,15 +102,18 @@ public class ChatStatusEmitter {
     }
 
     /**
-     * What this user's attended task running now is doing: its model call under way as a LIVE
-     * status -- what the next live frame would say -- or, between calls, the step or progress
-     * status it emitted last; null when no such task is running or it has emitted none. Unattended
-     * work is nobody's working state ({@link #BACKGROUND}), so it is not asked about.
+     * What this user's attended task running now in this chat is doing: its model call under way
+     * as a LIVE status -- what the next live frame would say -- or, between calls, the step or
+     * progress status it emitted last; null when no such task is running or it has emitted none.
+     * Unattended work is nobody's working state ({@link #BACKGROUND}), so it is not asked about.
+     *
+     * @param sessionId the chat, or null for a task of any chat of the user's
      */
-    public StatusMessage doing(String userId) {
+    public StatusMessage doing(String userId, String sessionId) {
         for (var task : running.entrySet()) {
             Running r = task.getValue();
             if (!r.userId().equals(userId) || background.contains(task.getKey())) continue;
+            if (sessionId != null && !sessionId.equals(r.sessionId())) continue;
             StatusMessage live = r.live().get();
             // Scrubbed as it is shown: a value stored after the frame was kept is not in it.
             return live != null ? live : scrubbed(userId, r.last().get());
@@ -184,18 +197,22 @@ public class ChatStatusEmitter {
 
     /**
      * Emit attributed to a specific task, with structured data -- marked {@link #BACKGROUND} when
-     * that task is unattended work running now ({@link #inBackground}). A step or progress status
+     * that task is unattended work running now ({@link #inBackground}), and naming the chat of a
+     * task running now ({@link #SESSION}) unless it names one itself. A step or progress status
      * of a task running now is kept as what it is doing ({@link #doing}).
      */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text,
                             Map<String, Object> data) {
-        if (taskId != null && background.contains(taskId)) {
+        Running task = taskId == null ? null : running.get(taskId);
+        boolean unattended = taskId != null && background.contains(taskId);
+        String chat = task == null ? null : task.sessionId();
+        if (unattended || chat != null && (data == null || data.get(SESSION) == null)) {
             var marked = data == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(data);
-            marked.put(BACKGROUND, true);
+            if (unattended) marked.put(BACKGROUND, true);
+            if (chat != null && marked.get(SESSION) == null) marked.put(SESSION, chat);
             data = marked;
         }
         var message = scrubbed(userId, new StatusMessage(type, text, data, taskId));
-        Running task = taskId == null ? null : running.get(taskId);
         if (task != null && (type == StatusMessage.Type.STEP || type == StatusMessage.Type.PROGRESS)) {
             task.last().set(message);
         }

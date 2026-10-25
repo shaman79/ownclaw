@@ -257,10 +257,10 @@ class VaultScrubbingTest {
     @DisplayName("a frame kept to show the next tab is scrubbed as it is shown, of a value stored after it was kept")
     void aKeptFrameIsScrubbedWhenShown() {
         var emitter = new ChatStatusEmitter();
-        emitter.running("u1", "t1", () -> null);
+        emitter.running("u1", "t1", null, () -> null);
         emitter.emitForTask("u1", "t1", StatusMessage.Type.STEP, "read " + SECRET, null);
         holds("u1");
-        assertClean(emitter.doing("u1"));
+        assertClean(emitter.doing("u1", null));
     }
 
     @Test
@@ -289,7 +289,7 @@ class VaultScrubbingTest {
         var emitter = new ChatStatusEmitter();
         var seen = new ArrayList<StatusMessage>();
         emitter.subscribe("u1", "test", seen::add);
-        emitter.running("u1", "t1", () -> null);
+        emitter.running("u1", "t1", null, () -> null);
 
         var data = new LinkedHashMap<String, Object>();
         data.put("output", "ssh said: " + SECRET);
@@ -302,7 +302,7 @@ class VaultScrubbingTest {
         for (var m : seen) assertClean(m);
         assertEquals("ssh said: " + MARK, seen.getFirst().data().get("output"));
         assertEquals(3, seen.getFirst().data().get("step"));
-        assertClean(emitter.doing("u1"));
+        assertClean(emitter.doing("u1", null));
     }
 
     @Test
