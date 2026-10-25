@@ -169,8 +169,8 @@ class TelegramSecretTest {
 
             assertEquals("ended by ExecutionException", waiting.get(5, java.util.concurrent.TimeUnit.SECONDS),
                     "the wizard hears it and says it was cancelled; a CancellationException got past it");
-            assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Cancelling this chat's work")),
-                    "calls: " + telegram.calls);
+            assertTrue(telegram.bodies("sendMessage").stream().anyMatch(b -> b.contains("Cancelling. ")),
+                    "everything, as Telegram's chat is the one a web tab wrote in last: " + telegram.calls);
         } finally {
             interactions.cancelPending(owner);   // nothing left waiting when the test failed
         }

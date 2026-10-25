@@ -75,14 +75,14 @@ public class ProcessSandbox implements SandboxManager {
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
             // Drain stderr async to prevent pipe-buffer deadlock.
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> stderrFuture = StreamReaders.read(
                     () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line so we can detect need_input immediately.
             // If a skill emits need_input in a non-interactive run it will block forever
             // waiting for user input that will never come — kill it right away.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<byte[]> stdoutFuture = StreamReaders.read(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -202,12 +202,12 @@ public class ProcessSandbox implements SandboxManager {
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
             // Drain stderr async
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> stderrFuture = StreamReaders.read(
                     () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line; intercept progress and need_input lines.
             AtomicBoolean needInputDetected = new AtomicBoolean(false);
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<byte[]> stdoutFuture = StreamReaders.read(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {

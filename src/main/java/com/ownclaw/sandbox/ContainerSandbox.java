@@ -261,17 +261,42 @@ public class ContainerSandbox {
         }
         // One build of an image at a time: a second task asking for the same one -- tasks of
         // different chats run side by side -- waits for the first's build and finds it built,
-        // instead of building it again beside it for minutes.
-        synchronized (buildLocks.computeIfAbsent(imageTag, t -> new Object())) {
+        // instead of building it again beside it for minutes. Said to it as its progress while it
+        // waits, which the stall watchdog counts as such: the build may take minutes.
+        var building = buildLocks.computeIfAbsent(imageTag, t -> new java.util.concurrent.locks.ReentrantLock());
+        awaitBuild(building, progressCallback);
+        try {
             if (builtImages.contains(imageTag)) {
                 return imageTag;
             }
             return buildImage(candidates, imageTag, systemPackages, pipRequirements, skillDir, progressCallback);
+        } finally {
+            building.unlock();
         }
     }
 
+    /** Take the lock of an image's build, saying every half minute that another task builds it. */
+    private static void awaitBuild(java.util.concurrent.locks.Lock building,
+                                   SandboxManager.ProgressCallback progressCallback) {
+        long next = 0;
+        boolean interrupted = false;
+        for (;;) {
+            try {
+                if (building.tryLock(1, java.util.concurrent.TimeUnit.SECONDS)) break;
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+            long now = System.currentTimeMillis();
+            if (progressCallback != null && now >= next) {
+                progressCallback.onProgress("Waiting for the container image another task is building", null);
+                next = now + 30_000;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
     /** One for each image being asked for, by its tag: see {@link #ensureImage}. */
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> buildLocks =
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> buildLocks =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     /** {@link #ensureImage}, its image's build lock held. */
@@ -494,7 +519,7 @@ public class ContainerSandbox {
             // Also feeds lastBuildActivity for stall detection. Synchronized, because a stalled
             // build reports what it had printed while this reader may still be appending.
             StringBuffer outputBuf = new StringBuffer();
-            CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<String> outputFuture = StreamReaders.read(() -> {
                 try (var reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
@@ -578,11 +603,11 @@ public class ContainerSandbox {
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
             // Drain stderr async
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> stderrFuture = StreamReaders.read(
                     () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Drain stdout async
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> stdoutFuture = StreamReaders.read(
                     () -> drainStreamWithActivity(process.getInputStream(), lastActivity));
 
             boolean finished = waitForWithStallDetection(process, timeoutSec, lastActivity);
@@ -661,11 +686,11 @@ public class ContainerSandbox {
             // Track output activity for stall detection.
             AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
-            CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> stderrFuture = StreamReaders.read(
                     () -> drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
             // Read stdout line-by-line to intercept progress messages
-            CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<byte[]> stdoutFuture = StreamReaders.read(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
                 try (var reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -830,7 +855,7 @@ public class ContainerSandbox {
             // Drain async so the 30s waitFor timeout is actually reachable.
             // Previous version drained synchronously (blocking until EOF) which
             // made the timeout dead code — a hanging container blocked forever.
-            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
+            CompletableFuture<byte[]> outputFuture = StreamReaders.read(
                     () -> drainStream(p.getInputStream()));
             boolean finished = p.waitFor(30, TimeUnit.SECONDS);
             if (!finished) {

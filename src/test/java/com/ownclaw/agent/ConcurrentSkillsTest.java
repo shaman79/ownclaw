@@ -56,13 +56,17 @@ class ConcurrentSkillsTest {
         manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null);
     }
 
-    private String create(String name) {
+    private static Map<String, Object> skill(String name) {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("name", name);
         p.put("description", "Says hello.");
         p.put("parameters", "{\"name\": {\"type\": \"string\", \"description\": \"who\"}}");
         p.put("code", "def run(params):\n    return {'greeting': 'hello'}\n");
-        return manager.createSkill(p);
+        return p;
+    }
+
+    private String create(String name) {
+        return manager.createSkill(skill(name));
     }
 
     @Test
@@ -135,5 +139,62 @@ class ConcurrentSkillsTest {
                 "{\"cloudTokens\": 41000, \"localTokens\": 7}", 0);
         assertArrayEquals(new long[]{0, 0}, events.completedTaskTokens("u1", null));
         assertArrayEquals(new long[]{41_000, 7}, events.completedTaskTokens("u1", "other-chat-task"));
+    }
+
+    @Test
+    @DisplayName("a task waiting for another's run of a skill it changes is said to wait, and its Stop ends the wait with nothing written")
+    void aWaitIsSaidAndStopped() throws Exception {
+        assertTrue(create("greeter").contains("registered"));
+        var running = SkillLocks.of("greeter").readLock();
+        running.lock();   // another task's run of it, under way
+        var said = new AtomicInteger();
+        var stopped = new AtomicBoolean();
+        try {
+            CompletableFuture<String> recreate = CompletableFuture.supplyAsync(
+                    () -> manager.createSkill(skill("greeter"), stopped::get, said::incrementAndGet));
+            for (int i = 0; i < 100 && said.get() == 0; i++) Thread.sleep(50);
+            assertEquals(1, said.get(), "said once it waits, which the stall watchdog counts as progress");
+            stopped.set(true);
+            String result = recreate.get(5, TimeUnit.SECONDS);
+            assertTrue(result.startsWith("ERROR: Stopped while a run of skill 'greeter' was under way"), result);
+        } finally {
+            running.unlock();
+        }
+
+        var changing = SkillLocks.of("greeter").writeLock();
+        changing.lock();   // another task's skill_create of it, under way
+        var progress = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var runStopped = new AtomicBoolean();
+        try {
+            CompletableFuture<com.ownclaw.agent.tools.ToolResult> run = CompletableFuture.supplyAsync(
+                    () -> dynamic.getDynamic("greeter").orElseThrow().execute(Map.of(),
+                            new com.ownclaw.agent.tools.ToolExecutionContext("u1", "t1", null, runStopped::get,
+                                    (message, percent) -> progress.add(message))));
+            for (int i = 0; i < 100 && progress.isEmpty(); i++) Thread.sleep(50);
+            assertEquals(List.of("Waiting: skill 'greeter' is being changed by another task"), progress);
+            runStopped.set(true);
+            assertFalse(run.get(5, TimeUnit.SECONDS).success(), "a Stop ends the run's wait too");
+        } finally {
+            changing.unlock();
+        }
+    }
+
+    @Test
+    @DisplayName("a reload leaves a skill a task is writing as it is registered: it is neither read half written nor quarantined")
+    void aReloadLeavesASkillBeingWritten() throws Exception {
+        assertTrue(create("greeter").contains("registered"));
+        Path dir = root.resolve("generated").resolve("greeter");
+        var changing = SkillLocks.of("greeter").writeLock();
+        CompletableFuture<Void> reload;
+        changing.lock();   // a skill_create writing it now, its manifest half written
+        try {
+            Files.writeString(dir.resolve("SKILL.yaml"), "name: greeter\nparameters: [unclosed");
+            reload = CompletableFuture.runAsync(dynamic::reload);
+            reload.get(10, TimeUnit.SECONDS);
+            assertTrue(Files.isDirectory(dir), "quarantined from under the skill_create writing it");
+            assertTrue(registry.find("greeter").isPresent(), "unregistered while it was written");
+        } finally {
+            changing.unlock();
+        }
     }
 }

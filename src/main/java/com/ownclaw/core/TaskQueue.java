@@ -67,9 +67,8 @@ public class TaskQueue {
     private final TreeSet<QueuedTask> waiting = new TreeSet<>();
     /** The chats a task runs in now: a chat's next task waits for it. */
     private final Map<Object, QueuedTask> runningByChat = new HashMap<>();
-    /** Tasks the pool runs now, and of them background ones. */
+    /** Tasks the pool runs now. */
     private int runningOnPool;
-    private int runningBackground;
     /** Chat turns the ops API runs on its own thread now (#runChat): work going on, too. */
     private int runningOutside;
     private boolean stopped;
@@ -271,11 +270,13 @@ public class TaskQueue {
             for (QueuedTask task : waiting) {
                 if (runningOnPool + starting.size() >= workers) break;
                 if (runningByChat.containsKey(task.chatKey())) continue;
+                // Background work leaves a worker free, however many of the busy ones are chats':
+                // counting its own alone, chats first and then the morning's scheduled runs took
+                // every worker, and a message in another chat waited for one of those runs.
                 boolean background = task.priority() >= BACKGROUND_PRIORITY;
-                if (background && workers > 1 && runningBackground >= workers - 1) continue;
+                if (background && workers > 1 && runningOnPool + starting.size() >= workers - 1) continue;
                 starting.add(task);
                 runningByChat.put(task.chatKey(), task);
-                if (background) runningBackground++;
             }
             waiting.removeAll(starting);
             runningOnPool += starting.size();
@@ -336,7 +337,6 @@ public class TaskQueue {
             runningByChat.remove(task.chatKey(), task);
             if (onPool) {
                 runningOnPool--;
-                if (task.priority() >= BACKGROUND_PRIORITY) runningBackground--;
             } else {
                 runningOutside--;
             }

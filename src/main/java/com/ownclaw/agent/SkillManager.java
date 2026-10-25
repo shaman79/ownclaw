@@ -129,12 +129,24 @@ public class SkillManager {
      * @return human-readable result message
      */
     public String createSkill(Map<String, Object> params) {
+        return createSkill(params, () -> false, () -> {});
+    }
+
+    /**
+     * {@link #createSkill(Map)} for a task: while the skill's runs under way in other tasks end,
+     * it is said to wait ({@code waiting}), which the stall watchdog counts as progress, and a
+     * Stop of it ({@code stopped}) ends the wait with nothing written.
+     */
+    public String createSkill(Map<String, Object> params, java.util.function.BooleanSupplier stopped,
+                              Runnable waiting) {
         String name = str(params, "name");
         if (name == null) return createSkillHeld(params);
         // Held to write while its files are written, checked and registered: another task's
         // skill_create of the same name waits, and so does every run of it.
         var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
-        changing.lock();
+        if (!com.ownclaw.agent.tools.SkillLocks.take(changing, stopped, waiting)) {
+            return "ERROR: Stopped while a run of skill '" + name + "' was under way: nothing was written.";
+        }
         try {
             return createSkillHeld(params);
         } finally {
@@ -332,10 +344,17 @@ public class SkillManager {
      * Delete a skill permanently.
      */
     public String deleteSkill(String name) {
+        return deleteSkill(name, () -> false, () -> {});
+    }
+
+    /** {@link #deleteSkill(String)} for a task, waiting as {@link #createSkill(Map, java.util.function.BooleanSupplier, Runnable)} does. */
+    public String deleteSkill(String name, java.util.function.BooleanSupplier stopped, Runnable waiting) {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
         // Held to write: the runs of it under way end first, and none starts while it goes.
         var removing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
-        removing.lock();
+        if (!com.ownclaw.agent.tools.SkillLocks.take(removing, stopped, waiting)) {
+            return "ERROR: Stopped while a run of skill '" + name + "' was under way: it was not deleted.";
+        }
         try {
             return deleteSkillHeld(name);
         } finally {

@@ -306,7 +306,7 @@ public final class TaskChat {
      */
     void privateResult(Artifact result) {
         if (sessionId == null) return;
-        lane.background(() -> summarise(result));
+        lane.background(task.taskId(), () -> summarise(result));
     }
 
     /**

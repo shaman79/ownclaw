@@ -351,6 +351,13 @@ class TabChatsTest {
         assertNotNull(cancellation.why(USER, "t3", x, later), "named by the socket alone, too");
         assertNull(cancellation.why(USER, "t4", y, later));
 
+        a.send("message", "/bg check the router", x);
+        queue.futures.getLast().complete(AgentResult.completed("the router is up", new AgentTrajectory(), 1));
+        assertTrue(jdbc.queryForList("SELECT content FROM conversations WHERE session_id = ?", String.class, y)
+                .stream().anyMatch(c -> c.contains("the router is up")), "/bg for a deleted chat answers in the open one");
+        assertEquals(List.of(), jdbc.queryForList("SELECT content FROM conversations WHERE session_id = ?",
+                String.class, x), "nothing is saved for a chat that is gone");
+
         a.send("message", "is the router up?", x);
         String filed = a.last("fate").path("sessionId").asText();
         assertNotEquals(y, filed, "not into the chat another window works in");
@@ -359,11 +366,5 @@ class TabChatsTest {
         assertEquals(List.of("where shall we eat?"), asked(y));
         a.send("message", "and the second one?", null);
         assertEquals(List.of("is the router up?", "and the second one?"), asked(filed), "the tab is in it from now on");
-
-        a.send("message", "/bg check the router", x);
-        queue.futures.getLast().complete(AgentResult.completed("the router is up", new AgentTrajectory(), 1));
-        String open = conversations.getCurrentSession(USER);
-        assertTrue(jdbc.queryForList("SELECT content FROM conversations WHERE session_id = ?", String.class, open)
-                .stream().anyMatch(c -> c.contains("the router is up")), "/bg for a deleted chat answers in the open one");
     }
 }

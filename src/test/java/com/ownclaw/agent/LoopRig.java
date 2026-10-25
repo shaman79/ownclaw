@@ -135,7 +135,8 @@ final class LoopRig {
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
-        @Override public String createSkill(Map<String, Object> params) { return create.apply(params); }
+        @Override public String createSkill(Map<String, Object> params, java.util.function.BooleanSupplier stopped,
+                                            Runnable waiting) { return create.apply(params); }
     }
 
     final JdbcTemplate jdbc;

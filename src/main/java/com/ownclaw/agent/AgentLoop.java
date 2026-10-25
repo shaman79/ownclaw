@@ -353,10 +353,13 @@ public class AgentLoop {
         } finally {
             inFlight.remove(taskId);
             statusEmitter.ended(taskId);
-            context.chat().close();
-            // The local model goes to the next task in turn: this one has finished with it.
-            lane.release(taskId);
-            cancellationService.forget(taskId);
+            try {
+                context.chat().close();
+            } finally {
+                // The local model goes to the next task in turn: this one has finished with it.
+                lane.release(taskId);
+                cancellationService.forget(taskId);
+            }
         }
         return end(context, result, true);
     }
@@ -1628,7 +1631,7 @@ public class AgentLoop {
 
         return switch (action) {
             case "read" -> skillManager.readSkill(name);
-            case "delete" -> skillManager.deleteSkill(name);
+            case "delete" -> skillManager.deleteSkill(name, context::isCancelled, () -> waitingForSkill(context, name));
             case "list" -> skillManager.listSkills();
             case "analyze" -> {
                 LlmProvider provider = llmRouter.selectProvider(context);
@@ -2278,12 +2281,24 @@ public class AgentLoop {
      * the first code call, so the step's duration is the code generation as much as the write --
      * a step that took four calls of two minutes each used to say 0ms.
      */
+    /**
+     * The task waits for another task's run of a skill it changes to end: said in its chat, and
+     * progress for the stall watchdog -- the other task's run is its own, and may be long.
+     */
+    private void waitingForSkill(AgentContext context, String skill) {
+        context.markProgress();
+        statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.PROGRESS,
+                "Waiting for another task's run of skill '" + skill + "' to end");
+    }
+
     private AgentObservation createSkill(AgentAction action, AgentContext context) {
         long startMs = System.currentTimeMillis();
         String result = skillManager.nameRefusal(str(action.params(), "name"));
         if (result == null) {
             Codegen code = generateSkillCode(action.params(), context);
-            result = code.error() != null ? code.error() : skillManager.createSkill(code.params());
+            result = code.error() != null ? code.error()
+                    : skillManager.createSkill(code.params(), context::isCancelled,
+                            () -> waitingForSkill(context, str(action.params(), "name")));
         }
         // The skill the model has just created is one of its tools from the next step.
         if (!result.startsWith("ERROR") && context.toolsAdded() != null) {

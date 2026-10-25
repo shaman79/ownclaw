@@ -125,6 +125,26 @@ class ParallelChatsTest {
     }
 
     @Test
+    @DisplayName("background work leaves a worker free when chats were busy first")
+    void backgroundAfterChatsLeavesAWorkerFree(@TempDir Path tmp) throws Exception {
+        start(tmp, 3);
+        queue.send(message("A", "check the router"), false);
+        assertEquals("check the router", started());
+        queue.submit("u1", "morning digest", TaskQueue.BACKGROUND_PRIORITY);
+        queue.submit("u1", "lunch menu", TaskQueue.BACKGROUND_PRIORITY);
+        assertEquals("morning digest", started());
+        nothingStarts();
+        assertEquals(Fate.STARTED, queue.send(message("B", "what is the weather"), false),
+                "the last worker is a chat's");
+        assertEquals("what is the weather", started());
+        loop.end("check the router");
+        loop.end("what is the weather");
+        assertEquals("lunch menu", started());
+        loop.end("morning digest");
+        loop.end("lunch menu");
+    }
+
+    @Test
     @DisplayName("the chats a page marks as working: those with attended work running or waiting in them, not background work's")
     void theWorkingChats(@TempDir Path tmp) throws Exception {
         start(tmp, 2);
@@ -176,9 +196,10 @@ class ParallelChatsTest {
                 "the second worker was kept for a chat");
         assertEquals("check the router", started());
         loop.end("morning digest");
+        nothingStarts();   // the lunch menu would take the worker a message in another chat needs
+        loop.end("check the router");
         assertEquals("lunch menu", started());
         loop.end("lunch menu");
-        loop.end("check the router");
         assertEquals("done: morning digest", digest.get(5, TimeUnit.SECONDS).response());
         assertEquals("done: lunch menu", menu.get(5, TimeUnit.SECONDS).response());
     }

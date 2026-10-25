@@ -158,4 +158,16 @@ class ChatHistoryPagingTest {
         assertEquals(400, controller.getMessages(as("u1"), chat, null, 0).getStatusCode().value());
         assertEquals(400, controller.getMessages(as("u1"), chat, null, -1).getStatusCode().value());
     }
+
+    @Test
+    @DisplayName("a chat is made the open one only by its own user: another account's id is not found")
+    void onlyOnesOwnChatIsActivated(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        String mine = conversations.createSession("u1", "Router");
+        String theirs = conversations.createSession("u2", "Theirs");
+        assertEquals(404, controller.switchSession(as("u1"), theirs).getStatusCode().value());
+        assertEquals(mine, conversations.getCurrentSession("u1"), "the open chat is left alone");
+        assertEquals(200, controller.switchSession(as("u2"), theirs).getStatusCode().value());
+        assertEquals(theirs, conversations.getCurrentSession("u2"));
+    }
 }

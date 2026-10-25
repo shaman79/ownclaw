@@ -297,8 +297,16 @@ public class DynamicSkill implements Tool {
     @Override
     public ToolResult execute(Map<String, Object> params, ToolExecutionContext context) {
         // Read-held for the run: a skill_create, delete or retirement of it waits for the run.
+        // One under way is waited for in turn, said to the task as its progress.
         var running = SkillLocks.of(name).readLock();
-        running.lock();
+        var progress = context == null ? null : context.progressCallback();
+        java.util.function.BooleanSupplier stopped = context == null || context.cancelled() == null
+                ? () -> false : context.cancelled();
+        if (!SkillLocks.take(running, stopped, () -> {
+            if (progress != null) progress.onProgress("Waiting: skill '" + name + "' is being changed by another task", null);
+        })) {
+            return ToolResult.failure("Stopped while skill '" + name + "' was being changed: it did not run.");
+        }
         try {
             return run(params, context);
         } finally {

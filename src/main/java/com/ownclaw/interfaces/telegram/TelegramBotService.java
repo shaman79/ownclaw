@@ -275,8 +275,11 @@ public class TelegramBotService {
             // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
             // on, unless it is removed -- asked for first, whatever storing it then does.
             if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
-            // Typed here, a command is of Telegram's chat: the one its messages are saved in.
-            var cmdResult = commandHandler.handle(userId, text, conversationService.getCurrentSession(userId));
+            // Typed here, a command is of no chat of a tab's: Telegram's messages go on in the
+            // account's open chat, which a web tab moves whenever it is written in -- so /cancel
+            // here stops everything, as it always did, not the chat the web used last; /bg answers
+            // in the chat open when it was sent.
+            var cmdResult = commandHandler.handle(userId, text, null);
             if (cmdResult.isPresent()) {
                 sendMessage(chatId, cmdResult.get());
                 // Session commands: send active session info

@@ -8,7 +8,9 @@ import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BiConsumer;
@@ -27,11 +29,13 @@ import java.util.function.Supplier;
  * not take it for silence, and a Stop ends it ({@link AgentContext#progress}).
  * <p>
  * What a task waits on is foreground work ({@link #foreground}). The local model's summaries of
- * private results ({@link TaskChat}) are background work: written one at a time, for every task
- * in the order they were asked for, on one thread, and only while nothing is in the foreground
- * and no other task has the lane. A summary under way when foreground work begins, or another
- * task takes the lane, is ended, and written again once the lane is free, so it never holds up a
- * task; and a summary ends with its task ({@link #interruptStopped}).
+ * private results ({@link TaskChat}) are background work: written one at a time -- each task's in
+ * the order they were asked for, on a thread of the task's own -- and only while nothing is in
+ * the foreground and no other task has the lane. A summary under way when foreground work begins,
+ * or another task takes the lane, is ended, and written again once the lane is free, so it never
+ * holds up a task; and a summary ends with its task ({@link #interruptStopped}). On one thread for
+ * all tasks, a summary waiting for another task's lane held up the summaries of the task that had
+ * it, which then ended with that task unwritten.
  */
 final class LocalLane {
 
@@ -49,8 +53,8 @@ final class LocalLane {
     private BooleanSupplier backgroundStopped;
     /** Whether foreground work, or another task taking the lane, ended the background call under way. */
     private volatile boolean preempted;
-    /** Writes the background work, one at a time and in order; made for the first. */
-    private ExecutorService background;
+    /** Each task's background work, in order, on a thread of the task's own; guarded by this. */
+    private final Map<String, ExecutorService> backgrounds = new HashMap<>();
     /** Told when a task begins to wait for the lane, with the task: its page is told why it waits. */
     private final BiConsumer<AgentContext, String> waits;
 
@@ -174,6 +178,9 @@ final class LocalLane {
         if (taskId == null) return;
         if (taskId.equals(owner)) owner = null;
         waiting.removeIf(w -> w.taskId().equals(taskId));
+        // What it queued and has not begun ends at once: its task is over (TaskChat#close).
+        ExecutorService done = backgrounds.remove(taskId);
+        if (done != null) done.shutdown();
         notifyAll();
     }
 
@@ -182,16 +189,16 @@ final class LocalLane {
         return owner;
     }
 
-    /** Queue background work: it runs on the lane's one thread, after what was queued before it. */
-    synchronized void background(Runnable job) {
-        if (background == null) {
-            background = Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "local-model-background");
-                t.setDaemon(true);
-                return t;
-            });
-        }
-        background.execute(job);
+    /**
+     * Queue background work of {@code taskId}: it runs on the task's own thread, after what the
+     * task queued before it, beside other tasks' -- whose calls take turns with its ({@link #call}).
+     */
+    synchronized void background(String taskId, Runnable job) {
+        backgrounds.computeIfAbsent(taskId, id -> Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "local-model-background-" + id);
+            t.setDaemon(true);
+            return t;
+        })).execute(job);
     }
 
     /** Whether a background call of {@code taskId} has to wait or end: foreground work, or another task's lane. Under this. */
@@ -233,7 +240,8 @@ final class LocalLane {
         };
         for (;;) {
             synchronized (this) {
-                while (blocked(taskId) && !stopped.getAsBoolean()) wait(1_000);
+                // And no other background call under way: the model answers one call at a time.
+                while ((blocked(taskId) || backgroundTask != null) && !stopped.getAsBoolean()) wait(1_000);
                 if (stopped.getAsBoolean()) throw new TaskCancellationService.TaskCancelledException(taskId);
                 preempted = false;
                 backgroundStopped = stopped;
@@ -249,6 +257,7 @@ final class LocalLane {
                     backgroundCall = null;
                     backgroundStopped = null;
                     backgroundTask = null;
+                    notifyAll();
                 }
             }
         }
