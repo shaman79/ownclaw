@@ -46,7 +46,8 @@ class StillRunningPageTest {
 
         String ask = function("stillRunning");
         assertTrue(ask.contains("askedStillRunning = true;"), ask);
-        assertTrue(ask.contains("ws.send(JSON.stringify({ type: 'ping' }))"), ask);
+        assertTrue(ask.contains("ws.send(JSON.stringify({ type: 'ping', sessionId: displayedSessionId }))"),
+                "asked of the chat on screen: " + ask);
         assertTrue(ask.contains("thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);"),
                 "a lost pong is asked about again: " + ask);
         assertFalse(ask.contains("setThinking(false)"), ask);

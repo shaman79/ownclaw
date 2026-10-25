@@ -218,6 +218,14 @@ class TabChatsTest {
         assertEquals(List.of(x), mapper.convertValue(b.last("session_info").path("workingChats"), List.class),
                 "chat A is marked in B's list");
 
+        // A chat whose task waits, not started: nothing is doing anything in it yet -- not chat A's task.
+        String z = conversations.createSession(USER, "Holidays");
+        queue.busyChats = Set.of(x, z);
+        Tab c = tab(z);
+        assertTrue(c.last("session_info").path("taskRunning").asBoolean(false));
+        assertTrue(c.last("session_info").path("doing").isMissingNode(), c.last("session_info").toString());
+        queue.busyChats = Set.of(x);
+
         a.send("ping", "", x);
         b.send("ping", "", y);
         assertTrue(a.last("pong").path("taskRunning").asBoolean(false));

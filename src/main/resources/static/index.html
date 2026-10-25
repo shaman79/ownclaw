@@ -1149,6 +1149,10 @@
         /* The pinned chat of scheduled results, listed first, and a chat with a result not yet opened. */
         .session-item.pinned { margin-bottom: 8px }
         .session-item.unread .session-title::before { content: '\25CF  '; color: var(--accent-hi) }
+        /* A chat with a task asked in it running or waiting: tasks of different chats run side by side. */
+        .session-item.working .session-meta::before {
+            content: 'Working'; color: var(--accent-hi); animation: pulse 1.6s ease-in-out infinite;
+        }
 
         .session-title {
             font-size: 13.5px;
@@ -2809,7 +2813,17 @@
     var THINKING_SAFETY_MS = 900000;
     /** Set while the page waits for the server to say whether its task still runs (stillRunning). */
     var askedStillRunning = false;
-    var activeSessionId = null;
+    /**
+     * The chat this tab works in, kept for its reloads: each tab has its own, and a chat opened in
+     * one leaves the others where they are. The tab's own storage; where it is blocked, the
+     * server names the chat (session_info).
+     */
+    var TAB_CHAT_KEY = 'ownclaw_chat';
+    function storedChat() { try { return sessionStorage.getItem(TAB_CHAT_KEY); } catch (e) { return null; } }
+    function rememberChat(id) {
+        try { if (id) sessionStorage.setItem(TAB_CHAT_KEY, id); else sessionStorage.removeItem(TAB_CHAT_KEY); }
+        catch (e) {}
+    }
     var currentView = 'chat'; // 'chat' or 'tasks'
     var thinkingStartedAt = null;
     var elapsedTimer = null;
@@ -2836,6 +2850,7 @@
             currentView = 'chat';
             document.getElementById('input-area').style.display = '';
             ws.send(JSON.stringify({ type: 'new_session', message: '' }));
+            leaveShownChat();
             clearMessages();
             // No chat is on screen until the server names the new one (session_info).
             displayedSessionId = null;
@@ -2960,8 +2975,12 @@
 
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
+        // The working state on screen is the chat's it leaves; the chat opened is told its own.
+        if (sessionId !== displayedSessionId) leaveShownChat();
         displayedSessionId = sessionId;
         delete unreadSessions[sessionId];
+        rememberChat(sessionId);
+        updateSidebarActive(sessionId);
         var listed = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
         if (listed) listed.classList.remove('unread');
         updateComposer();
@@ -3125,9 +3144,12 @@
         earlier = null;
     }
 
-    function renderSessionList(sessions, currentActiveId) {
+    /**
+     * The list of the user's chats, the one on screen highlighted -- this tab's, not the account's
+     * open chat, which is the one written in last in any tab.
+     */
+    function renderSessionList(sessions) {
         sessionListEl.innerHTML = '';
-        activeSessionId = currentActiveId;
 
         if (!sessions || sessions.length === 0) {
             var empty = document.createElement('div');
@@ -3138,10 +3160,11 @@
         }
         sessions.forEach(function(s) {
             var item = document.createElement('div');
-            var isActive = (currentView === 'chat' && s.id === activeSessionId);
+            var isActive = (currentView === 'chat' && s.id === displayedSessionId);
             // The server lists the pinned chat of scheduled results first.
             item.className = 'session-item' + (isActive ? ' active' : '')
-                    + (s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '');
+                    + (s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '')
+                    + (workingChats[s.id] ? ' working' : '');
             item.setAttribute('data-session-id', s.id);
             var timeStr = formatTime(s.updated_at);
             var msgCount = s.message_count || 0;
@@ -3159,7 +3182,7 @@
 
             item.addEventListener('click', function(e) {
                 if (e.target.closest('.session-action-btn')) return;
-                if (currentView === 'tasks' || s.id !== activeSessionId) {
+                if (currentView === 'tasks' || s.id !== displayedSessionId) {
                     switchToSession(s.id);
                 } else {
                     // Already active chat — just reload messages
@@ -3269,7 +3292,7 @@
         back.type = 'button';
         back.addEventListener('click', function() {
             if (from !== 'chat') { switchToTaskHistory(); return; }
-            var sid = displayedSessionId || activeSessionId;
+            var sid = displayedSessionId || storedChat();
             if (sid && ws && ws.readyState === 1) { switchToSession(sid); return; }
             // Offline: the transcript comes over REST, so show it rather than wait for the socket.
             ensureChatView();
@@ -5251,13 +5274,13 @@
         if (!authToken) return;
         // "Is this the chat on screen", not "is this the account's active chat".
         //
-        // activeSessionId tracks what the SERVER considers active, which another window can
-        // change at any time. Deleting a different chat then wiped the pane the owner was
-        // reading, and deleting the one he WAS reading left it on screen -- both decided by a
-        // window he was not looking at. It also has to be the chat view at all: deleting from
-        // Settings used to clear the settings form and replace it with an empty transcript the
-        // composer is hidden for, leaving the app unreachable by its own buttons.
-        var wasActive = (currentView === 'chat' && sessionId === activeSessionId);
+        // The account's open chat is the one written in last, in any window. Deciding by it,
+        // deleting a different chat wiped the pane the owner was reading, and deleting the one he
+        // WAS reading left it on screen -- both decided by a window he was not looking at. It also
+        // has to be the chat view at all: deleting from Settings used to clear the settings form
+        // and replace it with an empty transcript the composer is hidden for, leaving the app
+        // unreachable by its own buttons.
+        var wasActive = (currentView === 'chat' && sessionId === displayedSessionId);
 
         // Optimistic UI: immediately mark the item as deleting, then fade out
         var itemEl = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
@@ -5278,10 +5301,12 @@
             return resp.json();
         })
         .then(function(data) {
-            // Server returns updated session list + activeSessionId
-            renderSessionList(data.sessions || [], data.activeSessionId || '');
+            // Server returns updated session list + activeSessionId: the account's open chat,
+            // which this tab opens in place of the one deleted -- and says so, as a switch does.
+            renderSessionList(data.sessions || []);
             if (wasActive && data.activeSessionId) {
-                loadSessionMessages(data.activeSessionId);
+                if (ws && ws.readyState === 1) switchToSession(data.activeSessionId);
+                else loadSessionMessages(data.activeSessionId);
             }
         })
         .catch(function(e) {
@@ -5309,7 +5334,7 @@
         })
         .then(okJson)
         .then(function(data) {
-            renderSessionList(data.sessions || [], data.activeSessionId);
+            renderSessionList(data.sessions || []);
         })
         .catch(function(e) {
             console.error('Failed to refresh sessions:', e);
@@ -5791,7 +5816,11 @@
         // shown to whoever signs in next in this tab.
         clearMessages();
         ensureChatView();
-        activeSessionId = null;
+        // Whoever signs in next in this tab starts in a chat of theirs.
+        rememberChat(null);
+        displayedSessionId = null;
+        workingChats = {};
+        keptStates = {};
         sessionListEl.innerHTML = '';
         searchResults.innerHTML = '';
         searchResults.classList.remove('visible');
@@ -5857,7 +5886,7 @@
     function startHeartbeat() {
         stopHeartbeat();
         heartbeatTimer = setInterval(function() {
-            try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }
+            try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', sessionId: displayedSessionId })); }
             catch(e) {}
         }, 25000);
     }
@@ -5883,7 +5912,10 @@
 
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         var tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
-        ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam);
+        // And the chat this tab works in, so what the server says on connect is about that chat.
+        var tabChat = displayedSessionId || storedChat();
+        var chatParam = tabChat ? '&chat=' + encodeURIComponent(tabChat) : '';
+        ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam + chatParam);
         needsInitialLoad = true;
 
         ws.onopen = function() {
@@ -5895,6 +5927,8 @@
 
         ws.onclose = function(e) {
             setConnState(false, 'Disconnected');
+            // Kept for the reconnect, whose session_info says whether the task still runs.
+            keepShownState();
             setThinking(false);
             stopHeartbeat();
             if (e.code === 1008) { logout(); return; }
@@ -5918,11 +5952,13 @@
                         serverVersion = serverVersion || data.version;
                     }
                     // Session list update from server
-                    renderSessionList(data.sessions || [], data.activeSessionId || '');
-                    // Show the chat the server has open -- where what is typed here is saved --
-                    // when it is not the one on screen: on connect and reconnect (then always,
-                    // for what came while away), and after New Chat, /new or /switch, which open
-                    // a chat and say so only here. Left on the old chat, the page drew a result
+                    renderSessionList(data.sessions || []);
+                    setWorkingChats(data.workingChats);
+                    // Show the chat this tab works in, as the server has it -- the one its
+                    // address or frames named, or else the account's open chat -- when it is not
+                    // the one on screen: on connect and reconnect (then always, for what came
+                    // while away), and after New Chat, /new or /switch, which open a chat and
+                    // say so only here. Left on the old chat, the page drew a result
                     // for it into the new chat's empty pane, and the answer to the first
                     // question asked there went unshown, as one for another chat.
                     // Skip if user is viewing task history.
@@ -5940,33 +5976,21 @@
                     // otherwise wait for says it -- its model call under way, or the step it is
                     // on: a reload during a long local call used to show only that a task was
                     // running, until the call ended.
+                    // Of the chat on screen alone: tasks of other chats are theirs, marked in the list.
                     if (data.taskRunning) {
-                        setThinking(true);
+                        resumeShownChat();
                         if (data.doing) showStatus(data.doing);
                         else showActivity('Working — reconnected to a task already running', null);
+                    } else {
+                        delete keptStates[displayedSessionId];
                     }
                 } else if (type === 'session_updated') {
-                    // The id is the point, and it used to be discarded.
-                    //
-                    // The active session belongs to the ACCOUNT, not to a window. When another
-                    // tab (or the phone) switches or creates a chat, the server now tells every
-                    // window -- but this branch only refreshed the sidebar, so the highlight
-                    // moved while the transcript stayed on the old chat. Anything typed here was
-                    // then saved into the chat the server considers active, i.e. not the one on
-                    // screen. Following the switch is the only reading that is not a lie.
-                    // Measured against the chat on screen, not the one last listed as open: the
-                    // two differ while a switch this window made is under way, and after a list
-                    // fetched when a delete failed named a chat the pane does not show.
+                    // The list of chats changed: a chat was opened, created or written in, in this
+                    // window or another. Fetched again; the chat on screen stays. Each tab works in
+                    // its own chat and names it in what it sends, so another tab's switch moves
+                    // nothing here -- it used to take this one along, as the account had one open
+                    // chat and what was typed here was filed in it.
                     refreshSessionList();
-                    if (content && content !== displayedSessionId && currentView === 'chat') {
-                        activeSessionId = content;
-                        updateSidebarActive(content);
-                        // Keep anything half-typed: it belongs to the person, not the chat.
-                        loadSessionMessages(content);
-                    } else if (content) {
-                        activeSessionId = content;
-                        updateSidebarActive(content);
-                    }
                 } else if (type === 'fate') {
                     // What became of a message this page sent: handed to the running task, or
                     // queued. Said under its bubble, which is named by its row from now on.
@@ -5986,9 +6010,24 @@
                         steeredOptions = data.options;
                     } else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
                     updateComposer();
+                    // Filed in a chat other than the one on screen -- that one was deleted
+                    // meanwhile, or none was on screen yet: the message is in that chat, and so
+                    // is this tab from now on.
+                    if (data.sessionId && data.sessionId !== displayedSessionId && currentView === 'chat'
+                            && ws && ws.readyState === 1) {
+                        switchToSession(data.sessionId);
+                    }
                 } else if (type === 'status') {
                     showStatus(data);
                 } else if (type === 'input_request') {
+                    // A question in another chat: that chat's task waits there, and this one's
+                    // working state is not touched. Marked, and said, as an answer there is.
+                    markWorking(data.sessionId, false);
+                    if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
+                        showConnBanner('A question arrived in another chat — open it to answer.');
+                        markUnread(data.sessionId);
+                        return;
+                    }
                     // A task is waiting for an answer: the working state is over. It used to
                     // disable the Send button, and clicking Send did nothing.
                     // doneActivity() as well as setThinking(false): without it the activity
@@ -6000,12 +6039,14 @@
                     addMsg('input_request', content, data.taskId, null, data.timestamp);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
-                    addMsg('debug', content);
+                    // In the chat of the task it is about.
+                    if (!data.sessionId || data.sessionId === displayedSessionId) addMsg('debug', content);
                 } else if (type === 'progress') {
                     // A running task saying what it is doing, in the chat it was asked from: drawn
                     // there while that chat is on screen (it is saved, so a reload shows it too),
                     // and evidence that the work goes on -- never the end of it.
-                    resetThinkingSafetyTimer();
+                    if (data.sessionId && data.sessionId !== displayedSessionId) markWorking(data.sessionId, true);
+                    else resetThinkingSafetyTimer();
                     if (currentView === 'chat' && data.sessionId === displayedSessionId) {
                         addProgress(content, data.progress, null, data.timestamp);
                     }
@@ -6014,6 +6055,7 @@
                 } else if (type === 'pong' || type === 'ping') {
                     // The heartbeat's. One that comes while the page asks whether its task still
                     // runs answers that (stillRunning): ended only when no task runs.
+                    if (type === 'pong') setWorkingChats(data.workingChats);
                     if (type === 'pong' && askedStillRunning && typeof data.taskRunning === 'boolean') {
                         askedStillRunning = false;
                         if (!data.taskRunning) { setThinking(false); doneActivity(); }
@@ -6047,9 +6089,10 @@
                     // the wrong transcript, and do not drop it silently: the owner waited
                     // minutes for it.
                     if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
+                        // That chat's task has ended; the one on screen goes on.
                         showConnBanner('An answer arrived in another chat — open it to read it.');
-                        refreshSessionList();
-                        if (type === 'response') { setThinking(false); doneActivity(); }
+                        if (type === 'response') markWorking(data.sessionId, false);
+                        markUnread(data.sessionId);
                         return;
                     }
                     // A command's reply ends the working state its own sending started -- not a
@@ -6082,6 +6125,12 @@
         // filled the activity strip of whatever chat was open, and started its spinner.
         if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }
         var sub = data.status || '';
+        // A status of a task in another chat marks that chat in the list, and the chat on screen
+        // is left alone: tasks of different chats run side by side. One that names no chat is of
+        // no chat's task, and shown as it always was.
+        var ending = sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input';
+        if (data.sessionId) markWorking(data.sessionId, !ending);
+        if (data.sessionId && data.sessionId !== displayedSessionId) return;
         var detail = data.data && data.data.category ? data.data : null;
         // Claim this window's working state for the first task we hear from. A task
         // that was queued behind the one whose trace is shown starts a trace of its own.
@@ -6134,6 +6183,64 @@
             resetThinkingSafetyTimer();
             showActivity(content, detail);
         }
+    }
+
+    /**
+     * What the working state of a chat was when this tab left it while its task ran: since when,
+     * and the options Send reaches that task with. The working state on screen is the shown
+     * chat's alone -- tasks of different chats run side by side -- so it goes when the chat does,
+     * and comes back with it: the server says whether its task still runs and what it is doing
+     * (session_info), and this, since when, and whether Send reaches it.
+     */
+    var keptStates = {};
+
+    /** Keep the working state of the chat on screen, while its task runs (keptStates). */
+    function keepShownState() {
+        if (!displayedSessionId || !thinkingEl.classList.contains('active')) return;
+        keptStates[displayedSessionId] = { startedAt: thinkingStartedAt,
+                steered: steeredChatId === displayedSessionId ? steeredOptions : null };
+    }
+
+    /** The chat on screen is left for another: its working state is kept, and goes from the screen. */
+    function leaveShownChat() {
+        keepShownState();
+        setThinking(false);
+        activeTaskId = null;
+        resetActivity();
+    }
+
+    /** The task of the chat on screen runs, the server says: its working state is shown, as it was kept. */
+    function resumeShownChat() {
+        var kept = keptStates[displayedSessionId];
+        delete keptStates[displayedSessionId];
+        setThinking(true);
+        if (kept && kept.startedAt) { thinkingStartedAt = kept.startedAt; updateElapsed(); }
+        if (kept && kept.steered) { steeredChatId = displayedSessionId; steeredOptions = kept.steered; updateComposer(); }
+    }
+
+    /**
+     * The chats with a task asked in them running or waiting, marked in the list: as the server
+     * last said (session_info, pong), and as their statuses say since.
+     */
+    var workingChats = {};
+
+    function setWorkingChats(ids) {
+        if (!ids) return;
+        workingChats = {};
+        ids.forEach(function(id) { workingChats[id] = true; });
+        paintWorking();
+    }
+
+    function markWorking(id, on) {
+        if (!id || !!workingChats[id] === on) return;
+        if (on) workingChats[id] = true; else delete workingChats[id];
+        paintWorking();
+    }
+
+    function paintWorking() {
+        sessionListEl.querySelectorAll('.session-item').forEach(function(el) {
+            el.classList.toggle('working', !!workingChats[el.getAttribute('data-session-id')]);
+        });
     }
 
     /**
@@ -6209,7 +6316,7 @@
      */
     function stillRunning() {
         askedStillRunning = true;
-        try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }
+        try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', sessionId: displayedSessionId })); }
         catch (e) {}
         thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
     }
@@ -6654,6 +6761,8 @@
         // With what is chosen next to Send, which its task runs on and the chat keeps from now on.
         var options = chosenOptions();
         var payload = { message: text, clientId: clientId, costMode: options.costMode, effort: options.effort };
+        // Filed in the chat on screen, whichever chat another tab has open.
+        if (displayedSessionId) payload.sessionId = displayedSessionId;
         if (queued) payload.queue = true;
         if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;
         ws.send(JSON.stringify(payload));
@@ -6794,7 +6903,8 @@
             return;
         }
         if (ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'cancel' }));
+            // This chat's work: tasks of other chats go on.
+            ws.send(JSON.stringify({ type: 'cancel', sessionId: displayedSessionId }));
         }
         // Do NOT clear the working state here.
         //

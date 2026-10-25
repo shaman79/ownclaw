@@ -125,6 +125,26 @@ class ParallelChatsTest {
     }
 
     @Test
+    @DisplayName("the chats a page marks as working: those with attended work running or waiting in them, not background work's")
+    void theWorkingChats(@TempDir Path tmp) throws Exception {
+        start(tmp, 2);
+        queue.submit("u1", "morning digest", TaskQueue.BACKGROUND_PRIORITY);
+        assertEquals("morning digest", started());
+        queue.send(message("A", "check the router"), false);
+        assertEquals("check the router", started());
+        queue.send(message("B", "what is the weather"), false);   // waits: every worker is busy
+        nothingStarts();
+        assertEquals(List.of("A", "B"), List.copyOf(queue.attendedBusyChats("u1")), "running, and waiting");
+        assertEquals(List.of(), List.copyOf(queue.attendedBusyChats("u2")), "another user's chats are not his");
+        loop.end("check the router");
+        assertEquals("what is the weather", started());
+        for (int i = 0; i < 200 && queue.attendedBusyChats("u1").contains("A"); i++) Thread.sleep(10);
+        assertEquals(List.of("B"), List.copyOf(queue.attendedBusyChats("u1")), "chat A's task has ended");
+        loop.end("what is the weather");
+        loop.end("morning digest");
+    }
+
+    @Test
     @DisplayName("a message queued in a busy chat runs after its task, in order, while other chats run")
     void oneAtATimeInAChat(@TempDir Path tmp) throws Exception {
         start(tmp, 5);

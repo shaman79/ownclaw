@@ -43,13 +43,15 @@ class ChatPageTest {
     }
 
     @Test
-    @DisplayName("the page shows the chat the server has open: after New Chat, /new or /switch, results and answers are routed by it")
+    @DisplayName("the page shows the chat the server names for its tab: after New Chat, /new or /switch, results and answers are routed by it")
     void thePageFollowsTheOpenChat() {
         assertTrue(page.contains("if ((needsInitialLoad || data.activeSessionId !== displayedSessionId) "
                 + "&& data.activeSessionId && currentView === 'chat') { loadSessionMessages(data.activeSessionId);"),
-                "the chat session_info names as open is loaded when it is not the one on screen");
-        assertTrue(page.contains("if (content && content !== displayedSessionId && currentView === 'chat') {"),
-                "session_updated is measured against the chat on screen");
+                "the chat session_info names for this tab is loaded when it is not the one on screen");
+        String updated = page.substring(page.indexOf("} else if (type === 'session_updated') {"));
+        updated = updated.substring(0, updated.indexOf("} else if (type === 'fate') {"));
+        assertTrue(updated.contains("refreshSessionList();") && !updated.contains("loadSessionMessages("),
+                "another tab's switch moves nothing here: " + updated);
         String newChat = page.substring(page.indexOf("newChatBtn.addEventListener('click'"));
         newChat = newChat.substring(0, newChat.indexOf("});"));
         assertTrue(newChat.contains("clearMessages();") && newChat.contains("displayedSessionId = null;"),
@@ -205,7 +207,8 @@ class ChatPageTest {
         String send = page.substring(page.indexOf("function send(queued) {"));
         send = send.substring(0, send.indexOf("function markFate("));
         assertTrue(send.contains("var payload = { message: text, clientId: clientId, costMode: options.costMode, "
-                + "effort: options.effort }; if (queued) payload.queue = true;"), send);
+                + "effort: options.effort }; // Filed in the chat on screen, whichever chat another tab has open. "
+                + "if (displayedSessionId) payload.sessionId = displayedSessionId; if (queued) payload.queue = true;"), send);
         assertTrue(send.contains("if (!thinkingEl.classList.contains('active')) {"),
                 "a message sent while a task runs keeps that task's trace: " + send);
         // Mutation: disable Send in setThinking again -> nothing can be sent while a task runs.
@@ -321,7 +324,7 @@ class ChatPageTest {
                 "the line goes when the call has ended: " + show);
         assertTrue(page.contains("<div id=\"activity-live\"></div>"), "under the label, above the steps");
 
-        assertTrue(page.contains("if (data.taskRunning) { setThinking(true); if (data.doing) showStatus(data.doing); "
+        assertTrue(page.contains("if (data.taskRunning) { resumeShownChat(); if (data.doing) showStatus(data.doing); "
                 + "else showActivity('Working — reconnected to a task already running', null); }"),
                 "a reload is shown what the running task is doing, not a bare spinner");
         String background = page.substring(page.indexOf("function showBackgroundStatus(data, content) {"));
