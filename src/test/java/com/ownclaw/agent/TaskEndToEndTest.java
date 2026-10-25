@@ -75,6 +75,32 @@ class TaskEndToEndTest {
     }
 
     @Test
+    @DisplayName("a chat's Stop ends the task asked in that chat; another chat's Stop leaves it running")
+    void aChatStopEndsTheChatsTask(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        rig.cloud.think.add(streaming(1_000, respond("done in A")));
+        String a = session(rig);
+        String other = rig.chat.createSession("u1", "another chat");
+        rig.cancellation.requestChat("u1", other, "you pressed Stop");
+        assertEquals("done in A", rig.turn(a, "audit the routers").response(), "another chat's Stop: it runs");
+
+        rig.cloud.think.add(streaming(5_000, respond("an answer that came too late")));
+        var stop = new Thread(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                return;
+            }
+            rig.cancellation.requestChat("u1", a, "you pressed Stop");
+        });
+        stop.start();
+        AgentResult r = rig.turn(a, "audit them again");
+        stop.join();
+        assertEquals(AgentResult.TerminationReason.CANCELLED, r.terminationReason(), r.response());
+        // Mutation: the task does not learn its chat -> its chat's Stop never reaches it.
+    }
+
+    @Test
     @DisplayName("a reply that keeps streaming in is progress: the stall watchdog leaves the task alone")
     void aStreamingReplyIsProgress(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP), 1);

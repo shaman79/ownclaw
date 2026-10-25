@@ -134,6 +134,11 @@ public class AgentContext {
     }
 
     public boolean isUnattended() { return unattended; }
+
+    /** The chat this task was asked in, or null: what a Stop of that chat stops. */
+    private volatile String chatSession;
+    public String chatSession() { return chatSession; }
+    public void setChatSession(String sessionId) { this.chatSession = sessionId; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
 
     public TaskOptions options() { return options; }

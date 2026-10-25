@@ -216,6 +216,8 @@ public class AgentLoop {
         if (!unattended && currentMessageId != null && channel != null) {
             try {
                 String session = conversationService.sessionOf(userId, currentMessageId);
+                // The chat a Stop of it stops: this task, and what waits in it.
+                context.setChatSession(session);
                 if (session != null) {
                     context.setChat(new TaskChat(context, session, channel, conversationService,
                             statusEmitter, llmRouter.local(), lane, accountOf(context)));
@@ -322,8 +324,8 @@ public class AgentLoop {
         // supplier handed to every tool, the progress hook of every model call — misses a Stop,
         // which could then only take effect between steps. A step here can be a 60-133 s local
         // call.
-        context.setExternalCancel(
-                () -> cancellationService.isCancelled(userId, taskId, context.startTimeMs()));
+        context.setExternalCancel(() -> cancellationService.isCancelled(userId, taskId,
+                context.chatSession(), context.startTimeMs()));
         // A cloud call that ends without a reply -- stopped part-way, or cut by a timeout, a
         // dropped connection or an error event -- was billed for what it had read, and no reply
         // carries those tokens: its hook is told of them, and they are counted here. Only a cloud
@@ -354,6 +356,7 @@ public class AgentLoop {
             context.chat().close();
             // The local model goes to the next task in turn: this one has finished with it.
             lane.release(taskId);
+            cancellationService.forget(taskId);
         }
         return end(context, result, true);
     }
@@ -416,7 +419,8 @@ public class AgentLoop {
     private AgentResult stopped(AgentContext context) {
         String stall = context.stalled();
         String why = stall != null ? "the stall watchdog stopped it: " + stall
-                : cancellationService.why(context.userId(), context.taskId(), context.startTimeMs());
+                : cancellationService.why(context.userId(), context.taskId(), context.chatSession(),
+                        context.startTimeMs());
         if (longRunningTaskManager.isActive(context.taskId())) {
             longRunningTaskManager.cancel(context.taskId(), why);
         }

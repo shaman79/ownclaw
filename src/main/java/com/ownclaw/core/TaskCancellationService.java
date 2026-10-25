@@ -46,6 +46,15 @@ public class TaskCancellationService {
 
     private record Stop(long atMs, String why) {}
 
+    /**
+     * When each chat was last stopped, and why: what the Stop button of a chat's page and /cancel
+     * typed in it do, now that tasks of different chats run side by side -- the work of the other
+     * chats goes on. Bounded by time as the user-wide Stop is.
+     */
+    private final Map<ChatKey, Stop> stoppedChats = new ConcurrentHashMap<>();
+
+    private record ChatKey(String userId, String sessionId) {}
+
     /** Told after every request: see {@link #onRequest}. */
     private final List<Runnable> onRequest = new CopyOnWriteArrayList<>();
 
@@ -77,7 +86,24 @@ public class TaskCancellationService {
     }
 
     /**
-     * Why this task should stop, or null when nothing has asked it to.
+     * Stop what runs in this chat, and what waits in it -- the tasks asked there -- saying why.
+     * The other chats' work goes on.
+     */
+    public void requestChat(String userId, String sessionId, String why) {
+        if (userId != null && sessionId != null) {
+            stoppedChats.put(new ChatKey(userId, sessionId), new Stop(System.currentTimeMillis(), why));
+        }
+        onRequest.forEach(Runnable::run);
+    }
+
+    /** {@link #why(String, String, String, long)} of a task asked in no chat. */
+    public String why(String userId, String taskId, long taskStartedAtMs) {
+        return why(userId, taskId, null, taskStartedAtMs);
+    }
+
+    /**
+     * Why this task should stop, or null when nothing has asked it to: itself, the chat it was
+     * asked in ({@code sessionId}, null for a task asked in none), or everything of its user.
      *
      * @param taskStartedAtMs when this task began -- or, for one still waiting in the queue, when
      *                        it was queued: a user-wide Stop covers only what was already there
@@ -85,9 +111,11 @@ public class TaskCancellationService {
      *                        Stop was pressed would start after it, read as new work, and run --
      *                        though the owner queued it, changed his mind and pressed Stop.
      */
-    public String why(String userId, String taskId, long taskStartedAtMs) {
+    public String why(String userId, String taskId, String sessionId, long taskStartedAtMs) {
         String own = taskId == null ? null : stoppedTasks.get(taskId);
         if (own != null) return own;
+        Stop chat = userId == null || sessionId == null ? null : stoppedChats.get(new ChatKey(userId, sessionId));
+        if (chat != null && taskStartedAtMs <= chat.atMs()) return chat.why();
         Stop all = userId == null ? null : stoppedAll.get(userId);
         return all != null && taskStartedAtMs <= all.atMs() ? all.why() : null;
     }
@@ -95,6 +123,11 @@ public class TaskCancellationService {
     /** Whether this task should stop, given when it started. */
     public boolean isCancelled(String userId, String taskId, long taskStartedAtMs) {
         return why(userId, taskId, taskStartedAtMs) != null;
+    }
+
+    /** Whether this task, asked in this chat, should stop, given when it started. */
+    public boolean isCancelled(String userId, String taskId, String sessionId, long taskStartedAtMs) {
+        return why(userId, taskId, sessionId, taskStartedAtMs) != null;
     }
 
     /**
@@ -107,6 +140,11 @@ public class TaskCancellationService {
      * appears the moment more than one task can run at a time.
      */
     public void clear(String userId, String taskId) {
+        if (taskId != null) stoppedTasks.remove(taskId);
+    }
+
+    /** Forget this task's own request: it has ended, and nothing asks about it any more. */
+    public void forget(String taskId) {
         if (taskId != null) stoppedTasks.remove(taskId);
     }
 

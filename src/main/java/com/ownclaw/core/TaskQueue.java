@@ -292,10 +292,11 @@ public class TaskQueue {
     /** A task of the pool, run on its worker; its chat is let go, and what waits started, after it. */
     private void runOnPool(QueuedTask task) {
         try {
-            // Drop work that was already waiting when the user stopped everything: asked with when
-            // it was queued, not when it would start, which is after the Stop. The answer says who
-            // stopped it -- Stop, /cancel, the ops API.
-            String stoppedBy = cancellationService.why(task.userId(), null, task.enqueuedAt());
+            // Drop work that was already waiting when the user stopped everything, or its chat:
+            // asked with when it was queued, not when it would start, which is after the Stop. The
+            // answer says who stopped it -- Stop, /cancel, the ops API.
+            String stoppedBy = cancellationService.why(task.userId(), null,
+                    task.chat() == null ? null : task.chat().sessionId(), task.enqueuedAt());
             if (stoppedBy != null) {
                 log.info("Dropping a queued task of {}, waiting when it was stopped: {}",
                         task.userId(), stoppedBy);

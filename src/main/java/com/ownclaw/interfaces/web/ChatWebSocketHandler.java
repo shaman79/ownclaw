@@ -245,6 +245,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         java.util.List<String> attachmentIds = java.util.List.of();
         boolean queue = false;
         String clientId = null;
+        // The chat the page shows -- the one this tab works in -- when the page names it.
+        String tabChat = null;
         ChatOptions chosen = ChatOptions.NONE;
         try {
             JsonNode json = mapper.readTree(payload);
@@ -252,6 +254,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             userMessage = json.has("message") ? json.path("message").asText() : payload;
             queue = json.path("queue").asBoolean(false);
             clientId = json.hasNonNull("clientId") ? json.path("clientId").asText() : null;
+            tabChat = json.hasNonNull("sessionId") ? json.path("sessionId").asText() : null;
             chosen = new ChatOptions(json.hasNonNull("costMode") ? json.path("costMode").asText() : null,
                     json.hasNonNull("effort") ? json.path("effort").asText() : null);
             if (json.has("attachmentIds") && json.get("attachmentIds").isArray()) {
@@ -267,6 +270,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // The defaults are the owner's -- the settings page and /local are owner only -- so another
         // account's chat runs on them: a choice it sends is not taken, nor kept for its chat.
         if (!chosen.equals(ChatOptions.NONE) && !authService.isOwner(userId)) chosen = ChatOptions.NONE;
+        // A chat of this user's, or none: an id of another's names nothing here.
+        if (tabChat != null && !conversationService.hasChat(userId, tabChat)) tabChat = null;
 
         // Heartbeat ping: keep-alive for long-lived browser connections, sent as {type:'ping'}.
         // Do not treat as user input or command. A typed "ping" is a message like any other:
@@ -319,8 +324,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         // Cancel: user requested task interruption
         if ("cancel".equals(messageType)) {
-            // Stop with no task named means "whatever is running, stop it".
-            cancellationService.requestAll(userId, "you pressed Stop");
+            // Stop on a chat's page stops that chat's work: the task running in it, and what
+            // waits there. Tasks of other chats go on. A page that names no chat stops everything.
+            if (tabChat != null) {
+                cancellationService.requestChat(userId, tabChat, "you pressed Stop");
+            } else {
+                cancellationService.requestAll(userId, "you pressed Stop");
+            }
             interactionHandler.cancelPending(userId);
             sendToSession(session, "system", "⏹ Cancellation requested.");
             return;
@@ -367,7 +377,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (queued == null && CommandHandler.isCommand(userMessage)) {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
-            var handledAsCommand = commandHandler.handle(userId, userMessage);
+            var handledAsCommand = commandHandler.handle(userId, userMessage, tabChat);
             // The page does not draw a slash text itself; this is its bubble. A secret command's
             // secret is masked by the grammar that reads it, a well-formed one or not; a command
             // nobody knows shows its first word only, as nothing can say which part of

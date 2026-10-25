@@ -90,6 +90,14 @@ public class CommandHandler {
      * @return response text, or empty if not a command
      */
     public Optional<String> handle(String userId, String message) {
+        return handle(userId, message, null);
+    }
+
+    /**
+     * {@link #handle(String, String)}, typed in {@code sessionId}: the chat a /cancel stops, or
+     * null for none -- then /cancel stops everything, as /cancel all does.
+     */
+    public Optional<String> handle(String userId, String message, String sessionId) {
         message = unblanked(message);
         if (message == null || !message.startsWith("/")) {
             return Optional.empty();
@@ -133,11 +141,20 @@ public class CommandHandler {
                 // as Stop cancels it. Telegram had a /cancel of its own that did; this one did not,
                 // and the wizard took the next message typed in the web chat as its answer: at
                 // the cloud step, as the cloud API key.
-                cancellationService.requestAll(userId, "you sent /cancel");
+                // Typed in a chat, it stops that chat's work: tasks of other chats go on.
+                if (sessionId != null) {
+                    cancellationService.requestChat(userId, sessionId, "you sent /cancel");
+                } else {
+                    cancellationService.requestAll(userId, "you sent /cancel");
+                }
                 interactionHandler.cancelPending(userId);
-                yield Optional.of("Cancelling. A model call the task is waiting on ends at once, "
-                        + "and a delegation stops before its next step; a skill that is running is "
-                        + "not interrupted, so the task stops when it returns.");
+                yield Optional.of((sessionId != null ? "Cancelling this chat's work -- `/cancel all` stops "
+                        + "every chat's. " : "Cancelling. ") + CANCELLING);
+            }
+            case "/cancel all" -> {
+                cancellationService.requestAll(userId, "you sent /cancel all");
+                interactionHandler.cancelPending(userId);
+                yield Optional.of("Cancelling the work of every chat, scheduled and /bg work too. " + CANCELLING);
             }
             case "/status" -> Optional.of(statusText());
             case "/tokens" -> {
@@ -406,6 +423,11 @@ public class CommandHandler {
         return message.isEmpty() || startsWithCommand(message) ? null : message;
     }
 
+    /** What a cancel is told of how quickly it takes. */
+    private static final String CANCELLING = "A model call the task is waiting on ends at once, and a "
+            + "delegation stops before its next step; a skill that is running is not interrupted, so "
+            + "the task stops when it returns.";
+
     /** What a chat shows for an unknown command. The text itself is not repeated: it may hold a secret. */
     public static final String UNKNOWN_COMMAND = "Unknown command. Try /help";
 
@@ -583,7 +605,8 @@ public class CommandHandler {
                 - `/queue <message>` — Run it as a task of its own after the running one, instead of sending it to that task (the web chat's Queue button)
                 - `/files` — List uploaded files (`/files rm <id>` to delete one)
                 - `/debug` — Toggle debug mode
-                - `/cancel` — Cancel the running task
+                - `/cancel` — Stop this chat's work: its running task, and what waits in it
+                - `/cancel all` — Stop the work of every chat, scheduled and /bg work too
                 - `/grant <tool> <credential>` — Grant credential access to a tool
                 - `/revoke <tool>` — Revoke credential access
                 - `/cred set <KEY> <VALUE>` — Store a credential
