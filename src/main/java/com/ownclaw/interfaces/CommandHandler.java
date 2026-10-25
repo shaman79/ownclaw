@@ -98,6 +98,7 @@ public class CommandHandler {
      * null for none -- then /cancel stops everything, as /cancel all does.
      */
     public Optional<String> handle(String userId, String message, String sessionId) {
+        OPENED.remove();
         message = unblanked(message);
         if (message == null || !message.startsWith("/")) {
             return Optional.empty();
@@ -507,7 +508,9 @@ public class CommandHandler {
         // Where it was typed, read now: minutes later the open chat can be another one, and the
         // answer would be saved under a conversation it has nothing to do with. The chat of the
         // tab it was typed in, which need not be the account's open one.
-        String sessionId = typedIn != null ? typedIn : conversationService.getCurrentSession(userId);
+        // One deleted meanwhile, in another window, holds nothing any more: then the open one.
+        String sessionId = typedIn != null && conversationService.hasChat(userId, typedIn)
+                ? typedIn : conversationService.getCurrentSession(userId);
         // The future used to be discarded, so this promise was never kept: the task ran, the
         // answer was produced, and nothing delivered it. Only the status lines appeared.
         taskQueue.submit(userId, task, TaskQueue.BACKGROUND_PRIORITY)
@@ -709,18 +712,24 @@ public class CommandHandler {
     private static final String CREATED = "\u2705 New session created: **";
     private static final String SWITCHED = "\u2705 Switched to session: **";
 
+    /** The chat the command handled last on this thread opened (/new, /switch); null for none. */
+    private static final ThreadLocal<String> OPENED = new ThreadLocal<>();
+
     /**
-     * Whether this answer of /new or /switch says it opened a chat: the account's open chat is
-     * that one now, and the web tab it was typed in shows it.
+     * The chat the command just handled on this thread opened -- /new, a /switch that switched --
+     * or null, and forgotten: the web tab it was typed in shows that chat. Read from the thread
+     * that ran it, as the account's open chat read after can already be another window's.
      */
-    public static boolean openedChat(String reply) {
-        return reply != null && (reply.startsWith(CREATED) || reply.startsWith(SWITCHED));
+    public static String takeOpened() {
+        String opened = OPENED.get();
+        OPENED.remove();
+        return opened;
     }
 
     private String handleNew(String userId, String raw) {
         String title = raw.length() > 4 ? raw.substring(4).strip() : "";
         if (title.isEmpty()) title = "New Chat";
-        conversationService.createSession(userId, title);
+        OPENED.set(conversationService.createSession(userId, title));
         return CREATED + title + "**";
     }
 
@@ -762,6 +771,7 @@ public class CommandHandler {
         String sessionId = String.valueOf(target.get("id"));
         String title = String.valueOf(target.get("title"));
         conversationService.setActiveSession(userId, sessionId);
+        OPENED.set(sessionId);
         return SWITCHED + title + "**";
     }
 

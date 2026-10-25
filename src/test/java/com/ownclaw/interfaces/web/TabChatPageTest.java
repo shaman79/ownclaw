@@ -42,7 +42,7 @@ class TabChatPageTest {
     void theTabNamesItsChat() {
         String connect = function("connect");
         assertTrue(connect.contains("var tabChat = displayedSessionId || storedChat();")
-                && connect.contains("var chatParam = tabChat ? '&chat=' + encodeURIComponent(tabChat) : '';")
+                && connect.contains("var chatParam = '&tabs=1' + (tabChat ? '&chat=' + encodeURIComponent(tabChat) : '');")
                 && connect.contains("'/ws/chat' + tokenParam + chatParam"), connect);
         assertTrue(function("send").contains("if (displayedSessionId) payload.sessionId = displayedSessionId;"));
         assertTrue(page.contains("ws.send(JSON.stringify({ type: 'cancel', sessionId: displayedSessionId }));"),
@@ -97,12 +97,29 @@ class TabChatPageTest {
         assertTrue(branch("progress", "pong").contains("if (data.sessionId && data.sessionId !== displayedSessionId) "
                 + "markWorking(data.sessionId, true); else resetThinkingSafetyTimer();"));
 
-        String elsewhere = page.substring(page.indexOf("if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) { "
+        String elsewhere = page.substring(page.indexOf("if (data.sessionId && data.sessionId !== displayedSessionId) { "
                 + "// That chat's task has ended"));
         elsewhere = elsewhere.substring(0, elsewhere.indexOf("return;"));
         assertFalse(elsewhere.contains("setThinking(false)") || elsewhere.contains("doneActivity()"),
                 "an answer in another chat does not end the task on screen: " + elsewhere);
-        assertTrue(elsewhere.contains("markUnread(data.sessionId);"), elsewhere);
+        assertTrue(elsewhere.contains("markUnread(data.sessionId);")
+                && elsewhere.contains("showElsewhere('An answer arrived in another chat.', data.sessionId);"), elsewhere);
+        assertFalse(page.contains("showConnBanner('An answer") || page.contains("showConnBanner('A question"),
+                "the connection banner stays until a reconnect");
+        assertTrue(function("loadSessionMessages").contains("hideElsewhere(sessionId);"), "opening that chat ends the notice");
+        assertTrue(function("markWorking").contains("if (id && !on) delete keptStates[id];"),
+                "what was kept of a chat whose task ended is no state of its next task's");
+        assertTrue(function("setWorkingChats").contains("if (!workingChats[id]) delete keptStates[id];"));
+    }
+
+    @Test
+    @DisplayName("a fate naming another chat takes the tab there only while the chat it was sent from is still on screen")
+    void aFateMovesOnlyAnUnmovedTab() {
+        assertTrue(function("send").contains("sentFrom[clientId] = displayedSessionId;"));
+        String fate = branch("fate", "status");
+        assertTrue(fate.contains("var sentIn = sentFrom[data.clientId]; delete sentFrom[data.clientId];")
+                && fate.contains("if (data.sessionId && data.sessionId !== displayedSessionId && sentIn === displayedSessionId "
+                + "&& currentView === 'chat' && ws && ws.readyState === 1) { switchToSession(data.sessionId); }"), fate);
     }
 
     @Test

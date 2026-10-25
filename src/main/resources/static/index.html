@@ -2981,6 +2981,7 @@
         delete unreadSessions[sessionId];
         rememberChat(sessionId);
         updateSidebarActive(sessionId);
+        hideElsewhere(sessionId);
         var listed = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
         if (listed) listed.classList.remove('unread');
         updateComposer();
@@ -5821,6 +5822,10 @@
         displayedSessionId = null;
         workingChats = {};
         keptStates = {};
+        sentFrom = {};
+        activeTaskId = null;
+        steeredChatId = null;
+        hideElsewhere(null);
         sessionListEl.innerHTML = '';
         searchResults.innerHTML = '';
         searchResults.classList.remove('visible');
@@ -5864,6 +5869,49 @@
      * to reload. A page left open across a deploy kept its old code and only reconnected, so a
      * new setting was simply not there until the owner happened to reload.
      */
+    /**
+     * Something arrived in a chat this tab does not show -- an answer, a question: said in a
+     * notice of its own, with a button that opens that chat, gone once that chat is opened or the
+     * notice is dismissed. It was the connection banner's line, which stays until the next
+     * reconnect: with chats working side by side, one spun on for every answer elsewhere.
+     */
+    function showElsewhere(text, sessionId) {
+        var bar = document.getElementById('elsewhere-banner');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'elsewhere-banner';
+            bar.setAttribute('role', 'status');
+            bar.style.cssText = 'position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:1000;'
+                    + 'background:var(--surface);border:1px solid var(--border-mid);border-radius:8px;'
+                    + 'padding:8px 12px;display:flex;gap:10px;align-items:center;font-size:13px';
+            var line = document.createElement('span');
+            var open = document.createElement('button');
+            open.textContent = 'Open';
+            open.addEventListener('click', function() {
+                var chat = bar.dataset.sessionId;
+                bar.remove();
+                if (ws && ws.readyState === 1) switchToSession(chat);
+                else { ensureChatView(); loadSessionMessages(chat); }
+            });
+            var close = document.createElement('button');
+            close.textContent = '\u00d7';
+            close.setAttribute('aria-label', 'Dismiss');
+            close.addEventListener('click', function() { bar.remove(); });
+            bar.appendChild(line);
+            bar.appendChild(open);
+            bar.appendChild(close);
+            document.body.appendChild(bar);
+        }
+        bar.dataset.sessionId = sessionId;
+        bar.firstChild.textContent = text;
+    }
+
+    /** The notice of showElsewhere goes: when its chat is opened, or with every chat (null). */
+    function hideElsewhere(sessionId) {
+        var bar = document.getElementById('elsewhere-banner');
+        if (bar && (!sessionId || bar.dataset.sessionId === sessionId)) bar.remove();
+    }
+
     function showUpdated() {
         if (document.getElementById('updated-banner')) return;
         var bar = document.createElement('div');
@@ -5914,7 +5962,7 @@
         var tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
         // And the chat this tab works in, so what the server says on connect is about that chat.
         var tabChat = displayedSessionId || storedChat();
-        var chatParam = tabChat ? '&chat=' + encodeURIComponent(tabChat) : '';
+        var chatParam = '&tabs=1' + (tabChat ? '&chat=' + encodeURIComponent(tabChat) : '');
         ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam + chatParam);
         needsInitialLoad = true;
 
@@ -6010,11 +6058,13 @@
                         steeredOptions = data.options;
                     } else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
                     updateComposer();
-                    // Filed in a chat other than the one on screen -- that one was deleted
+                    // Filed in a chat other than the one it was sent from -- that one was deleted
                     // meanwhile, or none was on screen yet: the message is in that chat, and so
-                    // is this tab from now on.
-                    if (data.sessionId && data.sessionId !== displayedSessionId && currentView === 'chat'
-                            && ws && ws.readyState === 1) {
+                    // is this tab from now on, unless the owner has opened another since.
+                    var sentIn = sentFrom[data.clientId];
+                    delete sentFrom[data.clientId];
+                    if (data.sessionId && data.sessionId !== displayedSessionId && sentIn === displayedSessionId
+                            && currentView === 'chat' && ws && ws.readyState === 1) {
                         switchToSession(data.sessionId);
                     }
                 } else if (type === 'status') {
@@ -6023,8 +6073,8 @@
                     // A question in another chat: that chat's task waits there, and this one's
                     // working state is not touched. Marked, and said, as an answer there is.
                     markWorking(data.sessionId, false);
-                    if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
-                        showConnBanner('A question arrived in another chat — open it to answer.');
+                    if (data.sessionId && data.sessionId !== displayedSessionId) {
+                        showElsewhere('A question arrived in another chat.', data.sessionId);
                         markUnread(data.sessionId);
                         return;
                     }
@@ -6088,9 +6138,10 @@
                     // follow-up in a third place. Say it arrived instead of rendering it into
                     // the wrong transcript, and do not drop it silently: the owner waited
                     // minutes for it.
-                    if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
+                    // Another chat's while no chat is on screen yet, after New Chat, as well.
+                    if (data.sessionId && data.sessionId !== displayedSessionId) {
                         // That chat's task has ended; the one on screen goes on.
-                        showConnBanner('An answer arrived in another chat — open it to read it.');
+                        showElsewhere('An answer arrived in another chat.', data.sessionId);
                         if (type === 'response') markWorking(data.sessionId, false);
                         markUnread(data.sessionId);
                         return;
@@ -6228,10 +6279,13 @@
         if (!ids) return;
         workingChats = {};
         ids.forEach(function(id) { workingChats[id] = true; });
+        // What was kept of a chat whose task has ended since is no state of its next task's.
+        Object.keys(keptStates).forEach(function(id) { if (!workingChats[id]) delete keptStates[id]; });
         paintWorking();
     }
 
     function markWorking(id, on) {
+        if (id && !on) delete keptStates[id];
         if (!id || !!workingChats[id] === on) return;
         if (on) workingChats[id] = true; else delete workingChats[id];
         paintWorking();
@@ -6717,6 +6771,12 @@
      */
     var sentBubbles = {};
     var sentCount = 0;
+    /**
+     * The chat on screen when each message was sent, by its name, until its fate frame: a fate
+     * naming another chat takes this tab there only while the chat it was sent from is still the
+     * one on screen -- not after the owner has opened another meanwhile.
+     */
+    var sentFrom = {};
 
     /**
      * Send what is typed. While a task runs it goes to that task, which reads it before its next
@@ -6755,6 +6815,7 @@
         // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
         // back with the value masked (CommandHandler.displayed). Drawn here it stayed as typed.
         var clientId = 'm' + (++sentCount);
+        sentFrom[clientId] = displayedSessionId;
         var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;
         if (drawn) sentBubbles[clientId] = drawn;
 

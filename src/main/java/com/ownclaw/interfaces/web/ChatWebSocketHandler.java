@@ -128,8 +128,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         session.getAttributes().put("userId", userId);
         // The chat this tab shows, as its address names it: a reconnecting page is told at once
         // what is going on in that chat, not in the one another tab opened last.
+        // A page that works in a chat of its own says so (tabs=1): a page of an earlier version,
+        // still open after a deploy, names no chat in what it sends and follows the account's
+        // open chat, so it is never bound to one (bind).
+        if ("1".equals(queryParam(session, "tabs"))) session.getAttributes().put(TABS, true);
         String named = queryParam(session, "chat");
-        if (named != null && conversationService.hasChat(userId, named)) session.getAttributes().put(TAB_CHAT, named);
+        if (named != null && conversationService.hasChat(userId, named)) bind(session, named);
         sessions.computeIfAbsent(userId, u -> ConcurrentHashMap.newKeySet()).add(session);
 
         // Subscribe to status messages
@@ -275,13 +279,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // The defaults are the owner's -- the settings page and /local are owner only -- so another
         // account's chat runs on them: a choice it sends is not taken, nor kept for its chat.
         if (!chosen.equals(ChatOptions.NONE) && !authService.isOwner(userId)) chosen = ChatOptions.NONE;
-        // A chat of this user's, or none: an id of another's names nothing here.
-        if (tabChat != null && !conversationService.hasChat(userId, tabChat)) tabChat = null;
+        // A chat of this user's, or none: an id of another's names nothing here. One the tab
+        // names that is gone -- deleted in another window -- is kept apart: a Stop there still
+        // stops what runs in it, not everything, and a message for it starts a chat of its own,
+        // rather than landing in a chat another window is working in.
+        String gone = null;
+        if (tabChat != null && !conversationService.hasChat(userId, tabChat)) {
+            gone = tabChat;
+            tabChat = null;
+        }
         // Each tab works in its own chat. A frame naming none is in the chat its tab named last.
         if (tabChat != null) {
-            session.getAttributes().put(TAB_CHAT, tabChat);
+            bind(session, tabChat);
         } else {
+            Object bound = session.getAttributes().get(TAB_CHAT);
             tabChat = namedChat(session, userId);
+            if (tabChat == null && gone == null && bound != null) gone = bound.toString();
         }
 
         // Heartbeat ping: keep-alive for long-lived browser connections, sent as {type:'ping'}.
@@ -296,7 +309,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             var pong = new LinkedHashMap<String, Object>();
             pong.put("type", "pong");
             pong.put("content", "");
-            pong.put("taskRunning", taskQueue.isAttendedBusyFor(userId, tabChat));
+            pong.put("taskRunning", taskQueue.isAttendedBusyFor(userId, tabChat != null ? tabChat : gone));
             pong.put("workingChats", taskQueue.attendedBusyChats(userId));
             send(session, pong);
             return;
@@ -312,7 +325,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 // This tab's chat now, and the account's open one: Telegram goes on in the chat
                 // last opened here. The other tabs stay in theirs -- each names its own chat in
                 // what it sends.
-                session.getAttributes().put(TAB_CHAT, targetSession);
+                bind(session, targetSession);
                 conversationService.setActiveSession(userId, targetSession);
                 // Told to every window all the same, which a page of this version reads as "the
                 // list of chats changed". A page of an earlier one, which names no chat in what
@@ -327,7 +340,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if ("new_session".equals(messageType)) {
             String title = (userMessage != null && !userMessage.isBlank()) ? userMessage : "New Chat";
             String created = conversationService.createSession(userId, title);
-            if (created != null) session.getAttributes().put(TAB_CHAT, created);
+            if (created != null) bind(session, created);
             sendActiveSessionInfo(session, userId);
             // The other windows did not have the new chat in their list. A page of an earlier
             // version follows it, the same as an explicit switch (above).
@@ -338,9 +351,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Cancel: user requested task interruption
         if ("cancel".equals(messageType)) {
             // Stop on a chat's page stops that chat's work: the task running in it, and what
-            // waits there. Tasks of other chats go on. A page that names no chat stops everything.
-            if (tabChat != null) {
-                cancellationService.requestChat(userId, tabChat, "you pressed Stop");
+            // waits there -- a chat deleted meanwhile too. Tasks of other chats go on. A page that
+            // names no chat stops everything.
+            String stopIn = tabChat != null ? tabChat : gone;
+            if (stopIn != null) {
+                cancellationService.requestChat(userId, stopIn, "you pressed Stop");
             } else {
                 cancellationService.requestAll(userId, "you pressed Stop");
             }
@@ -390,7 +405,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (queued == null && CommandHandler.isCommand(userMessage)) {
             // Asking whether it is a command runs the command, so this answer is handed on and
             // the handler is not asked again.
-            var handledAsCommand = commandHandler.handle(userId, userMessage, tabChat);
+            var handledAsCommand = commandHandler.handle(userId, userMessage, tabChat != null ? tabChat : gone);
+            // The chat /new or /switch opened, read on the thread that ran it: the account's open
+            // chat, read after, can already be another window's.
+            String opened = CommandHandler.takeOpened();
             // The page does not draw a slash text itself; this is its bubble. A secret command's
             // secret is masked by the grammar that reads it, a well-formed one or not; a command
             // nobody knows shows its first word only, as nothing can say which part of
@@ -400,7 +418,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     ? CommandHandler.displayed(typed)
                     : typed.split("(?U)[\\s\\p{Cf}]", 2)[0] + (typed.matches("(?U)[^\\s\\p{Cf}]+") ? "" : " \u2026"));
             if (handledAsCommand.isPresent() || !waiting) {
-                handleCommand(userId, typed, handledAsCommand, session);
+                handleCommand(userId, typed, handledAsCommand, opened, session);
                 return;
             }
             // Not a command, and something is waiting for an answer: it is the answer.
@@ -416,8 +434,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // Filed in the chat of the tab it was typed in -- the chat its page shows -- or, from a
         // page that names none, in the account's open chat. The chat last written in is the open
         // one: Telegram's messages go on there.
-        String currentSessionId = tabChat != null ? tabChat : conversationService.getCurrentSession(userId);
-        if (tabChat != null) conversationService.setActiveSession(userId, tabChat);
+        String currentSessionId;
+        if (tabChat != null) {
+            currentSessionId = tabChat;
+            conversationService.setActiveSession(userId, tabChat);
+        } else if (gone != null) {
+            currentSessionId = conversationService.createSession(userId, "New Chat");
+            bind(session, currentSessionId);
+        } else {
+            currentSessionId = conversationService.getCurrentSession(userId);
+        }
         // Auto-generate title from first user message in a session
         conversationService.autoTitleIfNeeded(userId, currentSessionId, userMessage);
         // What it was sent with is its chat's from now on: the page shows it when the chat is
@@ -533,7 +559,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      *               queued its task twice, /new created two chats, and /files rm deleted the file
      *               and then reported that there was no such file.
      */
-    private void handleCommand(String userId, String command, Optional<String> shared,
+    private void handleCommand(String userId, String command, Optional<String> shared, String opened,
                                WebSocketSession session) {
         String cmd = command.trim();
         String cmdLower = cmd.toLowerCase();
@@ -575,9 +601,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // refresh the sidebar so the frontend sees the updated session list. The tab /new or
         // /switch was typed in is now in the chat it opened.
         if (commandHandler.isSessionCommand(command)) {
-            if (CommandHandler.openedChat(response)) {
-                session.getAttributes().put(TAB_CHAT, conversationService.getCurrentSession(userId));
-            }
+            if (opened != null) bind(session, opened);
             sendActiveSessionInfo(session, userId);
         }
     }
@@ -806,16 +830,28 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     /** The key of a socket's attribute naming the chat its tab shows. */
     static final String TAB_CHAT = "chat";
 
+    /** The key of a socket's attribute set when its page works in a chat of its own (tabs=1). */
+    static final String TABS = "tabs";
+
+    /**
+     * This socket's tab is in this chat from now on -- when its page works in a chat of its own.
+     * A page of an earlier version follows the account's open chat, and bound to the chat it
+     * switched to, it had what was typed there filed in that chat after it had followed another
+     * window to a different one.
+     */
+    private static void bind(WebSocketSession session, String chat) {
+        if (Boolean.TRUE.equals(session.getAttributes().get(TABS))) session.getAttributes().put(TAB_CHAT, chat);
+    }
+
     /**
      * The chat this socket's tab named last -- in its address, or in a frame -- while it is still
-     * one of the user's; null when it named none, or one deleted since.
+     * one of the user's; null when it named none, or one deleted since. One deleted stays named
+     * until the tab is in another: a Stop there stops what still runs in it.
      */
     private String namedChat(WebSocketSession session, String userId) {
         Object named = session.getAttributes().get(TAB_CHAT);
         if (named == null) return null;
-        if (conversationService.hasChat(userId, named.toString())) return named.toString();
-        session.getAttributes().remove(TAB_CHAT, named);
-        return null;
+        return conversationService.hasChat(userId, named.toString()) ? named.toString() : null;
     }
 
     /** The chat this socket's tab shows: the one it named last, or else the account's open chat. */

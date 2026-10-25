@@ -70,6 +70,9 @@ public class ChatHistoryController {
     public ResponseEntity<?> switchSession(HttpServletRequest request,
                                            @PathVariable String sessionId) {
         String userId = (String) request.getAttribute("userId");
+        // A chat of the caller's: pointed at another account's, Telegram and pages that follow
+        // the open chat filed this account's messages into that one.
+        if (!conversationService.hasChat(userId, sessionId)) return ResponseEntity.notFound().build();
         conversationService.setActiveSession(userId, sessionId);
         return ResponseEntity.ok(Map.of("sessionId", sessionId));
     }

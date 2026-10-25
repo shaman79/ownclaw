@@ -77,8 +77,9 @@ class StopSaysWhoTest {
         assertEquals("you pressed Stop", cancellation.why("u1", "t1", a, running));
         assertNull(cancellation.why("u1", "t2", b, running), "chat B's task goes on");
 
-        chat.handleTextMessage(socket("u2"), new TextMessage("{\"type\":\"cancel\",\"sessionId\":\"" + a + "\"}"));
-        assertEquals("you pressed Stop", cancellation.why("u2", "t3", "anything", running),
-                "a chat of another user's names nothing: the page stops its own user's work, as one naming none");
+        chat.handleTextMessage(socket("u2"), new TextMessage("{\"type\":\"cancel\",\"sessionId\":\"" + b + "\"}"));
+        assertNull(cancellation.why("u1", "t2", b, running), "a chat of another user's is none of his to stop");
+        assertNull(cancellation.why("u2", "t3", "anything", running),
+                "nor does it stop everything of the user who named it: it names no chat of his, as a deleted one");
     }
 }

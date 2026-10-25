@@ -118,8 +118,14 @@ class TabChatsTest {
         y = conversations.createSession(USER, "Lunch");
     }
 
+    /** A tab of this version's page: it works in a chat of its own, and its address says so. */
     private Tab tab(String chatId) throws Exception {
-        return new Tab("ws://localhost/ws/chat?token=t" + (chatId == null ? "" : "&chat=" + chatId));
+        return new Tab("ws://localhost/ws/chat?token=t&tabs=1" + (chatId == null ? "" : "&chat=" + chatId));
+    }
+
+    /** A tab of a page from before: it names no chat, and follows the account's open one. */
+    private Tab oldPage() throws Exception {
+        return new Tab("ws://localhost/ws/chat?token=t");
     }
 
     /** The chat's user rows, in order. */
@@ -306,8 +312,58 @@ class TabChatsTest {
         assertEquals(y, tab(null).shows());
         Tab a = tab(x);
         conversations.deleteSession(USER, x);
-        a.send("message", "hello?", null);
-        assertEquals(List.of("hello?"), asked(y), "a deleted chat files nothing: the account's open one does");
-        assertEquals(y, conversations.getCurrentSession(USER), "and stays the open one");
+        a.send("ping", "", null);
+        assertEquals(y, tab(x).shows(), "a reconnecting tab of a deleted chat is told about the open one");
+    }
+
+    @Test
+    @DisplayName("a page from before the deploy is bound to no chat: its messages go to the open chat it follows, its Stop stops everything")
+    void anOldPageFollowsTheOpenChat() throws Exception {
+        Tab old = oldPage(), b = tab(y);
+        old.send("switch_session", x, null);
+        assertEquals(x, old.shows());
+        b.send("message", "where shall we eat?", y);   // the open chat is Y now, which the old page follows
+        old.send("message", "typed while it shows Y", null);
+        assertEquals(List.of("where shall we eat?", "typed while it shows Y"), asked(y),
+                "filed in the chat the old page shows, not in the one it switched to before");
+        assertEquals(List.of(), asked(x));
+
+        long before = System.currentTimeMillis() - 1;
+        old.send("cancel", "", null);
+        assertNotNull(cancellation.why(USER, "t1", x, before), "everything stops, as it did");
+        assertNotNull(cancellation.why(USER, "t2", y, before));
+    }
+
+    @Test
+    @DisplayName("a tab whose chat another window deleted: its Stop stops what runs there alone, and its message starts a chat of its own")
+    void aDeletedChatsTab() throws Exception {
+        Tab a = tab(x), b = tab(y);
+        b.send("message", "where shall we eat?", y);   // the open chat: Y
+        conversations.deleteSession(USER, x);
+
+        long before = System.currentTimeMillis() - 1;
+        a.send("cancel", "", x);
+        assertNotNull(cancellation.why(USER, "t1", x, before), "the task of the deleted chat stops");
+        assertNull(cancellation.why(USER, "t2", y, before), "chat B's goes on");
+        Thread.sleep(2);
+        long later = System.currentTimeMillis() - 1;
+        a.send("cancel", "", null);
+        assertNotNull(cancellation.why(USER, "t3", x, later), "named by the socket alone, too");
+        assertNull(cancellation.why(USER, "t4", y, later));
+
+        a.send("message", "is the router up?", x);
+        String filed = a.last("fate").path("sessionId").asText();
+        assertNotEquals(y, filed, "not into the chat another window works in");
+        assertNotEquals(x, filed);
+        assertEquals(List.of("is the router up?"), asked(filed), "a chat of its own");
+        assertEquals(List.of("where shall we eat?"), asked(y));
+        a.send("message", "and the second one?", null);
+        assertEquals(List.of("is the router up?", "and the second one?"), asked(filed), "the tab is in it from now on");
+
+        a.send("message", "/bg check the router", x);
+        queue.futures.getLast().complete(AgentResult.completed("the router is up", new AgentTrajectory(), 1));
+        String open = conversations.getCurrentSession(USER);
+        assertTrue(jdbc.queryForList("SELECT content FROM conversations WHERE session_id = ?", String.class, open)
+                .stream().anyMatch(c -> c.contains("the router is up")), "/bg for a deleted chat answers in the open one");
     }
 }
