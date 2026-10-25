@@ -78,8 +78,16 @@ public class AgentLoop {
     private final FileStorageService fileStorage;
     /** The gateway's filter, asked what it takes out of each step's result (TaskChat#filtered). */
     private final Redactor redactor;
-    /** The local model as every task shares it: what a task waits on goes first. */
-    private final LocalLane lane = new LocalLane();
+    /**
+     * The local model as every task shares it: one task at a time, from its first local call to
+     * its end; what a task waits on goes before the background summaries.
+     */
+    private final LocalLane lane;
+
+    /** The task the local model works on now, or null: for tests. */
+    String localModelHolder() {
+        return lane.owner();
+    }
 
     public AgentLoop(
             ThinkingEngine thinkingEngine,
@@ -108,6 +116,11 @@ public class AgentLoop {
         this.criticAgent = criticAgent;
         this.toolRegistry = toolRegistry;
         this.statusEmitter = statusEmitter;
+        this.lane = new LocalLane((task, why) -> {
+            if (statusEmitter != null) {
+                statusEmitter.emitForTask(task.userId(), task.taskId(), StatusMessage.Type.PROGRESS, why);
+            }
+        });
         this.config = config;
         this.llmRouter = llmRouter;
         this.memory = memory;
@@ -339,6 +352,8 @@ public class AgentLoop {
             inFlight.remove(taskId);
             statusEmitter.ended(taskId);
             context.chat().close();
+            // The local model goes to the next task in turn: this one has finished with it.
+            lane.release(taskId);
         }
         return end(context, result, true);
     }
@@ -769,7 +784,7 @@ public class AgentLoop {
             try {
                 // On the local model, when the cloud is not available: work the task waits on.
                 thinkResult = local
-                        ? lane.foreground(() -> thinkingEngine.decideNextActionFull(context, provider))
+                        ? lane.foreground(context, () -> thinkingEngine.decideNextActionFull(context, provider))
                         : thinkingEngine.decideNextActionFull(context, provider);
             } catch (EgressRefused refused) {
                 // The gateway found bytes of a PRIVATE artifact in the request and nothing was
@@ -1122,7 +1137,7 @@ public class AgentLoop {
                         context.taskId(), step + 1, truncate(plan.goal(), 100), plan.steps().size());
 
                 // Work the task waits on: the local model's background work makes way for it.
-                LocalExecutor.Outcome outcome = lane.foreground(
+                LocalExecutor.Outcome outcome = lane.foreground(context,
                         () -> localExecutor.execute(plan, context, accountOf(context)));
                 long durationMs = System.currentTimeMillis() - startMs;
                 String result = outcome.text();
@@ -1619,7 +1634,7 @@ public class AgentLoop {
                     java.util.function.Supplier<String> analysis = () -> skillManager.analyzeSkills(provider,
                             context.egress("analyze"), live, accountOf(context));
                     // On the local model: work the task waits on, as its steps are.
-                    yield llmRouter.isLocal(provider) ? lane.foreground(analysis) : analysis.get();
+                    yield llmRouter.isLocal(provider) ? lane.foreground(context, analysis) : analysis.get();
                 }
             }
             default -> "ERROR: Unknown action '" + action + "'. Use one of: " + String.join(", ", SKILL_MANAGE_ACTIONS);
@@ -2370,7 +2385,7 @@ public class AgentLoop {
                 LlmRequestConfig asking = codeGenConfig.withProgress(live);
                 java.util.function.Supplier<LlmResponse> call = () -> writer.chat(asked, asking);
                 // On the local model, when the cloud is not available: work the task waits on.
-                reply = local ? lane.foreground(call) : call.get();
+                reply = local ? lane.foreground(context, call) : call.get();
             } catch (TaskCancellationService.TaskCancelledException stop) {
                 return Codegen.stopped(name);
             } catch (ProviderRefused declined) {

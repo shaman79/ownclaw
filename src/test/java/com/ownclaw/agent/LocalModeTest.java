@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * a cloud with a key set counted as available whatever happened to it, so every step failed, was
  * asked again, and three of those ended the task.
  */
+@org.junit.jupiter.api.Timeout(60)   // a task that never lets the local model go waits for ever: fail, not hang
 class LocalModeTest {
 
     static final Tool NOOP = tool("noop", List.of(), p -> "nothing to report");
@@ -77,6 +78,7 @@ class LocalModeTest {
         assertEquals("done locally\n\n_🏠 Written by the local model: the cloud model could not be used -- "
                 + NO_INTERNET + "._", r.response());
         assertEquals(2, rig.cloud.calls("think").size(), "asked once more, then handed over");
+        assertNull(rig.loop.localModelHolder(), "the task has ended: the local model is free for the next");
         var asked = local.calls("think");
         assertEquals(2, asked.size());
         String prompt = all(asked.get(0));
