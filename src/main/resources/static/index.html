@@ -6823,7 +6823,8 @@
         // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
         // back with the value masked (CommandHandler.displayed). Drawn here it stayed as typed.
         var clientId = 'm' + (++sentCount);
-        sentFrom[clientId] = displayedSessionId;
+        // Of a message, which a fate answers: a command is answered as a command, never with one.
+        if (text.charAt(0) !== '/' || /^\/queue\b/i.test(text)) sentFrom[clientId] = displayedSessionId;
         var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;
         if (drawn) sentBubbles[clientId] = drawn;
 

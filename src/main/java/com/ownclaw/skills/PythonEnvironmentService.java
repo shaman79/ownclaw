@@ -349,8 +349,12 @@ public class PythonEnvironmentService {
     /** Remove a skill's environments now, because the skill itself is being removed. */
     public void removeEnvironments(String skillName) {
         if (envsDir == null) return;
-        synchronized (envLock(skillName)) {
+        var lock = envLock(skillName);
+        lock.lock();
+        try {
             removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -434,9 +438,32 @@ public class PythonEnvironmentService {
      * be made, the system Python as it is, with why in {@link PythonResolution#installError}.
      */
     public PythonResolution resolveExecution(Path skillDir, String skillName) {
-        synchronized (envLock(skillName)) {
-            return resolveExecutionHeld(skillDir, skillName);
+        return resolveExecution(skillDir, skillName, () -> false, () -> {});
+    }
+
+    /**
+     * {@link #resolveExecution(Path, String)} for a task: while another task sets up the skill's
+     * environment -- its first run, or a self-heal installing a package -- the task is said to
+     * wait ({@code waiting}), which the stall watchdog counts as progress, and a Stop of it
+     * ({@code stopped}) ends the wait.
+     *
+     * @throws IllegalStateException when the task was stopped while it waited
+     */
+    public PythonResolution resolveExecution(Path skillDir, String skillName,
+                                             java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        var lock = envLock(skillName);
+        if (!com.ownclaw.agent.tools.SkillLocks.take(lock, stopped, waiting)) {
+            throw new IllegalStateException(stoppedWaiting(skillName));
         }
+        try {
+            return resolveExecutionHeld(skillDir, skillName);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private static String stoppedWaiting(String skillName) {
+        return "Stopped while another task set up the environment of skill '" + skillName + "'";
     }
 
     /**
@@ -444,11 +471,11 @@ public class PythonEnvironmentService {
      * side, and two first runs of a skill made its venv and installed its requirements into it
      * at once, and a self-heal's added package lost to another's rewrite of requirements.txt.
      */
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> envLocks =
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> envLocks =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-    private Object envLock(String skillName) {
-        return envLocks.computeIfAbsent(String.valueOf(skillName), n -> new Object());
+    java.util.concurrent.locks.ReentrantLock envLock(String skillName) {
+        return envLocks.computeIfAbsent(String.valueOf(skillName), n -> new java.util.concurrent.locks.ReentrantLock());
     }
 
     private PythonResolution resolveExecutionHeld(Path skillDir, String skillName) {
@@ -571,8 +598,18 @@ public class PythonEnvironmentService {
      *                     venv when the fallback target install was tried and failed too
      */
     public void installPackages(Path skillDir, String skillName, List<String> packages) throws IOException {
-        synchronized (envLock(skillName)) {
+        installPackages(skillDir, skillName, packages, () -> false, () -> {});
+    }
+
+    /** {@link #installPackages(Path, String, List)} for a task, waiting as {@link #resolveExecution(Path, String, java.util.function.BooleanSupplier, Runnable)} does. */
+    public void installPackages(Path skillDir, String skillName, List<String> packages,
+                                java.util.function.BooleanSupplier stopped, Runnable waiting) throws IOException {
+        var lock = envLock(skillName);
+        if (!com.ownclaw.agent.tools.SkillLocks.take(lock, stopped, waiting)) throw new IOException(stoppedWaiting(skillName));
+        try {
             installPackagesHeld(skillDir, skillName, packages);
+        } finally {
+            lock.unlock();
         }
     }
 

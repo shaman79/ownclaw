@@ -41,7 +41,8 @@ class DynamicSkillOutputTest {
         }
         @Override public boolean isAvailable() { return true; }
         @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
-                                            SandboxManager.ProgressCallback cb) { return "test-image"; }
+                                            SandboxManager.ProgressCallback cb,
+                                            java.util.function.BooleanSupplier stopped) { return "test-image"; }
         @Override public SandboxResult execute(String image, String python, Path script, Path dir,
                                                String stdinJson, Map<String, String> env, int timeout,
                                                SandboxManager.ProgressCallback cb,
@@ -192,7 +193,8 @@ class DynamicSkillOutputTest {
     void aStallIsNotSelfHealed() throws Exception {
         var installs = new ArrayList<List<String>>();
         var env = new PythonEnvironmentService(new OwnClawConfig()) {
-            @Override public void installPackages(Path skillDir, String skillName, List<String> packages) {
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages,
+                    java.util.function.BooleanSupplier stopped, Runnable waiting) {
                 installs.add(packages);
             }
         };
@@ -330,7 +332,8 @@ class DynamicSkillOutputTest {
     @DisplayName("after a self-heal, the retry's own failure is what is reported")
     void theRetrysFailureIsReported() throws Exception {
         var installs = new PythonEnvironmentService(new OwnClawConfig()) {
-            @Override public void installPackages(Path skillDir, String skillName, List<String> packages) {
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages,
+                    java.util.function.BooleanSupplier stopped, Runnable waiting) {
             }
         };
         var r = run(installs,

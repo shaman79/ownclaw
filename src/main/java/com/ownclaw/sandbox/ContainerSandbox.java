@@ -249,6 +249,19 @@ public class ContainerSandbox {
     public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
                               String preferredImage, SandboxManager.ProgressCallback progressCallback)
             throws IOException, InterruptedException {
+        return ensureImage(systemPackages, pipRequirements, skillDir, preferredImage, progressCallback, () -> false);
+    }
+
+    /**
+     * {@link #ensureImage(List, String, Path, String, SandboxManager.ProgressCallback)} for a task:
+     * a Stop of it ({@code stopped}) ends its wait for an image another task is building.
+     *
+     * @throws IOException when the task was stopped while it waited
+     */
+    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
+                              String preferredImage, SandboxManager.ProgressCallback progressCallback,
+                              java.util.function.BooleanSupplier stopped)
+            throws IOException, InterruptedException {
 
         // Build ordered list of base images to try: preferred first, then config default, then fallbacks
         List<String> candidates = buildImageCandidateList(preferredImage);
@@ -264,7 +277,13 @@ public class ContainerSandbox {
         // instead of building it again beside it for minutes. Said to it as its progress while it
         // waits, which the stall watchdog counts as such: the build may take minutes.
         var building = buildLocks.computeIfAbsent(imageTag, t -> new java.util.concurrent.locks.ReentrantLock());
-        awaitBuild(building, progressCallback);
+        if (!com.ownclaw.agent.tools.SkillLocks.take(building, stopped, () -> {
+            if (progressCallback != null) {
+                progressCallback.onProgress("Waiting for the container image another task is building", null);
+            }
+        })) {
+            throw new IOException("Stopped while another task built the container image " + imageTag);
+        }
         try {
             if (builtImages.contains(imageTag)) {
                 return imageTag;
@@ -273,26 +292,6 @@ public class ContainerSandbox {
         } finally {
             building.unlock();
         }
-    }
-
-    /** Take the lock of an image's build, saying every half minute that another task builds it. */
-    private static void awaitBuild(java.util.concurrent.locks.Lock building,
-                                   SandboxManager.ProgressCallback progressCallback) {
-        long next = 0;
-        boolean interrupted = false;
-        for (;;) {
-            try {
-                if (building.tryLock(1, java.util.concurrent.TimeUnit.SECONDS)) break;
-            } catch (InterruptedException e) {
-                interrupted = true;
-            }
-            long now = System.currentTimeMillis();
-            if (progressCallback != null && now >= next) {
-                progressCallback.onProgress("Waiting for the container image another task is building", null);
-                next = now + 30_000;
-            }
-        }
-        if (interrupted) Thread.currentThread().interrupt();
     }
 
     /** One for each image being asked for, by its tag: see {@link #ensureImage}. */

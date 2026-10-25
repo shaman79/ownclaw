@@ -57,4 +57,39 @@ class OneImageBuildTest {
             throw new IllegalStateException(e);
         }
     }
+
+    @Test
+    @DisplayName("a task waiting for an image another task builds is said to wait, and its Stop ends the wait")
+    void aWaitForABuildIsStopped() throws Exception {
+        Path builds = tmp.resolve("builds");
+        Path runtime = tmp.resolve("docker.sh");
+        Files.writeString(runtime, "#!/bin/sh\n"
+                + "case \"$1\" in\n"
+                + "  image) exit 1 ;;\n"
+                + "  build) echo built >> '" + builds + "'; sleep 6; exit 0 ;;\n"
+                + "  *) exit 0 ;;\n"
+                + "esac\n");
+        Files.setPosixFilePermissions(runtime, PosixFilePermissions.fromString("rwx------"));
+        var sandbox = ContainerSandbox.withRuntimes(new OwnClawConfig(), runtime.toString(), null);
+
+        var building = CompletableFuture.supplyAsync(() -> ensure(sandbox, new java.util.ArrayList<>()));
+        for (int i = 0; i < 100 && !Files.exists(builds); i++) Thread.sleep(50);
+        assertTrue(Files.exists(builds), "the first build began");
+
+        var said = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var stopped = new java.util.concurrent.atomic.AtomicBoolean();
+        var waiting = CompletableFuture.supplyAsync(() -> {
+            try {
+                return sandbox.ensureImage(List.of("nmap"), null, tmp, null, (m, p) -> said.add(m), stopped::get);
+            } catch (Exception e) {
+                return "ended: " + e.getMessage();
+            }
+        });
+        for (int i = 0; i < 100 && said.isEmpty(); i++) Thread.sleep(50);
+        assertEquals(List.of("Waiting for the container image another task is building"), said);
+        stopped.set(true);
+        String ended = waiting.get(3, TimeUnit.SECONDS);
+        assertTrue(ended.startsWith("ended: Stopped while another task built the container image"), ended);
+        assertNotNull(building.get(30, TimeUnit.SECONDS), "the first build went on");
+    }
 }

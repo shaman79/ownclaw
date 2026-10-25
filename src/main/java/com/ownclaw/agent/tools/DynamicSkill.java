@@ -300,9 +300,7 @@ public class DynamicSkill implements Tool {
         // One under way is waited for in turn, said to the task as its progress.
         var running = SkillLocks.of(name).readLock();
         var progress = context == null ? null : context.progressCallback();
-        java.util.function.BooleanSupplier stopped = context == null || context.cancelled() == null
-                ? () -> false : context.cancelled();
-        if (!SkillLocks.take(running, stopped, () -> {
+        if (!SkillLocks.take(running, stoppedOf(context), () -> {
             if (progress != null) progress.onProgress("Waiting: skill '" + name + "' is being changed by another task", null);
         })) {
             return ToolResult.failure("Stopped while skill '" + name + "' was being changed: it did not run.");
@@ -312,6 +310,21 @@ public class DynamicSkill implements Tool {
         } finally {
             running.unlock();
         }
+    }
+
+    /** Whether the task running this has been stopped: what ends its waits for other tasks. */
+    private static java.util.function.BooleanSupplier stoppedOf(ToolExecutionContext context) {
+        return context == null || context.cancelled() == null ? () -> false : context.cancelled();
+    }
+
+    /** Said to the task while another task sets up this skill's environment: its progress meanwhile. */
+    private Runnable settingUp(ToolExecutionContext context) {
+        var progress = context == null ? null : context.progressCallback();
+        return () -> {
+            if (progress != null) {
+                progress.onProgress("Waiting: another task is setting up the environment of skill '" + name + "'", null);
+            }
+        };
     }
 
     private ToolResult run(Map<String, Object> params, ToolExecutionContext context) {
@@ -324,7 +337,7 @@ public class DynamicSkill implements Tool {
         inFlight.incrementAndGet();
         try {
             // Resolve Python (creates venv + installs requirements if needed)
-            var resolution = pythonEnv.resolveExecution(skillDir, name);
+            var resolution = pythonEnv.resolveExecution(skillDir, name, stoppedOf(context), settingUp(context));
 
             // Write the runner harness with a unique name to avoid conflicts
             // when the same skill is executed concurrently by different users
@@ -413,7 +426,7 @@ public class DynamicSkill implements Tool {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
                 containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
-                        context.progressCallback());
+                        context.progressCallback(), stoppedOf(context));
                 usedContainer = true;
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
@@ -445,8 +458,8 @@ public class DynamicSkill implements Tool {
                 log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
                         name, missingModule, pkg);
                 try {
-                    pythonEnv.installPackages(skillDir, name, List.of(pkg));
-                    SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
+                    pythonEnv.installPackages(skillDir, name, List.of(pkg), stoppedOf(context), settingUp(context));
+                    SandboxResult retry = retrySelfHeal(stoppedOf(context), usedContainer, containerImageTag,
                             runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes);
                     if (retry != null) {
                         toolResult = interpret(retry);
@@ -493,7 +506,8 @@ public class DynamicSkill implements Tool {
      * Retry a self-healed skill execution using the same execution path as the original run.
      * Container-based skills retry inside the container; direct skills retry via the process sandbox.
      */
-    private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
+    private SandboxResult retrySelfHeal(java.util.function.BooleanSupplier stopped, boolean usedContainer,
+                                         String containerImageTag,
                                          Path runnerScript, Path skillDir, String inputJson,
                                          Map<String, String> envVars, int timeoutSec,
                                          Map<String, String> extraVolumes) {
@@ -501,13 +515,14 @@ public class DynamicSkill implements Tool {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
                 String pipReqs = readRequirements();
-                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage, null);
+                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
+                        null, stopped);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
                         inputJson, envVars, timeoutSec, null, extraVolumes);
             } else {
                 // Direct process execution
-                var healedResolution = pythonEnv.resolveExecution(skillDir, name);
+                var healedResolution = pythonEnv.resolveExecution(skillDir, name, stopped, () -> {});
                 Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
                 healedEnv.put("PYTHONIOENCODING", "utf-8");
                 healedEnv.put("PYTHONUTF8", "1");
