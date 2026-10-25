@@ -113,6 +113,16 @@ class TabChatPageTest {
     }
 
     @Test
+    @DisplayName("a chat's history that comes after another chat was opened is not drawn: only the last one asked for is")
+    void aLateHistoryIsDropped() {
+        String load = function("loadSessionMessages");
+        assertTrue(load.contains("var load = ++historyLoads;"), load);
+        assertTrue(load.contains(".then(function(data) { if (authToken !== asked || load !== historyLoads) return; clearMessages();"), load);
+        assertTrue(load.contains(".catch(function(e) { // ") && load.contains("if (load !== historyLoads) return; // a chat opened since is on screen clearMessages();"),
+                "nor its failure: " + load);
+    }
+
+    @Test
     @DisplayName("a fate naming another chat takes the tab there only while the chat it was sent from is still on screen")
     void aFateMovesOnlyAnUnmovedTab() {
         assertTrue(function("send").contains("sentFrom[clientId] = displayedSessionId;"));

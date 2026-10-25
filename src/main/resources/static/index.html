@@ -2973,6 +2973,9 @@
         refreshSessionList();
     }
 
+    /** How many chats' histories this page has asked for: only the last one asked is drawn. */
+    var historyLoads = 0;
+
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
         // The working state on screen is the chat's it leaves; the chat opened is told its own.
@@ -2993,12 +2996,16 @@
         messagesEl.appendChild(loader);
 
         var asked = authToken;   // a reply after logout or another login is dropped
+        // And one for a chat left since: a slow history drawn when it came drew one chat over the
+        // chat opened after it, whose name the list and the tab kept -- what was typed then was
+        // filed in a chat not on screen.
+        var load = ++historyLoads;
         fetch('/api/chats/' + sessionId + '/messages?limit=' + HISTORY_PAGE, {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(okJson)
         .then(function(data) {
-            if (authToken !== asked) return;
+            if (authToken !== asked || load !== historyLoads) return;
             clearMessages();
             var msgs = data.messages || [];
             var lastTask = null;
@@ -3023,6 +3030,7 @@
             // an empty chat looks like -- so a locked database or an expired token read as "this
             // conversation is gone". The loader must be removed either way, or the pane sits on
             // "Loading messages..." for ever while the global error bar auto-dismisses.
+            if (load !== historyLoads) return;   // a chat opened since is on screen
             clearMessages();
             if (!authToken) return;          // logout already cleared the pane deliberately
             var err = document.createElement('div');
