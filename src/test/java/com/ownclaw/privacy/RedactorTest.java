@@ -38,6 +38,13 @@ class RedactorTest {
             secret("DB_PASSWORD=fake-env-pass", "fake-env-pass"),
             secret("export API_TOKEN=\"fake-env-token\"", "fake-env-token"),
             secret("smtp_pass = fake-ini-pass", "fake-ini-pass"),
+            // SSH key material: a key-type word, then the base64 blob, which is what is removed.
+            secret("authorized key ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000",
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000"),
+            secret("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987 deploy",
+                    "AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987"),
+            secret("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000",
+                    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000"),
             secret("{\"user\":\"admin\",\"password\":\"fake-json-pass\"}", "fake-json-pass"),
             secret("{'client_secret': 'fake-dict-secret'}", "fake-dict-secret"),
             secret("  apiKey: \"fake-camel-key\"", "fake-camel-key"),
@@ -201,7 +208,11 @@ class RedactorTest {
                 "    client.login(user=user, password=password)",
                 "docker run -u 1000:1000 image",
                 "  --password PASSWORD   the router's admin password\n  --token-file PATH",
-                "Lunch (tomorrow) at noon"));
+                "Lunch (tomorrow) at noon",
+                // ssh key types as bare words, or not followed by an AAAA blob: not key material
+                "the key type is ssh-ed25519 or ssh-rsa",
+                "ssh-rsa hello world, no key here",
+                "run ssh-ed25519-keygen then restart"));
         for (int[] o : new int[][] {{10, 0, 0, 1}, {10, 255, 3, 7}, {172, 16, 5, 4}, {172, 31, 255, 254},
                 {192, 168, 1, 20}, {100, 64, 0, 1}, {100, 127, 255, 254}, {127, 0, 0, 1}, {169, 254, 1, 1}}) {
             texts.add("gateway " + ip(o[0], o[1], o[2], o[3]) + " is up");

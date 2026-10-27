@@ -755,6 +755,7 @@ public final class Redactor {
         var secrets = new ArrayList<Finding>();
         var ids = new ArrayList<Finding>();
         pemBlocks(s, secrets);
+        sshKeys(s, secrets);
         passwordHashes(s, secrets);
         tokens(s, secrets);
         urlPasswords(s, secrets);
@@ -875,6 +876,45 @@ public final class Redactor {
             out.add(new Finding(at, stop, null));
             from = stop;
         }
+    }
+
+    /** The key types whose SSH key blob {@link #sshKeys} removes; each blob begins with "AAAA". */
+    private static final List<String> SSH_KEY_TYPES = List.of(
+            "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+            "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+            "ssh-ed25519", "ssh-rsa", "ssh-dss");
+
+    /**
+     * SSH key material: a key-type word, whitespace, then the base64 blob, which for each of these
+     * types begins with "AAAA" -- the wire format's length-prefixed type name. The blob is removed
+     * and the type word kept, so a line reads {@code ... ssh-ed25519 «secret removed» comment}. The
+     * fixed type word plus the "AAAA" start make a match near-certain; a bare high-entropy token in
+     * prose -- a service secret a journal printed -- has no such anchor and is left to the named-value
+     * and vault passes, where a generic entropy rule here would take git shas, sha256 digests and
+     * base64 data with it. The longer {@code sk-}/{@code ecdsa} names come first so the shorter ones
+     * do not match inside them.
+     */
+    private static void sshKeys(String s, List<Finding> out) {
+        for (String type : SSH_KEY_TYPES) {
+            int from = 0, at;
+            while ((at = s.indexOf(type, from)) >= 0) {
+                from = at + type.length();
+                // A word boundary before the type: not "my-ssh-rsa-helper".
+                if (at > 0 && (isAsciiAlnum(s.charAt(at - 1)) || s.charAt(at - 1) == '-'
+                        || s.charAt(at - 1) == '.')) continue;
+                int p = from;
+                while (p < s.length() && (s.charAt(p) == ' ' || s.charAt(p) == '\t')) p++;
+                if (p == from || !s.startsWith("AAAA", p)) continue;   // a blob, set off from the word
+                int end = run(s, p, Redactor::isBase64Char);
+                if (end - p < 40) continue;   // too short to be a real key blob
+                out.add(new Finding(p, end, null));
+                from = end;
+            }
+        }
+    }
+
+    private static boolean isBase64Char(int c) {
+        return isAsciiAlnum(c) || c == '+' || c == '/' || c == '=';
     }
 
     private static final Set<String> HASH_IDS =
