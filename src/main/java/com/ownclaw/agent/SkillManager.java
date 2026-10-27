@@ -57,19 +57,26 @@ public class SkillManager {
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
     private final SkillCuratorService curatorService;
+    /**
+     * Who is the owner: a skill's code is global, so who may change it is decided by its author
+     * and the owner ({@link #changeRefusal}). Null in a test that makes its own manager.
+     */
+    private final com.ownclaw.users.AuthService authService;
 
     public SkillManager(DynamicSkillRegistry dynamicSkillRegistry,
                         @Lazy ToolRegistry toolRegistry,
                         OwnClawConfig config,
                         SandboxManager sandbox,
                         PythonEnvironmentService pythonEnv,
-                        SkillCuratorService curatorService) {
+                        SkillCuratorService curatorService,
+                        @Lazy com.ownclaw.users.AuthService authService) {
         this.dynamicSkillRegistry = dynamicSkillRegistry;
         this.toolRegistry = toolRegistry;
         this.config = config;
         this.sandbox = sandbox;
         this.pythonEnv = pythonEnv;
         this.curatorService = curatorService;
+        this.authService = authService;
     }
 
     // ────────────────────── Create / Update ──────────────────────
@@ -129,18 +136,22 @@ public class SkillManager {
      * @return human-readable result message
      */
     public String createSkill(Map<String, Object> params) {
-        return createSkill(params, () -> false, () -> {});
+        return createSkill(params, null, () -> false, () -> {});
     }
 
     /**
-     * {@link #createSkill(Map)} for a task: while the skill's runs under way in other tasks end,
-     * it is said to wait ({@code waiting}), which the stall watchdog counts as progress, and a
-     * Stop of it ({@code stopped}) ends the wait with nothing written.
+     * {@link #createSkill(Map)} for a task of {@code requester}'s: refused when the skill exists
+     * and is another account's ({@link #changeRefusal}); while the skill's runs under way in
+     * other tasks end, it is said to wait ({@code waiting}), which the stall watchdog counts as
+     * progress, and a Stop of it ({@code stopped}) ends the wait with nothing written.
+     *
+     * @param requester the account the task runs for; null for the owner's own pages and
+     *                  maintenance, which are not an account's task
      */
-    public String createSkill(Map<String, Object> params, java.util.function.BooleanSupplier stopped,
-                              Runnable waiting) {
+    public String createSkill(Map<String, Object> params, String requester,
+                              java.util.function.BooleanSupplier stopped, Runnable waiting) {
         String name = str(params, "name");
-        if (name == null) return createSkillHeld(params);
+        if (name == null) return createSkillHeld(params, requester);
         // Held to write while its files are written, checked and registered: another task's
         // skill_create of the same name waits, and so does every run of it.
         var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
@@ -148,13 +159,45 @@ public class SkillManager {
             return "ERROR: Stopped while a run of skill '" + name + "' was under way: nothing was written.";
         }
         try {
-            return createSkillHeld(params);
+            return createSkillHeld(params, requester);
         } finally {
             changing.unlock();
         }
     }
 
-    private String createSkillHeld(Map<String, Object> params) {
+    /**
+     * Why {@code requester} may not change or delete the skill whose files are in {@code skillDir},
+     * or null when it may. A skill's code is global -- every account's tasks are offered it -- and
+     * it runs with the vault values and the files of whoever runs it, so a skill the owner runs
+     * must not be one another account replaced: overwritten, account B's code would read the
+     * owner's credentials and attached files the next time he ran it. The account that first
+     * wrote a skill is its author, kept in its SKILL.yaml; it and the owner may change it, nobody
+     * else. A skill written before authors were kept has none, and is the owner's. A new name is
+     * anyone's to take. Checked with the skill's write lock held, so the author read is the one
+     * the write replaces.
+     */
+    private String changeRefusal(String name, Path skillDir, String requester, String change) {
+        if (requester == null) return null;                         // the owner's pages, maintenance
+        Path yamlFile = skillDir.resolve("SKILL.yaml");
+        if (!Files.exists(yamlFile)) return null;                   // a new skill: anyone's to write
+        if (authService != null && authService.isOwner(requester)) return null;
+        if (requester.equals(authorOf(yamlFile))) return null;      // its author
+        return "ERROR: the skill '" + name + "' belongs to another account, so it cannot be " + change
+                + " -- only its author or the owner can. Create a skill of your own under another name.";
+    }
+
+    /** The account that first wrote this skill, from its SKILL.yaml; null when none is kept. */
+    private static String authorOf(Path yamlFile) {
+        try {
+            Map<String, Object> yaml = yamlMapper.readValue(yamlFile.toFile(), new TypeReference<>() {});
+            Object author = yaml.get("author");
+            return author == null || author.toString().isBlank() ? null : author.toString();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private String createSkillHeld(Map<String, Object> params, String requester) {
         String name = str(params, "name");
         String description = str(params, "description");
         String code = str(params, "code");
@@ -196,6 +239,12 @@ public class SkillManager {
 
         try {
             Path skillDir = Path.of(config.getSkills().getGeneratedPath()).resolve(name);
+            String notYours = changeRefusal(name, skillDir, requester, "changed");
+            if (notYours != null) return notYours;
+            // The author is kept across updates: the owner repairing another account's skill
+            // does not take it over. A new skill is its requester's.
+            String existingAuthor = authorOf(skillDir.resolve("SKILL.yaml"));
+            String author = existingAuthor != null ? existingAuthor : requester;
             Files.createDirectories(skillDir);
 
             // Snapshot EVERY authored file before touching any of them.
@@ -217,7 +266,7 @@ public class SkillManager {
                     ? Files.readString(reqFile, StandardCharsets.UTF_8) : null;
 
             Files.writeString(yamlFile,
-                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
+                    buildSkillYaml(name, author, description, parametersDef, requiresNetwork, hasSideEffects,
                             timeout, credentials, systemPackagesStr, containerImage),
                     StandardCharsets.UTF_8);
             Files.writeString(codeFile, code, StandardCharsets.UTF_8);
@@ -344,11 +393,16 @@ public class SkillManager {
      * Delete a skill permanently.
      */
     public String deleteSkill(String name) {
-        return deleteSkill(name, () -> false, () -> {});
+        return deleteSkill(name, null, () -> false, () -> {});
     }
 
-    /** {@link #deleteSkill(String)} for a task, waiting as {@link #createSkill(Map, java.util.function.BooleanSupplier, Runnable)} does. */
-    public String deleteSkill(String name, java.util.function.BooleanSupplier stopped, Runnable waiting) {
+    /**
+     * {@link #deleteSkill(String)} for a task of {@code requester}'s: refused for another account's
+     * skill as a change is ({@link #changeRefusal}), and waiting as
+     * {@link #createSkill(Map, String, java.util.function.BooleanSupplier, Runnable)} does.
+     */
+    public String deleteSkill(String name, String requester, java.util.function.BooleanSupplier stopped,
+                              Runnable waiting) {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
         // Held to write: the runs of it under way end first, and none starts while it goes.
         var removing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
@@ -356,19 +410,21 @@ public class SkillManager {
             return "ERROR: Stopped while a run of skill '" + name + "' was under way: it was not deleted.";
         }
         try {
-            return deleteSkillHeld(name);
+            return deleteSkillHeld(name, requester);
         } finally {
             removing.unlock();
         }
     }
 
-    private String deleteSkillHeld(String name) {
+    private String deleteSkillHeld(String name, String requester) {
         if (!dynamicSkillRegistry.isDynamic(name)) {
             return "ERROR: '" + name + "' is not a modifiable skill.";
         }
 
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
+        String notYours = changeRefusal(name, skillOpt.get().skillDir(), requester, "deleted");
+        if (notYours != null) return notYours;
 
         Path skillDir = skillOpt.get().skillDir();
         dynamicSkillRegistry.unregister(name);
@@ -520,12 +576,14 @@ public class SkillManager {
         }
     }
 
-    private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
+    private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
                                   String credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
+        // Who may change it besides the owner (changeRefusal); none for one the owner's pages write.
+        if (author != null) yaml.put("author", author);
         yaml.put("description", description);
         yaml.put("version", 1);
         if (parametersDef != null && !parametersDef.isEmpty()) {

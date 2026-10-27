@@ -60,7 +60,7 @@ class SkillLifecycleTest {
         registry = new ToolRegistry(List.of());
         DynamicSkillRegistry dynamic =
                 new DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);
-        manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null);
+        manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null, null);
     }
 
     private String create(String name, String description, String code) {
@@ -201,7 +201,7 @@ class SkillLifecycleTest {
         var sandbox = new ProcessSandbox(env, new ObjectMapper());
         var reg = new ToolRegistry(List.of());
         var mgr = new SkillManager(new DynamicSkillRegistry(cfg, reg, sandbox, null, env, null, null),
-                reg, cfg, sandbox, env, null);
+                reg, cfg, sandbox, env, null, null);
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("name", "yaml_reader");
         p.put("description", "Reads a YAML file.");

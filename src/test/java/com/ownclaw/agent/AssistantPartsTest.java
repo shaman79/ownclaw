@@ -392,7 +392,7 @@ class AssistantPartsTest {
 
     /** No skill of its own: the loop reads a skill's source only to excuse a canary hit. */
     static final class NoSkills extends SkillManager {
-        NoSkills() { super(null, null, null, null, null, null); }
+        NoSkills() { super(null, null, null, null, null, null, null); }
         @Override public String readSkillCode(String name) { return null; }
     }
 

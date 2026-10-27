@@ -130,12 +130,13 @@ final class LoopRig {
         volatile Function<String, String> syntax = code -> null;
         volatile Function<Map<String, Object>, String> create = p -> "Skill '" + p.get("name") + "' created.";
 
-        Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator); }
+        Skills(SkillCuratorService curator, ToolRegistry registry) { super(null, registry, null, null, null, curator, null); }
 
         @Override public String readSkillCode(String name) { return source.apply(name); }
         @Override public String readSkill(String name) { return files.apply(name); }
         @Override String checkPythonSyntax(String code) { return syntax.apply(code); }
-        @Override public String createSkill(Map<String, Object> params, java.util.function.BooleanSupplier stopped,
+        @Override public String createSkill(Map<String, Object> params, String requester,
+                                            java.util.function.BooleanSupplier stopped,
                                             Runnable waiting) { return create.apply(params); }
     }
 

@@ -1639,7 +1639,8 @@ public class AgentLoop {
 
         return switch (action) {
             case "read" -> skillManager.readSkill(name);
-            case "delete" -> skillManager.deleteSkill(name, context::isCancelled, () -> waitingForSkill(context, name));
+            case "delete" -> skillManager.deleteSkill(name, context.userId(), context::isCancelled,
+                    () -> waitingForSkill(context, name));
             case "list" -> skillManager.listSkills();
             case "analyze" -> {
                 LlmProvider provider = llmRouter.selectProvider(context);
@@ -2305,7 +2306,7 @@ public class AgentLoop {
         if (result == null) {
             Codegen code = generateSkillCode(action.params(), context);
             result = code.error() != null ? code.error()
-                    : skillManager.createSkill(code.params(), context::isCancelled,
+                    : skillManager.createSkill(code.params(), context.userId(), context::isCancelled,
                             () -> waitingForSkill(context, str(action.params(), "name")));
         }
         // The skill the model has just created is one of its tools from the next step.

@@ -53,7 +53,7 @@ class ConcurrentSkillsTest {
         ProcessSandbox sandbox = new ProcessSandbox(pyEnv, new ObjectMapper());
         registry = new ToolRegistry(List.of());
         dynamic = new DynamicSkillRegistry(cfg, registry, sandbox, null, pyEnv, null, null);
-        manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null);
+        manager = new SkillManager(dynamic, registry, cfg, sandbox, pyEnv, null, null);
     }
 
     private static Map<String, Object> skill(String name) {
@@ -151,7 +151,7 @@ class ConcurrentSkillsTest {
         var stopped = new AtomicBoolean();
         try {
             CompletableFuture<String> recreate = CompletableFuture.supplyAsync(
-                    () -> manager.createSkill(skill("greeter"), stopped::get, said::incrementAndGet));
+                    () -> manager.createSkill(skill("greeter"), null, stopped::get, said::incrementAndGet));
             for (int i = 0; i < 100 && said.get() == 0; i++) Thread.sleep(50);
             assertEquals(1, said.get(), "said once it waits, which the stall watchdog counts as progress");
             stopped.set(true);
