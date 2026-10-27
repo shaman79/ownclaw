@@ -94,8 +94,11 @@ class TabChatPageTest {
         assertTrue(question.indexOf("markUnread(data.sessionId); return; }") < question.indexOf("setThinking(false);"),
                 "a question in another chat ends nothing here: " + question);
         assertTrue(branch("debug", "progress").contains("if (!data.sessionId || data.sessionId === displayedSessionId) addMsg('debug', content);"));
-        assertTrue(branch("progress", "pong").contains("if (data.sessionId && data.sessionId !== displayedSessionId) "
-                + "markWorking(data.sessionId, true); else resetThinkingSafetyTimer();"));
+        String progress = branch("progress", "pong");
+        assertTrue(progress.contains("if (data.sessionId && data.sessionId !== displayedSessionId) { "
+                + "markWorking(data.sessionId, true);") && progress.contains("} else resetThinkingSafetyTimer();"), progress);
+        assertTrue(progress.contains("if (data.question) { showElsewhere('A question is waiting in another chat.', "
+                + "data.sessionId); markUnread(data.sessionId); }"), "a question waiting elsewhere is said: " + progress);
 
         String elsewhere = page.substring(page.indexOf("if (data.sessionId && data.sessionId !== displayedSessionId) { "
                 + "// That chat's task has ended"));

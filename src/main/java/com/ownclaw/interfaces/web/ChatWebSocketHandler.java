@@ -176,6 +176,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 if (msg.data() != null && msg.data().get("read") != null) {
                     payload.put("read", msg.data().get("read"));
                 }
+                // A question the task waits on (TaskChat#question): a page showing another chat
+                // says one is waiting there.
+                if (msg.data() != null && Boolean.TRUE.equals(msg.data().get("question"))) {
+                    payload.put("question", true);
+                }
                 // When the row was saved, so the page shows the time a reload of the chat will.
                 if (msg.data() != null && msg.data().get("timestamp") != null) {
                     payload.put("timestamp", msg.data().get("timestamp"));

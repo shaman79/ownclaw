@@ -28,6 +28,10 @@ public final class Inbox {
     private final ChatOptions options;
     private final List<Sent> waiting = new ArrayList<>();
     private boolean taking = true;
+    /** Whether the task waits for the answer to a question it asked in its chat ({@link #awaitAnswer}). */
+    private boolean asking;
+    /** The answer to that question, once it has come; null until then. */
+    private UserMessage answer;
 
     public Inbox(TaskChat.Channel channel, ChatOptions options) {
         this.channel = channel;
@@ -50,6 +54,15 @@ public final class Inbox {
      *         caller's to queue
      */
     public synchronized boolean offer(UserMessage message, long order) {
+        // The answer to the question the task waits on: the next message from its chat's channel,
+        // whatever it was sent with -- it is a reply, read by the code that asked, never run on
+        // other options. One with files is no answer.
+        if (asking && taking && answer == null && message.channel() == channel
+                && message.attachmentIds().isEmpty()) {
+            answer = message;
+            notifyAll();
+            return true;
+        }
         if (message.channel() != channel || !message.attachmentIds().isEmpty()
                 || !message.options().equals(options)) taking = false;
         if (!taking) return false;
@@ -69,8 +82,44 @@ public final class Inbox {
      * to {@code handOn} with the place it took when it was sent, in order, before this returns --
      * so before any offer refused from here on, whose caller queues its message after these.
      */
+    /**
+     * The task is about to ask a question in its chat: from now on the next message sent there is
+     * its answer ({@link #awaitAnswer}). Called before the question is posted, so an answer that
+     * comes at once is not taken for one more message for the task.
+     */
+    public synchronized void startAsking() {
+        asking = true;
+        answer = null;
+    }
+
+    /**
+     * Wait for the answer to the question asked since {@link #startAsking}: the first message sent
+     * to the chat since then ({@link #offer}), taken as the answer and not read as one more
+     * message for the task. Messages offered before it are left for the task to read as before.
+     *
+     * @return the answer, or null when none came within {@code timeoutMs}, the task was stopped
+     *         ({@code stopped}), or it takes no more messages
+     */
+    public synchronized UserMessage awaitAnswer(long timeoutMs, java.util.function.BooleanSupplier stopped)
+            throws InterruptedException {
+        asking = true;
+        try {
+            long end = System.currentTimeMillis() + timeoutMs;
+            while (answer == null && taking && !stopped.getAsBoolean()) {
+                long left = end - System.currentTimeMillis();
+                if (left <= 0) break;
+                wait(Math.min(left, 1_000));
+            }
+            return answer;
+        } finally {
+            asking = false;
+            answer = null;
+        }
+    }
+
     public synchronized void close(ObjLongConsumer<UserMessage> handOn) {
         taking = false;
+        notifyAll();
         for (Sent unread : waiting) handOn.accept(unread.message(), unread.order());
         waiting.clear();
     }

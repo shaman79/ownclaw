@@ -1148,6 +1148,18 @@ public class AgentLoop {
                     continue;
                 }
 
+                // The owner's OK before the task's first change, when the plan names a tool that
+                // makes one: he sees the goal and the texts handed over, which is what will run.
+                // A plan naming none is asked about at its first such call (LocalExecutor).
+                if (localExecutor.namesAChange(plan, context)) {
+                    String notApproved = Approval.ask(context, Approval.delegation(plan));
+                    if (notApproved != null) {
+                        AgentResult end = notStarted(context, action, notApproved, asked, step, nothing);
+                        if (end != null) return end;
+                        continue;
+                    }
+                }
+
                 log.info("Task {} step {}: delegating to local LLM — goal: {}, steps: {}",
                         context.taskId(), step + 1, truncate(plan.goal(), 100), plan.steps().size());
 
@@ -1518,6 +1530,13 @@ public class AgentLoop {
                     + refs.refused() + "' would have been sent as literal text. " + refs.reason(), 0);
         }
         Map<String, Object> resolved = refs.params();
+
+        // The owner's OK before the task's first change, asked in its chat (Approval). The call
+        // as the model wrote it is what he is shown -- never the resolved values.
+        if (tool.hasSideEffects()) {
+            String notApproved = Approval.ask(context, Approval.call(action.tool(), action.params()));
+            if (notApproved != null) return AgentObservation.failure(action.tool(), notApproved, 0);
+        }
 
         long startMs = System.currentTimeMillis();
         ToolResult result;
