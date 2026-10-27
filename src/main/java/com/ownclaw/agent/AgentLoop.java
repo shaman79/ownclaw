@@ -1514,7 +1514,7 @@ public class AgentLoop {
         long startMs = System.currentTimeMillis();
         ToolResult result;
         try {
-            result = tool.execute(resolved, execCtx);
+            result = context.runningTool(() -> tool.execute(resolved, execCtx));
         } catch (Exception e) {
             log.error("Tool '{}' threw exception: {}", action.tool(), e.getMessage(), e);
             result = ToolResult.failure("Tool execution error: " + e.getMessage());

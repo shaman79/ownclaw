@@ -42,6 +42,17 @@ public class AgentContext {
     private volatile String stalled;
     /** How to end the model call this task is waiting on, or null. See {@link #progress}. */
     private volatile Runnable callInFlight;
+    /**
+     * Tool calls of this task executing now ({@link #runningTool}). A tool run is bounded by its
+     * own timeout -- a skill's, the sandbox's, an SSH command's -- so, like a model call under
+     * way, the stall watchdog does not count it as silence: a 20-minute backup test, run with no
+     * model call and no progress line between its start and its end, used to be stopped at the
+     * ten-minute stall limit while it was still working, and the change set it had made went
+     * unreported. The watchdog stays a backstop for a task stuck with neither a call nor a tool
+     * running.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger toolsInFlight =
+            new java.util.concurrent.atomic.AtomicInteger();
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
     /** Counts what a model call's attempt without a reply was billed for. See {@link #setBilledWithoutReply}. */
@@ -130,7 +141,25 @@ public class AgentContext {
      * task that had handed a long result to its local model ended STALLED while the model read it.
      */
     public long msSinceLastProgress() {
-        return callInFlight != null ? 0 : System.currentTimeMillis() - lastProgressMs;
+        return callInFlight != null || toolsInFlight.get() > 0
+                ? 0 : System.currentTimeMillis() - lastProgressMs;
+    }
+
+    /**
+     * Run a tool call of this task. While it runs the stall watchdog does not count the task as
+     * silent ({@link #msSinceLastProgress}): the call is bounded by the tool's own timeout, as a
+     * model call is bounded by the model's. Its end is progress, so the task stays alive through a
+     * run of several back-to-back calls. Used on both paths a tool runs on -- the loop's own step
+     * and a delegation's ({@code AgentLoop.executeTool}, {@code LocalExecutor.act}).
+     */
+    public <T> T runningTool(java.util.function.Supplier<T> call) {
+        toolsInFlight.incrementAndGet();
+        try {
+            return call.get();
+        } finally {
+            toolsInFlight.decrementAndGet();
+            markProgress();
+        }
     }
 
     public boolean isUnattended() { return unattended; }

@@ -65,6 +65,24 @@ class StallWatchdogTest {
     }
 
     @Test
+    @DisplayName("a tool call under way -- an SSH command, a long skill -- is not silence, and its end is progress")
+    void aToolCallUnderWayIsNotSilence() throws Exception {
+        // A delegation's SSH command ran for 20 minutes with no model call and no progress line
+        // between its start and its end; the watchdog counted it as silence and stopped the task
+        // while it was still working, and the change set it had made went unreported.
+        AgentContext ctx = new AgentContext("u1", "t1", "run the backup test");
+        Thread.sleep(30);
+        String out = ctx.runningTool(() -> {
+            try { Thread.sleep(40); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            assertEquals(0, ctx.msSinceLastProgress(), "the watchdog counted the tool run as silence");
+            return "done";
+        });
+        assertEquals("done", out);
+        assertTrue(ctx.msSinceLastProgress() < 20,
+                "the end of the tool run is progress: " + ctx.msSinceLastProgress());
+    }
+
+    @Test
     @DisplayName("a model call under way -- a request, or a wait to send one again -- is not silence, and its end is progress")
     void aCallUnderWayIsNotSilence() throws Exception {
         // Ollama sends nothing while it loads the model and reads the prompt, and a call that was

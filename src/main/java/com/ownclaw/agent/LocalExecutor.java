@@ -640,12 +640,11 @@ public class LocalExecutor {
                 "Delegate: running " + action.tool + "...");
 
         long toolStartMs = System.currentTimeMillis();
-        ToolResult result = executeToolDirect(target, params, parentContext);
+        // While it runs the stall watchdog does not count the task as silent, and its end marks
+        // progress: the calls of a turn run back to back, with no model call between them to say
+        // the task is alive, so their run times together used to be counted as silence.
+        ToolResult result = parentContext.runningTool(() -> executeToolDirect(target, params, parentContext));
         long toolMs = System.currentTimeMillis() - toolStartMs;
-        // A finished call is progress. The calls of a turn run back to back, with no model call
-        // between them to say the task is alive, and the stall watchdog would otherwise count
-        // their run times together as silence.
-        parentContext.markProgress();
         boolean toolOk = result.success();
         String toolResult = toolOk ? result.output() : "ERROR: " + result.output();
 

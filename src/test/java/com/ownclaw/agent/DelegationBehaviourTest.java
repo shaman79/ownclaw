@@ -838,16 +838,17 @@ class DelegationBehaviourTest {
         var emitter = new ChatStatusEmitter();
         var lines = new ArrayList<String>();
         emitter.subscribe("u1", "test", m -> lines.add(m.text()));
-        long[] quiet = {-1, -1};
+        long[] whileRunning = {-1};
         var scan = new Tool() {
             public String name() { return "net_scan"; }
             public String description() { return "scans"; }
             public Map<String, ToolParam> inputSchema() { return Map.of(); }
             public ToolResult execute(Map<String, Object> p, ToolExecutionContext c) {
                 try { Thread.sleep(30); } catch (InterruptedException e) { throw new IllegalStateException(e); }
-                quiet[0] = ctx.msSinceLastProgress();
                 c.progressCallback().onProgress("Scanning 1/3", 33);
-                quiet[1] = ctx.msSinceLastProgress();
+                // The tool is in flight, so the watchdog counts no silence against the task at all
+                // -- a slow skill is bounded by its own timeout, not the stall limit.
+                whileRunning[0] = ctx.msSinceLastProgress();
                 return ToolResult.success("3 hosts up");
             }
         };
@@ -857,7 +858,7 @@ class DelegationBehaviourTest {
                 new Usage()).execute(plan("scan"), ctx, UNCOUNTED);
 
         assertTrue(lines.contains("Delegate: net_scan: Scanning 1/3 (33%)"), lines.toString());
-        assertTrue(quiet[0] >= 30 && quiet[1] < quiet[0], quiet[0] + " then " + quiet[1] + " ms");
+        assertEquals(0, whileRunning[0], "a tool in flight is never counted as silence: " + whileRunning[0]);
     }
 
     @Test

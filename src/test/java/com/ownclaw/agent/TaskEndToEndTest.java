@@ -128,22 +128,26 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("a step that shows no progress -- a skill that hangs, reporting nothing -- is stopped by the watchdog: STALLED, with its facts and the steps")
-    void aStepWithNoProgressIsStalled(@TempDir Path tmp) throws Exception {
-        var rig = new LoopRig(tmp, List.of(NOOP, hanging("router_audit", 1_800)), 1);
+    @DisplayName("a long-running tool is not stalled: the watchdog leaves a tool in flight alone, its own timeout governs, and the task finishes")
+    void aLongToolIsNotStalled(@TempDir Path tmp) throws Exception {
+        // A skill reporting nothing while it works -- an SSH backup of twenty minutes -- ran far
+        // past the stall limit and was stopped mid-run, so its finished change set went
+        // unreported. A tool call is bounded by its own timeout, as a model call is, so the
+        // watchdog no longer counts it as silence (owner, 2026-10-27). Scaled: a 1.5s tool run
+        // against a 1s limit, with the watchdog ticking the whole time.
+        var rig = new LoopRig(tmp, List.of(NOOP, hanging("router_audit", 1_500)), 1);
         rig.cloud.think.add(call("noop", Map.of()));
         rig.cloud.think.add(call("router_audit", Map.of()));
+        rig.cloud.think.add(respond("the audit is done"));
         AgentResult r;
         try (var ticking = rig.watchdog()) {
             r = rig.turn(session(rig), "check the network");
         }
-        assertEquals(AgentResult.TerminationReason.STALLED, r.terminationReason(), r.response());
-        assertTrue(r.response().startsWith("**Stopped:** no progress for "), r.response());
-        assertTrue(r.response().contains("— no step finished, no model call was under way and no skill "
-                + "reported progress — and the limit is 1.0s."), r.response());
-        assertTrue(r.response().contains("1. ✓ noop"), r.response());
-        assertEquals(2, rig.cloud.calls("think").size(), "no step after the stop");
-        // Mutation: the watchdog asks through the cancellation service with no mark -> CANCELLED.
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals("the audit is done", r.response());
+        assertEquals(3, rig.cloud.calls("think").size(),
+                "the tool ran to its own end and the task went on -- it was not stalled mid-run");
+        // Mutation: count a tool in flight as silence again -> the task STALLs at 1s, mid-tool.
     }
 
     @Test
