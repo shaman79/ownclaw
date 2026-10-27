@@ -146,7 +146,8 @@ public class LocalExecutor {
      * local model's first such call.
      */
     boolean namesAChange(DelegationPlan plan, AgentContext context) {
-        return named(plan, context, offerable()).stream().anyMatch(Tool::hasSideEffects);
+        Given g = given(plan, context.artifacts());
+        return offered(plan, g.results(), context).stream().anyMatch(Tool::hasSideEffects);
     }
 
     /** Whether the text names the tool as a whole word: web_fetch, not web_fetcher. */

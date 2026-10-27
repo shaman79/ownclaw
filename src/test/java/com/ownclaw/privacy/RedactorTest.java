@@ -39,12 +39,14 @@ class RedactorTest {
             secret("export API_TOKEN=\"fake-env-token\"", "fake-env-token"),
             secret("smtp_pass = fake-ini-pass", "fake-ini-pass"),
             // SSH key material: a key-type word, then the base64 blob, which is what is removed.
-            secret("authorized key ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000",
-                    "AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000"),
-            secret("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987 deploy",
-                    "AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987"),
-            secret("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000",
-                    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000"),
+            // SSH key material: public-key material, so a reversible identifier (a <key_n> placeholder
+            // put back on the way out), not a one-way secret. Only the base64 blob is replaced.
+            id("authorized key ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000",
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTestsOnly00000000000", Redactor.Kind.KEY),
+            id("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987 deploy",
+                    "AAAAB3NzaC1yc2EAAAADAQABFakeRsaKeyMaterialForTestsOnlyXXXXXXXXXXXX987", Redactor.Kind.KEY),
+            id("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000",
+                    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYFakeEcdsaForTestsOnly00000000", Redactor.Kind.KEY),
             secret("{\"user\":\"admin\",\"password\":\"fake-json-pass\"}", "fake-json-pass"),
             secret("{'client_secret': 'fake-dict-secret'}", "fake-dict-secret"),
             secret("  apiKey: \"fake-camel-key\"", "fake-camel-key"),

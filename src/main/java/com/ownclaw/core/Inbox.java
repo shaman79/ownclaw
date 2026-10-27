@@ -32,6 +32,8 @@ public final class Inbox {
     private boolean asking;
     /** The answer to that question, once it has come; null until then. */
     private UserMessage answer;
+    /** Whether the task has ended ({@link #close}): then no answer can come, and the wait ends. */
+    private boolean closed;
 
     public Inbox(TaskChat.Channel channel, ChatOptions options) {
         this.channel = channel;
@@ -56,8 +58,10 @@ public final class Inbox {
     public synchronized boolean offer(UserMessage message, long order) {
         // The answer to the question the task waits on: the next message from its chat's channel,
         // whatever it was sent with -- it is a reply, read by the code that asked, never run on
-        // other options. One with files is no answer.
-        if (asking && taking && answer == null && message.channel() == channel
+        // other options. One with files is no answer. Not gated on `taking`: a message the inbox
+        // could not take earlier (a file, other options) stops the taking, and the owner's "yes"
+        // must still be heard as the answer, not refused and queued as a task of its own.
+        if (asking && !closed && answer == null && message.channel() == channel
                 && message.attachmentIds().isEmpty()) {
             answer = message;
             notifyAll();
@@ -92,6 +96,11 @@ public final class Inbox {
         answer = null;
     }
 
+    /** The question has been answered or abandoned: stop treating the next message as its answer. */
+    public synchronized void doneAsking() {
+        asking = false;
+    }
+
     /**
      * Wait for the answer to the question asked since {@link #startAsking}: the first message sent
      * to the chat since then ({@link #offer}), taken as the answer and not read as one more
@@ -105,7 +114,9 @@ public final class Inbox {
         asking = true;
         try {
             long end = System.currentTimeMillis() + timeoutMs;
-            while (answer == null && taking && !stopped.getAsBoolean()) {
+            // Not `taking`: the inbox stops taking steering the moment a message it cannot take is
+            // offered, but an answer can still come after that -- and the task's end is `closed`.
+            while (answer == null && !closed && !stopped.getAsBoolean()) {
                 long left = end - System.currentTimeMillis();
                 if (left <= 0) break;
                 wait(Math.min(left, 1_000));
@@ -119,6 +130,7 @@ public final class Inbox {
 
     public synchronized void close(ObjLongConsumer<UserMessage> handOn) {
         taking = false;
+        closed = true;
         notifyAll();
         for (Sent unread : waiting) handOn.accept(unread.message(), unread.order());
         waiting.clear();

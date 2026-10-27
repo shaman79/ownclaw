@@ -68,6 +68,27 @@ class ApprovalTest {
     }
 
     @Test
+    @DisplayName("the answer is heard even after a message the inbox could not take: a file, or other options")
+    void theAnswerIsHeardAfterTheInboxStoppedTaking() throws Exception {
+        for (UserMessage untakeable : List.of(
+                new UserMessage("u1", "A", "f", "with a file", List.of("file1"),
+                        TaskChat.Channel.WEB, ChatOptions.NONE, r -> {}),
+                new UserMessage("u1", "A", "o", "on other options", List.of(),
+                        TaskChat.Channel.WEB, new ChatOptions("free", null), r -> {}))) {
+            var inbox = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
+            assertFalse(inbox.offer(untakeable, 1), "the inbox cannot take it, and stops taking");
+            inbox.startAsking();
+            var answer = CompletableFuture.supplyAsync(() -> {
+                try { return inbox.awaitAnswer(5_000, () -> false); }
+                catch (InterruptedException e) { throw new IllegalStateException(e); }
+            });
+            Thread.sleep(50);
+            assertTrue(inbox.offer(msg("yes"), 2), "the owner's yes is still heard as the answer");
+            assertEquals("yes", answer.get(5, TimeUnit.SECONDS).text());
+        }
+    }
+
+    @Test
     @DisplayName("no answer within the wait returns nothing; a close ends the wait")
     void theWaitEnds() throws Exception {
         var a = new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE);
@@ -239,6 +260,34 @@ class ApprovalTest {
         } finally {
             Approval.waitMs = was;
         }
+    }
+
+    @Test
+    @DisplayName("a delegation that offers only read-only tools still asks when the local model calls a change off-script")
+    void aDelegationAsksForAnOffScriptChange(@TempDir Path tmp) throws Exception {
+        Approval.forgetAlways();
+        // The plan names only a read-only tool, so nothing is asked before the delegation starts;
+        // the local model then calls a side-effecting tool it was not offered (execution resolves
+        // against the whole registry), and the per-call ask catches it.
+        var look = new DelegationBehaviourTest.FakeTool("look", false, List.of(),
+                p -> com.ownclaw.agent.tools.ToolResult.success("all quiet"));
+        var deploy = new DelegationBehaviourTest.FakeTool("deploy", true, List.of(),
+                p -> com.ownclaw.agent.tools.ToolResult.success("deployed"));
+        var local = new DelegationBehaviourTest.Scripted(
+                DelegationBehaviourTest.call("deploy", Map.of("target", "forum")),
+                DelegationBehaviourTest.done("done"));
+        var rig = new LoopRig(tmp, List.of(look, deploy), 600, local);
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Check the forum.", "tools", "look")));
+        rig.cloud.think.add(respond("checked"));
+        String session = rig.chat.createSession("u1", "Ops");
+
+        var done = turnAsync(rig, session, "check the forum");
+        question(rig);
+        assertEquals(0, deploy.calls.size(), "the off-script change waited for the answer");
+        answer(rig, session, "yes");
+
+        assertEquals("checked", done.get(10, TimeUnit.SECONDS).response());
+        assertEquals(1, deploy.calls.size());
     }
 
     @Test

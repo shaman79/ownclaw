@@ -82,7 +82,7 @@ public final class Redactor {
      * placeholder's shape, which is no identifier and is not counted as one.
      */
     public enum Kind {
-        EMAIL, PHONE, IBAN, CARD, MAC, IP, SSID, HOST, TEXT;
+        EMAIL, PHONE, IBAN, CARD, MAC, IP, SSID, HOST, KEY, TEXT;
 
         String tag() { return name().toLowerCase(Locale.ROOT); }
     }
@@ -755,7 +755,7 @@ public final class Redactor {
         var secrets = new ArrayList<Finding>();
         var ids = new ArrayList<Finding>();
         pemBlocks(s, secrets);
-        sshKeys(s, secrets);
+        sshKeys(s, ids);
         passwordHashes(s, secrets);
         tokens(s, secrets);
         urlPasswords(s, secrets);
@@ -887,12 +887,14 @@ public final class Redactor {
     /**
      * SSH key material: a key-type word, whitespace, then the base64 blob, which for each of these
      * types begins with "AAAA" -- the wire format's length-prefixed type name. The blob is removed
-     * and the type word kept, so a line reads {@code ... ssh-ed25519 «secret removed» comment}. The
-     * fixed type word plus the "AAAA" start make a match near-certain; a bare high-entropy token in
+     * and the type word kept, so a line reads {@code ... ssh-ed25519 <key_1> comment}. The fixed
+     * type word plus the "AAAA" start make a match near-certain; a bare high-entropy token in
      * prose -- a service secret a journal printed -- has no such anchor and is left to the named-value
      * and vault passes, where a generic entropy rule here would take git shas, sha256 digests and
      * base64 data with it. The longer {@code sk-}/{@code ecdsa} names come first so the shorter ones
-     * do not match inside them.
+     * do not match inside them. The blob is public-key material -- an identifier, not a secret (the
+     * private key is the PEM, {@link #pemBlocks}) -- so it is a reversible {@code <key_n>} placeholder,
+     * put back on the way out ({@link #restore}), and a task that adds the key still has it.
      */
     private static void sshKeys(String s, List<Finding> out) {
         for (String type : SSH_KEY_TYPES) {
@@ -907,7 +909,7 @@ public final class Redactor {
                 if (p == from || !s.startsWith("AAAA", p)) continue;   // a blob, set off from the word
                 int end = run(s, p, Redactor::isBase64Char);
                 if (end - p < 40) continue;   // too short to be a real key blob
-                out.add(new Finding(p, end, null));
+                out.add(new Finding(p, end, Kind.KEY));
                 from = end;
             }
         }

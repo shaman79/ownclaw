@@ -55,18 +55,25 @@ final class Approval {
      */
     static String ask(AgentContext context, String what) {
         if (!needsAsking(context)) return null;
+        // From here the next message in the chat is the answer, until the wait ends; reset even
+        // if posting the question throws, so a later message is not silently eaten as an answer.
         context.inbox().startAsking();
-        context.chat().question("❓ **Before I change anything** -- this task is about to run:\n\n" + what
-                + "\n\nReply **yes** to go on, **always** to stop asking in this chat today, or say what "
-                + "to do instead.");
-        UserMessage answer = context.runningTool(() -> {
-            try {
-                return context.inbox().awaitAnswer(waitMs, context::isCancelled);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
-        });
+        UserMessage answer;
+        try {
+            context.chat().question("❓ **Before I change anything** -- this task is about to run:\n\n" + what
+                    + "\n\nReply **yes** to go on, **always** to stop asking in this chat today, or say what "
+                    + "to do instead.");
+            answer = context.runningTool(() -> {
+                try {
+                    return context.inbox().awaitAnswer(waitMs, context::isCancelled);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            });
+        } finally {
+            context.inbox().doneAsking();
+        }
         if (answer == null) {
             if (context.isCancelled()) return "Not run: the task was stopped while it waited for the owner's OK.";
             log.info("Task {}: no answer to the question before its first change; nothing was run.",
