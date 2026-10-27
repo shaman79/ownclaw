@@ -212,7 +212,11 @@ class RedactorTest {
                 // ssh key types as bare words, or not followed by an AAAA blob: not key material
                 "the key type is ssh-ed25519 or ssh-rsa",
                 "ssh-rsa hello world, no key here",
-                "run ssh-ed25519-keygen then restart"));
+                "run ssh-ed25519-keygen then restart",
+                // a key-type word with a long base64 run that does NOT start with AAAA is not key
+                // material, and a run that does but is too short to be a key blob is left as it is
+                "ssh-ed25519 Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4",
+                "ssh-rsa AAAAB3Nz and nothing more"));
         for (int[] o : new int[][] {{10, 0, 0, 1}, {10, 255, 3, 7}, {172, 16, 5, 4}, {172, 31, 255, 254},
                 {192, 168, 1, 20}, {100, 64, 0, 1}, {100, 127, 255, 254}, {127, 0, 0, 1}, {169, 254, 1, 1}}) {
             texts.add("gateway " + ip(o[0], o[1], o[2], o[3]) + " is up");

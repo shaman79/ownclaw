@@ -84,6 +84,35 @@ class ApprovalTest {
         assertNull(waiting.get(5, TimeUnit.SECONDS), "the task ended while it waited");
     }
 
+    @Test
+    @DisplayName("needsAsking: a task with a chat it can ask asks once; unattended, or already approved, it does not")
+    void needsAsking() {
+        var ctx = new AgentContext("u1", "t1", "do something");
+        ctx.setChatSession("A");
+        ctx.setInbox(new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE));
+        ctx.setChat(new TaskChat(ctx, "A", TaskChat.Channel.WEB, null, null, null, null, null));
+        assertTrue(Approval.needsAsking(ctx), "attended, a chat it can ask, not yet approved");
+
+        var unattended = new AgentContext("u1", "t2", "do something");
+        unattended.setUnattended(true);
+        unattended.setChatSession("A");
+        unattended.setInbox(new Inbox(TaskChat.Channel.WEB, ChatOptions.NONE));
+        unattended.setChat(new TaskChat(unattended, "A", TaskChat.Channel.WEB, null, null, null, null, null));
+        assertFalse(Approval.needsAsking(unattended), "unattended work has nobody to answer");
+
+        ctx.approveChanges();
+        assertFalse(Approval.needsAsking(ctx), "a task asks only before its first change");
+
+        var opsChat = new AgentContext("u1", "t3", "do something");
+        opsChat.setChatSession("A");
+        opsChat.setInbox(new Inbox(TaskChat.Channel.OPS, ChatOptions.NONE));
+        opsChat.setChat(new TaskChat(opsChat, "A", TaskChat.Channel.OPS, null, null, null, null, null));
+        assertFalse(Approval.needsAsking(opsChat), "an ops turn's chat is read by nobody while it runs");
+
+        var noChat = new AgentContext("u1", "t4", "do something");
+        assertFalse(Approval.needsAsking(noChat), "a task with no chat cannot ask");
+    }
+
     // ── end to end, through the real loop ──
 
     static final DelegationBehaviourTest.FakeTool DEPLOY = new DelegationBehaviourTest.FakeTool("deploy", true, List.of(),
@@ -177,6 +206,39 @@ class ApprovalTest {
         assertEquals(1, rig.jdbc.queryForList(
                 "SELECT content FROM conversations WHERE role = 'progress' AND content LIKE '%Before I change anything%'",
                 String.class).size(), "asked once, not for the second change");
+    }
+
+    @Test
+    @DisplayName("\"always\" lasts beyond the task: a later task in the same chat changes things without asking")
+    void alwaysLastsAcrossTasks(@TempDir Path tmp) throws Exception {
+        Approval.forgetAlways();
+        long was = Approval.waitMs;
+        Approval.waitMs = 400;   // so a wrongly-asked second task fails fast instead of hanging
+        try {
+            var deploy = new DelegationBehaviourTest.FakeTool("deploy", true, List.of(),
+                    p -> com.ownclaw.agent.tools.ToolResult.success("deployed"));
+            var rig = new LoopRig(tmp, List.of(deploy));
+            rig.cloud.think.add(call("deploy", Map.of("step", "1")));
+            rig.cloud.think.add(respond("one done"));
+            String session = rig.chat.createSession("u1", "Ops");
+
+            var first = turnAsync(rig, session, "first change");
+            question(rig);
+            answer(rig, session, "always");
+            assertEquals("one done", first.get(10, TimeUnit.SECONDS).response());
+
+            rig.cloud.think.add(call("deploy", Map.of("step", "2")));
+            rig.cloud.think.add(respond("two done"));
+            AgentResult second = rig.turn(session, "second change", ChatOptions.NONE);
+
+            assertEquals("two done", second.response(), "the later task was not blocked on a question");
+            assertEquals(2, deploy.calls.size(), "its change ran without asking");
+            assertEquals(1, rig.jdbc.queryForList(
+                    "SELECT content FROM conversations WHERE role = 'progress' AND content LIKE '%Before I change anything%'",
+                    String.class).size(), "only the first task asked");
+        } finally {
+            Approval.waitMs = was;
+        }
     }
 
     @Test

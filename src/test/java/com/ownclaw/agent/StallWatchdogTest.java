@@ -80,6 +80,9 @@ class StallWatchdogTest {
         assertEquals("done", out);
         assertTrue(ctx.msSinceLastProgress() < 20,
                 "the end of the tool run is progress: " + ctx.msSinceLastProgress());
+        Thread.sleep(30);
+        assertTrue(ctx.msSinceLastProgress() >= 20,
+                "once the tool has returned, silence accumulates again -- the count came back down");
     }
 
     @Test
