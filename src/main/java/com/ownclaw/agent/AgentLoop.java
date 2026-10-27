@@ -814,6 +814,14 @@ public class AgentLoop {
                 // which rewrites the steps it is shown (AgentContext#declinedAsReasoning); declined
                 // a third time, it ends like any refusal.
                 if (!declined.asReasoningExtraction() || context.timesDeclinedAsReasoning() == 2) {
+                    // The cloud model would not do the step. The owner asked that a refusal fall
+                    // back to the local model rather than stop the task, so the rest of it runs
+                    // there, when the local model can be used, and the step is taken again; the
+                    // task ends only when there is no local model to go on with.
+                    if (!local && goesOnLocallyAfterRefusal(context, provider, declined)) {
+                        step--; // the same step, on the local model
+                        continue;
+                    }
                     return noAnswer(context, local, provider, declined.reply(), declined);
                 }
                 account(context, local, provider, declined.reply());
@@ -2585,6 +2593,28 @@ public class AgentLoop {
      * rest of the task runs on the local model, when it answers, with a note in the chat saying
      * why; when it does not, the task ends ({@link #noAnswer}). A reply it came with is billed.
      */
+    /**
+     * After the cloud model declined a step ({@link ProviderRefused}) -- a safety or content
+     * refusal, or a reasoning-extraction refusal it would not get past: whether the task goes on.
+     * The owner asked that a refusal fall back to the local model rather than stop the task, so
+     * when the local model can be used the rest of the task runs on it, with a note in the chat
+     * saying why, and the task ends ({@link #noAnswer}) only when it cannot. The refused reply it
+     * came with is billed. Only the cloud declines; a task already on the local model that it
+     * cannot drive ends like any other.
+     */
+    private boolean goesOnLocallyAfterRefusal(AgentContext context, LlmProvider cloud, ProviderRefused declined) {
+        if (!llmRouter.canGoLocal()) return false;
+        account(context, false, cloud, declined.reply());
+        String category = declined.category();
+        String because = "it declined this request"
+                + (category == null ? "" : " (its safety check placed it in the category \"" + category + "\")");
+        log.warn("Task {}: the cloud model declined the step ({}); the rest of the task runs on the "
+                + "local model", context.taskId(), because);
+        context.goLocal(because);
+        context.chat().onLocalModel(cloud.name(), because);
+        return true;
+    }
+
     private boolean goesOnWithoutTheCloud(AgentContext context, LlmProvider cloud, LlmException why) {
         if (why.connectionFailed() && context.countCloudConnectionFailure() == 1) {
             account(context, false, cloud, why.reply());

@@ -50,6 +50,56 @@ class LocalModeTest {
         return rig.chat.createSession("u1", "Network");
     }
 
+    /** The cloud declines the request on a safety check -- a refusal, Anthropic's category "cyber". */
+    static Reply refused() {
+        return c -> {
+            throw new com.ownclaw.llm.ProviderRefused("anthropic", new com.ownclaw.llm.LlmResponse(
+                    "I can't help with that.", List.of(), null, "refusal", "cyber", "claude-opus-5-5",
+                    null, null, List.of(new com.ownclaw.llm.LlmResponse.Usage(null, 100, 20, 0, 0))));
+        };
+    }
+
+    @Test
+    @DisplayName("a cloud refusal falls back to the local model, which finishes the task; the chat says why")
+    void aRefusalGoesLocal(@TempDir Path tmp) throws Exception {
+        var local = localModel();
+        var rig = new LoopRig(tmp, List.of(NOOP), 600, local);
+        rig.cloud.think.add(refused());
+        local.think.add(call("noop", Map.of()));
+        local.think.add(respond("done locally"));
+        String session = session(rig);
+
+        AgentResult r = rig.turn(session, "switch off the old PHP versions");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertTrue(r.response().startsWith("done locally"), r.response());
+        assertEquals(1, rig.cloud.calls("think").size(), "the cloud refused once, then handed over -- not asked again");
+        assertEquals(2, local.calls("think").size(), "the local model took the refused step and finished");
+        List<String> rows = rows(rig);
+        assertTrue(rows.stream().anyMatch(c -> c.contains("can't be used -- it declined this request")
+                && c.contains("category \"cyber\"")), String.valueOf(rows));
+        assertTrue(rows.stream().anyMatch(c -> c.startsWith("🏠 Step 1 · noop")),
+                "the refused step is the local model's step 1: " + rows);
+
+        rig.cloud.think.add(respond("back on the cloud"));
+        assertEquals("back on the cloud", rig.turn(session, "and now?").response(),
+                "the next task tries the cloud again");
+    }
+
+    @Test
+    @DisplayName("a cloud refusal with no local model to fall back to ends the task, saying the cloud declined")
+    void aRefusalWithoutLocalStops(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));   // the default local model is unavailable
+        rig.cloud.think.add(refused());
+
+        AgentResult r = rig.turn(session(rig), "switch off the old PHP versions");
+
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason(), r.response());
+        assertEquals(1, rig.cloud.calls("think").size(), "a refusal is not asked again on the cloud");
+        assertTrue(r.response().contains("declined to answer this request")
+                && r.response().contains("cyber"), r.response());
+    }
+
     static List<String> rows(LoopRig rig) {
         return rig.jdbc.queryForList("SELECT content FROM conversations WHERE role = 'progress' ORDER BY id",
                 String.class);
