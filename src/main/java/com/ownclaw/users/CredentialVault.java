@@ -28,6 +28,18 @@ public class CredentialVault {
 
     private static final Logger log = LoggerFactory.getLogger(CredentialVault.class);
 
+    /**
+     * The secret a link that opens the chat with a message is signed with (LinkController): what
+     * shows the owner "Guardian alert: verified". Never handed to a skill -- a skill the agent
+     * wrote that could read it could sign any message as the guardian's.
+     */
+    public static final String LINK_SECRET = "GUARDIAN_LINK_SECRET";
+
+    /** Whether a skill may be handed this credential: every one but {@link #LINK_SECRET}. */
+    public static boolean forSkills(String key) {
+        return key == null || !LINK_SECRET.equals(key.strip().toUpperCase(java.util.Locale.ROOT));
+    }
+
     private static final String ALGORITHM = "AES/GCM/NoPadding";
     private static final int GCM_TAG_LENGTH = 128; // bits
     private static final int IV_LENGTH = 12;       // bytes (96 bits, recommended for GCM)

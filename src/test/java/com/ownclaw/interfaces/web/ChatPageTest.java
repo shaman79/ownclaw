@@ -205,7 +205,7 @@ class ChatPageTest {
         assertFalse(page.contains("busy"), "nothing holds back Enter while a task runs");
         assertTrue(page.contains("sendBtn.addEventListener('click', function() { send(false); });")
                 && page.contains("queueBtn.addEventListener('click', function() { send(true); });"));
-        assertTrue(page.contains("if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) { e.preventDefault(); "
+        assertTrue(page.contains("if (e.key === 'Enter' && !e.shiftKey && !e.repeat && hardKeyboard) { e.preventDefault(); "
                 + "// What Send does, in every state: while a task runs, the message goes to it. send(false); }"));
         assertTrue(page.contains("<button id=\"queue\""), "the Queue button");
         String send = page.substring(page.indexOf("function send(queued, choice) {"));

@@ -28,7 +28,8 @@ import java.util.function.LongSupplier;
  * The link carries {@code exp} (unix seconds) and {@code sig}, the hex of
  * HMAC-SHA256(secret, exp + "\n" + task). The secret is {@value #SECRET_KEY} in the vault of the
  * account signed in: a link is verified only for an account that stores it, and the secret never
- * leaves the server. Nothing of the message is logged -- an alert names hosts and paths.
+ * leaves the server -- not to the browser, and not to a skill ({@link CredentialVault#forSkills}).
+ * Nothing of the message is logged -- an alert names hosts and paths.
  */
 @RestController
 @RequestMapping("/api/links")
@@ -37,7 +38,7 @@ public class LinkController {
     private static final Logger log = LoggerFactory.getLogger(LinkController.class);
 
     /** The vault key the link secret is stored under ({@code /cred set GUARDIAN_LINK_SECRET ...}). */
-    static final String SECRET_KEY = "GUARDIAN_LINK_SECRET";
+    static final String SECRET_KEY = CredentialVault.LINK_SECRET;
 
     private final CredentialVault vault;
     private final LongSupplier nowSeconds;

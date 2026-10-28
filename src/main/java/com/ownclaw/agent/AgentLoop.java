@@ -927,6 +927,7 @@ public class AgentLoop {
                 }
                 Answer question = answerFor(action.responseText(), context);
                 String refusal = question.refusal() != null ? question.refusal() : alongsideOtherCalls(context);
+                if (refusal == null) refusal = choiceNamingAResult(action.choices());
                 if (refusal != null) {
                     AgentResult end = stepRanNothing(context, action, "Not delivered: " + refusal, null, step, nothing);
                     if (end != null) return end;
@@ -1430,6 +1431,23 @@ public class AgentLoop {
      * dropped with nobody told. The model is told which calls they were (the note the step's
      * observation carries), and can make them first, or answer alone.
      */
+    /**
+     * Why a question's choices cannot be offered, or null: one names a result by its handle. A
+     * picked choice is the next task's message, which numbers its results from 1 again, so there
+     * the handle names another result, or none -- the choice is to be written out in words.
+     */
+    static String choiceNamingAResult(List<String> choices) {
+        for (String choice : choices) {
+            var handle = ArtifactRef.TOKEN.matcher(choice);
+            if (handle.find()) {
+                return "the choice \"" + choice + "\" names a result by its handle (" + handle.group()
+                        + "). A picked choice is the user's next message, which starts a new task where "
+                        + "that handle names another result or none: write each choice out in words.";
+            }
+        }
+        return null;
+    }
+
     private static String alongsideOtherCalls(AgentContext context) {
         return context.hasCallsNotRun()
                 ? "it came with other tool calls, and an answer or a question ends the task. Make "

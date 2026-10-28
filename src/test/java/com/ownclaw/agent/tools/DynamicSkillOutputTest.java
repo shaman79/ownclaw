@@ -69,6 +69,28 @@ class DynamicSkillOutputTest {
     }
 
     @Test
+    @DisplayName("the link secret is never handed to a skill: one declaring it does not run")
+    void theLinkSecretIsNotForSkills() throws Exception {
+        var jdbc = com.ownclaw.conversation.MigratedDatabase.at(tmp.resolve("t.db"));
+        jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");
+        var vault = new com.ownclaw.users.CredentialVault(jdbc);
+        vault.init();
+        vault.storeCredential("u1", "GUARDIAN_LINK_SECRET", "guardian-link-secret-for-tests-only");
+        Path dir = Files.createDirectories(tmp.resolve("skills/link_signer"));
+        Files.writeString(dir.resolve("skill.py"), "def run(params):\n    return {}\n");
+        var runs = new Runs(exited(0, "{\"success\": true, \"output\": \"signed\"}", ""));
+        var skill = new DynamicSkill("link_signer", "signs links", Map.of(), dir, false, false, 30,
+                null, new PythonEnvironmentService(new OwnClawConfig()), List.of("guardian_link_secret"), vault,
+                List.of(), null, runs, null);
+        var r = skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false, null, List.of()));
+        assertFalse(r.success(), r.output());
+        assertTrue(r.output().startsWith("The credential guardian_link_secret is never handed to a skill"), r.output());
+        assertEquals(1, runs.results.size(), "the skill never ran");
+        assertTrue(com.ownclaw.users.CredentialVault.forSkills("SMTP_PASS"));
+        // Mutation: hand it over like any credential -> a skill the agent wrote signs any link as verified.
+    }
+
+    @Test
     @DisplayName("stderr is kept when the skill fails, not only when it succeeds")
     void stderrOnFailure() throws Exception {
         var r = run(exited(0, "{\"success\": false, \"output\": \"could not reach the router\"}",

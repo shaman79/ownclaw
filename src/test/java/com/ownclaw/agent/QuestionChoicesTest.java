@@ -65,14 +65,13 @@ class QuestionChoicesTest {
         rig.vault.storeCredential("u1", "ROUTER_PASS", "hunter2-router-admin");
         rig.cloud.think.add(call("noop", Map.of()));
         rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which router first?",
-                "choices", List.of("The main one", "Log in with hunter2-router-admin", "Use {{1}}",
+                "choices", List.of("The main one", "Log in with hunter2-router-admin",
                         "Log in with «vault:ROUTER_PASS»"))));
         String session = rig.chat.createSession("u1", "Network");
         AgentResult r = rig.turn(session, "fix the routers", ChatOptions.NONE);
 
         assertTrue(r.awaitingUser(), r.response());
-        assertEquals(List.of("The main one", "Log in with «vault:ROUTER_PASS»"), r.choices(),
-                "a handle would name another result in the task the answer starts");
+        assertEquals(List.of("The main one", "Log in with «vault:ROUTER_PASS»"), r.choices(), "scrubbed, each once");
         assertEquals(r.choices(), r.withTaskId("0badc0de").withOwnerText("x").choices(), "kept by every copy of it");
 
         var rows = rig.chat.getSessionMessages("u1", session, null, null).messages();
@@ -85,6 +84,26 @@ class QuestionChoicesTest {
         assertEquals(r.taskId(), asked.get("task_id"), "and still linked to its task");
         assertNull(rows.getFirst().get("choices"), "the owner's message offers none");
         // Mutation: drop withChoices in the loop -> no buttons; save without them -> none after a reload.
+    }
+
+    @Test
+    @DisplayName("a choice naming a result by its handle is not offered: the model is told to write it in words, and asks again")
+    void aChoiceNamingAResultIsRefused(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(NOOP));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which one goes?",
+                "choices", List.of("Delete {{1}}", "Keep both"))));
+        rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which one goes?",
+                "choices", List.of("Delete the old backup", "Keep both"))));
+        AgentResult r = rig.turn(rig.chat.createSession("u1", "Backups"), "tidy the backups", ChatOptions.NONE);
+
+        assertTrue(r.awaitingUser(), r.response());
+        assertEquals(List.of("Delete the old backup", "Keep both"), r.choices());
+        String told = TaskEndToEndTest.sentTo(rig, 2);
+        assertTrue(told.contains("names a result by its handle ({{1}})"), told);
+        assertEquals(List.of("Keep both"), TaskEnding.answers(List.of("Delete {{1}}", "Keep both"),
+                new AgentContext("u1", "t1", "x")), "and should one get past, it is still not a button");
+        // Mutation: drop the refusal -> "Delete {{1}}" vanishes and the owner is offered "Keep both" alone.
     }
 
     @Test

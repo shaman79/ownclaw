@@ -2836,13 +2836,21 @@
     /** The link's message while it waits; kept here too, for a tab whose storage is blocked. */
     var pendingLink = null;
 
-    /** Take a link's message out of the address, to wait for the chat. A second one replaces the first. */
+    /**
+     * Take a link's message out of the address, to wait for the chat. A second one replaces the
+     * first; asking for a new chat while the first one's is being made, it has that chat, retitled.
+     * One with no text is taken out of the address and puts nothing in.
+     */
     function captureLink() {
         var h = new URLSearchParams(location.hash.slice(1));
         if (!h.has('task')) return false;
-        keepLink({ task: h.get('task'), new: h.get('new') === '1', title: h.get('title') || '',
-                   exp: h.get('exp'), sig: h.get('sig'), made: false });
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
+        if (!h.get('task').trim()) return false;
+        var before = waitingLink();
+        var link = { task: h.get('task'), new: h.get('new') === '1', title: h.get('title') || '',
+                     exp: h.get('exp'), sig: h.get('sig'), made: false };
+        if (link.new && before && before.made) { link.made = true; link.retitle = true; }
+        keepLink(link);
         return true;
     }
 
@@ -5975,6 +5983,9 @@
         // Every view, not only messages: a task page or the Tasks list left on screen would be
         // shown to whoever signs in next in this tab.
         clearMessages();
+        // And a link's message, with its banner: not left in the box for whoever signs in next.
+        if (linkText !== null && inputEl.value === linkText) inputEl.value = '';
+        hideLinkBanner();
         ensureChatView();
         // Whoever signs in next in this tab starts in a chat of theirs.
         rememberChat(null);
@@ -7022,57 +7033,98 @@
      */
     var sentFrom = {};
 
-    /**
-     * Send what is typed. While a task runs it goes to that task, which reads it before its next
-     * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
-     * and says which under the bubble.
-     */
     var linkBanner = document.getElementById('link-banner');
     /** The text a link put in the box, while it is there unchanged: a second link replaces it without asking. */
     var linkText = null;
     /** Counts the link messages shown, so a signature's answer for one replaced since is not shown. */
     var linksShown = 0;
+    /** The chat made for the link whose text is in the box, while it is there unchanged and unsent. */
+    var linkChat = null;
 
     /**
      * Put the waiting link's message in the box, once this tab's chat is on screen -- in a new chat
      * first, when the link asks for one. Never sent: Send or Enter is the owner's. As text, never
-     * as markup, cut at LINK_MAX characters. A draft in the box is not replaced without asking; a
-     * message an earlier link put there, unchanged, is.
+     * as markup, shaped as linkTextOf says. A draft in the box is not replaced without asking, and
+     * the link waits for the answer; a message an earlier link put there, unchanged, is replaced.
+     * A command is refused: one Send would run it -- a forged link's /cred set, put above what the
+     * box shows, stored a secret of its own.
      */
     function applyLink() {
         var link = waitingLink();
         if (!link || !authToken || !ws || ws.readyState !== 1 || !displayedSessionId) return;
         // Drawn again, in the chat view, and then here again.
         if (currentView !== 'chat') { switchToSession(displayedSessionId); return; }
+        // A chat made for the link before, still holding only its unsent text, is this one's, retitled.
+        if (link.new && !link.made && linkChat === displayedSessionId && linkText !== null && inputEl.value === linkText) {
+            link.made = true;
+            link.retitle = true;
+        }
         if (link.new && !link.made) {
             link.made = true;
             keepLink(link);
             newChat(link.title);   // its history drawn, this runs again
             return;
         }
-        keepLink(null);
-        var chars = Array.from(String(link.task));   // by character, never half of one
-        var cut = chars.length > LINK_MAX;
-        var text = cut ? chars.slice(0, LINK_MAX).join('') : String(link.task);
+        var shaped = linkTextOf(link.task);
+        if (LINK_COMMAND.test(shaped.text)) {
+            keepLink(null);
+            showLinkBanner('A link asked to put a command in the box (its message starts with /). '
+                    + 'A link may not, so nothing was put in it.', false);
+            return;
+        }
         if (inputEl.value.trim() && inputEl.value !== linkText) {
             var shown = ++linksShown;
             showLinkBanner('Replace your draft with the message from the link?', false, [
-                { label: 'Replace', act: function() { if (shown === linksShown) fillFromLink(link, text, cut); } },
-                { label: 'Keep my draft', act: hideLinkBanner }
+                { label: 'Replace', act: function() { if (shown === linksShown) fillFromLink(link, shaped); } },
+                { label: 'Keep my draft', act: function() { if (shown === linksShown) { keepLink(null); hideLinkBanner(); } } }
             ]);
             return;
         }
-        fillFromLink(link, text, cut);
+        fillFromLink(link, shaped);
     }
 
-    function fillFromLink(link, text, cut) {
+    /**
+     * What the chat reads as a command, as the server reads one (CommandHandler.isCommand): a slash
+     * after nothing but blanks -- spaces, controls and invisible format characters among them.
+     */
+    var LINK_COMMAND = /^[\s\p{Z}\p{Cc}\p{Cf}]*\//u;
+
+    /**
+     * A link's text as the box takes it: line ends as the box writes them, no trailing blanks on a
+     * line and no run of blank lines -- where a forged link pushes its start out of view -- and at
+     * most LINK_MAX characters as a reader counts them (never half of an emoji). {text, cut,
+     * same}: same when the text is the link's exactly, which a signature is over.
+     */
+    function linkTextOf(task) {
+        var lines = String(task).replace(/\r\n?/g, '\n').split('\n').map(function(l) { return l.replace(/\s+$/, ''); });
+        var kept = [];
+        lines.forEach(function(l) { if (l || (kept.length && kept[kept.length - 1])) kept.push(l); });
+        while (kept.length && !kept[kept.length - 1]) kept.pop();
+        var text = kept.join('\n');
+        var chars = window.Intl && Intl.Segmenter
+                ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), function(g) { return g.segment; })
+                : Array.from(text);
+        var cut = chars.length > LINK_MAX;
+        if (cut) text = chars.slice(0, LINK_MAX).join('');
+        return { text: text, cut: cut, same: text === String(task) };
+    }
+
+    function fillFromLink(link, shaped) {
+        keepLink(null);
+        var text = shaped.text;
         inputEl.value = text;
         linkText = text;
-        inputEl.dispatchEvent(new Event('input'));   // the box grows to it, as it does to typing
         inputEl.focus();
         inputEl.setSelectionRange(text.length, text.length);
+        // All of it in view, from its start, as far as the screen allows: typing shrinks the box again.
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, Math.max(160, Math.round(window.innerHeight * 0.45))) + 'px';
+        inputEl.scrollTop = 0;
+        if (link.retitle && link.title) renameSession(displayedSessionId, link.title);
+        linkChat = link.made ? displayedSessionId : null;
         var shown = ++linksShown;
-        var after = cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '';
+        var after = (shaped.cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '')
+                + (inputEl.scrollHeight > inputEl.clientHeight + 1 ? ' It is longer than the box shows: scroll it to read all of it.' : '');
         if (!link.sig) {
             showLinkBanner('Message from a link: check it before sending.' + after, false);
             return;
@@ -7087,7 +7139,11 @@
         .then(okJson)
         .then(function(r) {
             if (authToken !== asked || shown !== linksShown) return;
-            if (r.valid && !r.expired) showLinkBanner('Guardian alert: verified.' + after, true);
+            // Green for the text signed, whole, as it is in the box: not once it is cut or tidied,
+            // nor once it is edited (the box's input listener).
+            if (r.valid && !r.expired && shaped.same && inputEl.value === linkText) showLinkBanner('Guardian alert: verified.' + after, true);
+            else if (r.valid && !r.expired) showLinkBanner('Guardian alert: the signature holds for the message as sent, '
+                    + 'but the box does not hold all of it as sent. Check it before sending.' + after, false);
             else if (r.valid) showLinkBanner('Guardian alert: its signature has expired. Check it before sending.' + after, false);
             else if (!r.configured) showLinkBanner('Message from a link: unverified, as no GUARDIAN_LINK_SECRET is stored for '
                     + 'your account (/cred set). Check it before sending.' + after, false);
@@ -7123,11 +7179,16 @@
     function hideLinkBanner() {
         linksShown++;
         linkText = null;
+        linkChat = null;
         linkBanner.hidden = true;
         linkBanner.innerHTML = '';
     }
 
     /**
+     * Send what is typed. While a task runs it goes to that task, which reads it before its next
+     * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
+     * and says which under the bubble.
+     *
      * @param choice a question's answer the owner clicked (addChoices), sent in place of what is in
      *               the box -- which stays there, with the files attached to it
      */
@@ -7260,6 +7321,10 @@
     inputEl.addEventListener('input', function() {
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+        // Verified is of the text the link put in the box: changed, it is the owner's text now.
+        if (linkText !== null && inputEl.value !== linkText && linkBanner.classList.contains('verified')) {
+            showLinkBanner('Message from a link, changed since: check it before sending.', false);
+        }
     });
 
     // A phone's Return key fires this same event and a soft keyboard has no Shift+Enter, so on
@@ -7268,7 +7333,8 @@
     var hardKeyboard = !window.matchMedia || !matchMedia('(pointer: coarse)').matches;
 
     inputEl.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) {
+        // Not a held key's repeats: one held from the login would send what a link put in the box.
+        if (e.key === 'Enter' && !e.shiftKey && !e.repeat && hardKeyboard) {
             e.preventDefault();
             // What Send does, in every state: while a task runs, the message goes to it.
             send(false);

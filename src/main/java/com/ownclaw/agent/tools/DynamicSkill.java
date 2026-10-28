@@ -377,6 +377,14 @@ public class DynamicSkill implements Tool {
             // CREDENTIALS) -- always set, so a parameter of that name from the caller never
             // reaches the runner's environment.
             Map<String, String> creds = Map.of();
+            for (String key : requiredCredentials) {
+                if (!CredentialVault.forSkills(key)) {
+                    log.warn("Skill '{}' declares {}, which is never handed to a skill; not run", name, key);
+                    return ToolResult.failure("The credential " + key + " is never handed to a skill: it "
+                            + "signs the links that open the owner's chat as verified, and a skill that could "
+                            + "read it could sign any message. Remove it from this skill's credentials.");
+                }
+            }
             if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
                 log.info("Skill '{}': requesting credentials {} for user='{}'",
                         name, requiredCredentials, context.userId());
