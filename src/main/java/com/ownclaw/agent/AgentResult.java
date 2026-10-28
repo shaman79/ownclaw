@@ -1,5 +1,7 @@
 package com.ownclaw.agent;
 
+import java.util.List;
+
 /**
  * The final result of an agent execution.
  *
@@ -20,6 +22,10 @@ package com.ownclaw.agent;
  *                       data: {@code response} is then the text without it, and it is what
  *                       every other reader gets -- history, memory, search, the scheduler's
  *                       records. The web chat and Telegram show ownerText.
+ * @param choices        the answers a question offers ({@code ask_user}'s choices), which the web
+ *                       chat draws as buttons under it and Telegram as keys: one is sent as the
+ *                       owner's reply when he picks it. Empty for every other result, and for a
+ *                       question that offers none -- he types his answer
  */
 public record AgentResult(
         boolean success,
@@ -29,12 +35,24 @@ public record AgentResult(
         long totalDurationMs,
         TerminationReason terminationReason,
         String taskId,
-        String ownerText
+        String ownerText,
+        List<String> choices
 ) {
+    public AgentResult {
+        choices = choices == null ? List.of() : List.copyOf(choices);
+    }
+
     /** Without an id — every factory below builds this shape and the loop stamps it after. */
     public AgentResult(boolean success, String response, AgentTrajectory trajectory,
                        int totalSteps, long totalDurationMs, TerminationReason terminationReason) {
         this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, null, null);
+    }
+
+    /** With no choices: every result but a question that offers some. */
+    public AgentResult(boolean success, String response, AgentTrajectory trajectory, int totalSteps,
+                       long totalDurationMs, TerminationReason terminationReason, String taskId, String ownerText) {
+        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, taskId, ownerText,
+                List.of());
     }
 
     public enum TerminationReason {
@@ -116,19 +134,25 @@ public record AgentResult(
     /**
      * Stamp the id of the task that produced this.
      * <p>
-     * Carries {@code ownerText}: the loop stamps the id after the answer is made, so dropping it
-     * here would lose the owner's answer silently, with the note that it exists delivered in
-     * its place.
+     * Carries {@code ownerText} and the choices: the loop stamps the id after the answer is made,
+     * so dropping it here would lose the owner's answer silently, with the note that it exists
+     * delivered in its place.
      */
     public AgentResult withTaskId(String taskId) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText);
+                terminationReason, taskId, ownerText, choices);
     }
 
     /** The same result, with the text only the owner's own screen shows. */
     public AgentResult withOwnerText(String ownerText) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText);
+                terminationReason, taskId, ownerText, choices);
+    }
+
+    /** The same result, offering these answers to pick from. */
+    public AgentResult withChoices(List<String> choices) {
+        return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
+                terminationReason, taskId, ownerText, choices);
     }
 
     /**

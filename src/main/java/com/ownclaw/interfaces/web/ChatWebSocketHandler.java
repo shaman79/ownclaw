@@ -27,6 +27,7 @@ import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Optional;
@@ -488,9 +489,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
                     }
                     // A question is routed as a question, so the client can offer a reply box
-                    // instead of presenting it as the finished answer.
+                    // instead of presenting it as the finished answer -- with the answers it
+                    // offers, which the page draws as buttons.
                     sendToUser(userId, result.awaitingUser() ? "input_request" : "response",
-                                result.shown(), currentSessionId, result.taskId(), answeredAt);
+                                result.shown(), currentSessionId, result.taskId(), answeredAt, result.choices());
                     // The chat list has changed (count, preview), so every window fetches it
                     // again. The frame names the chat open now, which a window follows -- not the
                     // one this answer is saved in, which the owner may have left while the task
@@ -731,6 +733,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void sendToUser(String userId, String type, String content, String sessionId,
                             String taskId, String timestamp) {
+        sendToUser(userId, type, content, sessionId, taskId, timestamp, List.of());
+    }
+
+    /** @param choices the answers a question offers, which the page draws as buttons under it */
+    private void sendToUser(String userId, String type, String content, String sessionId,
+                            String taskId, String timestamp, List<String> choices) {
         Set<WebSocketSession> open = sessions.get(userId);
         if (open == null || open.isEmpty()) {
             log.debug("No live socket for {}; '{}' was persisted but not pushed", userId, type);
@@ -741,7 +749,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         int sent = 0;
         for (WebSocketSession live : open) {
             if (live.isOpen()) {
-                sendToSession(live, type, content, sessionId, taskId, timestamp);
+                sendToSession(live, type, content, sessionId, taskId, timestamp, choices);
                 sent++;
             }
         }
@@ -775,12 +783,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      */
     private void sendToSession(WebSocketSession session, String type, String content,
                                String sessionId, String taskId, String timestamp) {
+        sendToSession(session, type, content, sessionId, taskId, timestamp, List.of());
+    }
+
+    private void sendToSession(WebSocketSession session, String type, String content,
+                               String sessionId, String taskId, String timestamp, List<String> choices) {
         var payload = new LinkedHashMap<String, Object>();
         payload.put("type", type);
         payload.put("content", content);
         if (sessionId != null) payload.put("sessionId", sessionId);
         if (taskId != null) payload.put("taskId", taskId);
         if (timestamp != null) payload.put("timestamp", timestamp);
+        if (!choices.isEmpty()) payload.put("choices", choices);
         send(session, payload);
     }
 

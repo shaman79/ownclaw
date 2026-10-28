@@ -932,11 +932,12 @@ public class AgentLoop {
                     if (end != null) return end;
                     continue;
                 }
+                // With the answers it offers, for the owner to pick one with a click.
                 return AgentResult.needsInput(
                         question.response(),
                         context.trajectory(),
                         context.elapsedMs()
-                ).withOwnerText(question.ownerText());
+                ).withOwnerText(question.ownerText()).withChoices(action.choices());
             }
 
             // === CRITIQUE ===

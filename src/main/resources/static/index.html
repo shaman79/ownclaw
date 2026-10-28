@@ -811,6 +811,68 @@
         .code-block-wrap:hover .copy-btn { opacity: 1 }
         .copy-btn:hover { background: rgba(255,255,255,.12); color: var(--text-1) }
         .copy-btn.copied { color: var(--green); opacity: 1 }
+        /* A task step's code comes folded to one line -- its language, its size, its first line --
+           and opens on a click: the scripts of a long task filled the chat. Copy works folded. */
+        .code-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 6px 0;
+            padding: 3px 6px 3px 10px;
+            background: #0a0c12;
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            min-width: 0;
+        }
+        .code-toggle {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--text-3);
+            font-size: 11.5px;
+            font-family: var(--font-mono);
+            text-align: left;
+            cursor: pointer;
+        }
+        .code-toggle:hover { color: var(--text-1) }
+        .code-toggle:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .code-first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2) }
+        .code-head > .copy-btn { position: static; opacity: 1; flex: none }
+        .code-block-wrap.folded > pre { display: none }
+        .code-block-wrap:not(.folded) .code-first { visibility: hidden }
+        .code-block-wrap:not(.folded) > .code-head {
+            margin-bottom: 0;
+            border-bottom: none;
+            border-radius: var(--r-sm) var(--r-sm) 0 0;
+        }
+        .code-head + pre { margin-top: 0 !important; border-radius: 0 0 var(--r-sm) var(--r-sm) }
+
+        /* A question's answers, under it: a click sends one as the owner's reply. Once he has
+           answered, they stay as a record of what was offered, the one he picked marked. */
+        .msg-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px }
+        .choice-btn {
+            max-width: 100%;
+            padding: 6px 14px;
+            background: var(--accent-glow);
+            border: 1px solid rgba(91,95,199,.35);
+            border-radius: 18px;
+            color: var(--text-1);
+            font: inherit;
+            font-size: 13.5px;
+            text-align: left;
+            overflow-wrap: anywhere;
+            cursor: pointer;
+            transition: background .15s, border-color .15s;
+        }
+        .choice-btn:hover:not(:disabled) { background: rgba(91,95,199,.32); border-color: var(--accent-hi) }
+        .choice-btn:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .msg-choices.retired .choice-btn { cursor: default; opacity: .45; background: none }
+        .msg-choices.retired .choice-btn.picked { opacity: 1; border-color: var(--accent-hi); background: var(--accent-glow) }
 
         /*  Input area  */
         #input-area {
@@ -3049,8 +3111,11 @@
      */
     function drawRow(m, before) {
         if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }
-        var type = m.role === 'user' || m.role === 'system' ? m.role : 'response';
+        // A question saved with the answers it offered is drawn as a question, with them.
+        var asked = m.choices && m.choices.length;
+        var type = m.role === 'user' || m.role === 'system' ? m.role : asked ? 'input_request' : 'response';
         var drawn = addMsg(type, m.content, m.task_id, before, m.timestamp);
+        if (asked && type === 'input_request') addChoices(drawn, m.choices);
         // Named by its row, as a bubble drawn live is once its fate comes: a task still
         // running marks it read, or handed on, after a reload or a switch back too.
         if (type === 'user') drawn.dataset.messageId = m.id;
@@ -6094,7 +6159,7 @@
                     setThinking(false);
                     doneActivity();
                     ensureChatView();   // unanswerable, then deleted, if Settings is open
-                    addMsg('input_request', content, data.taskId, null, data.timestamp);
+                    addChoices(addMsg('input_request', content, data.taskId, null, data.timestamp), data.choices);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
                     // In the chat of the task it is about.
@@ -6448,6 +6513,7 @@
             bubble.className = 'bubble';
             bubble.textContent = text;
             main.appendChild(bubble);
+            div.dataset.said = text;
         } else if (isAiMsg) {
             var avatar = document.createElement('div');
             avatar.className = 'msg-avatar';
@@ -6472,18 +6538,64 @@
         } else {
             var words = node('div', 'msg-text md');
             words.innerHTML = renderMarkdown(text);
-            words.querySelectorAll('pre').forEach(wrapCodeBlock);
+            // A task's own rows fold their code, as a step's does (addProgress).
+            words.querySelectorAll('pre').forEach(type === 'progress' ? foldCodeBlock : wrapCodeBlock);
             main.appendChild(words);
         }
         if (meta.firstChild) main.appendChild(meta);
         div.appendChild(main);
 
-        if (before) { messagesEl.insertBefore(div, before); return div; }
-        messagesEl.insertBefore(div, thinkingEl);
+        messagesEl.insertBefore(div, before || thinkingEl);
+        // A message of his answers the questions before it: their choices are done.
+        if (isUserMsg) retireChoicesBefore(div);
+        if (before) return div;
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
         scrollBottom(type === 'user');
         return div;
+    }
+
+    /**
+     * A question's answers, as buttons under it: a click sends one as the owner's reply, as if he
+     * had typed it. Drawn for a saved question as well, and done at once when his reply follows it
+     * on screen -- shown still, the one he picked marked, but no longer sent.
+     */
+    function addChoices(row, choices) {
+        if (!row || !choices || !choices.length) return;
+        var group = node('div', 'msg-choices');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', 'Answers to pick from');
+        choices.forEach(function(choice) {
+            var b = node('button', 'choice-btn', choice);
+            b.type = 'button';
+            b.addEventListener('click', function() {
+                if (!group.classList.contains('retired')) send(false, choice);
+            });
+            group.appendChild(b);
+        });
+        var main = row.querySelector('.msg-main');
+        main.insertBefore(group, main.querySelector('.msg-meta'));
+        for (var n = row.nextElementSibling; n; n = n.nextElementSibling) {
+            if (n.classList.contains('user')) { retireChoices(group, n.dataset.said); return; }
+        }
+        scrollBottom(false);
+    }
+
+    /** The choices of every question drawn before this message of the owner's, which answers them. */
+    function retireChoicesBefore(userRow) {
+        messagesEl.querySelectorAll('.msg-choices:not(.retired)').forEach(function(group) {
+            if (group.compareDocumentPosition(userRow) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                retireChoices(group, userRow.dataset.said);
+            }
+        });
+    }
+
+    function retireChoices(group, said) {
+        group.classList.add('retired');
+        group.querySelectorAll('.choice-btn').forEach(function(b) {
+            b.disabled = true;
+            if (said != null && b.textContent === said.trim()) b.classList.add('picked');
+        });
     }
 
     /**
@@ -6518,7 +6630,7 @@
         if (body) {
             var b = node('div', 'progress-body md');
             b.innerHTML = renderMarkdown(body);
-            b.querySelectorAll('pre').forEach(wrapCodeBlock);
+            b.querySelectorAll('pre').forEach(foldCodeBlock);
             main.appendChild(b);
         }
         div.appendChild(main);
@@ -6675,8 +6787,17 @@
     }
 
     function wrapCodeBlock(pre) {
+        codeBlock(pre, false);
+    }
+
+    /** A task step's code block, folded to its header line until it is clicked open. */
+    function foldCodeBlock(pre) {
+        codeBlock(pre, true);
+    }
+
+    function codeBlock(pre, folded) {
         var wrapper = document.createElement('div');
-        wrapper.className = 'code-block-wrap';
+        wrapper.className = 'code-block-wrap' + (folded ? ' folded' : '');
         pre.parentNode.insertBefore(wrapper, pre);
         wrapper.appendChild(pre);
         var btn = document.createElement('button');
@@ -6690,7 +6811,29 @@
                 setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
             });
         };
-        wrapper.appendChild(btn);
+        btn.type = 'button';
+        if (!folded) { wrapper.appendChild(btn); return; }
+        // Its header: what it is and how long, its first line, and Copy -- the whole block a click away.
+        var code = pre.querySelector('code');
+        var lang = code && /(?:^|\s)language-(\S+)/.exec(code.className);
+        var lines = (code ? code.textContent : pre.textContent).replace(/\n$/, '').split('\n');
+        var head = node('div', 'code-head');
+        var toggle = node('button', 'code-toggle');
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        var arrow = node('span', 'code-arrow', '\u25B8');
+        toggle.appendChild(arrow);
+        toggle.appendChild(node('span', 'code-lang', (lang ? lang[1] + ' \u00B7 ' : '') + lines.length
+                + (lines.length === 1 ? ' line' : ' lines')));
+        toggle.appendChild(node('span', 'code-first', lines[0]));
+        toggle.addEventListener('click', function() {
+            var open = wrapper.classList.toggle('folded') === false;
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            arrow.textContent = open ? '\u25BE' : '\u25B8';
+        });
+        head.appendChild(toggle);
+        head.appendChild(btn);
+        wrapper.insertBefore(head, pre);
     }
 
     //  File Upload 
@@ -6791,8 +6934,13 @@
      * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
      * and says which under the bubble.
      */
-    function send(queued) {
-        var text = inputEl.value.trim();
+    /**
+     * @param choice a question's answer the owner clicked (addChoices), sent in place of what is in
+     *               the box -- which stays there, with the files attached to it
+     */
+    function send(queued, choice) {
+        var picked = typeof choice === 'string';
+        var text = picked ? choice : inputEl.value.trim();
         if (!text) return;
         // Say so instead of doing nothing. The socket can be closed for up to 30 seconds while
         // reconnect backoff climbs, and this used to return silently: the text stayed in the
@@ -6806,18 +6954,19 @@
         // unconditionally -- so the attachment was dropped from THIS message and silently rode
         // along with the next, unrelated one. The agent answered "which document?" now and
         // referred to a forgotten PDF an hour later.
-        if (fileChips.querySelector('.file-chip.uploading')) {
+        if (!picked && fileChips.querySelector('.file-chip.uploading')) {
             showConnBanner('Still uploading — send again in a moment.');
             return;
         }
 
         // Collect file attachment IDs
-        var attachmentIds = pendingFiles.map(function(f) { return f.id; }).filter(Boolean);
+        var files = picked ? [] : pendingFiles;
+        var attachmentIds = files.map(function(f) { return f.id; }).filter(Boolean);
 
         // Show attached file names in the user message bubble
         var display = text;
-        if (pendingFiles.length > 0) {
-            var names = pendingFiles.map(function(f) { return '📎 ' + f.name; });
+        if (files.length > 0) {
+            var names = files.map(function(f) { return '📎 ' + f.name; });
             display = names.join('\n') + '\n' + text;
         }
         // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
@@ -6838,10 +6987,12 @@
         ws.send(JSON.stringify(payload));
 
         // Clear
-        inputEl.value = '';
-        inputEl.style.height = 'auto';
-        pendingFiles = [];
-        fileChips.innerHTML = '';
+        if (!picked) {
+            inputEl.value = '';
+            inputEl.style.height = 'auto';
+            pendingFiles = [];
+            fileChips.innerHTML = '';
+        }
         // Sent while a task runs, it does not start a trace of its own: that task's goes on, and
         // a queued task's starts when it does (see the claim in the status handler).
         if (!thinkingEl.classList.contains('active')) {

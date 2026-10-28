@@ -52,7 +52,7 @@ class ChatTimesPageTest {
     @Test
     @DisplayName("a row drawn live shows the time its frame says it was saved, or this page's clock when it says none")
     void liveRowsShowTheirFramesTime() {
-        assertTrue(page.contains("addMsg('input_request', content, data.taskId, null, data.timestamp);"), "a question");
+        assertTrue(page.contains("addMsg('input_request', content, data.taskId, null, data.timestamp)"), "a question");
         assertTrue(page.contains("addProgress(content, data.progress, null, data.timestamp);"), "a progress row");
         assertTrue(page.contains("addMsg('response', content, data.taskId, null, data.timestamp);"), "a result");
         assertTrue(page.contains("var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);"),

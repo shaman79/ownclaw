@@ -70,11 +70,16 @@ public class ConversationService {
      */
     public String saveMessage(String userId, String sessionId, String role, String content,
                               List<String> attachmentIds, String taskId, String privateContent) {
+        return insert(userId, sessionId, role, content, attachmentIds, metadataOf(taskId, List.of()), privateContent);
+    }
+
+    private String insert(String userId, String sessionId, String role, String content,
+                          List<String> attachmentIds, String metadata, String privateContent) {
         String messageId = UUID.randomUUID().toString();
         jdbc.update("""
             INSERT INTO conversations (id, user_id, session_id, role, content, metadata, private_content)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, messageId, userId, sessionId, role, content, metadataOf(taskId), privateContent);
+            """, messageId, userId, sessionId, role, content, metadata, privateContent);
 
         // Link file attachments to this message
         if (attachmentIds != null) {
@@ -134,9 +139,20 @@ public class ConversationService {
         return at.isEmpty() ? null : at.getFirst();
     }
 
-    /** A row's metadata (JSON): its task, when it has a well-formed 8-character task id. */
-    private static String metadataOf(String taskId) {
-        return isTaskId(taskId) ? "{\"taskId\":\"" + taskId + "\"}" : null;
+    /**
+     * A row's metadata (JSON): its task, when it has a well-formed 8-character task id, and the
+     * answers a question offers, when it offers any; null when it has neither.
+     */
+    private static String metadataOf(String taskId, List<String> choices) {
+        var metadata = new LinkedHashMap<String, Object>();
+        if (isTaskId(taskId)) metadata.put("taskId", taskId);
+        if (!choices.isEmpty()) metadata.put("choices", choices);
+        if (metadata.isEmpty()) return null;
+        try {
+            return JSON.writeValueAsString(metadata);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("a row's metadata is not JSON: " + e.getOriginalMessage(), e);
+        }
     }
 
     private static boolean isTaskId(String taskId) {
@@ -157,15 +173,16 @@ public class ConversationService {
 
     /**
      * Save a task's answer as the assistant row of the chat turn it answers: the safe text as the
-     * content, the owner's private text beside it, and the task id, which links the answer to what
-     * the task did. The one rule for what a turn's answer saves: the web chat, Telegram and the
-     * ops API's chat turns all save theirs here.
+     * content, the owner's private text beside it, the task id, which links the answer to what
+     * the task did, and a question's choices, which the page draws again after a reload. The one
+     * rule for what a turn's answer saves: the web chat, Telegram and the ops API's chat turns all
+     * save theirs here.
      *
      * @return the new row's id
      */
     public String saveAnswer(String userId, String sessionId, AgentResult result) {
-        return saveMessage(userId, sessionId, "assistant", result.response(), List.of(),
-                result.taskId(), result.ownerText());
+        return insert(userId, sessionId, "assistant", result.response(), List.of(),
+                metadataOf(result.taskId(), result.choices()), result.ownerText());
     }
 
     /**
@@ -351,7 +368,8 @@ public class ConversationService {
         List<Map<String, Object>> rows = new ArrayList<>(jdbc.queryForList("""
             SELECT id, role, COALESCE(private_content, content) AS content, timestamp,
                    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.taskId') END AS task_id,
-                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.progress') END AS progress
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.progress') END AS progress,
+                   CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.choices') END AS choices
             FROM conversations
             WHERE user_id = ? AND session_id = ? AND role != 'status'
               AND (? IS NULL OR (timestamp, rowid) <
@@ -364,8 +382,19 @@ public class ConversationService {
         Collections.reverse(rows);
         for (var row : rows) {
             if (row.get("progress") instanceof String header) row.put("progress", headerOf(header));
+            if (row.get("choices") instanceof String choices) row.put("choices", choicesOf(choices));
         }
         return new Page(rows, hasMore);
+    }
+
+    /** A question's choices, as the JSON they were saved as; null when it does not read as a list. */
+    private static JsonNode choicesOf(String json) {
+        try {
+            JsonNode choices = JSON.readTree(json);
+            return choices.isArray() ? choices : null;
+        } catch (JsonProcessingException e) {
+            return null;
+        }
     }
 
     /** A progress row's header, as the JSON it was saved as; null when it does not read as one. */

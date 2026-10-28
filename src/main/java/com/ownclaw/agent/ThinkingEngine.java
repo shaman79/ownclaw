@@ -864,7 +864,8 @@ public class ThinkingEngine {
         if (!nativeTools) {
         sb.append("## Actions\n\n");
         sb.append("respond(message): Final answer.\n\n");
-        sb.append("ask_user(message): Ask ONLY when info is missing. Never ask permission — just act.\n\n");
+        sb.append("ask_user(message, choices?): Ask ONLY when info is missing. Never ask permission — just act. "
+                + "choices: a JSON array of short answers the user picks with a click.\n\n");
 
         sb.append("skill_create: Create/update Python skill (code AUTO-GENERATED — specify WHAT not HOW).\n");
         sb.append("  THINK FIRST: anticipate edge cases, required imports, error handling. Rework burns tokens.\n");

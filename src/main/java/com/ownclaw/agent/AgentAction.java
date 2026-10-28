@@ -1,5 +1,10 @@
 package com.ownclaw.agent;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.ownclaw.interfaces.CommandHandler;
+
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -88,5 +93,42 @@ public record AgentAction(
         if (!isResponse() && !isAskUser()) return "";
         Object msg = params.get("message");
         return msg != null ? msg.toString() : "";
+    }
+
+    /**
+     * The answers an {@code ask_user} offers the owner to pick from, as the model wrote them: each
+     * once, in order, blanks dropped. A native call gives a list; the text protocol a JSON array,
+     * or one answer per line. Anything else offers none -- he types his answer.
+     * <p>
+     * A picked answer is sent as his message, and read as one he typed: one the chats would read
+     * as a slash command ({@link CommandHandler#isCommand}) is not offered, for it would run as
+     * one -- or be refused as an unknown command -- rather than answer.
+     */
+    public List<String> choices() {
+        if (!isAskUser()) return List.of();
+        List<?> items = switch (params.get("choices")) {
+            case List<?> list -> list;
+            case String text -> listIn(text.strip());
+            case null, default -> List.of();
+        };
+        var choices = new LinkedHashSet<String>();
+        for (Object item : items) {
+            if (item instanceof String || item instanceof Number || item instanceof Boolean) {
+                String choice = item.toString().strip();
+                if (!choice.isEmpty() && !CommandHandler.isCommand(choice)) choices.add(choice);
+            }
+        }
+        return List.copyOf(choices);
+    }
+
+    private static List<?> listIn(String text) {
+        if (text.startsWith("[")) {
+            try {
+                return TextCalls.MAPPER.readValue(text, List.class);
+            } catch (JsonProcessingException notJson) {
+                // one per line, below
+            }
+        }
+        return List.of(text.split("\\R"));
     }
 }

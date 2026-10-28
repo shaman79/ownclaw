@@ -45,11 +45,15 @@ public final class SpecialActionSchemas {
                             + "in 'message' — it is what the user reads.",
                     params("message", ToolParam.required("string", "The complete answer."))),
 
-            spec(AgentAction.ASK_USER,
+            withStringItems(spec(AgentAction.ASK_USER,
                     "Ask the user one question and stop until they answer. Only when you genuinely "
                             + "cannot proceed: on unattended work nobody is there to reply, so "
-                            + "prefer deciding and stating the assumption.",
-                    params("message", ToolParam.required("string", "The question to ask."))),
+                            + "prefer deciding and stating the assumption. When the answer is one "
+                            + "of a few, list them in 'choices': the user picks one with a click.",
+                    params("message", ToolParam.required("string", "The question to ask."),
+                            "choices", ToolParam.optional("array", "The likely answers, each a short "
+                                    + "string, sent as the user's reply when picked (\"Delete them\", "
+                                    + "\"Keep them\"). The user can still type their own."))), "choices"),
 
             // No 'code' parameter, deliberately. AgentLoop calls generateSkillCode
             // before SkillManager ever sees these params and injects the code it produced, so
@@ -179,6 +183,18 @@ public final class SpecialActionSchemas {
     private static ToolSpec withTextsAsStrings(ToolSpec spec) {
         var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
         properties.get("texts").put("additionalProperties", Map.of("type", "string"));
+        return spec;
+    }
+
+    /**
+     * The spec with an array parameter's items declared strings, which {@link ToolParam} has no way
+     * to say: OpenAI rejects an array schema with no items, and one bad schema fails every request
+     * that carries it.
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withStringItems(ToolSpec spec, String param) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get(param).put("items", Map.of("type", "string"));
         return spec;
     }
 

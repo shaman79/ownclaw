@@ -47,7 +47,7 @@ final class TaskEnding {
             String local = ctx.onLocal() ? "\n\n_🏠 Written by the local model: the cloud model could not "
                     + "be used -- " + ctx.onLocalBecause() + "._" : "";
             return texts(r, scrubbed(r.response(), ctx) + local,
-                    r.ownerText() == null ? null : scrubbed(r.ownerText(), ctx) + local);
+                    r.ownerText() == null ? null : scrubbed(r.ownerText(), ctx) + local, ctx);
         }
         boolean question = r.awaitingUser();
         var ending = new StringBuilder();
@@ -64,7 +64,7 @@ final class TaskEnding {
         String response = question ? words(r.response(), ctx) + "\n\n" + ending : ending.toString();
         String ownerText = question && r.ownerText() != null ? words(r.ownerText(), ctx) + "\n\n" + ending : null;
         if (privateResults.length() > 0) ownerText = (ownerText != null ? ownerText : response) + privateResults;
-        return texts(r, response, ownerText);
+        return texts(r, response, ownerText, ctx);
     }
 
     /**
@@ -224,9 +224,11 @@ final class TaskEnding {
         };
     }
 
-    private static AgentResult texts(AgentResult r, String response, String ownerText) {
+    /** The result with these texts; a question's choices written as its text is ({@link #words}). */
+    private static AgentResult texts(AgentResult r, String response, String ownerText, AgentContext ctx) {
         return new AgentResult(r.success(), response, r.trajectory(), r.totalSteps(),
-                r.totalDurationMs(), r.terminationReason(), r.taskId(), ownerText);
+                r.totalDurationMs(), r.terminationReason(), r.taskId(), ownerText,
+                r.choices().stream().map(c -> words(c, ctx)).toList());
     }
 
     /** What OwnClaw wrote: scrubbed of vault values, then handles written as words -- in that order, so a value is scrubbed whole. */

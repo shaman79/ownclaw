@@ -117,8 +117,10 @@ class ChatPageTest {
         assertTrue(earlier.contains("page.line.textContent = 'Could not load earlier messages: '"),
                 "a page that failed says so, where the rows it held would be: " + earlier);
 
-        assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return div; } "
-                + "messagesEl.insertBefore(div, thinkingEl);"), "a saved row is drawn where it belongs, and scrolls nothing");
+        assertTrue(page.contains("messagesEl.insertBefore(div, before || thinkingEl); "
+                + "// A message of his answers the questions before it: their choices are done. "
+                + "if (isUserMsg) retireChoicesBefore(div); if (before) return div;"),
+                "a saved row is drawn where it belongs, and scrolls nothing");
         assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return; } "
                 + "messagesEl.insertBefore(div, thinkingEl); scrollBottom(false);"), "a saved progress row too");
         String clear = page.substring(page.indexOf("function clearMessages() {"));
@@ -204,7 +206,7 @@ class ChatPageTest {
         assertTrue(page.contains("if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) { e.preventDefault(); "
                 + "// What Send does, in every state: while a task runs, the message goes to it. send(false); }"));
         assertTrue(page.contains("<button id=\"queue\""), "the Queue button");
-        String send = page.substring(page.indexOf("function send(queued) {"));
+        String send = page.substring(page.indexOf("function send(queued, choice) {"));
         send = send.substring(0, send.indexOf("function markFate("));
         assertTrue(send.contains("var payload = { message: text, clientId: clientId, costMode: options.costMode, "
                 + "effort: options.effort }; // Filed in the chat on screen, whichever chat another tab has open. "

@@ -652,9 +652,11 @@ public class OpsController {
             // ending, including the step cap and reasoning aborts -- no longer applies: each of
             // those endings now sets success=false and carries its own terminationReason.
             out.put("awaitingUser", result.awaitingUser());
+            if (!result.choices().isEmpty()) out.put("choices", result.choices());
             out.put("outcomeNote", result.awaitingUser()
                     ? "The agent asked the user a question and stopped for the answer. Not a "
-                      + "failure and not delivered work; the response field holds the question."
+                      + "failure and not delivered work; the response field holds the question, "
+                      + "and choices the answers it offers to pick from, if any."
                     : "success=false means the task did not finish: terminationReason says which "
                       + "ending it was.");
             return out;

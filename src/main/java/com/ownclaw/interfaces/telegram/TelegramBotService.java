@@ -333,8 +333,9 @@ public class TelegramBotService {
             }
             // The owner's own answer, private text included: he decided Telegram gets it in full
             // -- in his private chat (its id is his own). Asked from a group, the group gets the
-            // safe text. What is stored above for later turns is the safe text either way.
-            sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response());
+            // safe text. What is stored above for later turns is the safe text either way. A
+            // question comes with the answers it offers, as keys to tap.
+            sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response(), result.choices());
         });
         // What became of it, in a line, when there is anything to say.
         String fate = taskQueue.send(sent, queued != null).line();
@@ -500,6 +501,30 @@ public class TelegramBotService {
     }
 
     /**
+     * Chats shown a question's answers as keys, which stay under the message box -- hidden once
+     * one is tapped, a button away -- until a message takes them off. Only the outbox's thread
+     * reads and writes it.
+     */
+    private final java.util.Set<Long> keysShown = new java.util.HashSet<>();
+
+    /**
+     * A task's answer, as {@link #sendMessage(long, String)} sends a text: a question with the
+     * answers it offers as keys, each sent as the owner's reply when tapped, so it goes on as one
+     * he typed; any other answer takes the keys of a question before it away.
+     */
+    private void sendMessage(long chatId, String text, List<String> choices) {
+        outbox.execute(() -> deliver(chatId, text, keys(chatId, choices)));
+    }
+
+    /** The reply_markup for an answer: keys for its choices, one per row; a removal; or none. */
+    private Map<String, Object> keys(long chatId, List<String> choices) {
+        if (choices.isEmpty()) return keysShown.remove(chatId) ? Map.of("remove_keyboard", true) : null;
+        keysShown.add(chatId);
+        return Map.of("keyboard", choices.stream().map(c -> List.of(Map.of("text", c))).toList(),
+                "one_time_keyboard", true, "resize_keyboard", true);
+    }
+
+    /**
      * Send a text in the parts Telegram accepts, in order, each until Telegram takes it: in
      * Telegram's HTML, which {@link TelegramHtml} makes of the Markdown the text is written in.
      * A part Telegram refuses as a bad request (400), as it refuses HTML it cannot read, is sent
@@ -512,15 +537,30 @@ public class TelegramBotService {
      * of it.
      */
     private void deliver(long chatId, String text) {
+        deliver(chatId, text, null);
+    }
+
+    /**
+     * @param markup the reply_markup the last part goes with ({@link #keys}), or null. A part
+     *               Telegram refuses with it (400) is sent again without it: the question arrives,
+     *               and is answered by typing.
+     */
+    private void deliver(long chatId, String text, Map<String, Object> markup) {
         List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
         List<String> html = html(parts);
         boolean asHtml = html != null;
         for (int i = 0; i < parts.size(); i++) {
-            int status = send(chatId, asHtml ? html.get(i) : parts.get(i), asHtml);
+            Map<String, Object> with = i == parts.size() - 1 ? markup : null;
+            int status = send(chatId, asHtml ? html.get(i) : parts.get(i), asHtml, with);
             if (status == 400 && asHtml) {
                 log.warn("Telegram refused part {} of {} for chat {} as HTML (HTTP 400); sending it as written",
                         i + 1, parts.size(), chatId);
-                status = send(chatId, parts.get(i), false);
+                status = send(chatId, parts.get(i), false, with);
+            }
+            if (status == 400 && with != null) {
+                log.warn("Telegram refused the last part for chat {} with its keys (HTTP 400); sending it without them",
+                        chatId);
+                status = send(chatId, parts.get(i), false, null);
             }
             if (status / 100 == 2) continue;
             log.warn("Telegram did not take part {} of {} for chat {}: HTTP {}", i + 1, parts.size(), chatId, status);
@@ -567,10 +607,16 @@ public class TelegramBotService {
      * as smtpsendemail and a network named Home_Net_5G as HomeNet5G.
      */
     private int send(long chatId, String text, boolean html) {
+        return send(chatId, text, html, null);
+    }
+
+    /** @param markup the message's reply_markup, or null for none */
+    private int send(long chatId, String text, boolean html, Map<String, Object> markup) {
         var payload = new java.util.LinkedHashMap<String, Object>();
         payload.put("chat_id", chatId);
         payload.put("text", text);
         if (html) payload.put("parse_mode", "HTML");
+        if (markup != null) payload.put("reply_markup", markup);
         return call("sendMessage", payload);
     }
 

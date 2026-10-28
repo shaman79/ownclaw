@@ -43,7 +43,7 @@ class TelegramDeliveryTest {
      * running task, which answers it with its own; runs nothing.
      */
     static final class Answering extends TaskQueue {
-        final AgentResult answer;
+        volatile AgentResult answer;
         final List<com.ownclaw.agent.TaskChat.Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<String> texts = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<Boolean> queued = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -132,6 +132,61 @@ class TelegramDeliveryTest {
         assertEquals("[Private answer]", row.get("content"), "what later prompts read");
         assertEquals("Closing balance 48,213.07 CZK", row.get("private_content"), "what the web chat shows");
         assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "what links it to what the task did");
+    }
+
+    /** The texts of the keys a sendMessage call's reply_markup shows, row by row. */
+    private static List<String> keys(String body) throws Exception {
+        var texts = new java.util.ArrayList<String>();
+        for (JsonNode row : JSON.readTree(body).path("reply_markup").path("keyboard")) {
+            for (JsonNode key : row) texts.add(key.path("text").asText());
+        }
+        return texts;
+    }
+
+    @Test
+    @DisplayName("a question goes with its choices as keys to tap, saved with it; the next answer takes them away, and one after that carries none")
+    void aQuestionsChoicesAreKeys(@TempDir Path tmp) throws Exception {
+        start(tmp, AgentResult.needsInput("Which router first?", new AgentTrajectory(), 1)
+                .withChoices(List.of("The main one", "The access point")).withTaskId("a1b2c3d4"));
+        receive("fix the routers");
+        FakeTelegram.drain(bot);
+
+        String asked = telegram.bodies("sendMessage").getLast();
+        assertEquals("Which router first?", JSON.readTree(asked).path("text").asText());
+        assertEquals(List.of("The main one", "The access point"), keys(asked), "one key a row, each the reply it sends");
+        assertTrue(JSON.readTree(asked).path("reply_markup").path("one_time_keyboard").asBoolean(), asked);
+        assertEquals("{\"taskId\":\"a1b2c3d4\",\"choices\":[\"The main one\",\"The access point\"]}",
+                jdbc.queryForObject("SELECT metadata FROM conversations WHERE role = 'assistant'", String.class),
+                "the web chat draws them after a reload");
+
+        queue.answer = AgentResult.completed("The main router is fixed.", new AgentTrajectory(), 1);
+        receive("The main one");
+        FakeTelegram.drain(bot);
+        assertEquals("The main one", queue.texts.getLast(), "a tapped key is a message like any other");
+        JsonNode answered = JSON.readTree(telegram.bodies("sendMessage").getLast());
+        assertTrue(answered.path("reply_markup").path("remove_keyboard").asBoolean(), "the keys are taken away: " + answered);
+
+        receive("and the access point?");
+        FakeTelegram.drain(bot);
+        assertTrue(JSON.readTree(telegram.bodies("sendMessage").getLast()).path("reply_markup").isMissingNode(),
+                "no keys to take away");
+        // Mutation: never remove them -> a question's keys stay under the box for every answer after it.
+    }
+
+    @Test
+    @DisplayName("a question Telegram refuses with its keys still arrives, without them, to be answered by typing")
+    void aQuestionRefusedWithItsKeysArrivesWithout(@TempDir Path tmp) throws Exception {
+        start(tmp, AgentResult.needsInput("Which router first?", new AgentTrajectory(), 1)
+                .withChoices(List.of("The main one")));
+        telegram.answer("sendMessage", FakeTelegram.Answer.refused(400), FakeTelegram.Answer.refused(400));
+        receive("fix the routers");
+        FakeTelegram.drain(bot);
+
+        var bodies = telegram.bodies("sendMessage");
+        assertEquals(3, bodies.size(), "as HTML with its keys, as written with them, as written without: " + bodies);
+        assertEquals(List.of("The main one"), keys(bodies.get(1)));
+        assertTrue(JSON.readTree(bodies.get(2)).path("reply_markup").isMissingNode(), bodies.get(2));
+        assertEquals("Which router first?", JSON.readTree(bodies.get(2)).path("text").asText());
     }
 
     @Test
