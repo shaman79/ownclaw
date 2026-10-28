@@ -224,11 +224,23 @@ final class TaskEnding {
         };
     }
 
-    /** The result with these texts; a question's choices written as its text is ({@link #words}). */
+    /** The result with these texts, and with its choices ({@link #answers}). */
     private static AgentResult texts(AgentResult r, String response, String ownerText, AgentContext ctx) {
         return new AgentResult(r.success(), response, r.trajectory(), r.totalSteps(),
-                r.totalDurationMs(), r.terminationReason(), r.taskId(), ownerText,
-                r.choices().stream().map(c -> words(c, ctx)).toList());
+                r.totalDurationMs(), r.terminationReason(), r.taskId(), ownerText, answers(r.choices(), ctx));
+    }
+
+    /**
+     * A question's choices as they are offered: scrubbed of vault values, each once. One naming a
+     * result by its handle is not offered: picked, it is the next task's message, which numbers its
+     * results from 1 again -- "result 1" there is another result, or none.
+     */
+    static java.util.List<String> answers(java.util.List<String> choices, AgentContext ctx) {
+        return choices.stream()
+                .map(c -> scrubbed(c, ctx))
+                .filter(c -> TaskRecord.inWords(c).equals(c))
+                .distinct()
+                .toList();
     }
 
     /** What OwnClaw wrote: scrubbed of vault values, then handles written as words -- in that order, so a value is scrubbed whole. */

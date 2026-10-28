@@ -3158,6 +3158,7 @@
                 drawRow(m, thinkingEl);
             });
             if (data.hasMore) holdEarlier(sessionId, msgs[0].id);
+            settleChoices();
             showChatOptions(data.options, data.defaults);
             // A chat opens on its newest message, and follows from there: how far the chat shown
             // before was scrolled says nothing about this one. At once, not smoothly: scrolled down
@@ -3265,6 +3266,7 @@
             lastMsgSender = null;
             page.line.remove();
             msgs.forEach(function(m) { drawRow(m, oldest); });
+            settleChoices();
             if (run && lastMsgSender === (run.classList.contains('user') ? 'user' : 'ai')) {
                 run.classList.remove('first-in-run');
             }
@@ -6630,9 +6632,9 @@
         div.appendChild(main);
 
         messagesEl.insertBefore(div, before || thinkingEl);
-        // The owner's message answers the questions before it: their choices are done.
-        if (isUserMsg) retireChoicesBefore(div);
         if (before) return div;
+        // The owner's message answers the questions before it: their choices are done.
+        if (isUserMsg) settleChoices();
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
         scrollBottom(type === 'user');
@@ -6641,8 +6643,8 @@
 
     /**
      * A question's answers, as buttons under it: a click sends one as the owner's reply, as if it
-     * had been typed. Drawn for a saved question as well, and done at once when the reply follows it
-     * on screen -- shown still, the one picked marked, but no longer sent.
+     * had been typed. Drawn for a saved question as well; done once the reply is on screen
+     * (settleChoices) -- shown still, the one picked marked, but no longer sent.
      */
     function addChoices(row, choices) {
         if (!row || !choices || !choices.length) return;
@@ -6659,17 +6661,24 @@
         });
         var main = row.querySelector('.msg-main');
         main.insertBefore(group, main.querySelector('.msg-meta'));
-        for (var n = row.nextElementSibling; n; n = n.nextElementSibling) {
-            if (n.classList.contains('user')) { retireChoices(group, n.dataset.said); return; }
-        }
         scrollBottom(false);
     }
 
-    /** The choices of every question drawn before this message of the owner's, which answers them. */
-    function retireChoicesBefore(userRow) {
+    /**
+     * Mark done the choices of every question answered on screen, by the owner's nearest message
+     * after it -- not a command, which answers nothing and is not kept. Run once a page of rows is
+     * drawn, and when a message is sent: a page of earlier rows is drawn above the rows on screen,
+     * a row at a time, so a question's reply may be drawn after the question, or be on the page
+     * below its own.
+     */
+    function settleChoices() {
         messagesEl.querySelectorAll('.msg-choices:not(.retired)').forEach(function(group) {
-            if (group.compareDocumentPosition(userRow) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                retireChoices(group, userRow.dataset.said);
+            for (var n = group.closest('.msg').nextElementSibling; n; n = n.nextElementSibling) {
+                if (!n.classList.contains('user')) continue;
+                var said = n.dataset.said || '';
+                if (said.trim().charAt(0) === '/') continue;
+                retireChoices(group, said);
+                return;
             }
         });
     }

@@ -102,7 +102,8 @@ public record AgentAction(
      * <p>
      * A picked answer is sent as the owner's message, and read as one typed: one the chats would read
      * as a slash command ({@link CommandHandler#isCommand}) is not offered, for it would run as
-     * one -- or be refused as an unknown command -- rather than answer.
+     * one -- or be refused as an unknown command -- rather than answer; nor one holding a secret
+     * command ({@link CommandHandler#misplacedSecret}), which the chats refuse and keep nothing of.
      */
     public List<String> choices() {
         if (!isAskUser()) return List.of();
@@ -115,7 +116,9 @@ public record AgentAction(
         for (Object item : items) {
             if (item instanceof String || item instanceof Number || item instanceof Boolean) {
                 String choice = item.toString().strip();
-                if (!choice.isEmpty() && !CommandHandler.isCommand(choice)) choices.add(choice);
+                if (!choice.isEmpty() && !CommandHandler.isCommand(choice) && !CommandHandler.misplacedSecret(choice)) {
+                    choices.add(choice);
+                }
             }
         }
         return List.copyOf(choices);

@@ -500,26 +500,26 @@ public class TelegramBotService {
         outbox.execute(() -> deliver(chatId, text));
     }
 
-    /**
-     * Chats shown a question's answers as keys, which stay under the message box -- hidden once
-     * one is tapped, a button away -- until a message takes them off. Only the outbox's thread
-     * reads and writes it.
-     */
-    private final java.util.Set<Long> keysShown = new java.util.HashSet<>();
+    /** What takes a question's keys away; Telegram does nothing with it when none are shown. */
+    static final Map<String, Object> NO_KEYS = Map.of("remove_keyboard", true);
 
     /**
      * A task's answer, as {@link #sendMessage(long, String)} sends a text: a question with the
-     * answers it offers as keys, each sent as the owner's reply when tapped, so it goes on as one
-     * typed; any other answer takes the keys of a question before it away.
+     * answers it offers as keys under its last part, each sent as the owner's reply when tapped, so
+     * it goes on as one typed. Any other answer takes away, with its first part, the keys a
+     * question before it left under the message box -- hidden once one is tapped, a button away.
+     * Every answer, not one known to follow keys: what is known is gone with a restart, which every
+     * deploy is.
      */
     private void sendMessage(long chatId, String text, List<String> choices) {
-        outbox.execute(() -> deliver(chatId, text, keys(chatId, choices)));
+        outbox.execute(() -> {
+            if (choices.isEmpty()) deliver(chatId, text, NO_KEYS, null);
+            else deliver(chatId, text, null, keys(choices));
+        });
     }
 
-    /** The reply_markup for an answer: keys for its choices, one per row; a removal; or none. */
-    private Map<String, Object> keys(long chatId, List<String> choices) {
-        if (choices.isEmpty()) return keysShown.remove(chatId) ? Map.of("remove_keyboard", true) : null;
-        keysShown.add(chatId);
+    /** The reply_markup of a question's choices: a key for each, one per row, gone once one is tapped. */
+    static Map<String, Object> keys(List<String> choices) {
         return Map.of("keyboard", choices.stream().map(c -> List.of(Map.of("text", c))).toList(),
                 "one_time_keyboard", true, "resize_keyboard", true);
     }
@@ -537,20 +537,22 @@ public class TelegramBotService {
      * of it.
      */
     private void deliver(long chatId, String text) {
-        deliver(chatId, text, null);
+        deliver(chatId, text, null, null);
     }
 
     /**
-     * @param markup the reply_markup the last part goes with ({@link #keys}), or null. A part
-     *               Telegram refuses with it (400) is sent again without it: the question arrives,
-     *               and is answered by typing.
+     * @param first the reply_markup the first part goes with, or null
+     * @param last  the reply_markup the last part goes with, or null; for a text of one part, it
+     *              goes with that part in place of {@code first}. A part Telegram refuses with its
+     *              markup (400) is sent again without it: a question arrives, to be answered by
+     *              typing.
      */
-    private void deliver(long chatId, String text, Map<String, Object> markup) {
+    private void deliver(long chatId, String text, Map<String, Object> first, Map<String, Object> last) {
         List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
         List<String> html = html(parts);
         boolean asHtml = html != null;
         for (int i = 0; i < parts.size(); i++) {
-            Map<String, Object> with = i == parts.size() - 1 ? markup : null;
+            Map<String, Object> with = i == parts.size() - 1 && last != null ? last : i == 0 ? first : null;
             int status = send(chatId, asHtml ? html.get(i) : parts.get(i), asHtml, with);
             if (status == 400 && asHtml) {
                 log.warn("Telegram refused part {} of {} for chat {} as HTML (HTTP 400); sending it as written",
@@ -558,8 +560,8 @@ public class TelegramBotService {
                 status = send(chatId, parts.get(i), false, with);
             }
             if (status == 400 && with != null) {
-                log.warn("Telegram refused the last part for chat {} with its keys (HTTP 400); sending it without them",
-                        chatId);
+                log.warn("Telegram refused part {} of {} for chat {} with its keys (HTTP 400); sending it without them",
+                        i + 1, parts.size(), chatId);
                 status = send(chatId, parts.get(i), false, null);
             }
             if (status / 100 == 2) continue;

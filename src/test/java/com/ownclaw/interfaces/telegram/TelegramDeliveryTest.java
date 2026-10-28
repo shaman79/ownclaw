@@ -144,7 +144,7 @@ class TelegramDeliveryTest {
     }
 
     @Test
-    @DisplayName("a question goes with its choices as keys to tap, saved with it; the next answer takes them away, and one after that carries none")
+    @DisplayName("a question goes with its choices as keys to tap, saved with it; every other answer takes keys away, a restart between them or not")
     void aQuestionsChoicesAreKeys(@TempDir Path tmp) throws Exception {
         start(tmp, AgentResult.needsInput("Which router first?", new AgentTrajectory(), 1)
                 .withChoices(List.of("The main one", "The access point")).withTaskId("a1b2c3d4"));
@@ -168,9 +168,34 @@ class TelegramDeliveryTest {
 
         receive("and the access point?");
         FakeTelegram.drain(bot);
-        assertTrue(JSON.readTree(telegram.bodies("sendMessage").getLast()).path("reply_markup").isMissingNode(),
-                "no keys to take away");
+        assertTrue(JSON.readTree(telegram.bodies("sendMessage").getLast()).path("reply_markup").path("remove_keyboard").asBoolean(),
+                "what was shown before a restart is not known, so every answer takes them away");
         // Mutation: never remove them -> a question's keys stay under the box for every answer after it.
+    }
+
+    @Test
+    @DisplayName("a long question's keys go under its last part; a long answer takes them away with its first")
+    void inPartsTheKeysGoLastAndTheRemovalFirst(@TempDir Path tmp) throws Exception {
+        String longText = ("line of the question " + "x".repeat(80) + "\n").repeat(60);   // about 6,000 characters
+        start(tmp, AgentResult.needsInput(longText, new AgentTrajectory(), 1).withChoices(List.of("Yes", "No")));
+        receive("what now?");
+        FakeTelegram.drain(bot);
+        var asked = telegram.bodies("sendMessage");
+        assertTrue(asked.size() >= 2, "in parts: " + asked.size());
+        for (int i = 0; i < asked.size() - 1; i++) {
+            assertTrue(JSON.readTree(asked.get(i)).path("reply_markup").isMissingNode(), "part " + (i + 1) + ": " + asked.get(i));
+        }
+        assertEquals(List.of("Yes", "No"), keys(asked.getLast()), "under the question's end, where it is answered");
+
+        int before = telegram.bodies("sendMessage").size();
+        queue.answer = AgentResult.completed(longText, new AgentTrajectory(), 1);
+        receive("Yes");
+        FakeTelegram.drain(bot);
+        var answered = telegram.bodies("sendMessage").subList(before, telegram.bodies("sendMessage").size());
+        assertTrue(JSON.readTree(answered.getFirst()).path("reply_markup").path("remove_keyboard").asBoolean(), answered.getFirst());
+        for (String part : answered.subList(1, answered.size())) {
+            assertTrue(JSON.readTree(part).path("reply_markup").isMissingNode(), part);
+        }
     }
 
     @Test

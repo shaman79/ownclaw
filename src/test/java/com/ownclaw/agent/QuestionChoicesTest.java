@@ -49,25 +49,30 @@ class QuestionChoicesTest {
     }
 
     @Test
-    @DisplayName("a choice the chats would read as a slash command is not offered: picked, it would run as one")
+    @DisplayName("a choice the chats would read as a slash command, or that holds a secret command, is not offered")
     void noChoiceIsACommand() {
-        assertEquals(List.of("Clean /tmp"), choicesOf(List.of("/cancel", " /new", "/var/log", "Clean /tmp")));
+        assertEquals(List.of("Clean /tmp"), choicesOf(List.of("/cancel", " /new", "/var/log", "Clean /tmp",
+                "Store it: /cred set WIFI_PASS", "store this: /cred set KEY VALUE")));
+        // Mutation: drop the misplacedSecret test -> "Store it: /cred set WIFI_PASS" is a button the
+        // chat refuses, and the buttons come back after a reload as if unanswered.
     }
 
     @Test
-    @DisplayName("a question's choices reach the saved row the page draws, written as the question is: no vault value, no handle")
+    @DisplayName("a question's choices reach the saved row the page draws: no vault value, none naming a result, each once")
     void theChoicesReachTheSavedRow(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));
         rig.jdbc.update("INSERT INTO users (id, display_name) VALUES ('u1', 'Owner')");   // the vault's salt lives on it
         rig.vault.storeCredential("u1", "ROUTER_PASS", "hunter2-router-admin");
         rig.cloud.think.add(call("noop", Map.of()));
         rig.cloud.think.add(call(AgentAction.ASK_USER, Map.of("message", "Which router first?",
-                "choices", List.of("The main one", "Log in with hunter2-router-admin", "Use {{1}}"))));
+                "choices", List.of("The main one", "Log in with hunter2-router-admin", "Use {{1}}",
+                        "Log in with «vault:ROUTER_PASS»"))));
         String session = rig.chat.createSession("u1", "Network");
         AgentResult r = rig.turn(session, "fix the routers", ChatOptions.NONE);
 
         assertTrue(r.awaitingUser(), r.response());
-        assertEquals(List.of("The main one", "Log in with «vault:ROUTER_PASS»", "Use result 1"), r.choices());
+        assertEquals(List.of("The main one", "Log in with «vault:ROUTER_PASS»"), r.choices(),
+                "a handle would name another result in the task the answer starts");
         assertEquals(r.choices(), r.withTaskId("0badc0de").withOwnerText("x").choices(), "kept by every copy of it");
 
         var rows = rig.chat.getSessionMessages("u1", session, null, null).messages();
@@ -75,7 +80,7 @@ class QuestionChoicesTest {
         assertEquals("assistant", asked.get("role"));
         assertTrue(asked.get("choices") instanceof com.fasterxml.jackson.databind.JsonNode list && list.isArray(),
                 "a list the page reads, not its JSON text: " + asked.get("choices"));
-        assertEquals("[\"The main one\",\"Log in with «vault:ROUTER_PASS»\",\"Use result 1\"]",
+        assertEquals("[\"The main one\",\"Log in with «vault:ROUTER_PASS»\"]",
                 String.valueOf(asked.get("choices")), "drawn again after a reload");
         assertEquals(r.taskId(), asked.get("task_id"), "and still linked to its task");
         assertNull(rows.getFirst().get("choices"), "the owner's message offers none");

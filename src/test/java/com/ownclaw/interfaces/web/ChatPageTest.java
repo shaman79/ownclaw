@@ -119,9 +119,9 @@ class ChatPageTest {
         assertTrue(earlier.contains("page.line.textContent = 'Could not load earlier messages: '"),
                 "a page that failed says so, where the rows it held would be: " + earlier);
 
-        assertTrue(page.contains("messagesEl.insertBefore(div, before || thinkingEl); "
+        assertTrue(page.contains("messagesEl.insertBefore(div, before || thinkingEl); if (before) return div; "
                 + "// The owner's message answers the questions before it: their choices are done. "
-                + "if (isUserMsg) retireChoicesBefore(div); if (before) return div;"),
+                + "if (isUserMsg) settleChoices();"),
                 "a saved row is drawn where it belongs, and scrolls nothing");
         assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return; } "
                 + "messagesEl.insertBefore(div, thinkingEl); scrollBottom(false);"), "a saved progress row too");
