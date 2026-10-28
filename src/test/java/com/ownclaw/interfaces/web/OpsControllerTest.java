@@ -101,6 +101,11 @@ class OpsControllerTest {
             }
             if (failWith instanceof RuntimeException e) throw e;
             if (failWith instanceof Error e) throw e;
+            if (message.startsWith("ask: ")) {
+                return AgentResult.needsInput(message.substring(5), new AgentTrajectory(), 5)
+                        .withChoices(List.of("Delete them", "Keep them"))
+                        .withTaskId(String.format("%08x", calls.incrementAndGet()));
+            }
             var trajectory = new AgentTrajectory();
             trajectory.record(new AgentAction("probe", Map.of(), "look"),
                     new AgentObservation("probe", true, "o".repeat(5000) + "END", Map.of(), 3));
@@ -183,6 +188,19 @@ class OpsControllerTest {
         String untitled = s.conversations().createSession("u1", "New Chat");
         body(s.ops().runAgent(Map.of("message", "plan the trip", "userId", "u1", "sessionId", untitled)));
         assertEquals("plan the trip", title(s.jdbc(), untitled));
+    }
+
+    @Test
+    @DisplayName("a chat turn that ends on a question says so, with the answers it offers; one that answers offers none")
+    void aQuestionsChoicesInTheTurn(@TempDir Path tmp) throws Exception {
+        var s = setup(tmp);
+        Map<String, Object> asked = body(s.ops().runAgent(
+                Map.of("message", "ask: Delete the old backups?", "userId", "u1", "sessionId", "new")));
+        assertEquals(true, asked.get("awaitingUser"), String.valueOf(asked));
+        assertEquals(List.of("Delete them", "Keep them"), asked.get("choices"));
+        Map<String, Object> answered = body(s.ops().runAgent(
+                Map.of("message", "Keep them", "userId", "u1", "sessionId", asked.get("sessionId"))));
+        assertFalse(answered.containsKey("choices"), String.valueOf(answered));
     }
 
     @Test

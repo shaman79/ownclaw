@@ -157,6 +157,22 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 | `OWNCLAW_MENTOR_PROVIDER` | `openai` | Cloud provider: `openai` or `anthropic` |
 | `OWNCLAW_SERVER_PORT` | `8080` | HTTP server port |
 
+### Links that open a message in the chat
+
+An alert or another tool can link to the chat with a message ready in the box:
+
+```
+https://<host>/#task=<URL-encoded text>[&new=1][&title=<URL-encoded>][&exp=<unix time>&sig=<hex>]
+```
+
+- Everything goes after `#`, so the text never reaches the server, a proxy's logs or a referrer.
+- `task` is the message, cut at 1,500 characters. `new=1` starts a new chat, titled `title`.
+- The page puts the message in the box, after the login if one is needed, and takes it out of the address. It never sends it: the user reads it and presses Send.
+- Encode with `encodeURIComponent` / `urllib.parse.quote(text, safe='')`. A `+` is read as a space.
+- **Signed links** show "verified" above the box. Set `sig = hex(HMAC-SHA256(secret, exp + "\n" + task))`, where `task` is the text before URL encoding and `exp` is a unix time in seconds.
+  - The secret is `GUARDIAN_LINK_SECRET` in the vault of the account that opens the link (`/cred set GUARDIAN_LINK_SECRET <secret>`).
+  - The page checks the signature with `POST /api/links/verify`, so the secret never reaches the browser.
+
 ## Tech stack
 
 - **Backend**: Java 21, Spring Boot, SQLite (Liquibase migrations)
