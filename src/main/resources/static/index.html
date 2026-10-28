@@ -2839,20 +2839,15 @@
 
     /**
      * Take a link's message out of the address, to wait for the chat. A second one replaces the
-     * first; asking for a new chat while the chat made for the first waits to be filled, it has
-     * that chat, retitled (makeLinkChat). One with no text is taken out of the address and puts
-     * nothing in.
+     * first. One with no text is taken out of the address and puts nothing in.
      */
     function captureLink() {
         var h = new URLSearchParams(location.hash.slice(1));
         if (!h.has('task')) return false;
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
         if (!h.get('task').trim()) return false;
-        var before = waitingLink();
-        var link = { id: Date.now() + '-' + Math.random(), task: h.get('task'), new: h.get('new') === '1',
-                     title: h.get('title') || '', exp: h.get('exp'), sig: h.get('sig'), chat: null };
-        if (link.new && before && before.new && before.chat) { link.chat = before.chat; link.retitle = true; }
-        keepLink(link);
+        keepLink({ id: Date.now() + '-' + Math.random(), task: h.get('task'), new: h.get('new') === '1',
+                   title: h.get('title') || '', exp: h.get('exp'), sig: h.get('sig'), chat: null });
         return true;
     }
 
@@ -5985,7 +5980,6 @@
         // And a link's message, with its banner, and one waiting: not left for whoever signs in next.
         if (linkText !== null && inputEl.value === linkText) inputEl.value = '';
         hideLinkBanner();
-        keepLink(null);
         ensureChatView();
         // Whoever signs in next in this tab starts in a chat of theirs.
         rememberChat(null);
@@ -7038,55 +7032,51 @@
     var linkText = null;
     /** Counts the link messages shown, so a signature's answer for one replaced since is not shown. */
     var linksShown = 0;
-    /** The chat made for the link whose text is in the box, while it is there unchanged and unsent. */
-    var linkChat = null;
     /** Set while a chat is being made for a link (makeLinkChat): one at a time. */
     var makingLinkChat = false;
+    /** How long a chat for a link is waited for before its message goes in the chat on screen. */
+    var LINK_CHAT_WAIT = 20000;
+    /** Set once this page is being left: a request that ends with it has not failed. */
+    var pageLeaving = false;
+    window.addEventListener('pagehide', function() { pageLeaving = true; });
 
     /**
-     * Put the waiting link's message in the box, once this tab's chat is on screen -- in a new chat
-     * first, when the link asks for one. Never sent: Send or Enter is the owner's. As text, never
-     * as markup, shaped as linkTextOf says. A draft in the box is not replaced without asking, and
-     * the link waits for the answer; a message an earlier link put there, unchanged, is replaced.
-     * A command is refused: one Send would run it -- a forged link's /cred set, put above what the
-     * box shows, stored a secret of its own.
+     * Put the waiting link's message in the box, once this tab's chat is on screen -- in a chat of
+     * its own first, when the link asks for one. Never sent: Send or Enter is the owner's. As text,
+     * never as markup, shaped as linkTextOf says. Refused before anything is made for it when it is
+     * a command -- one Send would run it: a forged link's /cred set, put above what the box showed,
+     * stored a secret of its own -- or holds what the box does not show. A draft in the box is not
+     * replaced without asking, and the link waits for the answer; a message an earlier link put
+     * there, unchanged, is replaced.
      */
     function applyLink() {
         var link = waitingLink();
         if (!link || !authToken || !ws || ws.readyState !== 1 || !displayedSessionId) return;
         // Drawn again, in the chat view, and then here again.
         if (currentView !== 'chat') { switchToSession(displayedSessionId); return; }
-        if (link.new && !link.chat) {
-            // The chat made for the link before, still empty, with only that link's unsent text in
-            // the box: this one's, retitled. Any other chat is the owner's, and is never touched.
-            if (linkChat === displayedSessionId && !messagesEl.querySelector('.msg')
-                    && linkText !== null && inputEl.value === linkText) {
-                link.chat = linkChat;
-                link.retitle = true;
-                keepLink(link);
-            } else {
-                makeLinkChat(link);   // opened, its history drawn, this runs again
-                return;
-            }
-        }
         var shaped = linkTextOf(link.task);
-        if (LINK_COMMAND.test(shaped.text)) {
+        var refused = !shaped.text
+                ? 'A link asked to put a message in the box that cannot be shown there, so nothing was put in it.'
+                : LINK_COMMAND.test(shaped.text)
+                ? 'A link asked to put a command in the box (its message starts with /). A link may not, so nothing was put in it.'
+                : LINK_HIDDEN.test(shaped.text)
+                ? 'A link asked to put text with invisible characters in the box, which can hide or reorder what the '
+                        + 'agent is sent. A link may not, so nothing was put in it.'
+                : null;
+        if (refused) {
             keepLink(null);
-            showLinkBanner('A link asked to put a command in the box (its message starts with /). '
-                    + 'A link may not, so nothing was put in it.', false);
+            showLinkBanner(refused, false);
             return;
         }
-        if (LINK_HIDDEN.test(shaped.text)) {
-            keepLink(null);
-            showLinkBanner('A link asked to put text with invisible characters in the box, which can hide or '
-                    + 'reorder what the agent is sent. A link may not, so nothing was put in it.', false);
+        if (link.new && !link.chat) {
+            makeLinkChat(link);   // opened, its history drawn, this runs again
             return;
         }
         if (inputEl.value.trim() && inputEl.value !== linkText) {
             var shown = ++linksShown;
             showLinkBanner('Replace your draft with the message from the link?', false, [
                 { label: 'Replace', act: function() { if (shown === linksShown) fillFromLink(link, shaped); } },
-                { label: 'Keep my draft', act: function() { if (shown === linksShown) { keepLink(null); hideLinkBanner(); } } }
+                { label: 'Keep my draft', act: function() { if (shown === linksShown) hideLinkBanner(); } }
             ]);
             return;
         }
@@ -7094,36 +7084,44 @@
     }
 
     /**
-     * Make the chat a link asks for, titled as it says, and open it: by its id, so only that chat
-     * is ever filled from a later link or retitled for one. Should a later link that asks for a new
-     * chat be waiting by the time it is made, it is that link's, retitled; when it cannot be made,
-     * the message goes in the chat on screen.
+     * Make the chat a link asks for, titled as it says, and open it by its id. Its own: a later
+     * link that asks for a new chat has another, and no chat is renamed for a link. A link that has
+     * replaced this one meanwhile is applied as it asks. When the chat cannot be made -- refused, or
+     * no answer within LINK_CHAT_WAIT -- the message goes in the chat on screen, and the banner says
+     * so; a page being left has not failed, and the link waits for the page that follows.
      */
     function makeLinkChat(link) {
         if (makingLinkChat) return;
         makingLinkChat = true;
+        var stop = new AbortController();
+        var timer = setTimeout(function() { stop.abort(); }, LINK_CHAT_WAIT);
         fetch('/api/chats', {
             method: 'POST',
+            signal: stop.signal,
             headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
             body: JSON.stringify(link.title ? { title: link.title } : {})
         })
         .then(okJson)
         .then(function(made) {
+            clearTimeout(timer);
             makingLinkChat = false;
             var now = waitingLink();
-            if (!now || !now.new || now.chat) return;
+            if (!now || now.id !== link.id) { applyLink(); return; }
             now.chat = made.sessionId;
-            if (now.id !== link.id) now.retitle = true;
             keepLink(now);
             refreshSessionList();
             switchToSession(made.sessionId);
         })
         .catch(function() {
+            clearTimeout(timer);
             makingLinkChat = false;
+            if (pageLeaving) return;
             var now = waitingLink();
-            if (!now) return;
-            now.new = false;
-            keepLink(now);
+            if (now && now.id === link.id) {
+                now.new = false;
+                now.noChat = true;
+                keepLink(now);
+            }
             applyLink();
         });
     }
@@ -7135,37 +7133,45 @@
     var LINK_COMMAND = /^[\s\p{Z}\p{Cc}\p{Cf}]*\//u;
 
     /**
-     * An invisible format character -- a Unicode tag, a direction override or isolate, a zero-width
-     * space, a soft hyphen: text the box does not show, or shows in another order than the agent
-     * reads it. All but the joiners that hold an emoji or a word of some scripts together.
+     * A character the box does not draw, or draws in another order than the agent reads it -- a
+     * Unicode tag, a direction override or isolate, a zero-width space, a soft hyphen, a variation
+     * selector, a filler: every format and default-ignorable character but the joiners and the two
+     * selectors that hold an emoji, or a word of some scripts, together.
      */
-    var LINK_HIDDEN = /(?![\u200C\u200D])\p{Cf}/u;
+    var LINK_HIDDEN = /(?![\u200C\u200D\uFE0E\uFE0F])[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 
-    /** What looks blank on a line: spaces, and the fillers that draw as nothing. */
-    var BLANKISH = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]+$/u;
+    /** What looks blank at the end of a line: a space, or a filler that draws as nothing. */
+    var BLANKISH = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]/u;
 
     /**
      * A link's text as the box takes it: line ends as the box writes them, no trailing blanks on a
      * line and no run of blank lines -- where a forged link pushes its start out of view -- and at
-     * most LINK_MAX characters as a reader counts them (never half of an emoji). {text, cut,
-     * same}: same when the text is the link's exactly, which a signature is over.
+     * most LINK_MAX code points, cut where a character as a reader sees it ends (never in an
+     * emoji). In time linear in the text: a link of megabytes is read once. {text, cut, same}: same
+     * when the text is the link's exactly, which a signature is over.
      */
     function linkTextOf(task) {
-        var lines = String(task).replace(/\r\n?/g, '\n').split('\n').map(function(l) { return l.replace(BLANKISH, ''); });
         var kept = [];
-        lines.forEach(function(l) { if (l || (kept.length && kept[kept.length - 1])) kept.push(l); });
+        String(task).replace(/\r\n?/g, '\n').split('\n').forEach(function(line) {
+            // One character at a time from the end: a pattern for a run of them backtracks on a long one.
+            var end = line.length;
+            while (end > 0 && BLANKISH.test(line.charAt(end - 1))) end--;
+            var l = line.slice(0, end);
+            if (l || (kept.length && kept[kept.length - 1])) kept.push(l);
+        });
         while (kept.length && !kept[kept.length - 1]) kept.pop();
         var text = kept.join('\n');
-        // LINK_MAX code points, cut where a character as a reader sees it ends.
-        var chars = window.Intl && Intl.Segmenter
-                ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), function(g) { return g.segment; })
-                : Array.from(text);
+        // Read as far as the cut, no further.
+        var parts = window.Intl && Intl.Segmenter
+                ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)[Symbol.iterator]()
+                : text[Symbol.iterator]();
         var cut = false, count = 0, upTo = '';
-        for (var i = 0; i < chars.length; i++) {
-            var n = Array.from(chars[i]).length;
+        for (var step = parts.next(); !step.done; step = parts.next()) {
+            var part = typeof step.value === 'string' ? step.value : step.value.segment;
+            var n = Array.from(part).length;
             if (count + n > LINK_MAX) { cut = true; break; }
             count += n;
-            upTo += chars[i];
+            upTo += part;
         }
         if (cut) text = upTo;
         return { text: text, cut: cut, same: text === String(task) };
@@ -7182,10 +7188,9 @@
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, Math.max(160, Math.round(window.innerHeight * 0.45))) + 'px';
         inputEl.scrollTop = 0;
-        if (link.retitle && link.title && link.chat) renameSession(link.chat, link.title);
-        linkChat = link.chat && link.chat === displayedSessionId ? link.chat : null;
         var shown = ++linksShown;
-        var after = (shaped.cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '')
+        var after = (link.noChat ? ' A chat of its own could not be made for it, so it is in this one.' : '')
+                + (shaped.cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '')
                 + (inputEl.scrollHeight > inputEl.clientHeight + 1 ? ' It is longer than the box shows: scroll it to read all of it.' : '');
         if (!link.sig) {
             showLinkBanner('Message from a link: check it before sending.' + after, false);
@@ -7239,10 +7244,11 @@
         linkBanner.hidden = false;
     }
 
+    /** The banner gone, and with it a link waiting on it: dismissed, answered, or sent past. */
     function hideLinkBanner() {
         linksShown++;
         linkText = null;
-        linkChat = null;
+        keepLink(null);
         linkBanner.hidden = true;
         linkBanner.innerHTML = '';
     }

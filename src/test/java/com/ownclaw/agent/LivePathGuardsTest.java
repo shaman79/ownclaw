@@ -162,6 +162,14 @@ class LivePathGuardsTest {
     }
 
     @Test
+    @DisplayName("a new chat's title is not logged: a link's chat is titled by an alert, which names hosts and paths")
+    void aNewChatsTitleIsNotLogged() throws IOException {
+        String chats = read("com.ownclaw.interfaces.web.ChatHistoryController");
+        String created = call(chats, "log.info(\"New chat session created");
+        assertFalse(created.contains("title"), created);
+    }
+
+    @Test
     @DisplayName("Telegram is sent the owner's text, in his own chat alone")
     void telegramIsSentTheOwnersText() throws IOException {
         // What is sent, pinned here; what is saved is driven: the web chat's by

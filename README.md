@@ -167,7 +167,10 @@ https://<host>/#task=<URL-encoded text>[&new=1][&title=<URL-encoded>][&exp=<unix
 
 - Everything goes after `#`, so the text never reaches the server, a proxy's logs or a referrer.
 - `task` is the message, cut at 1,500 characters. `new=1` starts a new chat, titled `title`.
-- A message the chat would read as a command (one that starts with `/`) is refused. Runs of blank lines are closed up.
+- These messages are refused:
+  - one the chat would read as a command (it starts with `/`);
+  - one holding invisible characters, such as Unicode tags, direction controls, zero-width spaces, soft hyphens or variation selectors (the emoji joiners are fine).
+- Runs of blank lines are closed up.
 - The page puts the message in the box, after the login if one is needed, and takes it out of the address. It never sends it: the user reads it and presses Send.
 - Encode with `encodeURIComponent` / `urllib.parse.quote(text, safe='')`. A `+` is read as a space.
 - **Signed links** show "verified" above the box. Set `sig = hex(HMAC-SHA256(secret, exp + "\n" + task))`, where `task` is the text before URL encoding and `exp` is a unix time in seconds.

@@ -88,22 +88,26 @@ class LinkPageTest {
     void nothingHidesAndGreenMeansWhatItSays() {
         assertTrue(page.contains("var LINK_COMMAND = /^[\\s\\p{Z}\\p{Cc}\\p{Cf}]*\\//u;"),
                 "a slash after any blanks, invisible ones too, as the server reads a command");
+        assertTrue(page.contains("var LINK_HIDDEN = /(?![\\u200C\\u200D\\uFE0E\\uFE0F])[\\p{Cf}\\p{Default_Ignorable_Code_Point}]/u;"),
+                "every format and default-ignorable character but the emoji joiners and selectors");
         String apply = function("applyLink");
-        assertTrue(apply.indexOf("if (LINK_COMMAND.test(shaped.text)) {") > 0
-                && apply.indexOf("if (LINK_COMMAND.test(shaped.text)) {") < apply.indexOf("fillFromLink(link, shaped)"),
-                "refused before anything is put in the box: " + apply);
-        assertTrue(page.contains("var LINK_HIDDEN = /(?![\\u200C\\u200D])\\p{Cf}/u;"),
-                "invisible format characters -- tags, direction controls -- but for the joiners");
-        assertTrue(apply.indexOf("if (LINK_HIDDEN.test(shaped.text)) {") > 0
-                && apply.indexOf("if (LINK_HIDDEN.test(shaped.text)) {") < apply.indexOf("fillFromLink(link, shaped)"),
-                "refused before anything is put in the box: " + apply);
+        int refused = apply.indexOf("if (refused) { keepLink(null); showLinkBanner(refused, false); return; }");
+        assertTrue(apply.contains("var refused = !shaped.text ? ") && apply.contains(": LINK_COMMAND.test(shaped.text) ? ")
+                && apply.contains(": LINK_HIDDEN.test(shaped.text) ? ") && refused > 0, apply);
+        assertTrue(refused < apply.indexOf("makeLinkChat(link);") && refused < apply.indexOf("fillFromLink(link, shaped)"),
+                "refused before a chat is made for it or anything is put in the box: " + apply);
         String shape = function("linkTextOf");
         assertTrue(shape.contains("replace(/\\r\\n?/g, '\\n')") && shape.contains("if (l || (kept.length && kept[kept.length - 1])) kept.push(l);"),
                 "line ends as the box writes them, no run of blank lines: " + shape);
+        assertTrue(page.contains("var BLANKISH = /[\\s\\p{Z}\\u115F\\u1160\\u2800\\u3164\\uFFA0]/u;")
+                && shape.contains("while (end > 0 && BLANKISH.test(line.charAt(end - 1))) end--;"),
+                "trailing blanks and fillers off one character at a time, in linear time: " + shape);
         assertTrue(shape.contains("new Intl.Segmenter(undefined, { granularity: 'grapheme' })") && page.contains("var LINK_MAX = 1500;")
-                && shape.contains("var n = Array.from(chars[i]).length; if (count + n > LINK_MAX) { cut = true; break; }"),
+                && shape.contains("var n = Array.from(part).length; if (count + n > LINK_MAX) { cut = true; break; }")
+                && shape.contains(".segment(text)[Symbol.iterator]()"),
                 "LINK_MAX code points, cut where a character ends: " + shape);
         assertTrue(page.contains("max-height: max(160px, 45vh);"), "the box may grow past the 160px of typing for a link's message");
+        assertTrue(page.contains("inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';"), "typing still stops at 160px");
         String fill = function("fillFromLink");
         assertTrue(fill.contains("inputEl.scrollTop = 0;") && fill.contains("It is longer than the box shows"),
                 "its start in view, and said when it does not all fit: " + fill);
@@ -114,20 +118,24 @@ class LinkPageTest {
         String logout = function("logout");
         assertTrue(logout.contains("if (linkText !== null && inputEl.value === linkText) inputEl.value = ''; hideLinkBanner();"),
                 "not left for whoever signs in next: " + logout);
+        assertTrue(function("hideLinkBanner").contains("keepLink(null);"), "and a link still waiting goes with the banner");
     }
 
     @Test
-    @DisplayName("a chat is made for a link by its id, and only that chat, still empty, is ever reused or retitled for a later link")
-    void onlyTheLinksOwnChatIsTouched() {
-        String apply = function("applyLink");
-        assertTrue(apply.contains("if (linkChat === displayedSessionId && !messagesEl.querySelector('.msg') "
-                + "&& linkText !== null && inputEl.value === linkText) {"), apply);
-        String fill = function("fillFromLink");
-        assertTrue(fill.contains("if (link.retitle && link.title && link.chat) renameSession(link.chat, link.title);")
-                && fill.contains("linkChat = link.chat && link.chat === displayedSessionId ? link.chat : null;"), fill);
+    @DisplayName("a link's chat is its own, made by its id; no chat is renamed for a link; a failure puts it in the chat on screen, a page being left does not")
+    void aLinksChatIsItsOwn() {
+        assertFalse(page.contains("renameSession(link"), "no chat is renamed for a link");
+        assertFalse(function("captureLink").contains(".chat = "), "a link takes no other link's chat");
         String make = function("makeLinkChat");
-        assertTrue(make.contains("fetch('/api/chats', {") && make.contains("now.chat = made.sessionId;")
-                && make.contains("switchToSession(made.sessionId);"), make);
+        assertTrue(make.contains("if (makingLinkChat) return;") && make.contains("fetch('/api/chats', {")
+                && make.contains("now.chat = made.sessionId;") && make.contains("switchToSession(made.sessionId);"), make);
+        assertTrue(make.contains("if (!now || now.id !== link.id) { applyLink(); return; }"),
+                "a link that replaced this one meanwhile is applied: " + make);
+        assertTrue(make.contains("setTimeout(function() { stop.abort(); }, LINK_CHAT_WAIT);") && make.contains("signal: stop.signal,"),
+                "never waited for for ever: " + make);
+        assertTrue(make.contains("if (pageLeaving) return;") && make.contains("now.new = false; now.noChat = true;"),
+                "a failure puts it in the chat on screen, said; a reload is no failure: " + make);
+        assertTrue(page.contains("window.addEventListener('pagehide', function() { pageLeaving = true; });"));
     }
 
     @Test
