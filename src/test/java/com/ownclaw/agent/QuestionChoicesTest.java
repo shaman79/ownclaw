@@ -73,6 +73,8 @@ class QuestionChoicesTest {
         var rows = rig.chat.getSessionMessages("u1", session, null, null).messages();
         var asked = rows.getLast();
         assertEquals("assistant", asked.get("role"));
+        assertTrue(asked.get("choices") instanceof com.fasterxml.jackson.databind.JsonNode list && list.isArray(),
+                "a list the page reads, not its JSON text: " + asked.get("choices"));
         assertEquals("[\"The main one\",\"Log in with «vault:ROUTER_PASS»\",\"Use result 1\"]",
                 String.valueOf(asked.get("choices")), "drawn again after a reload");
         assertEquals(r.taskId(), asked.get("task_id"), "and still linked to its task");

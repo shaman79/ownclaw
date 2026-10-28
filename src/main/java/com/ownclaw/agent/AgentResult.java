@@ -24,8 +24,8 @@ import java.util.List;
  *                       records. The web chat and Telegram show ownerText.
  * @param choices        the answers a question offers ({@code ask_user}'s choices), which the web
  *                       chat draws as buttons under it and Telegram as keys: one is sent as the
- *                       owner's reply when he picks it. Empty for every other result, and for a
- *                       question that offers none -- he types his answer
+ *                       owner's reply when picked. Empty for every other result, and for a
+ *                       question that offers none -- the owner types the answer
  */
 public record AgentResult(
         boolean success,

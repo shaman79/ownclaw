@@ -510,7 +510,7 @@ public class TelegramBotService {
     /**
      * A task's answer, as {@link #sendMessage(long, String)} sends a text: a question with the
      * answers it offers as keys, each sent as the owner's reply when tapped, so it goes on as one
-     * he typed; any other answer takes the keys of a question before it away.
+     * typed; any other answer takes the keys of a question before it away.
      */
     private void sendMessage(long chatId, String text, List<String> choices) {
         outbox.execute(() -> deliver(chatId, text, keys(chatId, choices)));

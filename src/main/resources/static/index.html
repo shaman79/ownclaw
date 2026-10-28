@@ -852,8 +852,8 @@
         }
         .code-head + pre { margin-top: 0 !important; border-radius: 0 0 var(--r-sm) var(--r-sm) }
 
-        /* A question's answers, under it: a click sends one as the owner's reply. Once he has
-           answered, they stay as a record of what was offered, the one he picked marked. */
+        /* A question's answers, under it: a click sends one as the owner's reply. Once answered,
+           they stay as a record of what was offered, the one picked marked. */
         .msg-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px }
         .choice-btn {
             max-width: 100%;
@@ -6546,7 +6546,7 @@
         div.appendChild(main);
 
         messagesEl.insertBefore(div, before || thinkingEl);
-        // A message of his answers the questions before it: their choices are done.
+        // The owner's message answers the questions before it: their choices are done.
         if (isUserMsg) retireChoicesBefore(div);
         if (before) return div;
         // Force for the user's own message: sending is an explicit action, so jumping
@@ -6556,9 +6556,9 @@
     }
 
     /**
-     * A question's answers, as buttons under it: a click sends one as the owner's reply, as if he
-     * had typed it. Drawn for a saved question as well, and done at once when his reply follows it
-     * on screen -- shown still, the one he picked marked, but no longer sent.
+     * A question's answers, as buttons under it: a click sends one as the owner's reply, as if it
+     * had been typed. Drawn for a saved question as well, and done at once when the reply follows it
+     * on screen -- shown still, the one picked marked, but no longer sent.
      */
     function addChoices(row, choices) {
         if (!row || !choices || !choices.length) return;

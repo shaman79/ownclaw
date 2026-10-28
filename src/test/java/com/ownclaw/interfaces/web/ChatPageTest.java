@@ -118,7 +118,7 @@ class ChatPageTest {
                 "a page that failed says so, where the rows it held would be: " + earlier);
 
         assertTrue(page.contains("messagesEl.insertBefore(div, before || thinkingEl); "
-                + "// A message of his answers the questions before it: their choices are done. "
+                + "// The owner's message answers the questions before it: their choices are done. "
                 + "if (isUserMsg) retireChoicesBefore(div); if (before) return div;"),
                 "a saved row is drawn where it belongs, and scrolls nothing");
         assertTrue(page.contains("if (before) { messagesEl.insertBefore(div, before); return; } "

@@ -98,9 +98,9 @@ public record AgentAction(
     /**
      * The answers an {@code ask_user} offers the owner to pick from, as the model wrote them: each
      * once, in order, blanks dropped. A native call gives a list; the text protocol a JSON array,
-     * or one answer per line. Anything else offers none -- he types his answer.
+     * or one answer per line. Anything else offers none -- the owner types the answer.
      * <p>
-     * A picked answer is sent as his message, and read as one he typed: one the chats would read
+     * A picked answer is sent as the owner's message, and read as one typed: one the chats would read
      * as a slash command ({@link CommandHandler#isCommand}) is not offered, for it would run as
      * one -- or be refused as an unknown command -- rather than answer.
      */

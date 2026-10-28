@@ -258,6 +258,24 @@ class ChatDeliveryTest {
     }
 
     @Test
+    @DisplayName("a question reaches the page with the answers it offers, for buttons; an answer offers none")
+    void aQuestionsChoicesReachThePage(@TempDir Path tmp) throws Exception {
+        connect(tmp);
+        type("clean the backups");
+        queue.futures.getLast().complete(AgentResult.needsInput("Delete the 3 old backups?",
+                new com.ownclaw.agent.AgentTrajectory(), 1).withChoices(List.of("Delete them", "Keep them")));
+        var asked = frames("input_request").getLast();
+        assertEquals("Delete the 3 old backups?", asked.path("content").asText());
+        assertEquals(List.of("Delete them", "Keep them"),
+                mapper.convertValue(asked.path("choices"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}),
+                asked.toString());
+
+        type("Keep them");
+        queue.futures.getLast().complete(AgentResult.completed("Kept.", new com.ownclaw.agent.AgentTrajectory(), 1));
+        assertTrue(frames("response").getLast().path("choices").isMissingNode(), frames("response").getLast().toString());
+    }
+
+    @Test
     @DisplayName("an answer whose sending breaks with an Error is kept once, and nothing says the task failed")
     void anErrorWhileSendingAddsNoFailure(@TempDir Path tmp) throws Exception {
         connect(tmp);
