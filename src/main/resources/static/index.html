@@ -6103,14 +6103,8 @@
                     // A running task saying what it is doing, in the chat it was asked from: drawn
                     // there while that chat is on screen (it is saved, so a reload shows it too),
                     // and evidence that the work goes on -- never the end of it.
-                    if (data.sessionId && data.sessionId !== displayedSessionId) {
-                        markWorking(data.sessionId, true);
-                        // A question the task there waits on: said, as an answer there is.
-                        if (data.question) {
-                            showElsewhere('A question is waiting in another chat.', data.sessionId);
-                            markUnread(data.sessionId);
-                        }
-                    } else resetThinkingSafetyTimer();
+                    if (data.sessionId && data.sessionId !== displayedSessionId) markWorking(data.sessionId, true);
+                    else resetThinkingSafetyTimer();
                     if (currentView === 'chat' && data.sessionId === displayedSessionId) {
                         addProgress(content, data.progress, null, data.timestamp);
                     }

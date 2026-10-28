@@ -123,22 +123,6 @@ class DelegationBehaviourTest {
         return new DelegationPlan(goal, List.of(), List.of());
     }
 
-    @Test
-    @DisplayName("namesAChange: true when the local model would be offered a side-effecting tool -- so the owner is asked before the lane is taken")
-    void namesAChangeWhenAChangeIsOffered() {
-        var deploy = new FakeTool("deploy", true, List.of(), p -> ToolResult.success("x"));
-        var look = new FakeTool("look", false, List.of(), p -> ToolResult.success("x"));
-        var ex = executor(new Scripted(), new Usage(), deploy, look);
-        // Named nothing and not read-only: every tool is offered, the change among them.
-        assertTrue(ex.namesAChange(plan("sort the server out"), task()),
-                "an unnamed plan is offered every tool, so a change may run -- ask up front");
-        // Named only a read-only tool: no change is offered up front.
-        assertFalse(ex.namesAChange(LocalExecutor.parsePlan(Map.of("goal", "g", "tools", "look")), task()),
-                "only a read-only tool is offered");
-        // Named the change: offered.
-        assertTrue(ex.namesAChange(LocalExecutor.parsePlan(Map.of("goal", "g", "tools", "deploy")), task()));
-    }
-
     static AgentContext task() {
         var ctx = new AgentContext("u1", "t1", "the morning menu");
         ctx.setUnattended(true);

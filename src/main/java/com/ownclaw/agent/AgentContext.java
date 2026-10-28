@@ -731,17 +731,6 @@ public class AgentContext {
      */
     private volatile String onLocalBecause;
 
-    /** Whether the owner has OKed this task's changes ({@link Approval}): it asks before the first only. */
-    private volatile boolean changesApproved;
-
-    public boolean changesApproved() {
-        return changesApproved;
-    }
-
-    public void approveChanges() {
-        changesApproved = true;
-    }
-
     public boolean onLocal() {
         return onLocalBecause != null;
     }

@@ -157,23 +157,6 @@ public final class TaskChat {
     }
 
     /**
-     * Whether the owner can be asked something in this task's chat and answer it there: a web or
-     * Telegram chat he follows. An ops API turn's chat is read by nobody while it runs.
-     */
-    boolean canAsk() {
-        return sessionId != null && (channel == Channel.WEB || channel == Channel.TELEGRAM);
-    }
-
-    /**
-     * A question to the owner in the task's chat, which the task waits on ({@link Approval}):
-     * posted as a note is, and marked as a question, so a page showing another chat says that one
-     * is waiting instead of only marking the chat as working.
-     */
-    void question(String content) {
-        note(content, true);
-    }
-
-    /**
      * Before a step of the loop runs: its header, and what the model wrote beside the call -- its
      * reasoning, on either protocol -- when it wrote anything. Nothing else: no parameters, no
      * results. The cloud's words are the row's content; the local model's, written when the cloud
@@ -476,10 +459,6 @@ public final class TaskChat {
      * one as its text.
      */
     private void note(String content) {
-        note(content, false);
-    }
-
-    private void note(String content, boolean question) {
         synchronized (this) {
             if (ended) return;
             String savedAt = null;
@@ -494,7 +473,6 @@ public final class TaskChat {
             data.put("sessionId", sessionId);
             if (savedAt != null) data.put("timestamp", savedAt);
             if (channel == Channel.TELEGRAM) data.put("telegram", true);
-            if (question) data.put("question", true);
             emitter.emitForTask(task.userId(), task.taskId(), StatusMessage.Type.PROGRESS_MESSAGE, content, data);
         }
     }

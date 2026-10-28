@@ -114,40 +114,19 @@ public class LocalExecutor {
         // 100 tokens a second on this host), and was drawn into calling them: on 2026-10-01 such
         // reads took 10 to 14 minutes, and one ended with no answer.
         if (readsWhatItWasGiven(plan, given)) return List.of();
-        var all = offerable();
-        var named = named(plan, context, all);
-        return named.isEmpty() ? all : named;
-    }
-
-    /** Every tool a delegation can be offered. */
-    private List<Tool> offerable() {
-        return toolRegistry.all().stream()
+        var all = toolRegistry.all().stream()
                 .filter(t -> t != null && !"skill_create".equals(t.name()))
                 .collect(Collectors.toList());
-    }
-
-    /** The tools of {@code all} a plan names: in its tools, its steps, or its goal. */
-    private static List<Tool> named(DelegationPlan plan, AgentContext context, List<Tool> all) {
         var wanted = new java.util.HashSet<>(plan.tools());
         for (var st : plan.steps()) {
             if (st.tool() != null && !st.tool().isBlank()) wanted.add(st.tool());
         }
         String asked = (plan.goal() == null ? "" : plan.goal()) + "\n"
                 + (context.isUnattended() && context.originalMessage() != null ? context.originalMessage() : "");
-        return all.stream()
+        var named = all.stream()
                 .filter(t -> wanted.contains(t.name()) || namedIn(asked, t.name()))
                 .collect(Collectors.toList());
-    }
-
-    /**
-     * Whether a plan names a tool that changes something, by the rule that decides what the local
-     * model is offered ({@link #offered}): the delegation then asks the owner before it starts
-     * ({@link Approval}), showing its goal and its texts. A plan naming none is asked about at the
-     * local model's first such call.
-     */
-    boolean namesAChange(DelegationPlan plan, AgentContext context) {
-        Given g = given(plan, context.artifacts());
-        return offered(plan, g.results(), context).stream().anyMatch(Tool::hasSideEffects);
+        return named.isEmpty() ? all : named;
     }
 
     /** Whether the text names the tool as a whole word: web_fetch, not web_fetcher. */
@@ -652,15 +631,6 @@ public class LocalExecutor {
                     + (given.isEmpty() ? "" : " A result you were given has no reference: pass it "
                             + "on whole, exactly as given, or not at all.")
                     + " Text you compose yourself is fine; a partial copy of a result is not.";
-        }
-
-        // The owner's OK before the task's first change, when the delegation was not asked about
-        // before it started (Approval). After the local model has read private data, only the
-        // tool is named: what it typed can carry what it read.
-        if (target.hasSideEffects()) {
-            String notApproved = Approval.ask(parentContext, parentContext.localTierReadPrivate()
-                    ? "`" + target.name() + "`" : Approval.call(target.name(), action.params));
-            if (notApproved != null) return notApproved;
         }
 
         // ACT: execute the tool -- said in the owner's chat first, with the model's words and
