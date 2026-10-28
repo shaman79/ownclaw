@@ -7135,28 +7135,28 @@
     /**
      * A character the box does not draw, or draws in another order than the agent reads it -- a
      * Unicode tag, a direction override or isolate, a zero-width space, a soft hyphen, a variation
-     * selector, a filler: every format and default-ignorable character but the joiners and the two
-     * selectors that hold an emoji, or a word of some scripts, together.
+     * selector, a control: every format, control and default-ignorable character but a line break,
+     * and the joiners and the two selectors that hold an emoji, or a word of some scripts, together.
      */
-    var LINK_HIDDEN = /(?![\u200C\u200D\uFE0E\uFE0F])[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+    var LINK_HIDDEN = /(?![\n\u200C\u200D\uFE0E\uFE0F])[\p{Cf}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
 
-    /** What looks blank at the end of a line: a space, or a filler that draws as nothing. */
-    var BLANKISH = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]/u;
+    /** A run of what looks blank on a line: spaces of every width, and the fillers that draw as nothing. */
+    var BLANK_RUN = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]+/gu;
 
     /**
-     * A link's text as the box takes it: line ends as the box writes them, no trailing blanks on a
-     * line and no run of blank lines -- where a forged link pushes its start out of view -- and at
-     * most LINK_MAX code points, cut where a character as a reader sees it ends (never in an
-     * emoji). In time linear in the text: a link of megabytes is read once. {text, cut, same}: same
-     * when the text is the link's exactly, which a signature is over.
+     * A link's text as the box takes it: line ends as the box writes them; on a line, each run of
+     * blanks one space, and none at its ends; no run of blank lines -- blank space, rows of it,
+     * is where a forged link pushes what it hides out of view -- and at most LINK_MAX code points,
+     * cut where a character as a reader sees it ends (never in an emoji). In time linear in the
+     * text: a link of megabytes is read once. {text, cut, same}: same when the text is the link's
+     * exactly, which a signature is over.
      */
     function linkTextOf(task) {
         var kept = [];
         String(task).replace(/\r\n?/g, '\n').split('\n').forEach(function(line) {
-            // One character at a time from the end: a pattern for a run of them backtracks on a long one.
-            var end = line.length;
-            while (end > 0 && BLANKISH.test(line.charAt(end - 1))) end--;
-            var l = line.slice(0, end);
+            var l = line.replace(BLANK_RUN, ' ');
+            if (l.charAt(0) === ' ') l = l.slice(1);
+            if (l.charAt(l.length - 1) === ' ') l = l.slice(0, -1);
             if (l || (kept.length && kept[kept.length - 1])) kept.push(l);
         });
         while (kept.length && !kept[kept.length - 1]) kept.pop();

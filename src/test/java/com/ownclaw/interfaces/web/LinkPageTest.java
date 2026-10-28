@@ -88,8 +88,8 @@ class LinkPageTest {
     void nothingHidesAndGreenMeansWhatItSays() {
         assertTrue(page.contains("var LINK_COMMAND = /^[\\s\\p{Z}\\p{Cc}\\p{Cf}]*\\//u;"),
                 "a slash after any blanks, invisible ones too, as the server reads a command");
-        assertTrue(page.contains("var LINK_HIDDEN = /(?![\\u200C\\u200D\\uFE0E\\uFE0F])[\\p{Cf}\\p{Default_Ignorable_Code_Point}]/u;"),
-                "every format and default-ignorable character but the emoji joiners and selectors");
+        assertTrue(page.contains("var LINK_HIDDEN = /(?![\\n\\u200C\\u200D\\uFE0E\\uFE0F])[\\p{Cf}\\p{Cc}\\p{Default_Ignorable_Code_Point}]/u;"),
+                "every format, control and default-ignorable character but a line break and the emoji joiners and selectors");
         String apply = function("applyLink");
         int refused = apply.indexOf("if (refused) { keepLink(null); showLinkBanner(refused, false); return; }");
         assertTrue(apply.contains("var refused = !shaped.text ? ") && apply.contains(": LINK_COMMAND.test(shaped.text) ? ")
@@ -99,9 +99,10 @@ class LinkPageTest {
         String shape = function("linkTextOf");
         assertTrue(shape.contains("replace(/\\r\\n?/g, '\\n')") && shape.contains("if (l || (kept.length && kept[kept.length - 1])) kept.push(l);"),
                 "line ends as the box writes them, no run of blank lines: " + shape);
-        assertTrue(page.contains("var BLANKISH = /[\\s\\p{Z}\\u115F\\u1160\\u2800\\u3164\\uFFA0]/u;")
-                && shape.contains("while (end > 0 && BLANKISH.test(line.charAt(end - 1))) end--;"),
-                "trailing blanks and fillers off one character at a time, in linear time: " + shape);
+        assertTrue(page.contains("var BLANK_RUN = /[\\s\\p{Z}\\u115F\\u1160\\u2800\\u3164\\uFFA0]+/gu;")
+                && shape.contains("var l = line.replace(BLANK_RUN, ' '); if (l.charAt(0) === ' ') l = l.slice(1); "
+                        + "if (l.charAt(l.length - 1) === ' ') l = l.slice(0, -1);"),
+                "each run of blanks on a line one space, none at its ends -- in linear time: " + shape);
         assertTrue(shape.contains("new Intl.Segmenter(undefined, { granularity: 'grapheme' })") && page.contains("var LINK_MAX = 1500;")
                 && shape.contains("var n = Array.from(part).length; if (count + n > LINK_MAX) { cut = true; break; }")
                 && shape.contains(".segment(text)[Symbol.iterator]()"),
