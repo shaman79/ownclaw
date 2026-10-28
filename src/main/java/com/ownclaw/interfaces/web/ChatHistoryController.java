@@ -58,7 +58,8 @@ public class ChatHistoryController {
         String userId = (String) request.getAttribute("userId");
         String title = (body != null && body.containsKey("title")) ? body.get("title") : "New Chat";
         String sessionId = conversationService.createSession(userId, title);
-        log.info("New chat session created: user={}, session={}, title={}", userId, sessionId, title);
+        // Not its title: a chat a link makes is titled by an alert, which names hosts and paths.
+        log.info("New chat session created: user={}, session={}", userId, sessionId);
         return ResponseEntity.ok(Map.of("sessionId", sessionId, "title", title));
     }
 

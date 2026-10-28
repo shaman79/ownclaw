@@ -941,7 +941,8 @@
             font-size: 14.5px;
             font-family: var(--font);
             line-height: 1.55;
-            max-height: 160px;
+            /* Typing grows it to 160px (its input listener); a link's message, to its whole height. */
+            max-height: max(160px, 45vh);
             min-height: 48px;
             scrollbar-width: thin;
             scrollbar-color: rgba(255,255,255,.14) transparent;
@@ -2838,8 +2839,9 @@
 
     /**
      * Take a link's message out of the address, to wait for the chat. A second one replaces the
-     * first; asking for a new chat while the first one's is being made, it has that chat, retitled.
-     * One with no text is taken out of the address and puts nothing in.
+     * first; asking for a new chat while the chat made for the first waits to be filled, it has
+     * that chat, retitled (makeLinkChat). One with no text is taken out of the address and puts
+     * nothing in.
      */
     function captureLink() {
         var h = new URLSearchParams(location.hash.slice(1));
@@ -2847,9 +2849,9 @@
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
         if (!h.get('task').trim()) return false;
         var before = waitingLink();
-        var link = { task: h.get('task'), new: h.get('new') === '1', title: h.get('title') || '',
-                     exp: h.get('exp'), sig: h.get('sig'), made: false };
-        if (link.new && before && before.made) { link.made = true; link.retitle = true; }
+        var link = { id: Date.now() + '-' + Math.random(), task: h.get('task'), new: h.get('new') === '1',
+                     title: h.get('title') || '', exp: h.get('exp'), sig: h.get('sig'), chat: null };
+        if (link.new && before && before.new && before.chat) { link.chat = before.chat; link.retitle = true; }
         keepLink(link);
         return true;
     }
@@ -2994,14 +2996,11 @@
         sidebar.classList.remove('mobile-open');
     });
 
-    newChatBtn.addEventListener('click', function() { newChat(''); });
-
-    /** Open a new chat, with this title, or the first line of its first message when blank. */
-    function newChat(title) {
+    newChatBtn.addEventListener('click', function() {
         if (ws && ws.readyState === 1) {
             currentView = 'chat';
             document.getElementById('input-area').style.display = '';
-            ws.send(JSON.stringify({ type: 'new_session', message: title }));
+            ws.send(JSON.stringify({ type: 'new_session', message: '' }));
             leaveShownChat();
             clearMessages();
             // No chat is on screen until the server names the new one (session_info).
@@ -3010,7 +3009,7 @@
             resetActivity();
             sidebar.classList.remove('mobile-open');
         }
-    }
+    });
 
     //  Search
     searchInput.addEventListener('input', function() {
@@ -5983,9 +5982,10 @@
         // Every view, not only messages: a task page or the Tasks list left on screen would be
         // shown to whoever signs in next in this tab.
         clearMessages();
-        // And a link's message, with its banner: not left in the box for whoever signs in next.
+        // And a link's message, with its banner, and one waiting: not left for whoever signs in next.
         if (linkText !== null && inputEl.value === linkText) inputEl.value = '';
         hideLinkBanner();
+        keepLink(null);
         ensureChatView();
         // Whoever signs in next in this tab starts in a chat of theirs.
         rememberChat(null);
@@ -7040,6 +7040,8 @@
     var linksShown = 0;
     /** The chat made for the link whose text is in the box, while it is there unchanged and unsent. */
     var linkChat = null;
+    /** Set while a chat is being made for a link (makeLinkChat): one at a time. */
+    var makingLinkChat = false;
 
     /**
      * Put the waiting link's message in the box, once this tab's chat is on screen -- in a new chat
@@ -7054,22 +7056,30 @@
         if (!link || !authToken || !ws || ws.readyState !== 1 || !displayedSessionId) return;
         // Drawn again, in the chat view, and then here again.
         if (currentView !== 'chat') { switchToSession(displayedSessionId); return; }
-        // A chat made for the link before, still holding only its unsent text, is this one's, retitled.
-        if (link.new && !link.made && linkChat === displayedSessionId && linkText !== null && inputEl.value === linkText) {
-            link.made = true;
-            link.retitle = true;
-        }
-        if (link.new && !link.made) {
-            link.made = true;
-            keepLink(link);
-            newChat(link.title);   // its history drawn, this runs again
-            return;
+        if (link.new && !link.chat) {
+            // The chat made for the link before, still empty, with only that link's unsent text in
+            // the box: this one's, retitled. Any other chat is the owner's, and is never touched.
+            if (linkChat === displayedSessionId && !messagesEl.querySelector('.msg')
+                    && linkText !== null && inputEl.value === linkText) {
+                link.chat = linkChat;
+                link.retitle = true;
+                keepLink(link);
+            } else {
+                makeLinkChat(link);   // opened, its history drawn, this runs again
+                return;
+            }
         }
         var shaped = linkTextOf(link.task);
         if (LINK_COMMAND.test(shaped.text)) {
             keepLink(null);
             showLinkBanner('A link asked to put a command in the box (its message starts with /). '
                     + 'A link may not, so nothing was put in it.', false);
+            return;
+        }
+        if (LINK_HIDDEN.test(shaped.text)) {
+            keepLink(null);
+            showLinkBanner('A link asked to put text with invisible characters in the box, which can hide or '
+                    + 'reorder what the agent is sent. A link may not, so nothing was put in it.', false);
             return;
         }
         if (inputEl.value.trim() && inputEl.value !== linkText) {
@@ -7084,10 +7094,55 @@
     }
 
     /**
+     * Make the chat a link asks for, titled as it says, and open it: by its id, so only that chat
+     * is ever filled from a later link or retitled for one. Should a later link that asks for a new
+     * chat be waiting by the time it is made, it is that link's, retitled; when it cannot be made,
+     * the message goes in the chat on screen.
+     */
+    function makeLinkChat(link) {
+        if (makingLinkChat) return;
+        makingLinkChat = true;
+        fetch('/api/chats', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(link.title ? { title: link.title } : {})
+        })
+        .then(okJson)
+        .then(function(made) {
+            makingLinkChat = false;
+            var now = waitingLink();
+            if (!now || !now.new || now.chat) return;
+            now.chat = made.sessionId;
+            if (now.id !== link.id) now.retitle = true;
+            keepLink(now);
+            refreshSessionList();
+            switchToSession(made.sessionId);
+        })
+        .catch(function() {
+            makingLinkChat = false;
+            var now = waitingLink();
+            if (!now) return;
+            now.new = false;
+            keepLink(now);
+            applyLink();
+        });
+    }
+
+    /**
      * What the chat reads as a command, as the server reads one (CommandHandler.isCommand): a slash
      * after nothing but blanks -- spaces, controls and invisible format characters among them.
      */
     var LINK_COMMAND = /^[\s\p{Z}\p{Cc}\p{Cf}]*\//u;
+
+    /**
+     * An invisible format character -- a Unicode tag, a direction override or isolate, a zero-width
+     * space, a soft hyphen: text the box does not show, or shows in another order than the agent
+     * reads it. All but the joiners that hold an emoji or a word of some scripts together.
+     */
+    var LINK_HIDDEN = /(?![\u200C\u200D])\p{Cf}/u;
+
+    /** What looks blank on a line: spaces, and the fillers that draw as nothing. */
+    var BLANKISH = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]+$/u;
 
     /**
      * A link's text as the box takes it: line ends as the box writes them, no trailing blanks on a
@@ -7096,16 +7151,23 @@
      * same}: same when the text is the link's exactly, which a signature is over.
      */
     function linkTextOf(task) {
-        var lines = String(task).replace(/\r\n?/g, '\n').split('\n').map(function(l) { return l.replace(/\s+$/, ''); });
+        var lines = String(task).replace(/\r\n?/g, '\n').split('\n').map(function(l) { return l.replace(BLANKISH, ''); });
         var kept = [];
         lines.forEach(function(l) { if (l || (kept.length && kept[kept.length - 1])) kept.push(l); });
         while (kept.length && !kept[kept.length - 1]) kept.pop();
         var text = kept.join('\n');
+        // LINK_MAX code points, cut where a character as a reader sees it ends.
         var chars = window.Intl && Intl.Segmenter
                 ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), function(g) { return g.segment; })
                 : Array.from(text);
-        var cut = chars.length > LINK_MAX;
-        if (cut) text = chars.slice(0, LINK_MAX).join('');
+        var cut = false, count = 0, upTo = '';
+        for (var i = 0; i < chars.length; i++) {
+            var n = Array.from(chars[i]).length;
+            if (count + n > LINK_MAX) { cut = true; break; }
+            count += n;
+            upTo += chars[i];
+        }
+        if (cut) text = upTo;
         return { text: text, cut: cut, same: text === String(task) };
     }
 
@@ -7120,8 +7182,8 @@
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, Math.max(160, Math.round(window.innerHeight * 0.45))) + 'px';
         inputEl.scrollTop = 0;
-        if (link.retitle && link.title) renameSession(displayedSessionId, link.title);
-        linkChat = link.made ? displayedSessionId : null;
+        if (link.retitle && link.title && link.chat) renameSession(link.chat, link.title);
+        linkChat = link.chat && link.chat === displayedSessionId ? link.chat : null;
         var shown = ++linksShown;
         var after = (shaped.cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '')
                 + (inputEl.scrollHeight > inputEl.clientHeight + 1 ? ' It is longer than the box shows: scroll it to read all of it.' : '');
@@ -7142,6 +7204,7 @@
             // Green for the text signed, whole, as it is in the box: not once it is cut or tidied,
             // nor once it is edited (the box's input listener).
             if (r.valid && !r.expired && shaped.same && inputEl.value === linkText) showLinkBanner('Guardian alert: verified.' + after, true);
+            else if (r.valid && !r.expired && shaped.same) showLinkBanner('Message from a link, changed since: check it before sending.', false);
             else if (r.valid && !r.expired) showLinkBanner('Guardian alert: the signature holds for the message as sent, '
                     + 'but the box does not hold all of it as sent. Check it before sending.' + after, false);
             else if (r.valid) showLinkBanner('Guardian alert: its signature has expired. Check it before sending.' + after, false);

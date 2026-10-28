@@ -52,9 +52,8 @@ class ChatPageTest {
         updated = updated.substring(0, updated.indexOf("} else if (type === 'fate') {"));
         assertTrue(updated.contains("refreshSessionList();") && !updated.contains("loadSessionMessages("),
                 "another tab's switch moves nothing here: " + updated);
-        assertTrue(page.contains("newChatBtn.addEventListener('click', function() { newChat(''); });"));
-        String newChat = page.substring(page.indexOf("function newChat(title) {"));
-        newChat = newChat.substring(0, newChat.indexOf("sidebar.classList.remove('mobile-open');"));
+        String newChat = page.substring(page.indexOf("newChatBtn.addEventListener('click'"));
+        newChat = newChat.substring(0, newChat.indexOf("});"));
         assertTrue(newChat.contains("clearMessages();") && newChat.contains("displayedSessionId = null;"),
                 "the cleared pane shows no chat until the server names the new one: " + newChat);
         // Mutation: load only on (re)connect, as before -> after New Chat a result for the old

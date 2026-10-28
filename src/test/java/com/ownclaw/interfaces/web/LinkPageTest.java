@@ -66,8 +66,8 @@ class LinkPageTest {
         assertTrue(page.contains("loadEarlierNearTop(); // The chat is on screen: a link's message waiting for it goes in the box. applyLink(); })"));
         String fill = function("fillFromLink");
         assertTrue(fill.contains("inputEl.value = text;"), fill);
-        for (String name : new String[] {"captureLink", "keepLink", "waitingLink", "applyLink", "linkTextOf",
-                "fillFromLink", "showLinkBanner", "hideLinkBanner"}) {
+        for (String name : new String[] {"captureLink", "keepLink", "waitingLink", "applyLink", "makeLinkChat",
+                "linkTextOf", "fillFromLink", "showLinkBanner", "hideLinkBanner"}) {
             String f = function(name);
             for (String sends : new String[] {"send(", ".click(", "dispatchEvent(", "KeyboardEvent", "sendBtn", "submit"}) {
                 assertFalse(f.contains(sends), name + " holds " + sends + ": " + f);
@@ -92,11 +92,18 @@ class LinkPageTest {
         assertTrue(apply.indexOf("if (LINK_COMMAND.test(shaped.text)) {") > 0
                 && apply.indexOf("if (LINK_COMMAND.test(shaped.text)) {") < apply.indexOf("fillFromLink(link, shaped)"),
                 "refused before anything is put in the box: " + apply);
+        assertTrue(page.contains("var LINK_HIDDEN = /(?![\\u200C\\u200D])\\p{Cf}/u;"),
+                "invisible format characters -- tags, direction controls -- but for the joiners");
+        assertTrue(apply.indexOf("if (LINK_HIDDEN.test(shaped.text)) {") > 0
+                && apply.indexOf("if (LINK_HIDDEN.test(shaped.text)) {") < apply.indexOf("fillFromLink(link, shaped)"),
+                "refused before anything is put in the box: " + apply);
         String shape = function("linkTextOf");
         assertTrue(shape.contains("replace(/\\r\\n?/g, '\\n')") && shape.contains("if (l || (kept.length && kept[kept.length - 1])) kept.push(l);"),
                 "line ends as the box writes them, no run of blank lines: " + shape);
-        assertTrue(shape.contains("new Intl.Segmenter(undefined, { granularity: 'grapheme' })") && page.contains("var LINK_MAX = 1500;"),
-                "cut between characters as a reader counts them: " + shape);
+        assertTrue(shape.contains("new Intl.Segmenter(undefined, { granularity: 'grapheme' })") && page.contains("var LINK_MAX = 1500;")
+                && shape.contains("var n = Array.from(chars[i]).length; if (count + n > LINK_MAX) { cut = true; break; }"),
+                "LINK_MAX code points, cut where a character ends: " + shape);
+        assertTrue(page.contains("max-height: max(160px, 45vh);"), "the box may grow past the 160px of typing for a link's message");
         String fill = function("fillFromLink");
         assertTrue(fill.contains("inputEl.scrollTop = 0;") && fill.contains("It is longer than the box shows"),
                 "its start in view, and said when it does not all fit: " + fill);
@@ -107,6 +114,20 @@ class LinkPageTest {
         String logout = function("logout");
         assertTrue(logout.contains("if (linkText !== null && inputEl.value === linkText) inputEl.value = ''; hideLinkBanner();"),
                 "not left for whoever signs in next: " + logout);
+    }
+
+    @Test
+    @DisplayName("a chat is made for a link by its id, and only that chat, still empty, is ever reused or retitled for a later link")
+    void onlyTheLinksOwnChatIsTouched() {
+        String apply = function("applyLink");
+        assertTrue(apply.contains("if (linkChat === displayedSessionId && !messagesEl.querySelector('.msg') "
+                + "&& linkText !== null && inputEl.value === linkText) {"), apply);
+        String fill = function("fillFromLink");
+        assertTrue(fill.contains("if (link.retitle && link.title && link.chat) renameSession(link.chat, link.title);")
+                && fill.contains("linkChat = link.chat && link.chat === displayedSessionId ? link.chat : null;"), fill);
+        String make = function("makeLinkChat");
+        assertTrue(make.contains("fetch('/api/chats', {") && make.contains("now.chat = made.sessionId;")
+                && make.contains("switchToSession(made.sessionId);"), make);
     }
 
     @Test
