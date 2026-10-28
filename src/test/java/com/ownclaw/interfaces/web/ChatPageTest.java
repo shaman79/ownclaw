@@ -52,8 +52,9 @@ class ChatPageTest {
         updated = updated.substring(0, updated.indexOf("} else if (type === 'fate') {"));
         assertTrue(updated.contains("refreshSessionList();") && !updated.contains("loadSessionMessages("),
                 "another tab's switch moves nothing here: " + updated);
-        String newChat = page.substring(page.indexOf("newChatBtn.addEventListener('click'"));
-        newChat = newChat.substring(0, newChat.indexOf("});"));
+        assertTrue(page.contains("newChatBtn.addEventListener('click', function() { newChat(''); });"));
+        String newChat = page.substring(page.indexOf("function newChat(title) {"));
+        newChat = newChat.substring(0, newChat.indexOf("sidebar.classList.remove('mobile-open');"));
         assertTrue(newChat.contains("clearMessages();") && newChat.contains("displayedSessionId = null;"),
                 "the cleared pane shows no chat until the server names the new one: " + newChat);
         // Mutation: load only on (re)connect, as before -> after New Chat a result for the old
@@ -89,7 +90,8 @@ class ChatPageTest {
                 "drawn, with a line for the rows before them: " + load);
         assertTrue(load.contains("following = true; scrollPane(messagesEl.scrollHeight);"),
                 "and landed at the bottom at once: " + load);
-        assertTrue(load.endsWith("if (lastTask) restoreTaskStats(lastTask, sessionId); loadEarlierNearTop(); }) "),
+        assertTrue(load.endsWith("if (lastTask) restoreTaskStats(lastTask, sessionId); loadEarlierNearTop(); "
+                + "// The chat is on screen: a link's message waiting for it goes in the box. applyLink(); }) "),
                 "a page that does not fill the pane cannot be scrolled up from: the next is asked for at once: " + load);
 
         assertTrue(page.contains("messagesEl.addEventListener('scroll', loadEarlierNearTop);"));

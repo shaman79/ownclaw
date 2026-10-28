@@ -142,8 +142,9 @@ class TabChatPageTest {
         assertTrue(resume.contains("setThinking(true); if (kept && kept.startedAt) { thinkingStartedAt = kept.startedAt;"),
                 "since when it runs, not since it was opened again: " + resume);
         assertTrue(resume.contains("steeredChatId = displayedSessionId; steeredOptions = kept.steered;"), resume);
-        String newChat = page.substring(page.indexOf("newChatBtn.addEventListener('click'"));
-        newChat = newChat.substring(0, newChat.indexOf("});"));
+        assertTrue(page.contains("newChatBtn.addEventListener('click', function() { newChat(''); });"));
+        String newChat = page.substring(page.indexOf("function newChat(title) {"));
+        newChat = newChat.substring(0, newChat.indexOf("sidebar.classList.remove('mobile-open');"));
         assertTrue(newChat.contains("leaveShownChat(); clearMessages();"), newChat);
         assertTrue(page.contains("// Kept for the reconnect, whose session_info says whether the task still runs. "
                 + "keepShownState(); setThinking(false);"));

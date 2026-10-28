@@ -874,6 +874,38 @@
         .msg-choices.retired .choice-btn { cursor: default; opacity: .45; background: none }
         .msg-choices.retired .choice-btn.picked { opacity: 1; border-color: var(--accent-hi); background: var(--accent-glow) }
 
+        /* A message a link put in the box: where it came from, and whether its signature holds. */
+        .link-banner {
+            max-width: 780px;
+            margin: 0 auto 8px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 10px;
+            padding: 7px 8px 7px 12px;
+            border: 1px solid rgba(251,191,36,.35);
+            border-radius: var(--r-sm);
+            background: rgba(251,191,36,.08);
+            color: #fcd34d;
+            font-size: 12.5px;
+            line-height: 1.45;
+        }
+        .link-banner[hidden] { display: none }
+        .link-banner.verified { border-color: rgba(52,211,153,.35); background: var(--green-dim); color: var(--green) }
+        .link-banner-text { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere }
+        .link-banner button {
+            padding: 3px 10px;
+            background: rgba(255,255,255,.06);
+            border: 1px solid rgba(255,255,255,.14);
+            border-radius: 6px;
+            color: var(--text-1);
+            font: inherit;
+            cursor: pointer;
+        }
+        .link-banner button:hover { background: rgba(255,255,255,.12) }
+        .link-banner button:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .link-banner .link-close { padding: 0 8px; font-size: 15px; line-height: 22px; color: var(--text-3) }
+
         /*  Input area  */
         #input-area {
             flex-shrink: 0;
@@ -2746,6 +2778,7 @@
 
 <!--  Input bar  -->
 <div id="input-area">
+    <div id="link-banner" class="link-banner" role="status" hidden></div>
     <div id="file-chips"></div>
     <div class="input-wrap">
         <button id="attach-btn" title="Attach files (private: read only by your local model, never by the cloud)" aria-label="Attach files (private: read only by your local model, never by the cloud)">
@@ -2787,6 +2820,52 @@
 
 <script>
 (function() {
+    //  A message from a link
+    /**
+     * A link can open the chat with a message in the box, ready to send -- an alert's button:
+     * #task=<text>[&new=1][&title=<text>][&exp=<unix time>&sig=<hex>]. After the #, so the text
+     * never reaches the server, its proxy or its logs, nor a referrer. Read before anything else,
+     * kept for this tab until its chat is on screen -- through the login, and a reload at the login
+     * -- and taken out of the address, so a reload or the history does not put it in again. It is
+     * never sent on its own: a mail scanner or a link preview opening the link cannot log in, and
+     * a forged link's text is read before anything is done with it (applyLink).
+     */
+    var LINK_KEY = 'ownclaw.pendingTask';
+    /** Characters of a link's text the box takes; the rest is cut, and the banner says so. */
+    var LINK_MAX = 1500;
+    /** The link's message while it waits; kept here too, for a tab whose storage is blocked. */
+    var pendingLink = null;
+
+    /** Take a link's message out of the address, to wait for the chat. A second one replaces the first. */
+    function captureLink() {
+        var h = new URLSearchParams(location.hash.slice(1));
+        if (!h.has('task')) return false;
+        keepLink({ task: h.get('task'), new: h.get('new') === '1', title: h.get('title') || '',
+                   exp: h.get('exp'), sig: h.get('sig'), made: false });
+        try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
+        return true;
+    }
+
+    function keepLink(link) {
+        pendingLink = link;
+        try {
+            if (link) sessionStorage.setItem(LINK_KEY, JSON.stringify(link));
+            else sessionStorage.removeItem(LINK_KEY);
+        } catch (e) {}
+    }
+
+    function waitingLink() {
+        if (pendingLink) return pendingLink;
+        try {
+            var raw = sessionStorage.getItem(LINK_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    captureLink();
+    // A link opened in a tab already on this page changes only the address after the #.
+    window.addEventListener('hashchange', function() { if (captureLink()) applyLink(); });
+
     var authOverlay  = document.getElementById('auth-overlay');
     var authLoading  = document.getElementById('auth-loading');
     var authBox      = document.getElementById('auth-box');
@@ -2907,11 +2986,14 @@
         sidebar.classList.remove('mobile-open');
     });
 
-    newChatBtn.addEventListener('click', function() {
+    newChatBtn.addEventListener('click', function() { newChat(''); });
+
+    /** Open a new chat, with this title, or the first line of its first message when blank. */
+    function newChat(title) {
         if (ws && ws.readyState === 1) {
             currentView = 'chat';
             document.getElementById('input-area').style.display = '';
-            ws.send(JSON.stringify({ type: 'new_session', message: '' }));
+            ws.send(JSON.stringify({ type: 'new_session', message: title }));
             leaveShownChat();
             clearMessages();
             // No chat is on screen until the server names the new one (session_info).
@@ -2920,7 +3002,7 @@
             resetActivity();
             sidebar.classList.remove('mobile-open');
         }
-    });
+    }
 
     //  Search
     searchInput.addEventListener('input', function() {
@@ -3086,6 +3168,8 @@
             // no task's counters are read back.
             if (lastTask) restoreTaskStats(lastTask, sessionId);
             loadEarlierNearTop();
+            // The chat is on screen: a link's message waiting for it goes in the box.
+            applyLink();
         })
         .catch(function(e) {
             // Say what happened. clearMessages() alone left a blank pane, which is exactly what
@@ -6934,6 +7018,106 @@
      * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
      * and says which under the bubble.
      */
+    var linkBanner = document.getElementById('link-banner');
+    /** The text a link put in the box, while it is there unchanged: a second link replaces it without asking. */
+    var linkText = null;
+    /** Counts the link messages shown, so a signature's answer for one replaced since is not shown. */
+    var linksShown = 0;
+
+    /**
+     * Put the waiting link's message in the box, once this tab's chat is on screen -- in a new chat
+     * first, when the link asks for one. Never sent: Send or Enter is the owner's. As text, never
+     * as markup, cut at LINK_MAX characters. A draft in the box is not replaced without asking; a
+     * message an earlier link put there, unchanged, is.
+     */
+    function applyLink() {
+        var link = waitingLink();
+        if (!link || !authToken || !ws || ws.readyState !== 1 || !displayedSessionId) return;
+        // Drawn again, in the chat view, and then here again.
+        if (currentView !== 'chat') { switchToSession(displayedSessionId); return; }
+        if (link.new && !link.made) {
+            link.made = true;
+            keepLink(link);
+            newChat(link.title);   // its history drawn, this runs again
+            return;
+        }
+        keepLink(null);
+        var chars = Array.from(String(link.task));   // by character, never half of one
+        var cut = chars.length > LINK_MAX;
+        var text = cut ? chars.slice(0, LINK_MAX).join('') : String(link.task);
+        if (inputEl.value.trim() && inputEl.value !== linkText) {
+            var shown = ++linksShown;
+            showLinkBanner('Replace your draft with the message from the link?', false, [
+                { label: 'Replace', act: function() { if (shown === linksShown) fillFromLink(link, text, cut); } },
+                { label: 'Keep my draft', act: hideLinkBanner }
+            ]);
+            return;
+        }
+        fillFromLink(link, text, cut);
+    }
+
+    function fillFromLink(link, text, cut) {
+        inputEl.value = text;
+        linkText = text;
+        inputEl.dispatchEvent(new Event('input'));   // the box grows to it, as it does to typing
+        inputEl.focus();
+        inputEl.setSelectionRange(text.length, text.length);
+        var shown = ++linksShown;
+        var after = cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '';
+        if (!link.sig) {
+            showLinkBanner('Message from a link: check it before sending.' + after, false);
+            return;
+        }
+        showLinkBanner('Message from a link: checking its signature\u2026' + after, false);
+        var asked = authToken;
+        fetch('/api/links/verify', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task: link.task, exp: link.exp, sig: link.sig })
+        })
+        .then(okJson)
+        .then(function(r) {
+            if (authToken !== asked || shown !== linksShown) return;
+            if (r.valid && !r.expired) showLinkBanner('Guardian alert: verified.' + after, true);
+            else if (r.valid) showLinkBanner('Guardian alert: its signature has expired. Check it before sending.' + after, false);
+            else if (!r.configured) showLinkBanner('Message from a link: unverified, as no GUARDIAN_LINK_SECRET is stored for '
+                    + 'your account (/cred set). Check it before sending.' + after, false);
+            else showLinkBanner('Message from a link: unverified, its signature does not match. Check it before sending.' + after, false);
+        })
+        .catch(function() {
+            if (shown === linksShown) {
+                showLinkBanner('Message from a link: its signature could not be checked. Check it before sending.' + after, false);
+            }
+        });
+    }
+
+    /** The banner above the box: its words, green when verified, and buttons with what each does. */
+    function showLinkBanner(words, verified, buttons) {
+        linkBanner.innerHTML = '';
+        linkBanner.classList.toggle('verified', !!verified);
+        linkBanner.appendChild(node('span', 'link-banner-text', words));
+        (buttons || []).forEach(function(b) {
+            var button = node('button', null, b.label);
+            button.type = 'button';
+            button.addEventListener('click', b.act);
+            linkBanner.appendChild(button);
+        });
+        var close = node('button', 'link-close', '\u00D7');
+        close.type = 'button';
+        close.title = 'Dismiss';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.addEventListener('click', hideLinkBanner);
+        linkBanner.appendChild(close);
+        linkBanner.hidden = false;
+    }
+
+    function hideLinkBanner() {
+        linksShown++;
+        linkText = null;
+        linkBanner.hidden = true;
+        linkBanner.innerHTML = '';
+    }
+
     /**
      * @param choice a question's answer the owner clicked (addChoices), sent in place of what is in
      *               the box -- which stays there, with the files attached to it
@@ -6992,6 +7176,7 @@
             inputEl.style.height = 'auto';
             pendingFiles = [];
             fileChips.innerHTML = '';
+            hideLinkBanner();
         }
         // Sent while a task runs, it does not start a trace of its own: that task's goes on, and
         // a queued task's starts when it does (see the claim in the status handler).
