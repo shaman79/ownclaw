@@ -32,7 +32,7 @@ class ArtifactRefTest {
 
     private static final List<Artifact> NAMESPACE = List.of(
             new Artifact(1, "imap_fetch", Map.of(), Map.of(), PRIVATE_JSON, true, Label.PRIVATE,
-                    List.of("credentials (1)")),
+                    List.of("personal source")),
             new Artifact(2, "daily_menu_fetcher", Map.of(), Map.of(),
                     "ERROR: Traceback: AttributeError: 'NoneType' object has no attribute 'text'",
                     false, Label.PUBLIC, List.of()));
@@ -98,7 +98,7 @@ class ArtifactRefTest {
         for (String v : ATTEMPTS) {
             var r = References.resolve(Map.of("body", v), NAMESPACE);
             if (!r.ok() || v.equals(r.params().get("body"))) continue;
-            assertEquals(Label.PRIVATE, Artifact.labelFor(List.of(), r.used()).label(),
+            assertEquals(Label.PRIVATE, Artifact.labelFor(false, r.used()).label(),
                     "private bytes moved and the result was labelled PUBLIC: " + v);
         }
     }
@@ -122,6 +122,34 @@ class ArtifactRefTest {
         var r = References.resolve(Map.of("body", "{{2}}"), NAMESPACE);
         assertFalse(r.ok());
         assertTrue(r.reason().contains("FAILED"), r.reason());
+    }
+
+    @Test
+    @DisplayName("in a tool's arguments a reference inside text is filled in: a date line and then the menu")
+    void referencesInsideText() {
+        var menu = new Artifact(1, "daily_menu_fetcher", Map.of(), Map.of(), "Hospoda: polévka, řízek", true,
+                Label.PUBLIC, List.of());
+        // The body of 8 October's lunch email, as the local model wrote it.
+        var r = References.resolveInText(Map.of("body", "čtvrtek 8. 10. 2026\n\n{{1}}"), List.of(menu));
+        assertTrue(r.ok(), r.reason());
+        assertEquals("čtvrtek 8. 10. 2026\n\nHospoda: polévka, řízek", r.params().get("body"));
+        assertEquals(List.of(menu), r.used(), "what moved decides the label");
+
+        var fields = References.resolveInText(Map.of("body", "Menu: {{1.body_text}} -- and {{1.polévka}}"), NAMESPACE);
+        assertTrue(fields.ok(), fields.reason());
+        assertEquals("Menu: SECRET body text -- and SECRET czech", fields.params().get("body"));
+        assertTrue(fields.used().getFirst().isPrivate(), "a private result filled into text still labels the call");
+
+        assertEquals("Hello {{7}}, your order ships", References.resolveInText(
+                Map.of("t", "Hello {{7}}, your order ships"), NAMESPACE).params().get("t"),
+                "a handle past the last result is a template's own placeholder: text");
+        var failed = References.resolveInText(Map.of("body", "Today: {{2}}"), NAMESPACE);
+        assertFalse(failed.ok(), "a failed result inside text is still never sent");
+        assertTrue(failed.reason().contains("FAILED"), failed.reason());
+        assertFalse(References.resolveInText(Map.of("body", "Today: {{1.nope}}"), NAMESPACE).ok());
+
+        assertEquals("Menu: {{1.body_text}}", References.resolve(Map.of("m", "Menu: {{1.body_text}}"), NAMESPACE)
+                .params().get("m"), "outside a tool's arguments -- an answer -- only a whole value is a reference");
     }
 
     @Test
@@ -154,7 +182,7 @@ class ArtifactRefTest {
     void anOkFalseResultIsAFailure() {
         var smtpError = new Artifact(1, "smtp_send_email", Map.of(), Map.of(),
                 "{\"ok\": false, \"error\": \"SMTP connection error: timed out\"}", true,
-                Label.PRIVATE, List.of("credentials (1)"));
+                Label.PRIVATE, List.of("personal source"));
         assertFalse(smtpError.succeeded(), "the harness said success; the skill said it failed");
         assertFalse(References.resolve(Map.of("body", "{{1}}"), List.of(smtpError)).ok(),
                 "an error envelope is not something to send on");
@@ -184,16 +212,19 @@ class ArtifactRefTest {
     }
 
     @Test
-    @DisplayName("a name the descriptor did not cut is never matched by prefix")
-    void prefixMatchingIsOnlyForCutNames() {
+    @DisplayName("a field is its exact name or its position -- never a name's beginning")
+    void noPrefixMatching() {
         var ns = List.of(new Artifact(1, "render", Map.of(), Map.of(),
                 "{\"ok\":true,\"body_html\":\"<html>PRIVATE</html>\"}", true, Label.PRIVATE, List.of()));
-        for (String v : List.of("{{1.body}}", "{{1.b}}", "{{1.o}}")) {
+        for (String v : List.of("{{1.body}}", "{{1.b}}", "{{1.o}}", "{{1.body_h…}}", "{{1.#0}}", "{{1.#3}}")) {
             assertFalse(References.resolve(Map.of("body", v), ns).ok(),
                     "\"$1.o\" once matched ok, and the email's whole body was \"true\": " + v);
         }
         assertEquals("<html>PRIVATE</html>",
-                References.resolve(Map.of("body", "{{1.body_h…}}"), ns).params().get("body"));
+                References.resolve(Map.of("body", "{{1.body_html}}"), ns).params().get("body"));
+        assertEquals("<html>PRIVATE</html>",
+                References.resolve(Map.of("body", "{{1.#2}}"), ns).params().get("body"));
+        assertEquals("true", References.resolve(Map.of("body", "{{ 1 . #1 }}"), ns).params().get("body"));
     }
 
     @Test
@@ -223,5 +254,15 @@ class ArtifactRefTest {
         assertNull(ArtifactRef.parse("$1"), "the old syntax is not a reference any more");
         assertEquals("{{4.body_text}}", new ArtifactRef(4, "body_text").toString());
         assertEquals("{{4}}", ArtifactRef.handle(4));
+
+        // #k is a field's position, 1-based, in key order.
+        assertEquals(new ArtifactRef(3, "#7"), ArtifactRef.parse("{{3.#7}}"));
+        assertEquals(7, ArtifactRef.parse("{{3.#7}}").position());
+        assertEquals("{{3.#7}}", new ArtifactRef(3, "#7").toString());
+        assertNull(ArtifactRef.parse("{{3.body_text}}").position(), "a name is not a position");
+        for (String name : List.of("#0", "#", "#7a", "# 7", "#1234567890")) {
+            assertNull(new ArtifactRef(3, name).position(), name);
+        }
+        assertTrue(ArtifactRef.looksLikeReference("{{3.#7}}"), "and a slip around it is refused, not sent");
     }
 }

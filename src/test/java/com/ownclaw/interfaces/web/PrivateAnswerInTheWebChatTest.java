@@ -28,7 +28,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,9 +59,9 @@ class PrivateAnswerInTheWebChatTest {
         }
 
         @Override
-        public CompletableFuture<AgentResult> submit(String userId, String message, int priority,
-                                                     String currentMessageId, List<String> attachmentIds) {
-            return CompletableFuture.completedFuture(privateAnswer());
+        public Fate send(com.ownclaw.core.UserMessage message, boolean queue) {
+            message.answer().accept(privateAnswer());
+            return Fate.STARTED;
         }
     }
 
@@ -76,7 +75,7 @@ class PrivateAnswerInTheWebChatTest {
 
     private void connect(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
         emitter = new ChatStatusEmitter();
         var auth = new AuthService(null, null, new OwnClawConfig()) {
             @Override
@@ -84,7 +83,7 @@ class PrivateAnswerInTheWebChatTest {
                 return "t".equals(token) ? Optional.of(USER) : Optional.empty();
             }
         };
-        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null) {
+        var wizard = new SetupWizardService(null, new OwnClawConfig(), null, null, null, null) {
             @Override
             public boolean isSetupNeeded() { return false; }
         };
@@ -124,9 +123,10 @@ class PrivateAnswerInTheWebChatTest {
 
         assertEquals(List.of(OWNER), frames("response"), "the owner reads the answer, not the note");
         var row = jdbc.queryForMap(
-                "SELECT content, private_content FROM conversations WHERE role = 'assistant'");
+                "SELECT content, private_content, metadata FROM conversations WHERE role = 'assistant'");
         assertEquals(NOTE, row.get("content"), "every later prompt reads this column");
         assertEquals(OWNER, row.get("private_content"));
+        assertEquals("{\"taskId\":\"a1b2c3d4\"}", row.get("metadata"), "linked to what the task did");
     }
 
     @Test
@@ -137,11 +137,14 @@ class PrivateAnswerInTheWebChatTest {
         emitter.subscribe(USER, "telegram", m -> telegram.add(
                 com.ownclaw.interfaces.telegram.TelegramBotService.telegramText(m)));
 
-        new ResultDelivery(conversations, emitter).deliver(USER, "Background task", privateAnswer());
+        String session = conversations.getCurrentSession(USER);
+        new ResultDelivery(conversations, emitter).deliver(USER, () -> session, "Background task", privateAnswer());
 
         List<String> shown = frames("result");
         assertEquals(1, shown.size(), String.valueOf(sent));
         assertTrue(shown.get(0).contains(SECRET), "the web chat shows the answer: " + shown);
+        assertEquals(List.of(session), sent.stream().filter(f -> "result".equals(f.path("type").asText()))
+                .map(f -> f.path("sessionId").asText()).toList(), "with the chat it was saved into");
         assertTrue(telegram.stream().anyMatch(t -> t.contains(SECRET)),
                 "Telegram gets the answer too -- the owner's decision: " + telegram);
     }

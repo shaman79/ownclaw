@@ -40,9 +40,9 @@ class DynamicSkillSelfHealNameTest {
         Files.writeString(skillDir.resolve("skill.py"), "def run(params):\n    return {}\n");
         var asked = new ArrayList<List<String>>();
         var pythonEnv = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
-            @Override public boolean installPackages(Path dir, String name, List<String> packages) {
+            @Override public void installPackages(Path dir, String name, List<String> packages, java.util.function.BooleanSupplier stopped, Runnable waiting) throws java.io.IOException {
                 asked.add(packages);
-                return false;
+                throw new java.io.IOException("not installed");
             }
         };
         SandboxManager sandbox = new SandboxManager() {

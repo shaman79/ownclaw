@@ -55,7 +55,8 @@ class DynamicSkillMountTest {
         Recording() { super(new OwnClawConfig()); }
         @Override public boolean isAvailable() { return true; }
         @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
-                                            SandboxManager.ProgressCallback cb) {
+                                            SandboxManager.ProgressCallback cb,
+                                            java.util.function.BooleanSupplier stopped) {
             images++;
             return "test-image";
         }
@@ -131,7 +132,8 @@ class DynamicSkillMountTest {
         var container = new ContainerSandbox(new OwnClawConfig()) {
             @Override public boolean isAvailable() { return true; }
             @Override public String ensureImage(List<String> packages, String pip, Path dir, String image,
-                                                SandboxManager.ProgressCallback cb) { return "test-image"; }
+                                                SandboxManager.ProgressCallback cb,
+                                            java.util.function.BooleanSupplier stopped) { return "test-image"; }
             @Override public SandboxResult execute(String image, String python, Path script, Path dir,
                                                    String stdinJson, int timeout,
                                                    SandboxManager.ProgressCallback cb,
@@ -143,8 +145,8 @@ class DynamicSkillMountTest {
             }
         };
         var installs = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
-            @Override public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
-                return true;
+            @Override public void installPackages(Path skillDir, String skillName, List<String> packages,
+                    java.util.function.BooleanSupplier stopped, Runnable waiting) {
             }
         };
         Path skillDir = Files.createDirectories(tmp.resolve("skills/pdf_text"));

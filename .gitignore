@@ -30,6 +30,8 @@ logs/
 
 # Python virtual environments for skills
 skills/_envs/
+# Each account's /tmp for its jailed skills (emptied when OwnClaw starts)
+skills/_tmp/
 
 # Gradle build output (bin/)
 bin/

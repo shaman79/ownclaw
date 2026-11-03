@@ -27,16 +27,16 @@ class ThinkingEngineFilesSectionTest {
         AgentLoop.registerAttachments(ctx, List.of(pdf), h.files(), h.events());
 
         String section = ThinkingEngine.filesSection(ctx);
-        assertTrue(section.contains("- {{1}}: application/pdf, 15 bytes, no text read (not text, over 100 KB, or not UTF-8)"), section);
+        assertTrue(section.contains("- {{1}}: application/pdf, 15 bytes, no text read (not text, or not UTF-8)"), section);
         assertTrue(section.contains("_attached_files"), "where a skill finds the file");
         assertTrue(section.contains("delegate"), "and who can read what it returns");
         assertFalse(section.contains("vypis") || section.contains("123456789"), section);
 
         // And it is what the model is actually sent, on both renderers.
         var registry = new ToolRegistry(List.of());
-        var engine = new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        var engine = new ThinkingEngine(registry, new OwnClawConfig(), null);
         for (String provider : List.of("anthropic", "openai")) {
-            String all = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false))
+            String all = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false))
                     .stream().map(LlmMessage::content).reduce("", String::concat);
             assertTrue(all.contains("## Files sent with this message\n- {{1}}"), provider + " omits the files");
             assertFalse(all.contains("vypis") || all.contains("123456789"), provider + " names the file");

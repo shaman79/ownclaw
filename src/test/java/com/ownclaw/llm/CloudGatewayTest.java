@@ -2,6 +2,7 @@ package com.ownclaw.llm;
 
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.privacy.PrivateIndex;
+import com.ownclaw.privacy.Redactor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +14,7 @@ import java.util.Random;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The door, in order: refuse if unclassified, scrub, canary, send, record.
+ * The door, in order: refuse if unclassified, filter, canary, send, record, put the values back.
  * <p>
  * Each test names the step it pins and the mutation that would break it. The fake provider
  * records exactly what it was handed, because "the provider never saw it" is the claim.
@@ -25,12 +26,18 @@ class CloudGatewayTest {
         final List<List<LlmMessage>> calls = new ArrayList<>();
         final List<LlmRequestConfig> configs = new ArrayList<>();
         RuntimeException failWith;
+        /** Tell the request's progress hook about an event before answering, as a stream does. */
+        boolean streams;
+        /** Tell the hook of an attempt that ended without a reply before answering or failing. */
+        LlmResponse.Usage billsFirst;
         String name = "anthropic";
         String model = "claude-opus-5";
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             calls.add(m); configs.add(c);
+            if (billsFirst != null) c.progress().billed(billsFirst);
             if (failWith != null) throw failWith;
-            return new LlmResponse("ok", 120, 7, 30, 90, "end_turn");
+            if (streams) c.progress().onProgress();
+            return Replies.of("ok", 120, 7, 30, 90, "end_turn");
         }
         public boolean isAvailable() { return true; }
         public boolean supportsTools() { return true; }
@@ -61,7 +68,7 @@ class CloudGatewayTest {
 
     private static EgressContext egress(PrivateIndex index, Map<String, String> secrets,
                                         java.util.function.BiPredicate<Integer, String> allowed) {
-        return new EgressContext("u1", "t1", "think", index, secrets, allowed);
+        return new EgressContext("u1", "t1", "think", index, secrets, allowed, null);
     }
 
     private static List<LlmMessage> messages(String... contents) {
@@ -77,7 +84,7 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
         var resp = gw.chat(messages("What is the capital of France?"), cfg);
 
         assertEquals("ok", resp.content());
@@ -103,7 +110,7 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        assertThrows(EgressRefused.class, () -> gw.chat(messages("hello"), LlmRequestConfig.DEFAULT));
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("hello"), new LlmRequestConfig(null, null, false)));
         assertTrue(provider.calls.isEmpty(), "unclassified means denied, not scanned against nothing");
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
         assertEquals("unclassified", rows.last().refusalRef());
@@ -118,7 +125,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 1);
         var index = new PrivateIndex(); index.addPrivate(3, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
         var ex = assertThrows(EgressRefused.class,
                 () -> gw.chat(messages("Here is what the mailbox held: " + secret.substring(1000, 1040)), cfg));
 
@@ -145,7 +152,7 @@ class CloudGatewayTest {
         var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + output.substring(200, 240),
                 Map.of("type", "object"));
 
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
         gw.chat(messages("send it"), cfg);
 
@@ -172,7 +179,7 @@ class CloudGatewayTest {
         String described = output.substring(200, 240);
         var tool = new ToolSpec("smtp_send_email", "Sends mail. Returns: " + described,
                 Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         gw.chat(messages("send the invoice"), cfg);
@@ -203,7 +210,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(4, iban);
         var tool = new ToolSpec("fx_rates", "Rates. Example account: " + iban,
                 Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         var ex = assertThrows(EgressRefused.class,
@@ -227,7 +234,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(2, shortOutput);
         var tool = new ToolSpec("smtp_send_email",
                 "Sends mail. Returns " + shortOutput + " on success.", Map.of("type", "object"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(index, Map.of(), (h, w) -> false));
 
         assertDoesNotThrow(() -> gw.chat(messages("send it"), cfg),
@@ -240,24 +247,38 @@ class CloudGatewayTest {
     }
 
     @Test
-    @DisplayName("a vault value scrubbing could not reach refuses the call")
-    void secretsThatSurviveScrubbingAreRefused() {
-        // scrub() rewrites message text and tool DESCRIPTIONS. A schema is neither, so a secret
-        // sitting in one used to travel with a scrub count of zero and nothing to show for it.
-        // The marker itself was also unverified: a value of "redacted" would have been written
-        // out inside «vault:redacted». This is the post-condition rather than the promise.
+    @DisplayName("a vault value in a tool's schema is removed, as in every other part")
+    void schemasAreFiltered() {
+        // The scrub used to rewrite message text and tool DESCRIPTIONS only, so a secret sitting
+        // in a schema reached the post-condition below and refused the call. The filter now
+        // covers every part.
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         var tool = new ToolSpec("fx_rates", "Rates.",
                 Map.of("type", "object", "example", "token=hunter2secret"));
-        var cfg = LlmRequestConfig.DEFAULT.withTools(List.of(tool))
+        var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
                 .withEgress(egress(new PrivateIndex(), Map.of("API_TOKEN", "hunter2secret"),
                         (h, w) -> false));
 
-        assertThrows(EgressRefused.class, () -> gw.chat(messages("go"), cfg));
+        gw.chat(messages("go"), cfg);
+        assertEquals("token=«vault:API_TOKEN»", provider.configs.get(0).tools().get(0).inputSchema().get("example"));
+        assertEquals(1, rows.last().secretsRemoved());
+    }
+
+    @Test
+    @DisplayName("a vault value its own marker carries refuses the call")
+    void secretsThatSurviveScrubbingAreRefused() {
+        // The marker is unverified: a value of "redacted" under a key that holds it is written
+        // out inside «vault:redacted». This is the post-condition rather than the promise.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var cfg = new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of("redacted", "redacted"), (h, w) -> false));
+
+        assertThrows(EgressRefused.class, () -> gw.chat(messages("the word redacted"), cfg));
         assertTrue(provider.calls.isEmpty(), "checked before the socket opens");
         assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
-        assertTrue(rows.last().refusalRef().contains("API_TOKEN"), rows.last().refusalRef());
+        assertTrue(rows.last().refusalRef().contains("vault:redacted"), rows.last().refusalRef());
     }
 
     @Test
@@ -272,7 +293,7 @@ class CloudGatewayTest {
                 config("anthropic", CloudGateway.Mode.OBSERVE), rows, null);
         String output = prose(5_000, 7);
         var index = new PrivateIndex(); index.addPrivate(4, output);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
 
         assertThrows(IllegalStateException.class,
                 () -> gw.chat(messages("the mailbox said: " + output.substring(900, 1200)), cfg));
@@ -298,7 +319,7 @@ class CloudGatewayTest {
 
         // The first run is allowed (it is the public digest); the tail is not.
         String allowed = PrivateIndex.normalise(publicPart);
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(),
                 (h, w) -> allowed.contains(w)));
 
         var ex = assertThrows(EgressRefused.class,
@@ -309,6 +330,28 @@ class CloudGatewayTest {
     }
 
     @Test
+    @DisplayName("a private tail shorter than a window, after an allowed run, is refused")
+    void aShortPrivateTailIsRefused() {
+        // The same confirmation with only its address after the digest: 26 characters, less than
+        // a window, carried by the windows that take in the end of the digest.
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String digest = prose(130, 23);
+        var index = new PrivateIndex();
+        index.addPrivate(2, digest + " sent to owner@example.org");
+        String allowed = PrivateIndex.normalise(digest);
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(),
+                (h, w) -> allowed.contains(w)));
+
+        var ex = assertThrows(EgressRefused.class,
+                () -> gw.chat(messages(digest + " sent to owner@example.org"), cfg));
+        assertEquals(2, ex.handle());
+        assertTrue(provider.calls.isEmpty());
+        gw.chat(messages(digest), cfg);
+        assertEquals(1, provider.calls.size(), "the digest alone is sent");
+    }
+
+    @Test
     @DisplayName("a hit the task has allowed is sent")
     void allowedHitIsSent() {
         var provider = new Recording(); var rows = new Rows();
@@ -316,7 +359,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 3);
         var index = new PrivateIndex(); index.addPrivate(2, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> h == 2));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> h == 2));
         gw.chat(messages("quoting the task text: " + secret.substring(0, 40)), cfg);
 
         assertEquals(1, provider.calls.size());
@@ -330,13 +373,13 @@ class CloudGatewayTest {
         var provider = new Recording(); var rows = new Rows();
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(),
                 Map.of("IMAP_PASS", "hunter2secret", "SMTP_PORT", "465"), (h, w) -> false));
         gw.chat(messages("log in with hunter2secret on port 465 then hunter2secret again"), cfg);
 
         String sent = provider.calls.get(0).get(1).content();
         assertEquals("log in with «vault:IMAP_PASS» on port 465 then «vault:IMAP_PASS» again", sent);
-        assertEquals(2, rows.last().scrubs());
+        assertEquals(2, rows.last().secretsRemoved());
         // Mutations: skip the scrub -> value sent; scrub every key -> "465" replaced.
     }
 
@@ -347,7 +390,7 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         // "vault:PASS" appears inside «vault:PASS», so restarting the search from zero rewrote
         // its own replacement for ever, holding the task's only worker thread.
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(),
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(),
                 Map.of("PASS", "vault:PASS"), (h, w) -> false));
 
         assertTimeoutPreemptively(java.time.Duration.ofSeconds(5),
@@ -356,7 +399,7 @@ class CloudGatewayTest {
         // literal value "vault:PASS", so scrubbing it into its own key name would have sent the
         // secret in the shape of a redaction -- one scrub recorded, nothing actually withheld.
         assertEquals("the value is «vault:redacted» here", provider.calls.get(0).get(1).content());
-        assertEquals(1, rows.last().scrubs());
+        assertEquals(1, rows.last().secretsRemoved());
     }
 
     @Test
@@ -369,7 +412,7 @@ class CloudGatewayTest {
         var index = new PrivateIndex(); index.addPrivate(1, secret);
 
         assertThrows(EgressRefused.class, () -> gw.chat(messages("leak: " + secret.substring(0, 40)),
-                LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false))));
+                new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false))));
 
         assertEquals(0, rows.last().bytesOut(),
                 "counting a refused payload as egress is the one arithmetic error that would "
@@ -383,7 +426,7 @@ class CloudGatewayTest {
         provider.failWith = new LlmException("anthropic", "429 rate limited", 429, null);
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
         assertThrows(LlmException.class, () -> gw.chat(messages("hi"), cfg));
         assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
         assertEquals("LlmException", rows.last().refusalRef());
@@ -398,7 +441,7 @@ class CloudGatewayTest {
         String secret = prose(5_000, 4);
         var index = new PrivateIndex(); index.addPrivate(5, secret);
 
-        var cfg = LlmRequestConfig.DEFAULT.withEgress(egress(index, Map.of(), (h, w) -> false));
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
         gw.chat(messages("leak: " + secret.substring(300, 340)), cfg);
 
         assertEquals(1, provider.calls.size());
@@ -410,6 +453,85 @@ class CloudGatewayTest {
                 "and it is written after the send, so it carries the tokens like any other");
         assertNotNull(rows.last().refusalRef(), "naming what would have been refused");
         // Mutation: treat OBSERVE as silent -> decision is SENT.
+    }
+
+    @Test
+    @DisplayName("the progress hook reaches the provider, with tools or without, and what it throws comes back unchanged")
+    void theProgressHookGoesThroughTheDoor() {
+        // Stop and the stall watchdog end an in-flight cloud call through this hook, and every
+        // cloud call goes through the door.
+        var provider = new Recording(); provider.streams = true; var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var stop = new IllegalStateException("stopped by the owner");
+        var handed = new ArrayList<Runnable>();
+        var heard = new ArrayList<String>();
+        LlmProgress hook = new LlmProgress() {
+            @Override public void onProgress() { throw stop; }
+            @Override public void calling(Runnable cancel) { handed.add(cancel); }
+            @Override public void received(Part part, String text) { heard.add(part + ":" + text); }
+        };
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+                .withProgress(hook);
+
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)),
+                "not wrapped, not replaced");
+        Runnable cancel = () -> { };
+        provider.configs.get(0).progress().calling(cancel);
+        assertEquals(List.of(cancel), handed, "the caller's hook is handed the cancel of what the call waits on");
+        provider.configs.get(0).progress().received(LlmProgress.Part.REASONING, "Checking the router.");
+        assertEquals(List.of("REASONING:Checking the router."), heard,
+                "and told what each event carried, which the owner is shown and the loop guard reads");
+        assertEquals(EgressLedger.Decision.ERROR, rows.last().decision());
+
+        var withTools = cfg.withTools(List.of(new ToolSpec("fx_rates", "Rates.", Map.of("type", "object"))));
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), withTools)),
+                "the request the door rebuilds around the scrubbed tools keeps the hook");
+        provider.configs.get(1).progress().calling(cancel);
+        assertEquals(List.of(cancel, cancel), handed);
+        // Mutation: send the request without its hook -> the provider has none to tell, and the
+        // call cannot be stopped.
+    }
+
+    @Test
+    @DisplayName("a call that ends without a reply is on its row with what it was billed, and the caller's hook is told of it")
+    void aCallWithoutAReplyIsRecordedWithItsTokens() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var billed = new ArrayList<LlmResponse.Usage>();
+        var stop = new IllegalStateException("stopped by the owner");
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false))
+                .withProgress(new LlmProgress() {
+                    @Override public void onProgress() { }
+                    @Override public void billed(LlmResponse.Usage usage) { billed.add(usage); }
+                });
+        // A reply stopped part-way: message_start had said 120,000 input tokens and 80,000 read
+        // from the cache.
+        var partWay = new LlmResponse.Usage("claude-opus-5", 120_000, 1, 0, 80_000);
+        provider.billsFirst = partWay;
+        provider.failWith = stop;
+
+        assertSame(stop, assertThrows(IllegalStateException.class, () -> gw.chat(messages("hi"), cfg)));
+
+        var row = rows.last();
+        assertEquals(EgressLedger.Decision.ERROR, row.decision());
+        assertEquals(120_000, row.promptTokens());
+        assertEquals(80_000, row.cacheReadTokens());
+        assertEquals(1, row.completionTokens());
+        assertEquals(ModelPricing.costUsd("claude-opus-5", new LlmResponse.Usage(null, 120_000, 1, 0, 80_000)),
+                row.costUsd(), 1e-9);
+        assertTrue(row.costUsd() > 0.6, "priced as claude-opus-5 input: " + row.costUsd());
+        assertEquals(List.of(partWay), billed, "and the task is told, so it counts them");
+        // Mutation: record the ERROR row with no tokens -> 0 and $0, as before.
+
+        // An attempt that ended without a reply, then one that answered: the row is the call's,
+        // both of them.
+        provider.failWith = null;
+        gw.chat(messages("hi"), cfg);
+        assertEquals(EgressLedger.Decision.SENT, rows.last().decision());
+        assertEquals(120_000 + 120, rows.last().promptTokens());
+        assertEquals(80_000 + 90, rows.last().cacheReadTokens());
+        assertEquals(1 + 7, rows.last().completionTokens());
+        assertEquals(List.of(partWay, partWay), billed, "the reply's own counts are not reported: the caller counts them from it");
     }
 
     @Test
@@ -434,10 +556,112 @@ class CloudGatewayTest {
         var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
         String text = "the quick brown fox and a long line of ordinary text that must not be stored";
 
-        gw.chat(messages(text), LlmRequestConfig.DEFAULT.withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
+        gw.chat(messages(text), new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false)));
 
         String serialised = rows.last().toString();
         assertFalse(serialised.contains("quick brown fox"), "a ledger is not an audit copy");
         assertTrue(serialised.contains("chars=" + text.length()));
+    }
+
+    // ── the filter ──
+
+    @Test
+    @DisplayName("generated configs and logs: no planted secret leaves in any part, and every identifier leaves as a placeholder")
+    void nothingPlantedLeavesAnyPart() {
+        var random = new Random(20261001);
+        String[] resolvers = {"9.9.9.9", "1.1.1.1", "2606:4700:4700::1111"};
+        for (int n = 0; n < 150; n++) {
+            String vault = "FakeVault-" + n + "-" + Long.toString(random.nextLong() & 0xffffffffL, 36);
+            String key = "fake-wifi-key-" + random.nextInt(1_000_000);
+            String token = "fakeToken" + random.nextInt(1_000_000) + "x";
+            String pass = "fake-pass-" + random.nextInt(1_000_000);
+            String ssid = "Fake Net " + random.nextInt(1_000);
+            String host = "fake-host-" + random.nextInt(1_000);
+            String mail = "user" + random.nextInt(1_000) + "@example.org";
+            String mac = String.format("00:00:5e:00:53:%02x", random.nextInt(256));
+            String ip = resolvers[random.nextInt(resolvers.length)];
+            String[] lines = {
+                    "\toption ssid '" + ssid + "'", "\toption key '" + key + "'",
+                    "config host\n\toption name '" + host + "'\n\toption mac '" + mac + "'",
+                    "wpa_passphrase=" + pass, "{\"password\": \"" + pass + "\", \"ssid\": \"" + ssid + "\"}",
+                    "Authorization: Bearer " + token, "GET /api?token=" + token + "&q=1",
+                    "login root / " + vault, "mail from " + mail + " via " + ip,
+                    "1727777777 " + mac + " 10.0.0.9 " + host + " *", "upstream " + ip + " port 53",
+                    "\toption encryption 'psk2'", "uptime 12 days, load 0.10"};
+            var text = new StringBuilder();
+            for (int k = 0; k < 4 + random.nextInt(8); k++) text.append(lines[random.nextInt(lines.length)]).append('\n');
+            String t = text.toString();
+
+            var provider = new Recording(); var rows = new Rows();
+            var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+            var tool = new ToolSpec("router_read", "Reads the router. Example output:\n" + t,
+                    Map.of("type", "object", "properties", Map.of("q", Map.of("type", "string", "description", t))));
+            var cfg = new LlmRequestConfig(null, null, false).withTools(List.of(tool))
+                    .withEgress(egress(new PrivateIndex(), Map.of("ROUTER_PASS", vault), (h, w) -> false));
+            gw.chat(List.of(LlmMessage.system(t), LlmMessage.user(t), LlmMessage.assistant(t)), cfg);
+
+            var sent = new ArrayList<String>();
+            for (LlmMessage m : provider.calls.get(0)) sent.add(m.content());
+            for (ToolSpec spec : provider.configs.get(0).tools()) {
+                sent.add(spec.description());
+                sent.add(String.valueOf(spec.inputSchema()));
+            }
+            assertEquals(5, sent.size());
+            for (String part : sent) {
+                for (String planted : List.of(vault, key, token, pass, ssid, host, mail, mac, ip)) {
+                    assertFalse(part.contains(planted), "[" + planted + "] left in: " + part);
+                }
+            }
+            var row = rows.last();
+            assertTrue(row.secretsRemoved() + row.identifiersReplaced() > 0, t);
+        }
+        // Mutation: filter only the messages, as the scrub once did -> the tool's parts carry them.
+    }
+
+    @Test
+    @DisplayName("the canary reads the filtered text, and still refuses a private result's bytes in a user part")
+    void theCanaryReadsTheFilteredText() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        String mail = "From alice@example.org: " + prose(2_000, 21) + " -- call me on +1 202 555 0143";
+        var index = new PrivateIndex(); index.addPrivate(3, mail);
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(index, Map.of(), (h, w) -> false));
+
+        var refused = assertThrows(EgressRefused.class, () -> gw.chat(messages("the mail: " + mail), cfg));
+        assertTrue(refused.getMessage().contains("{{3}}"), refused.getMessage());
+        assertTrue(provider.calls.isEmpty());
+        assertEquals(EgressLedger.Decision.REFUSED, rows.last().decision());
+        assertEquals(2, rows.last().identifiersReplaced(), "the address and the number, replaced before the check");
+    }
+
+    @Test
+    @DisplayName("a reply's placeholders are put back, in its text and in every tool call's arguments")
+    void aReplyIsRestored() {
+        var redactor = new Redactor(null);
+        var calls = new ArrayList<List<LlmMessage>>();
+        LlmProvider cloud = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                calls.add(m);
+                return Replies.of("Moving <mac_1> to <ssid_1>; <email_7> is unknown.", 10, 5, 0, 0, "tool_use",
+                        List.of(new ToolCall("c1", "wifi_set", Map.of("ssid", "<ssid_1>",
+                                "clients", List.of("<mac_1>")))));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+            public String model() { return "claude-opus-5"; }
+        };
+        var rows = new Rows();
+        var gw = new CloudGateway(cloud, cloud, config("anthropic", CloudGateway.Mode.ENFORCE), rows, null, redactor);
+        var cfg = new LlmRequestConfig(null, null, false).withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+
+        var reply = gw.chat(messages("\toption ssid 'Fake Home'\nstation 00:00:5e:00:53:01 joined"), cfg);
+
+        assertEquals("\toption ssid '<ssid_1>'\nstation <mac_1> joined", calls.get(0).get(1).content());
+        assertEquals(2, rows.last().identifiersReplaced());
+        assertEquals("Moving 00:00:5e:00:53:01 to Fake Home; <email_7> is unknown.", reply.content());
+        assertEquals(Map.of("ssid", "Fake Home", "clients", List.of("00:00:5e:00:53:01")),
+                reply.toolCalls().get(0).arguments());
+        // Mutation: return the provider's reply as it came -> the tool runs with "<ssid_1>".
     }
 }

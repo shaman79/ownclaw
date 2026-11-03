@@ -1,7 +1,6 @@
 package com.ownclaw.skills;
 
 import com.ownclaw.config.OwnClawConfig;
-import com.ownclaw.sandbox.ProcessSandbox;
 import com.ownclaw.sandbox.SkillJail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +31,6 @@ import java.util.Comparator;
 import java.util.stream.Stream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
@@ -56,9 +54,6 @@ public class PythonEnvironmentService {
 
     /** Tracks which skill dirs have been provisioned this session (avoid redundant checks). */
     private final Map<String, String> provisionedHashes = new ConcurrentHashMap<>();
-
-    /** Captures the last provisioning error per skill+dir (for user-facing diagnostics). */
-    private final Map<String, String> lastProvisionErrors = new ConcurrentHashMap<>();
 
     private final OwnClawConfig config;
     private final SkillJail jail;
@@ -258,8 +253,14 @@ public class PythonEnvironmentService {
      *
      * @param envDir the venv or target directory the skill imports from -- what an isolated run
      *               must be given to read; null when it runs on system Python alone
+     * @param installError why the skill's requirements could not be installed -- pip's own
+     *                     account, from each way it was tried -- when they could not, and the
+     *                     skill runs on the system Python without them; null when they are
+     *                     installed, or it declares none. A run that fails then says why
+     *                     (DynamicSkill), and so does the load check of a new skill: its error
+     *                     alone names only the module it then missed.
      */
-    public record PythonResolution(String python, Map<String, String> extraEnv, Path envDir) {}
+    public record PythonResolution(String python, Map<String, String> extraEnv, Path envDir, String installError) {}
 
     // ── environments that outlived their skill ──
 
@@ -322,7 +323,13 @@ public class PythonEnvironmentService {
      */
     public boolean removeEnvironments(String skillName) {
         if (envsDir == null) return true;
-        return removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+        var lock = envLock(skillName);
+        lock.lock();
+        try {
+            return removeEnvironments(envsDir, targetsDir, skillName, this::forgetProvisioning);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -352,7 +359,6 @@ public class PythonEnvironmentService {
 
     private void forgetProvisioning(String skillName) {
         provisionedHashes.keySet().removeIf(k -> k.startsWith(skillName + ":"));
-        lastProvisionErrors.keySet().removeIf(k -> k.startsWith(skillName + ":"));
     }
 
     /**
@@ -412,116 +418,155 @@ public class PythonEnvironmentService {
     }
 
     /**
-     * Resolve the best Python executable for running a skill, provisioning dependencies if needed.
+     * Resolve the best Python executable for running a skill, provisioning dependencies if needed:
+     * the skill's own venv, or else a target install on the system Python; and when neither can
+     * be made, the system Python as it is, with why in {@link PythonResolution#installError}.
      */
     public PythonResolution resolveExecution(Path skillDir, String skillName) {
-        Path reqFile = skillDir.resolve("requirements.txt");
-        try {
-            String declared = SkillJail.readAuthored(reqFile);
-            if (declared == null || declared.isBlank()) {
-                return new PythonResolution(systemPython, Map.of(), null);
-            }
-            String reqContent = declared.strip();
-
-            // Try venv path first.
-            String python = resolvePython(skillDir, skillName);
-            if (python != null && !python.isBlank() && !python.equals(systemPython)) {
-                // Expose the venv bin/ directory on PATH so that subprocesses launched
-                // by the skill (e.g. "python3 -c ..." via shell_command) also resolve
-                // to this venv's Python and can find its installed packages.
-                String venvBin = Path.of(python).getParent().toAbsolutePath().toString();
-                // PREPEND. This used to be Map.of("PATH", venvBin), which replaces PATH with a
-                // single directory containing python and pip and nothing else -- so a skill with
-                // a virtualenv could not reach ls, curl, nmap, tesseract, ip or any other system
-                // binary. That contradicts what the skill-authoring prompt promises ("system
-                // packages on PATH") and what the capability guidance instructs skills to do
-                // (read the ARP table, shell out to a scanner), and it only bites skills that
-                // declare requirements.txt, which is why it looked like flaky dependencies.
-                String inherited = System.getenv("PATH");
-                String path = inherited == null || inherited.isBlank()
-                        ? venvBin
-                        : venvBin + java.io.File.pathSeparator + inherited;
-                return new PythonResolution(python, Map.of("PATH", path), ownDir(envsDir, skillName));
-            }
-
-            // Venv unavailable or provisioning failed; try a target install + PYTHONPATH.
-            Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
-            if (target != null) {
-                return new PythonResolution(systemPython, Map.of(
-                        "PYTHONPATH", target.toAbsolutePath().toString()
-                ), target.toAbsolutePath());
-            }
-        } catch (Exception e) {
-            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
-            log.warn("Failed to resolve execution environment for skill '{}': {}", skillName, msg);
-        }
-
-        return new PythonResolution(systemPython, Map.of(), null);
+        return resolveExecution(skillDir, skillName, () -> false, () -> {});
     }
 
     /**
-     * Resolve the Python executable for a skill.
-     * If the skill has a requirements.txt, ensures a venv exists and deps are installed.
+     * {@link #resolveExecution(Path, String)} for a task: while another task sets up the skill's
+     * environment -- its first run, or a self-heal installing a package -- the task is said to
+     * wait ({@code waiting}), which the stall watchdog counts as progress, and a Stop of it
+     * ({@code stopped}) ends the wait.
      *
-     * @param skillDir the versioned skill directory (e.g. skills/core/shell_command/v1)
-     * @param skillName skill name for the venv directory name
-     * @return path to the Python executable (venv python or system python)
+     * @throws IllegalStateException when the task was stopped while it waited
      */
-    public String resolvePython(Path skillDir, String skillName) {
-        Path reqFile = skillDir.resolve("requirements.txt");
-
+    public PythonResolution resolveExecution(Path skillDir, String skillName,
+                                             java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        var lock = envLock(skillName);
+        if (!com.ownclaw.agent.tools.SkillLocks.take(lock, stopped, waiting)) {
+            throw new IllegalStateException(stoppedWaiting(skillName));
+        }
         try {
-            String declared = SkillJail.readAuthored(reqFile);
-            if (declared == null || declared.isBlank()) {
-                // No dependencies — use system Python directly
-                return systemPython;
-            }
-            String reqContent = declared.strip();
-
-            String reqHash = hash(reqContent);
-            String cacheKey = skillName + ":" + skillDir;
-            Path venvDir = ownDir(envsDir, skillName);
-
-            // Already provisioned this session with same hash?
-            // ...and the interpreter still exists: the cache outlived a prune once and handed a
-            // restored skill the path of a deleted python until the next restart.
-            if (reqHash.equals(provisionedHashes.get(cacheKey))
-                    && Files.exists(venvDir.resolve(pythonRelative()))) {
-                lastProvisionErrors.remove(cacheKey);
-                return venvPython(skillName);
-            }
-
-            Path hashFile = venvDir.resolve(".req_hash");
-
-            // Check on-disk hash — skip install if unchanged
-            if (reqHash.equals(storedHash(hashFile)) && Files.exists(venvDir.resolve(pythonRelative()))) {
-                provisionedHashes.put(cacheKey, reqHash);
-                lastProvisionErrors.remove(cacheKey);
-                return venvPython(skillName);
-            }
-
-            // Create or update venv
-            log.info("Provisioning Python venv for skill '{}' ...", skillName);
-            createVenv(venvDir, skillDir);
-            installRequirements(venvDir, reqFile, skillDir);
-            SkillJail.writeFresh(hashFile, reqHash);
-            provisionedHashes.put(cacheKey, reqHash);
-            lastProvisionErrors.remove(cacheKey);
-
-            log.info("Venv ready for skill '{}'", skillName);
-            return venvPython(skillName);
-
-        } catch (Exception e) {
-            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
-            lastProvisionErrors.put(skillName + ":" + skillDir, msg);
-            log.warn("Failed to provision venv for skill '{}': {}. Falling back to system Python.",
-                    skillName, msg);
-            return systemPython;
+            return resolveExecutionHeld(skillDir, skillName);
+        } finally {
+            lock.unlock();
         }
     }
 
-    public Optional<String> getLastProvisionError(Path skillDir, String skillName) {
-        return Optional.ofNullable(lastProvisionErrors.get(skillName + ":" + skillDir));
+    private static String stoppedWaiting(String skillName) {
+        return "Stopped while another task set up the environment of skill '" + skillName + "'";
+    }
+
+    /**
+     * One lock for each skill's environments, by its name: tasks of different chats run side by
+     * side, and two first runs of a skill made its venv and installed its requirements into it
+     * at once, and a self-heal's added package lost to another's rewrite of requirements.txt.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> envLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    java.util.concurrent.locks.ReentrantLock envLock(String skillName) {
+        return envLocks.computeIfAbsent(String.valueOf(skillName), n -> new java.util.concurrent.locks.ReentrantLock());
+    }
+
+    private PythonResolution resolveExecutionHeld(Path skillDir, String skillName) {
+        Path reqFile = skillDir.resolve("requirements.txt");
+        String reqContent;
+        try {
+            // Through the one reader of authored files: a link left at this name is refused, not
+            // followed into whatever it points at.
+            String declared = SkillJail.readAuthored(reqFile);
+            reqContent = declared == null ? "" : declared.strip();
+        } catch (IOException e) {
+            String msg = messageOf(e);
+            log.warn("Failed to read the requirements of skill '{}': {}", skillName, msg);
+            return new PythonResolution(systemPython, Map.of(), null, "requirements.txt could not be read: " + msg);
+        }
+        if (reqContent.isEmpty()) {
+            return new PythonResolution(systemPython, Map.of(), null, null);
+        }
+
+        // Try venv path first.
+        String venvError;
+        try {
+            String python = resolvePython(skillDir, skillName, reqFile, reqContent);
+            // Expose the venv bin/ directory on PATH so that subprocesses launched
+            // by the skill (e.g. "python3 -c ..." via shell_command) also resolve
+            // to this venv's Python and can find its installed packages.
+            String venvBin = Path.of(python).getParent().toAbsolutePath().toString();
+            // PREPEND. This used to be Map.of("PATH", venvBin), which replaces PATH with a
+            // single directory containing python and pip and nothing else -- so a skill with
+            // a virtualenv could not reach ls, curl, nmap, tesseract, ip or any other system
+            // binary. That contradicts what the skill-authoring prompt promises ("system
+            // packages on PATH") and what the capability guidance instructs skills to do
+            // (read the ARP table, shell out to a scanner), and it only bites skills that
+            // declare requirements.txt, which is why it looked like flaky dependencies.
+            String inherited = System.getenv("PATH");
+            String path = inherited == null || inherited.isBlank()
+                    ? venvBin
+                    : venvBin + java.io.File.pathSeparator + inherited;
+            return new PythonResolution(python, Map.of("PATH", path), ownDir(envsDir, skillName), null);
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            venvError = messageOf(e);
+            log.warn("Failed to provision venv for skill '{}': {}. Falling back to system Python.",
+                    skillName, venvError);
+        }
+
+        // Venv unavailable or provisioning failed; try a target install + PYTHONPATH.
+        try {
+            Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
+            return new PythonResolution(systemPython, Map.of(
+                    "PYTHONPATH", target.toAbsolutePath().toString()
+            ), target.toAbsolutePath(), null);
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            String msg = messageOf(e);
+            log.warn("Failed to resolve execution environment for skill '{}': {}", skillName, msg);
+            return new PythonResolution(systemPython, Map.of(), null, venvError + "\n" + msg);
+        }
+    }
+
+    /**
+     * The Python executable of a skill's own venv, made and given its requirements if they have
+     * changed since it was last provisioned.
+     *
+     * @param skillDir the versioned skill directory (e.g. skills/core/shell_command/v1)
+     * @param skillName skill name for the venv directory name
+     * @throws Exception why the venv could not be made or given its requirements: pip's own
+     *                   output, when that is what failed
+     */
+    private String resolvePython(Path skillDir, String skillName, Path reqFile, String reqContent)
+            throws Exception {
+        String reqHash = hash(reqContent);
+        String cacheKey = skillName + ":" + skillDir;
+        Path venvDir = ownDir(envsDir, skillName);
+
+        // Already provisioned this session with same hash?
+        // ...and the interpreter still exists: the cache outlived a prune once and handed a
+        // restored skill the path of a deleted python until the next restart.
+        if (reqHash.equals(provisionedHashes.get(cacheKey))
+                && Files.exists(venvDir.resolve(pythonRelative()))) {
+            return venvPython(skillName);
+        }
+
+        Path hashFile = venvDir.resolve(".req_hash");
+
+        // Check on-disk hash — skip install if unchanged
+        if (reqHash.equals(storedHash(hashFile)) && Files.exists(venvDir.resolve(pythonRelative()))) {
+            provisionedHashes.put(cacheKey, reqHash);
+            return venvPython(skillName);
+        }
+
+        // Create or update venv
+        log.info("Provisioning Python venv for skill '{}' ...", skillName);
+        createVenv(venvDir, skillDir);
+        installRequirements(venvDir, reqFile, skillDir);
+        SkillJail.writeFresh(hashFile, reqHash);
+        provisionedHashes.put(cacheKey, reqHash);
+
+        log.info("Venv ready for skill '{}'", skillName);
+        return venvPython(skillName);
+    }
+
+    /** An exception's message, or its type when it has none. */
+    private static String messageOf(Exception e) {
+        return e.getMessage() == null || e.getMessage().isBlank()
+                ? e.getClass().getSimpleName() : e.getMessage();
     }
 
     /**
@@ -529,36 +574,61 @@ public class PythonEnvironmentService {
      * Also persists the packages into requirements.txt for future seamless provisioning.
      *
      * This is used for deterministic self-healing (e.g. ModuleNotFoundError).
+     *
+     * @throws IOException why they could not be installed: pip's own output, and why there was no
+     *                     venv when the fallback target install was tried and failed too
      */
-    public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
-        if (packages == null || packages.isEmpty()) return false;
-        for (String pkg : packages) {
-            if (!isPlainName(pkg)) {
-                // Refused before anything starts or is written: see PLAIN_NAME for what pip
-                // would have done with it.
-                String msg = "Refusing to install '" + pkg + "': not a plain package name";
-                lastProvisionErrors.put(skillName + ":" + skillDir, msg);
-                log.warn("Skill '{}': {}", skillName, msg);
-                return false;
+    public void installPackages(Path skillDir, String skillName, List<String> packages) throws IOException {
+        installPackages(skillDir, skillName, packages, () -> false, () -> {});
+    }
+
+    /** {@link #installPackages(Path, String, List)} for a task, waiting as {@link #resolveExecution(Path, String, java.util.function.BooleanSupplier, Runnable)} does. */
+    public void installPackages(Path skillDir, String skillName, List<String> packages,
+                                java.util.function.BooleanSupplier stopped, Runnable waiting) throws IOException {
+        if (packages != null) {
+            for (String pkg : packages) {
+                if (!isPlainName(pkg)) {
+                    // Refused before anything starts or is written: see PLAIN_NAME for what pip
+                    // would have done with it.
+                    String msg = "Refusing to install '" + pkg + "': not a plain package name";
+                    log.warn("Skill '{}': {}", skillName, msg);
+                    throw new IOException(msg);
+                }
             }
         }
+        var lock = envLock(skillName);
+        if (!com.ownclaw.agent.tools.SkillLocks.take(lock, stopped, waiting)) throw new IOException(stoppedWaiting(skillName));
+        try {
+            installPackagesHeld(skillDir, skillName, packages);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void installPackagesHeld(Path skillDir, String skillName, List<String> packages) throws IOException {
+        if (packages == null || packages.isEmpty()) return;
         try {
             Path venvDir = ownDir(envsDir, skillName);
             try {
                 createVenv(venvDir, skillDir);
                 ensurePipAvailable(venvDir, skillDir);
             } catch (Exception venvErr) {
+                if (venvErr instanceof InterruptedException) throw (InterruptedException) venvErr;
                 // Minimal Python installs often cannot create venvs.
                 // Fall back to target installs + PYTHONPATH.
                 persistRequirements(skillDir, packages);
                 String declared = SkillJail.readAuthored(skillDir.resolve("requirements.txt"));
                 String reqContent = declared == null ? "" : declared.strip();
-                Path target = ensureTargetDependencies(skillDir, skillName, reqContent);
-                if (target == null) {
-                    throw new IOException("No target dependency directory produced");
+                try {
+                    if (ensureTargetDependencies(skillDir, skillName, reqContent) == null) {
+                        throw new IOException("No target dependency directory produced");
+                    }
+                } catch (InterruptedException interrupted) {
+                    throw interrupted;
+                } catch (Exception targetErr) {
+                    throw new IOException(messageOf(venvErr) + "\n" + messageOf(targetErr), targetErr);
                 }
-                lastProvisionErrors.remove(skillName + ":" + skillDir);
-                return true;
+                return;
             }
 
             String venvPython = venvDir.resolve(pythonRelative()).toAbsolutePath().toString();
@@ -580,21 +650,21 @@ public class PythonEnvironmentService {
                 SkillJail.writeFresh(venvDir.resolve(".req_hash"), reqHash);
                 provisionedHashes.put(skillName + ":" + skillDir, reqHash);
             }
-
-            lastProvisionErrors.remove(skillName + ":" + skillDir);
-            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Installing packages for skill '{}' was interrupted", skillName);
+            throw new IOException("interrupted while installing " + String.join(", ", packages), e);
         } catch (Exception e) {
-            String msg = (e.getMessage() == null || e.getMessage().isBlank()) ? e.getClass().getSimpleName() : e.getMessage();
-            lastProvisionErrors.put(skillName + ":" + skillDir, msg);
-            log.warn("Failed to install packages for skill '{}': {}", skillName, msg);
-            return false;
+            log.warn("Failed to install packages for skill '{}': {}", skillName, messageOf(e));
+            throw e instanceof IOException failed ? failed : new IOException(messageOf(e), e);
         }
     }
 
     /**
      * Ensure dependencies are installed into a per-skill target directory (no venv required).
      *
-     * @return the target directory if ready; null if installation failed
+     * @return the target directory, ready; null when there is nothing to install
+     * @throws IOException why it could not be made ready: pip's own output, when that failed
      */
     private Path ensureTargetDependencies(Path skillDir, String skillName, String reqContent)
             throws IOException, InterruptedException {
@@ -705,9 +775,13 @@ public class PythonEnvironmentService {
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
                 throw new IOException("Failed to download get-pip.py: HTTP " + resp.statusCode());
             }
-            // A link left at the name is replaced, never written through. get-pip.py is Python
-            // source, text.
-            SkillJail.writeFresh(dest, new String(resp.body(), StandardCharsets.UTF_8));
+            // Written aside and moved into place: another caller found a file of some size and ran
+            // it while it was still being written. The move also replaces a link left at the name
+            // instead of writing through it.
+            Path part = Files.createTempFile(dest.getParent(), "get-pip", ".part");
+            Files.write(part, resp.body(), StandardOpenOption.TRUNCATE_EXISTING);
+            Files.move(part, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             return dest;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -825,12 +899,10 @@ public class PythonEnvironmentService {
             // Read beside the wait, not after it: a command whose output fills the pipe blocks
             // until it is read, and a hung build hook that holds the output open -- or a process
             // it left running -- never gives the read an end. So a command out of time is killed
-            // first, and its output is waited for only briefly. Its output is bounded as a
-            // skill's is (see ProcessSandbox.limited): past the limit the command is killed.
+            // first, and its output is waited for only briefly.
             var out = new ByteArrayOutputStream();
-            var overLimit = new AtomicBoolean(false);
             Thread drain = Thread.ofVirtual().start(() -> {
-                try (var in = ProcessSandbox.limited(p.getInputStream(), p, overLimit)) {
+                try (var in = p.getInputStream()) {
                     in.transferTo(out);
                 } catch (IOException ignored) {
                     // what was read before is kept
@@ -843,10 +915,6 @@ public class PythonEnvironmentService {
             }
             drain.join(Duration.ofSeconds(5));
             String output = out.toString(StandardCharsets.UTF_8);
-            if (overLimit.get()) {
-                return new ProcessResult(-1, "(killed: output past the " + (ProcessSandbox.OUTPUT_LIMIT >> 20)
-                        + " MB limit)\n" + output);
-            }
             if (!ok) return new ProcessResult(-1, output + "\n(timeout)");
             return new ProcessResult(p.exitValue(), output);
         } finally {

@@ -51,7 +51,7 @@ class LocalFirstUnattendedTest {
 
     private static ThinkingEngine engine() {
         ToolRegistry registry = new ToolRegistry(REGISTRY);
-        return new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
     }
 
     private static AgentContext unattended() {
@@ -116,10 +116,11 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("under localFirst the prompt does not offer a skill the tools array withholds")
     void promptDoesNotContradictTheToolsArray() {
-        var mode = new ThinkingEngine.StepMode(true, true);
+        var mode = new ThinkingEngine.StepMode(true, true, false);
         var engine = engine();
-        String text = prompt(engine, unattended(), mode);
-        String delegateSpec = engine.toolsFor(unattended(), mode).stream()
+        var ctx = unattended();
+        String text = prompt(engine, ctx, mode);   // as on every step: the messages, then the tools
+        String delegateSpec = engine.toolsFor(ctx, mode).stream()
                 .filter(s -> "delegate".equals(s.name())).map(ToolSpec::description)
                 .findFirst().orElse("");
 
@@ -127,24 +128,17 @@ class LocalFirstUnattendedTest {
                 "the actionable manifest is what tells the model it can call these");
         assertTrue(text.contains("delegate"), "it has to be told how the work gets done");
 
-        // The catalogue lives in ONE place. With a tools array it is delegate's description,
-        // which sits inside the cache prefix; rendering it into the newest user message as well
-        // paid for it twice a step, and forced the canary to reason about the same bytes
-        // appearing in two parts at once — which is how a leak got in.
+        // The skills it is told of are named in ONE place: delegate's description, a tool part
+        // inside the cache prefix -- the task's likeliest (this request names the digest) and the
+        // owner's usual ones. Rendering them into the newest user message as well paid for them
+        // twice a step, and forced the canary to reason about the same bytes appearing in two
+        // parts at once -- which is how a leak got in.
         assertTrue(delegateSpec.contains("daily_news_digest"),
                 "it must still know the skill exists, or it will rebuild it with skill_create");
-        assertTrue(delegateSpec.contains("cannot run skills yourself"),
+        assertTrue(delegateSpec.contains("you are not given the skills to run yourself"),
                 "knowing a skill exists and being able to call it are different things");
-        assertFalse(text.contains("## Skills on this machine"),
+        assertFalse(text.contains("Fetch and format a news digest."),
                 "and not a second copy in the message: " + text);
-
-        // Without an array there is no other copy, so the message carries it.
-        // StepMode is (nativeTools, localFirst) — the text protocol, still local-first.
-        String textNoTools = prompt(engine, unattended(), new ThinkingEngine.StepMode(false, true));
-        assertTrue(textNoTools.contains("## Skills on this machine"),
-                "on the text protocol the message is the only place it can be");
-        assertTrue(textNoTools.contains("Fetch and format a news digest."),
-                "and it carries the descriptions, not just the names");
     }
 
     @Test
@@ -156,7 +150,7 @@ class LocalFirstUnattendedTest {
         // second time, the very skills the array withholds advertised as callable, and the
         // "Output: {reasoning, tool, params}" instruction the array exists to replace. The
         // duplicate is what kept the deadlock alive there after it was fixed for Anthropic.
-        var mode = new ThinkingEngine.StepMode(true, true);
+        var mode = new ThinkingEngine.StepMode(true, true, false);
         var engine = engine();
         var first = unattended();
         String step0 = promptFor(engine, first, mode, "openai");
@@ -164,19 +158,18 @@ class LocalFirstUnattendedTest {
         var later = unattended();
         later.trajectory().record(new AgentAction("delegate", Map.of("goal", "fetch"), "go"),
                 AgentObservation.success("delegate", "done", Map.of(), 10));
-        String step1 = promptFor(engine, later, mode, "openai");   // the compact prompt
+        String step1 = promptFor(engine, later, mode, "openai");   // a later step, same prompt
 
         for (String text : List.of(step0, step1)) {
             assertFalse(text.contains("Fetch and format a news digest."),
                     "the catalogue lives in delegate's description; a second copy here is what "
                             + "the canary refused a run over: " + text);
-            assertFalse(text.contains("## Available Tools"), text);
             assertFalse(text.contains("## Tools"), text);
             assertFalse(text.contains("## Actions"), text);
             assertFalse(text.contains("Output: {\"reasoning\""),
                     "the instruction to use the protocol the tools array replaces: " + text);
         }
-        String spec = engine.toolsFor(unattended(), mode).stream()
+        String spec = engine.toolsFor(first, mode).stream()
                 .filter(t -> "delegate".equals(t.name())).map(ToolSpec::description)
                 .findFirst().orElse("");
         assertTrue(spec.contains("Fetch and format a news digest."),
@@ -184,15 +177,15 @@ class LocalFirstUnattendedTest {
 
         // Without native tools the prompt is the only place any of it can be.
         String textProtocol = promptFor(engine, unattended(),
-                new ThinkingEngine.StepMode(false, false), "openai");
-        assertTrue(textProtocol.contains("## Available Tools"), textProtocol);
+                new ThinkingEngine.StepMode(false, false, false), "openai");
+        assertTrue(textProtocol.contains("## Tools"), textProtocol);
         assertTrue(textProtocol.contains("Fetch and format a news digest."));
     }
 
     @Test
     @DisplayName("native tools: the JSON envelope is not taught alongside a tools array")
     void nativeToolsDoNotTeachTheTextEnvelope() {
-        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(true, false));
+        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(true, false, false));
         assertFalse(text.contains("Single JSON:"),
                 "this instruction IS the escape hatch: a model told to emit {tool, params} as "
                         + "text will, and the parser accepts it, and the loop runs it");
@@ -204,7 +197,7 @@ class LocalFirstUnattendedTest {
     @Test
     @DisplayName("the text protocol still gets the full prose prompt")
     void textProtocolIsUnchanged() {
-        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(false, false));
+        String text = prompt(engine(), unattended(), new ThinkingEngine.StepMode(false, false, false));
         assertTrue(text.contains("Single JSON:"), "without a tools array, prose is the protocol");
         assertTrue(text.contains("## Actions"));
         assertTrue(text.contains("## Tools"));

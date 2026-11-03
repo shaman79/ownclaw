@@ -25,15 +25,21 @@ public class SettingsController {
     private final LlmRouter llmRouter;
     private final AuthService authService;
     private final com.ownclaw.llm.LocalModelCheck localModelCheck;
+    private final com.ownclaw.config.LocalMode localMode;
+    private final com.ownclaw.config.ThinkingEffort thinkingEffort;
 
     public SettingsController(SetupWizardService setupWizard, OwnClawConfig config,
                               LlmRouter llmRouter, AuthService authService,
-                              com.ownclaw.llm.LocalModelCheck localModelCheck) {
+                              com.ownclaw.llm.LocalModelCheck localModelCheck,
+                              com.ownclaw.config.LocalMode localMode,
+                              com.ownclaw.config.ThinkingEffort thinkingEffort) {
         this.setupWizard = setupWizard;
         this.config = config;
         this.llmRouter = llmRouter;
         this.authService = authService;
         this.localModelCheck = localModelCheck;
+        this.localMode = localMode;
+        this.thinkingEffort = thinkingEffort;
     }
 
     /**
@@ -52,6 +58,9 @@ public class SettingsController {
         var result = new HashMap<String, Object>();
 
         // Cloud LLM
+        result.put("local_only", localMode.on());
+        result.put("prefer_cost", localMode.preferCost());
+        result.put("thinking_effort", thinkingEffort.level());
         result.put("cloud_provider", config.getMentor().getProvider());
         result.put("openai_api_key", maskKey(config.getMentor().getApiKey()));
         result.put("openai_api_key_set", config.getMentor().getApiKey() != null && !config.getMentor().getApiKey().isBlank());
@@ -101,6 +110,9 @@ public class SettingsController {
             if (value == null) continue;
 
             switch (key) {
+                case "local_only" -> localMode.set(Boolean.parseBoolean(value.strip()));
+                case "prefer_cost" -> localMode.setPreferCost(Boolean.parseBoolean(value.strip()));
+                case "thinking_effort" -> thinkingEffort.set(value.strip().toLowerCase());
                 case "cloud_provider" -> {
                     String provider = value.strip().toLowerCase();
                     if ("openai".equals(provider) || "anthropic".equals(provider)) {

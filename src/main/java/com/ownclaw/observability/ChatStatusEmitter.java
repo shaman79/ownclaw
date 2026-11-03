@@ -1,12 +1,17 @@
 package com.ownclaw.observability;
 
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Emits structured status messages to user chat sessions.
@@ -32,6 +37,89 @@ public class ChatStatusEmitter {
      * the browser should report to Telegram too, not instead.
      */
     private final Map<String, Map<Object, Consumer<StatusMessage>>> listeners = new ConcurrentHashMap<>();
+
+    /**
+     * The key in a status's data that marks it as unattended work's -- a scheduled run, /bg --
+     * set to true. Such a status is about work nobody is waiting on in the chat on screen, so a
+     * page shows it only in the pinned chat of scheduled results, and never as the working state
+     * of the chat it has open. Unmarked, the steps of a morning run filled the activity strip of
+     * whatever chat was open, and started its spinner.
+     */
+    public static final String BACKGROUND = "background";
+
+    /**
+     * The key in a status's data naming the chat of the task it is about -- the chat it was asked
+     * in. Tasks of different chats run side by side, and a page shows a status in that chat only.
+     */
+    public static final String SESSION = "sessionId";
+
+    /** The ids of the unattended tasks running now: every status emitted for one is marked. */
+    private final Set<String> background = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Run an unattended task's work with every status emitted for its id marked
+     * {@link #BACKGROUND}, from its first step to its ending; the mark goes with the work, however
+     * the work ends.
+     */
+    public <T> T inBackground(String taskId, Supplier<T> work) {
+        background.add(taskId);
+        try {
+            return work.get();
+        } finally {
+            background.remove(taskId);
+        }
+    }
+
+    /**
+     * What a task running now is doing, for a page that connects while it runs ({@link #doing}):
+     * whose task it is, in which chat (null for none), what its model call under way looks like
+     * now (null while none is), and the step or progress status it emitted last.
+     */
+    private record Running(String userId, String sessionId, Supplier<StatusMessage> live,
+                           AtomicReference<StatusMessage> last) {}
+
+    /** The tasks running now, by id ({@link #running}). */
+    private final Map<String, Running> running = new ConcurrentHashMap<>();
+
+    /**
+     * A task has begun running: from now until {@link #ended}, its latest step or progress status
+     * is kept, and {@code live} is asked for the state of its model call under way, so a page that
+     * connects or opens a chat meanwhile is told at once what the task is doing ({@link #doing}).
+     * Statuses are otherwise live only: one sent while no page was connected is not sent again.
+     *
+     * Every status emitted for it meanwhile names its chat ({@link #SESSION}).
+     *
+     * @param sessionId the chat the task was asked in, or null for none
+     * @param live the task's model call under way, as a LIVE status, or null while none is
+     */
+    public void running(String userId, String taskId, String sessionId, Supplier<StatusMessage> live) {
+        running.put(taskId, new Running(userId, sessionId, live, new AtomicReference<>()));
+    }
+
+    /** The task has ended: nothing of it is kept for a page any more. */
+    public void ended(String taskId) {
+        running.remove(taskId);
+    }
+
+    /**
+     * What this user's attended task running now in this chat is doing: its model call under way
+     * as a LIVE status -- what the next live frame would say -- or, between calls, the step or
+     * progress status it emitted last; null when no such task is running or it has emitted none.
+     * Unattended work is nobody's working state ({@link #BACKGROUND}), so it is not asked about.
+     *
+     * @param sessionId the chat, or null for a task of any chat of the user's
+     */
+    public StatusMessage doing(String userId, String sessionId) {
+        for (var task : running.entrySet()) {
+            Running r = task.getValue();
+            if (!r.userId().equals(userId) || background.contains(task.getKey())) continue;
+            if (sessionId != null && !sessionId.equals(r.sessionId())) continue;
+            StatusMessage live = r.live().get();
+            // Scrubbed as it is shown: a value stored after the frame was kept is not in it.
+            return live != null ? live : scrubbed(userId, r.last().get());
+        }
+        return null;
+    }
 
     /**
      * Register a listener for a user's status messages.
@@ -64,6 +152,11 @@ public class ChatStatusEmitter {
      * should never be able to silence Telegram.
      */
     public void emit(String userId, StatusMessage message) {
+        deliver(userId, scrubbed(userId, message));
+    }
+
+    /** {@link #emit}, of a message already scrubbed. */
+    private void deliver(String userId, StatusMessage message) {
         Map<Object, Consumer<StatusMessage>> forUser = listeners.get(userId);
         if (forUser == null) return;
         for (Map.Entry<Object, Consumer<StatusMessage>> e : forUser.entrySet()) {
@@ -73,6 +166,18 @@ public class ChatStatusEmitter {
                 log.debug("Status listener {} failed for {}: {}", e.getKey(), userId, ex.toString());
             }
         }
+    }
+
+    /**
+     * The message with the user's secret vault values replaced, in its text and in every text of
+     * its data. A step's frame carries the tool's whole output and the whole prompt, the debug
+     * frames the raw model output, and the page keeps the last of them to show the next tab that
+     * opens: each of those held a password a skill had printed, as printed.
+     */
+    private static StatusMessage scrubbed(String userId, StatusMessage message) {
+        if (message == null || VaultSecrets.of(userId).isEmpty()) return message;
+        return new StatusMessage(message.type(), VaultSecrets.scrub(userId, message.text()),
+                VaultSecrets.scrubDeep(userId, message.data()), message.taskId());
     }
 
     /** Convenience overload — text only (no structured data). */
@@ -87,13 +192,31 @@ public class ChatStatusEmitter {
 
     /** Emit attributed to a specific task. Use this from anywhere inside a running task. */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text) {
-        emit(userId, new StatusMessage(type, text, null, taskId));
+        emitForTask(userId, taskId, type, text, null);
     }
 
-    /** Emit attributed to a specific task, with structured data. */
+    /**
+     * Emit attributed to a specific task, with structured data -- marked {@link #BACKGROUND} when
+     * that task is unattended work running now ({@link #inBackground}), and naming the chat of a
+     * task running now ({@link #SESSION}) unless it names one itself. A step or progress status
+     * of a task running now is kept as what it is doing ({@link #doing}).
+     */
     public void emitForTask(String userId, String taskId, StatusMessage.Type type, String text,
                             Map<String, Object> data) {
-        emit(userId, new StatusMessage(type, text, data, taskId));
+        Running task = taskId == null ? null : running.get(taskId);
+        boolean unattended = taskId != null && background.contains(taskId);
+        String chat = task == null ? null : task.sessionId();
+        if (unattended || chat != null && (data == null || data.get(SESSION) == null)) {
+            var marked = data == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(data);
+            if (unattended) marked.put(BACKGROUND, true);
+            if (chat != null && marked.get(SESSION) == null) marked.put(SESSION, chat);
+            data = marked;
+        }
+        var message = scrubbed(userId, new StatusMessage(type, text, data, taskId));
+        if (task != null && (type == StatusMessage.Type.STEP || type == StatusMessage.Type.PROGRESS)) {
+            task.last().set(message);
+        }
+        deliver(userId, message);
     }
 
     /**
@@ -135,7 +258,24 @@ public class ChatStatusEmitter {
              * as an ordinary assistant message rather than an entry in the activity strip. A
              * morning digest is not a status line.
              */
-            RESULT
+            RESULT,
+            /**
+             * A message in a running task's own chat about what it is doing -- a step, a tool
+             * call of the local model, the local model's summary of a private result -- saved
+             * there as a progress row ({@code TaskChat}). Shown in the chat, secondary to the
+             * answer, not in the activity strip; Telegram gets it for a task that came from
+             * Telegram. Carries the chat it was saved in, and the owner's text when only he may
+             * read it, as a result does.
+             */
+            PROGRESS_MESSAGE,
+            /**
+             * What a running task's model call is doing at this moment -- which model, what for,
+             * since when, how much it has written, the latest line of its reasoning -- sent as the
+             * call begins, every so often while it runs, and as it ends ({@code AgentLoop}). The
+             * page shows it in place of the one before; it is never saved, and never sent to
+             * Telegram. Its data's "live" is the call's state ({@code LiveCall#shown}).
+             */
+            LIVE
         }
 
         /** Format with icon prefix for display. */
@@ -155,6 +295,8 @@ public class ChatStatusEmitter {
                 case DEBUG      -> "\uD83D\uDC1B " + text;  // 🐛
                 case SCHEDULED  -> "\uD83D\uDD54 " + text;  // 🕔
                 case RESULT     -> text;                    // the answer, not a note about it
+                case PROGRESS_MESSAGE -> text;              // a message of its own, written whole
+                case LIVE       -> text;                    // opens with the model's own chip
             };
         }
     }

@@ -1,24 +1,28 @@
 package com.ownclaw.llm;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ownclaw.config.OwnClawConfig;
 import okhttp3.*;
+import okio.BufferedSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Ollama REST API provider for local LLM inference (Executor + SkillRunner).
  * <p>
- * API: POST {url}/api/chat with {"model", "messages", "stream": false, "options": {"temperature"}}
+ * API: POST {url}/api/chat with {"model", "messages", "stream": true, "options": {"temperature",
+ * "num_ctx"}, "truncate": false, "shift": false}. The reply streams back as one JSON object per
+ * line, the last one with {@code "done": true} and the counters.
  */
 @Component
 public class OllamaProvider implements LlmProvider {
@@ -31,33 +35,174 @@ public class OllamaProvider implements LlmProvider {
     private final OkHttpClient httpClient;
     private final LocalModelCheck localModelCheck;
 
+    @Autowired
     public OllamaProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper,
                           @org.springframework.context.annotation.Lazy LocalModelCheck localModelCheck) {
+        this(ownClawConfig, mapper, localModelCheck, new OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                // The reply is streamed, so this bounds the silence between two lines, and the
+                // longest silence comes before the first: Ollama writes nothing, not even its
+                // headers, until it has loaded the model and read the whole prompt. Measured on
+                // the production host on 2026-09-30, a cold load takes about 3 minutes and the
+                // prompt is read at about 100 tokens a second with the model's 262,144-token
+                // window, so a prompt that fills the window is some 47 minutes of silence. An hour
+                // covers that; only a server that has stopped answering is silent for longer.
+                // A caller need not wait it out: the call's cancel is handed to its progress
+                // hook (LlmProgress#calling), so a Stop ends it at once. A task's stall watchdog
+                // does not count the silence: this timeout is what bounds it
+                // (AgentContext#msSinceLastProgress).
+                .readTimeout(60, TimeUnit.MINUTES)
+                .writeTimeout(10, TimeUnit.SECONDS)
+                .build());
+    }
+
+    /** With the HTTP client given, so a test can answer the calls itself. */
+    OllamaProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper, LocalModelCheck localModelCheck,
+                   OkHttpClient httpClient) {
         this.localModelCheck = localModelCheck;
         this.config = ownClawConfig.getExecutor();
         this.mapper = mapper;
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(600, TimeUnit.SECONDS)  // local inference is slow, especially for code generation
-                .writeTimeout(10, TimeUnit.SECONDS)
+        this.httpClient = httpClient;
+    }
+
+    /**
+     * An Ollama server's URL as the API is addressed from it: surrounding whitespace, trailing
+     * slashes and an OpenAI-style "/v1" suffix dropped, because the native API lives at the root.
+     * The one rule for it -- this provider, the startup check, the ops probe and the setup wizard
+     * all address Ollama through here, so a URL that works for one of them works for all of them.
+     */
+    public static String baseUrl(String url) {
+        String base = url == null ? "" : url.strip().replaceAll("/+$", "");
+        return base.endsWith("/v1") ? base.substring(0, base.length() - 3).replaceAll("/+$", "") : base;
+    }
+
+    /** The URL of the Ollama endpoint {@code path} ("/api/chat", "/api/show", ...) at {@code url}. */
+    public static String endpoint(String url, String path) {
+        return baseUrl(url) + path;
+    }
+
+    /**
+     * One {@code POST /api/chat}, streamed and read to its last line. Every /api/chat this
+     * application sends goes through here -- this provider's, the ops probe's and the /setup
+     * speed sample's -- so every one streams, carries the same context settings, and is read and
+     * reported the same way.
+     * <p>
+     * num_ctx is the model's own context length ({@link LocalModelCheck#contextLength}), and it
+     * and shift are the same in every request because a request whose num_ctx or shift differs
+     * from the loaded model's makes Ollama load the model again, which takes minutes on this
+     * host. truncate and shift are off: left on, Ollama silently drops the oldest messages of a
+     * prompt that does not fit, and silently slides the window during a reply that fills it.
+     * Off, the first is an error and the second a reply that ends with done_reason "length" --
+     * both reported as the context window they are. Nothing here sets num_predict: the model
+     * writes until it stops or its window is full.
+     * <p>
+     * The progress hook hears every line, and what each line carried ({@link LlmProgress#received}),
+     * and whatever it throws leaves through here untouched, closing the stream.
+     *
+     * @param http          the client, whose read timeout bounds the silence between two lines
+     * @param body          the request; its stream, truncate, shift and num_ctx are set here
+     * @param contextLength the model's own context window
+     * @return the last line ({@code "done": true}), with its {@code message} holding what every
+     *         line carried: all of the content, all of the thinking and every tool call
+     * @throws OutputTruncated when Ollama says the prompt is longer than the window
+     * @throws LlmException    for any other error Ollama reports, a line that is not JSON, a
+     *                         connection that fails, or a stream that ends before its last line
+     */
+    public static JsonNode streamChat(OkHttpClient http, String baseUrl, ObjectNode body,
+                                      int contextLength, LlmProgress progress, ObjectMapper mapper) {
+        body.put("stream", true);
+        body.put("truncate", false);
+        body.put("shift", false);
+        ObjectNode options = body.has("options") ? (ObjectNode) body.get("options") : body.putObject("options");
+        options.put("num_ctx", contextLength);
+
+        Request request = new Request.Builder()
+                .url(endpoint(baseUrl, "/api/chat"))
+                .post(RequestBody.create(body.toString(), JSON))
                 .build();
+        return StreamedCall.send(http, request, "ollama", progress, response -> {
+            ResponseBody responseBody = response.body();
+            if (!response.isSuccessful()) {
+                String error = responseBody != null ? responseBody.string() : "";
+                throw failure("HTTP " + response.code() + ": " + error, response.code(), contextLength);
+            }
+            if (responseBody == null) {
+                throw new LlmException("ollama", "HTTP " + response.code() + " with no body", 0, null);
+            }
+            return read(responseBody.source(), contextLength, progress, mapper);
+        });
+    }
+
+    /** The reply, line by line, until the one with {@code "done": true}. */
+    private static JsonNode read(BufferedSource source, int contextLength, LlmProgress progress,
+                                 ObjectMapper mapper) throws IOException {
+        var content = new StringBuilder();
+        var thinking = new StringBuilder();
+        ArrayNode toolCalls = mapper.createArrayNode();
+        String line;
+        while ((line = source.readUtf8Line()) != null) {
+            if (line.isBlank()) continue;
+            progress.onProgress();
+            JsonNode chunk = StreamedReply.parse("ollama", mapper, line);
+            if (chunk.hasNonNull("error")) {
+                throw failure("the reply stream reported: " + chunk.path("error").asText(), 0, contextLength);
+            }
+            JsonNode message = chunk.path("message");
+            // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
+            // separate field before writing the answer to content. It is not part of the answer.
+            String reasoning = message.path("thinking").asText("");
+            String said = message.path("content").asText("");
+            thinking.append(reasoning);
+            content.append(said);
+            if (!reasoning.isEmpty()) progress.received(LlmProgress.Part.REASONING, reasoning);
+            if (!said.isEmpty()) progress.received(LlmProgress.Part.ANSWER, said);
+            for (JsonNode call : message.path("tool_calls")) {
+                toolCalls.add(call);
+                // Ollama sends each call whole: its name, then all of its arguments at once.
+                progress.received(LlmProgress.Part.CALL, call.path("function").path("name").asText(""));
+                progress.received(LlmProgress.Part.ARGUMENTS, call.path("function").path("arguments").toString());
+            }
+            if (!chunk.path("done").asBoolean(false)) continue;
+
+            ObjectNode last = chunk.deepCopy();
+            ObjectNode whole = last.putObject("message");
+            whole.put("role", "assistant");
+            whole.put("content", content.toString());
+            whole.put("thinking", thinking.toString());
+            whole.set("tool_calls", toolCalls);
+            return last;
+        }
+        throw new LlmException("ollama",
+                "the reply stream ended before its last line (\"done\": true), so the reply is incomplete", 0, null);
+    }
+
+    /**
+     * An error Ollama reported. A prompt longer than num_ctx -- which truncate:false makes an
+     * error instead of silently dropped messages -- is reported as the context window it is.
+     */
+    private static LlmException failure(String message, int status, int contextLength) {
+        String m = message.toLowerCase(Locale.ROOT);
+        if (m.contains("exceed_context_size") || m.contains("exceeds the available context size")
+                || m.contains("exceeds the context length")) {
+            return new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, contextLength, null);
+        }
+        return new LlmException("ollama", message, status, null);
     }
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
         String model = reqConfig.model() != null ? reqConfig.model() : config.getModel();
-        double temperature = reqConfig.temperature() != null ? reqConfig.temperature() : config.getTemperature();
+        int contextLength = localModelCheck.contextLength(model);
 
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
-        body.put("stream", false);
 
         // Keep the model resident between calls.
         //
         // Nothing here set keep_alive, so every request inherited whatever the server default
         // happened to be. Ollama's own default is five minutes, and this deployment makes
-        // local calls in bursts separated by much longer gaps -- a scheduled summary, then
-        // nothing for an hour -- so the model was liable to be evicted between them. Reloading
+        // local calls in bursts separated by much longer gaps -- a scheduled run's delegations,
+        // then nothing for an hour -- so the model was liable to be evicted between them. Reloading
         // it costs 35-119 seconds measured on this hardware, which is longer than most of the
         // calls themselves.
         //
@@ -81,18 +226,21 @@ public class OllamaProvider implements LlmProvider {
             body.put("format", "json");
         }
 
-        ObjectNode options = body.putObject("options");
-        options.put("temperature", temperature);
-        if (config.getContextWindow() > 0) {
-            options.put("num_ctx", config.getContextWindow());
-        }
-        if (reqConfig.maxTokens() != null) {
-            options.put("num_predict", reqConfig.maxTokens());
-        }
+        // Only ever "false": a model without a thinking mode takes no "think": true, and leaving it
+        // out keeps the model's own default (Qwen3.6 reasons first). Asked for by the call, or by
+        // the owner's thinking effort at low.
+        boolean thinks = !(reqConfig.withoutThinking() || "low".equals(reqConfig.effort()));
+        if (!thinks) body.put("think", false);
+
+        // How the model chooses each next piece of the reply: the settings for a reply it reasons
+        // on, or for one it gives straight away (OwnClawConfig.Executor), whole. A request's own
+        // temperature is not sent: the callers that set one chose it for the cloud models, and at
+        // 0.3, without a presence penalty, this model reasoned itself into a loop.
+        (thinks ? config.getThinking() : config.getAnswering()).into(body.putObject("options"));
 
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
-            for (ToolSpec spec : reqConfig.tools()) {
+            for (ToolSpec spec : ToolSpec.offered(reqConfig.tools(), messages)) {
                 ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
                 fn.put("name", spec.name());
                 fn.put("description", spec.description() == null ? "" : spec.description());
@@ -102,107 +250,70 @@ public class OllamaProvider implements LlmProvider {
 
         ArrayNode msgs = body.putArray("messages");
         for (LlmMessage msg : messages) {
+            if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the array
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
             m.put("content", msg.content());
         }
 
-        String url = config.getUrl().replaceAll("/+$", "") + "/api/chat";
-        Request request = new Request.Builder()
-                .url(url)
-                .post(RequestBody.create(body.toString(), JSON))
-                .build();
-
-        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errBody = response.body() != null ? response.body().string() : "";
-                throw new LlmException("ollama", "HTTP " + response.code() + ": " + errBody,
-                        response.code(), null);
-            }
-
-            JsonNode json = mapper.readTree(response.body().string());
-            String content = json.path("message").path("content").asText("");
-            // Thinking models (Ollama reports a "thinking" capability) put their reasoning in a
-            // separate field and only then write the answer to content. Thinking is left ENABLED
-            // deliberately — it is what makes a small local model usable on real work — but the
-            // reasoning consumes the num_predict budget, so a budget that is too small ends the
-            // turn mid-thought with an empty content. Reading only content made that look like a
-            // successful empty reply, which downstream became "unparseable output" and a retry.
-            String thinking = json.path("message").path("thinking").asText("");
-            String doneReason = json.path("done_reason").asText("");
-            int promptTokens = json.path("prompt_eval_count").asInt(0);
-            int completionTokens = json.path("eval_count").asInt(0);
-            long promptDurationNs = json.path("prompt_eval_duration").asLong(0);
-            long evalDurationNs = json.path("eval_duration").asLong(0);
-
-            if (completionTokens > 0 && evalDurationNs > 0) {
-                double tps = completionTokens / (evalDurationNs / 1_000_000_000.0);
-                if (promptTokens > 0 && promptDurationNs > 0) {
-                    double ptps = promptTokens / (promptDurationNs / 1_000_000_000.0);
-                    log.debug("Ollama [{}]: {} prompt ({} tok/s) + {} completion ({} tok/s)",
-                            model,
-                            promptTokens,
-                            String.format(java.util.Locale.US, "%.1f", ptps),
-                            completionTokens,
-                            String.format(java.util.Locale.US, "%.1f", tps));
-                } else {
-                    log.debug("Ollama [{}]: {} prompt + {} completion ({} tok/s)",
-                            model,
-                            promptTokens,
-                            completionTokens,
-                            String.format(java.util.Locale.US, "%.1f", tps));
-                }
-            } else {
-                log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
-            }
-            if (!thinking.isBlank()) {
-                log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinking.length());
-            }
-            // Ollama returns arguments as an object, like Anthropic and unlike OpenAI.
-            var toolCalls = new java.util.ArrayList<ToolCall>();
-            for (JsonNode tc : json.path("message").path("tool_calls")) {
-                java.util.Map<String, Object> args = mapper.convertValue(
-                        tc.path("function").path("arguments"),
-                        new TypeReference<java.util.Map<String, Object>>() {});
-                toolCalls.add(new ToolCall(tc.path("id").asText(null),
-                        tc.path("function").path("name").asText(null),
-                        args == null ? java.util.Map.of() : args));
-            }
-
-            // A tool call with no prose is a perfectly good reply; only an empty answer with
-            // no tool call means the budget went entirely on reasoning.
-            if (content.isBlank() && !thinking.isBlank() && toolCalls.isEmpty()) {
-                // Fail loudly instead of returning "" — the caller can raise the budget, whereas
-                // an empty string just becomes a mystery parse failure several layers away.
-                throw new LlmException("ollama",
-                        "Model '" + model + "' used its whole output budget on reasoning and never "
-                                + "produced an answer (" + completionTokens + " tokens generated, done_reason="
-                                + doneReason + ", " + thinking.length() + " chars of thinking). Raise "
-                                + "max_tokens for this call, or use a model that reasons more briefly.",
-                        0, null);
-            }
-            if ("length".equals(doneReason)) {
-                log.warn("Ollama [{}]: output truncated at the token limit ({} tokens) — the answer is "
-                        + "incomplete", model, completionTokens);
-            }
-
-            return new LlmResponse(content, promptTokens, completionTokens, 0, 0,
-                    json.path("done_reason").asText(null), toolCalls);
-
-        } catch (IOException e) {
-            throw new LlmException("ollama", "Connection failed: " + e.getMessage(), 0, e);
-        }
+        JsonNode last = streamChat(httpClient, config.getUrl(), body, contextLength, reqConfig.progress(), mapper);
+        // The one check every reply passes before a caller sees it -- here, because local calls
+        // have no gateway to apply it.
+        return response(last, model, contextLength).requireComplete("ollama");
     }
 
+    /** The reply {@link #streamChat} read, as the response every provider gives. */
+    private LlmResponse response(JsonNode last, String model, int contextLength) {
+        var reply = new StreamedReply("ollama", mapper);
+        JsonNode message = last.path("message");
+        reply.text(message.path("content").asText(""));
+        // Ollama sends each tool call whole, its arguments an object -- like Anthropic's input
+        // and unlike OpenAI's string -- and they go through the same strict parse.
+        int index = 0;
+        for (JsonNode tc : message.path("tool_calls")) {
+            reply.call(index, tc.path("id").asText(null), tc.path("function").path("name").asText(null),
+                    tc.path("function").path("arguments").toString());
+            reply.close(index++);
+        }
+
+        int promptTokens = last.path("prompt_eval_count").asInt(0);
+        int completionTokens = last.path("eval_count").asInt(0);
+        long promptDurationNs = last.path("prompt_eval_duration").asLong(0);
+        long evalDurationNs = last.path("eval_duration").asLong(0);
+        if (completionTokens > 0 && evalDurationNs > 0) {
+            double tps = completionTokens / (evalDurationNs / 1_000_000_000.0);
+            if (promptTokens > 0 && promptDurationNs > 0) {
+                double ptps = promptTokens / (promptDurationNs / 1_000_000_000.0);
+                log.debug("Ollama [{}]: {} prompt ({} tok/s) + {} completion ({} tok/s)",
+                        model, promptTokens, String.format(Locale.US, "%.1f", ptps),
+                        completionTokens, String.format(Locale.US, "%.1f", tps));
+            } else {
+                log.debug("Ollama [{}]: {} prompt + {} completion ({} tok/s)",
+                        model, promptTokens, completionTokens, String.format(Locale.US, "%.1f", tps));
+            }
+        } else {
+            log.debug("Ollama [{}]: {} prompt + {} completion tokens", model, promptTokens, completionTokens);
+        }
+        int thinkingChars = message.path("thinking").asText("").length();
+        if (thinkingChars > 0) {
+            log.debug("Ollama [{}]: {} thinking chars before the answer", model, thinkingChars);
+        }
+        // No output limit was sent, so a "length" here is the context window filling up.
+        return reply.response(List.of(new LlmResponse.Usage(model, promptTokens, completionTokens, 0, 0)),
+                last.path("done_reason").asText(null), null, model, null, contextLength);
+    }
+
+    /**
+     * Whether the server answers, asked by the startup check ({@link LocalModelCheck#reachable})
+     * rather than with this provider's client. That client waits up to an hour for a reply's
+     * first line, which a streamed chat needs and a probe does not: no hook holds the probe's
+     * cancel, and a delegation and every task with a file ask it first, on the task's thread --
+     * so a server that accepts the connection and never answers costs them the check's seconds,
+     * not that hour.
+     */
     @Override
     public boolean isAvailable() {
-        String url = config.getUrl().replaceAll("/+$", "") + "/api/tags";
-        Request request = new Request.Builder().url(url).get().build();
-        try (Response response = httpClient.newCall(request).execute()) {
-            return response.isSuccessful();
-        } catch (IOException e) {
-            return false;
-        }
+        return localModelCheck.reachable();
     }
 
     /**
@@ -223,18 +334,4 @@ public class OllamaProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getModel(); }
-
-    /**
-     * Return an OkHttpClient with the read timeout from reqConfig (if set),
-     * otherwise use the default httpClient. Uses newBuilder() so the
-     * connection pool and dispatcher are shared.
-     */
-    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
-        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
-            return httpClient.newBuilder()
-                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
-                    .build();
-        }
-        return httpClient;
-    }
 }

@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OwnClaw</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"
-            integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="/vendor/marked-12.0.1.min.js"
+            integrity="sha384-3zf4Pen4fXU90jGg3cxmo7BF4dq8HMtF2s07c/Hhd1Fh+Encm6ApPvNm8vrMJbWu"></script>
     <style>
         /*  Design tokens  */
         :root {
@@ -263,7 +263,6 @@
             padding: 24px 20px 16px;
             display: flex;
             flex-direction: column;
-            gap: 2px;
             scroll-behavior: smooth;
         }
         #messages::-webkit-scrollbar { width: 5px }
@@ -292,18 +291,30 @@
             word-break: break-word;
         }
 
-        /* Group spacing — extra gap before a new sender */
-        .msg.first-in-run { margin-top: 20px }
-        .msg:first-child  { margin-top: 0 }
+        /* The rhythm of a chat: the rows of one side close together, more room where the speaker
+           changes -- the owner's messages on one side; answers, a task's steps and notes and system
+           lines on the other. */
+        .msg + .msg { margin-top: 8px }
+        .msg.user + .msg:not(.user), .msg:not(.user) + .msg.user { margin-top: 24px }
+
+        /* Every row's content, with its meta line (.msg-meta) under it. */
+        .msg-main {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
 
         /* ───── User message ───── */
         .msg.user {
             display: flex;
             justify-content: flex-end;
-            padding: 2px 0;
+        }
+        .msg.user .msg-main {
+            max-width: 72%;
+            align-items: flex-end;
         }
         .msg.user .bubble {
-            max-width: 72%;
+            max-width: 100%;
             background: var(--user-hi);
             color: #fff;
             padding: 10px 16px;
@@ -319,6 +330,15 @@
         .msg.user:not(.first-in-run) .bubble {
             border-radius: var(--r-md) 6px 4px var(--r-md);
         }
+        /* What became of a message sent while a task ran: handed to it, read by it, or queued. */
+        .msg.user .msg-fate {
+            display: block;
+            margin-top: 4px;
+            font-size: 11.5px;
+            line-height: 1.4;
+            opacity: .8;
+            white-space: normal;
+        }
 
         /* ───── AI / assistant message ───── */
         .msg.response,
@@ -329,7 +349,6 @@
             display: flex;
             gap: 12px;
             align-items: flex-start;
-            padding: 2px 0;
         }
 
         .msg-avatar {
@@ -339,21 +358,21 @@
             display: flex; align-items: center; justify-content: center;
             font-size: 14px;
             flex-shrink: 0;
-            margin-top: 4px;
+            margin-top: 2px;
             box-shadow: 0 2px 8px var(--accent-glow);
             user-select: none;
         }
         .msg:not(.first-in-run) .msg-avatar { visibility: hidden }
+        .msg-avatar + .msg-main { flex: 1 }
 
         .msg-body {
-            flex: 1;
             min-width: 0;
             background: var(--bg-elevated);
             border: 1px solid var(--border);
             border-radius: 4px var(--r-md) var(--r-md) var(--r-md);
-            padding: 12px 16px;
+            padding: 11px 16px;
             font-size: 14.5px;
-            line-height: 1.7;
+            line-height: 1.65;
             color: var(--text-1);
         }
         /* Consecutive AI messages: soften top-left corner */
@@ -401,30 +420,82 @@
         .msg.debug .msg-body::-webkit-scrollbar { width: 4px }
         .msg.debug .msg-body::-webkit-scrollbar-thumb { background: rgba(251,191,36,.2); border-radius: 4px }
 
-        /* ───── System messages ───── */
-        /* Short: centred pill.  Long (contains newline or >80 chars): card. */
-        .msg.system {
-            align-self: center;
-            text-align: left;
-            font-size: 13px;
-            color: var(--text-2);
-            padding: 10px 16px;
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: var(--r-md);
-            margin: 10px auto;
-            max-width: 620px;
-            line-height: 1.65;
-        }
-        /* Truly short system messages get the pill look */
-        .msg.system.short {
-            text-align: center;
-            padding: 6px 16px;
-            border-radius: 100px;
-            max-width: 480px;
+        /* ───── Secondary rows: system lines, a task's steps and its notes ───── */
+        /* One family, quieter than an answer: in the assistant's content column, where an answer's
+           bubble starts -- the 42px are the avatar's 30 and the 12 beside it -- behind a thin rule
+           that holds the row's meta line too. As wide as the column, no wider: a phone never
+           scrolls sideways, and the time stays on screen. */
+        .msg.system,
+        .msg.progress {
+            padding-left: 42px;
             font-size: 12.5px;
+            line-height: 1.55;
             color: var(--text-3);
         }
+        .msg.system > .msg-main,
+        .msg.progress > .msg-main {
+            border-left: 2px solid var(--border-mid);
+            padding: 2px 0 2px 12px;
+        }
+        /* A system line's words and a note's. */
+        .msg-text { color: var(--text-2) }
+        .msg.system p, .msg.progress p { margin: 0 }
+        .msg.system p + p, .msg.progress p + p { margin-top: 4px }
+        /* Code in a secondary row is as compact as the row. */
+        .msg.system .md pre, .msg.progress .md pre { padding: 8px 12px; margin: 6px 0 }
+        /* A step's header: a chip for who acts, where the task stands, then when it was saved. */
+        .progress-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-right: 6px;
+            padding: 0 7px;
+            border-radius: 100px;
+            font-size: 11px;
+            line-height: 18px;
+            border: 1px solid var(--border-mid);
+        }
+        .progress-chip.cloud { color: var(--accent-hi); background: var(--accent-glow) }
+        .progress-chip.local { color: var(--green); background: var(--green-dim) }
+        .progress-what { color: var(--text-2) }
+        .progress-body { margin-top: 2px; min-width: 0 }
+        .progress-body pre { max-width: 100%; overflow-x: auto }
+        /* No margin of the markdown's above a row's first block or below its last: the bubble's
+           padding, or the rule's, is the room. */
+        .msg-body > :first-child, .msg-text > :first-child, .progress-body > :first-child { margin-top: 0 }
+        .msg-body > :last-child, .msg-text > :last-child, .progress-body > :last-child { margin-bottom: 0 }
+        .code-block-wrap:first-child > pre { margin-top: 0 }
+        .code-block-wrap:last-child > pre { margin-bottom: 0 }
+
+        /* ───── A row's meta line ───── */
+        /* Under the row's content, at the row's own edge -- under the owner's bubble at its right, on
+           the assistant's side at the content column's left: when the row was saved, and under an
+           answer of a task, what that task did. A step says when it was saved in its header. */
+        .msg-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0 6px;
+            margin-top: 4px;
+            font-size: 11px;
+            line-height: 16px;
+            color: var(--text-3);
+        }
+        .msg.system .msg-meta, .msg.progress .msg-meta { margin-top: 1px }
+        .msg-meta > .msg-time:not(:last-child)::after { content: '\00B7'; margin-left: 6px }
+
+        /* ───── When a row was saved ───── */
+        /* Small and muted, the whole date and time in its tooltip: first in a row's meta line, and
+           the last item of a step's header, after a dot as the header's own items are. */
+        .msg-time {
+            font-size: 11px;
+            line-height: 16px;
+            color: var(--text-3);
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+            user-select: none;
+        }
+        .progress-head > .msg-time::before { content: ' \00B7\00A0' }
 
         /*  Connection banner  */
         #conn-banner {
@@ -456,6 +527,7 @@
             background: rgba(13,15,20,.9);
             backdrop-filter: blur(12px);
             padding: 0 20px;
+            border-top: 1px solid var(--border);
         }
         #activity {
             max-width: 780px;
@@ -518,6 +590,22 @@
         }
         .activity-toggle.open { transform: rotate(180deg) }
 
+        /* The latest line of a model's reasoning while its call runs, under the label that says
+           which model, what for and how far: whole, and scrolled within when it is long. */
+        #activity-live {
+            display: none;
+            margin: -4px 14px 8px 39px;
+            font-size: 12px;
+            font-style: italic;
+            color: var(--text-3);
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 6em;
+            overflow-y: auto;
+        }
+        #activity-live.visible { display: block }
+
         #activity-steps {
             display: none;
             border-top: 1px solid var(--border);
@@ -529,11 +617,13 @@
         #activity-steps::-webkit-scrollbar { width: 3px }
         #activity-steps::-webkit-scrollbar-thumb { background: var(--surface); border-radius: 3px }
 
+        /* A step's dot under the spinner's centre, its words under the label's: the 19px and the
+           15 beside the dot come to the spinner's 14, its 15 and the 10 beside it. */
         .activity-step {
             display: flex;
             align-items: flex-start;
-            gap: 10px;
-            padding: 4px 14px;
+            gap: 15px;
+            padding: 4px 14px 4px 19px;
             font-size: 12px;
             color: var(--text-3);
             line-height: 1.5;
@@ -555,8 +645,8 @@
         .step-expand.open { transform: rotate(180deg) }
         .step-detail {
             display: none;
-            width: 100%;
-            margin: 4px 0 2px 15px;
+            width: calc(100% - 20px);
+            margin: 4px 0 2px 20px;
             padding: 6px 10px;
             background: rgba(255,255,255,.02);
             border-left: 2px solid var(--border-mid);
@@ -584,19 +674,24 @@
         .activity-step.cat-observe .step-dot { background: #34d399 }
         .activity-step.cat-observe.step-fail .step-dot { background: #fca5a5 }
 
-        /* Stats bar in activity header */
+        /* The task's counters, under its steps: their words under the label's, as the steps' are. */
         #activity-stats {
             display: none;
             font-size: 10.5px;
             color: var(--text-3);
             gap: 10px;
-            padding: 2px 14px 6px;
+            padding: 4px 14px 8px 39px;
             font-variant-numeric: tabular-nums;
             letter-spacing: .02em;
             border-top: 1px solid rgba(255,255,255,.04);
         }
         #activity-stats.visible { display: flex }
+        /* The cloud's item is long -- its cost, then its tokens kind by kind -- so the row wraps,
+           and the item wraps between its parts, never inside one. */
+        #activity-stats { flex-wrap: wrap; row-gap: 2px }
         .stat-item { white-space: nowrap }
+        .stat-item.stat-cloud { white-space: normal }
+        .cloud-part { white-space: nowrap }
         .stat-label { color: var(--text-3); opacity: .7 }
         .stat-value { color: var(--text-2); font-weight: 500 }
 
@@ -665,7 +760,12 @@
         .md h3 { font-size: 1.02em }
         .md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0 }
         .md table { border-collapse: collapse; margin: 8px 0; width: 100%; display: block; overflow-x: auto }
-        .md th, .md td { border: 1px solid rgba(255,255,255,.08); padding: 6px 12px; text-align: left; font-size: 13px }
+        /* A cell breaks between words only, as a page's table does: broken anywhere, as the rest of
+           a row is, a narrow screen squeezed "Router" into "Rout/er" rather than scroll the table. */
+        .md th, .md td { border: 1px solid rgba(255,255,255,.08); padding: 6px 12px; text-align: left; font-size: 13px;
+                         overflow-wrap: normal; word-break: normal }
+        /* What scrolls sideways inside a row does so on a thin, dark bar, not the system's white one. */
+        .md pre, .md table { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.14) transparent }
         .md th { background: rgba(255,255,255,.04); font-weight: 600; color: #fff }
         .md tr:nth-child(even) td { background: rgba(255,255,255,.02) }
         .md img { max-width: 100%; height: auto; border-radius: var(--r-sm); margin: 8px 0 }
@@ -711,6 +811,100 @@
         .code-block-wrap:hover .copy-btn { opacity: 1 }
         .copy-btn:hover { background: rgba(255,255,255,.12); color: var(--text-1) }
         .copy-btn.copied { color: var(--green); opacity: 1 }
+        /* A task step's code comes folded to one line -- its language, its size, its first line --
+           and opens on a click: the scripts of a long task filled the chat. Copy works folded. */
+        .code-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 6px 0;
+            padding: 3px 6px 3px 10px;
+            background: #0a0c12;
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+            min-width: 0;
+        }
+        .code-toggle {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--text-3);
+            font-size: 11.5px;
+            font-family: var(--font-mono);
+            text-align: left;
+            cursor: pointer;
+        }
+        .code-toggle:hover { color: var(--text-1) }
+        .code-toggle:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .code-first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2) }
+        .code-head > .copy-btn { position: static; opacity: 1; flex: none }
+        .code-block-wrap.folded > pre { display: none }
+        .code-block-wrap:not(.folded) .code-first { visibility: hidden }
+        .code-block-wrap:not(.folded) > .code-head {
+            margin-bottom: 0;
+            border-bottom: none;
+            border-radius: var(--r-sm) var(--r-sm) 0 0;
+        }
+        .code-head + pre { margin-top: 0 !important; border-radius: 0 0 var(--r-sm) var(--r-sm) }
+
+        /* A question's answers, under it: a click sends one as the owner's reply. Once answered,
+           they stay as a record of what was offered, the one picked marked. */
+        .msg-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px }
+        .choice-btn {
+            max-width: 100%;
+            padding: 6px 14px;
+            background: var(--accent-glow);
+            border: 1px solid rgba(91,95,199,.35);
+            border-radius: 18px;
+            color: var(--text-1);
+            font: inherit;
+            font-size: 13.5px;
+            text-align: left;
+            overflow-wrap: anywhere;
+            cursor: pointer;
+            transition: background .15s, border-color .15s;
+        }
+        .choice-btn:hover:not(:disabled) { background: rgba(91,95,199,.32); border-color: var(--accent-hi) }
+        .choice-btn:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .msg-choices.retired .choice-btn { cursor: default; opacity: .45; background: none }
+        .msg-choices.retired .choice-btn.picked { opacity: 1; border-color: var(--accent-hi); background: var(--accent-glow) }
+
+        /* A message a link put in the box: where it came from, and whether its signature holds. */
+        .link-banner {
+            max-width: 780px;
+            margin: 0 auto 8px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 10px;
+            padding: 7px 8px 7px 12px;
+            border: 1px solid rgba(251,191,36,.35);
+            border-radius: var(--r-sm);
+            background: rgba(251,191,36,.08);
+            color: #fcd34d;
+            font-size: 12.5px;
+            line-height: 1.45;
+        }
+        .link-banner[hidden] { display: none }
+        .link-banner.verified { border-color: rgba(52,211,153,.35); background: var(--green-dim); color: var(--green) }
+        .link-banner-text { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere }
+        .link-banner button {
+            padding: 3px 10px;
+            background: rgba(255,255,255,.06);
+            border: 1px solid rgba(255,255,255,.14);
+            border-radius: 6px;
+            color: var(--text-1);
+            font: inherit;
+            cursor: pointer;
+        }
+        .link-banner button:hover { background: rgba(255,255,255,.12) }
+        .link-banner button:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
+        .link-banner .link-close { padding: 0 8px; font-size: 15px; line-height: 22px; color: var(--text-3) }
 
         /*  Input area  */
         #input-area {
@@ -747,10 +941,15 @@
             font-size: 14.5px;
             font-family: var(--font);
             line-height: 1.55;
-            max-height: 160px;
+            /* Typing grows it to 160px (its input listener); a link's message, to its whole height. */
+            max-height: max(160px, 45vh);
             min-height: 48px;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,.14) transparent;
         }
-        #input::placeholder { color: var(--text-3) }
+        /* On one line, ending in "..." where the box is too narrow for it: on a phone, beside three
+           buttons, the steering placeholder ran on to a second line the box does not show. */
+        #input::placeholder { color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 
         #send {
             width: 36px; height: 36px;
@@ -768,13 +967,28 @@
         }
         #send:hover { background: var(--accent-hi); transform: scale(1.04) }
         #send:active { transform: scale(.96) }
-        #send:disabled {
-            background: var(--surface);
-            color: var(--text-3);
-            cursor: not-allowed;
-            transform: none;
-        }
         #send svg { width: 16px; height: 16px; fill: currentColor }
+
+        /* While a task runs: Send hands the message to it, Queue runs it as a task of its own after it. */
+        #queue {
+            height: 36px;
+            margin: 6px 8px 6px 0;
+            padding: 0 10px;
+            flex-shrink: 0;
+            background: var(--surface);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 12.5px;
+            font-family: var(--font);
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            transition: opacity .15s, transform .1s;
+        }
+        #queue.visible { display: flex; }
+        #queue:hover { opacity: .85; transform: scale(1.04) }
+        #queue:active { transform: scale(.96) }
 
         #stop {
             width: 36px; height: 36px;
@@ -795,6 +1009,28 @@
         #stop:hover { opacity: .85; transform: scale(1.04) }
         #stop:active { transform: scale(.96) }
         #stop svg { width: 12px; height: 12px; fill: currentColor }
+
+        /* What this chat runs on, under Send: sent with each message, and kept for the chat. */
+        .composer-options {
+            max-width: 780px;
+            margin: 6px auto 0;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 6px 14px;
+            font-size: 12px;
+            color: var(--text-3);
+        }
+        .composer-options label { display: inline-flex; align-items: center; gap: 6px }
+        .composer-options select {
+            padding: 3px 6px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--r-sm);
+            color: var(--text-1);
+            font-size: 12px;
+            font-family: var(--font);
+        }
 
         .input-hint {
             max-width: 780px;
@@ -1005,6 +1241,13 @@
             border: 1px solid rgba(91,95,199,.2);
         }
         .session-item:not(.active) { border: 1px solid transparent }
+        /* The pinned chat of scheduled results, listed first, and a chat with a result not yet opened. */
+        .session-item.pinned { margin-bottom: 8px }
+        .session-item.unread .session-title::before { content: '\25CF  '; color: var(--accent-hi) }
+        /* A chat with a task asked in it running or waiting: tasks of different chats run side by side. */
+        .session-item.working .session-meta::before {
+            content: 'Working'; color: var(--accent-hi); animation: pulse 1.6s ease-in-out infinite;
+        }
 
         .session-title {
             font-size: 13.5px;
@@ -1160,6 +1403,8 @@
             animation: spin .8s linear infinite;
             flex-shrink: 0;
         }
+        /* The line above a chat's drawn rows that stands for its earlier ones. */
+        .messages-loading.earlier { padding: 8px 16px }
 
         /*  Main chat column  */
         #chat-main {
@@ -1273,6 +1518,14 @@
             margin-top: 2px;
             text-transform: uppercase;
             letter-spacing: .04em;
+        }
+        /* The cloud card's tokens kind by kind, under its cost: wrapped between parts only. */
+        .task-stat-split {
+            font-size: 12px;
+            color: var(--text-2);
+            margin-top: 6px;
+            line-height: 1.5;
+            font-variant-numeric: tabular-nums;
         }
 
         /*  Active tasks section  */
@@ -1486,10 +1739,10 @@
         .task-detail .task-detail-value, .task-detail .task-run-desc { min-width: 0 }
         /* "Open steps and cloud calls" at the top of a scheduled run's details. */
         .task-run-details > .skill-back-btn { margin-bottom: 12px }
-        /* Under an answer in chat. A DOM button after the markdown, never a link inside it. */
+        /* In an answer's meta line, after its time: a DOM button, never a link inside the markdown.
+           Its padding, which its margin takes back from the line, is a finger's room on a phone. */
         .msg-trace-link {
-            display: block;
-            margin-top: 8px;
+            margin: -6px 0;
             padding: 6px 0;
             background: none;
             border: none;
@@ -2393,7 +2646,7 @@
         @media (max-width: 600px) {
             #messages { padding: 16px 10px 12px }
             #input-area { padding: 8px 10px 14px }
-            .msg.user .bubble { max-width: 88% }
+            .msg.user .msg-main { max-width: 88% }
             .msg-body { padding: 10px 12px }
             #header { padding: 0 12px }
             #sidebar { display: none }
@@ -2408,6 +2661,10 @@
                activity label to 64px across seven wrapped lines -- the one line that says what
                the agent is doing right now. The same numbers appear in #activity-stats. */
             #activity-tokens { display: none }
+            /* "Sign out" wrapped onto two lines and squeezed the icon buttons beside it: on a
+               phone the button is its icon, as theirs are, and says what it does on a long press. */
+            #logout-btn { padding: 6px 10px }
+            #logout-btn .logout-label { display: none }
         }
 
     </style>
@@ -2456,9 +2713,9 @@
     <button id="settings-btn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
     </button>
-    <button id="logout-btn">
+    <button id="logout-btn" title="Sign out" aria-label="Sign out">
         <svg viewBox="0 0 24 24"><path d="M16 13v-2H7V8l-5 4 5 4v-3zM20 3h-9c-1.1 0-2 .9-2 2v4h2V5h9v14h-9v-4H9v4c0 1.1.9 2 2 2h9c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
-        Sign out
+        <span class="logout-label">Sign out</span>
     </button>
 </header>
 
@@ -2508,12 +2765,13 @@
             <span id="activity-elapsed"></span>
             <span class="activity-toggle" id="activity-toggle">&#x25be;</span>
         </div>
+        <div id="activity-live"></div>
         <div id="activity-steps"></div>
         <div id="activity-stats">
             <span class="stat-item"><span class="stat-label">Steps </span><span class="stat-value" id="stat-steps">0</span></span>
             <span class="stat-item"><span class="stat-label">OK </span><span class="stat-value" id="stat-success">0</span></span>
             <span class="stat-item"><span class="stat-label">Fail </span><span class="stat-value" id="stat-fail">0</span></span>
-            <span class="stat-item"><span class="stat-label">Cloud </span><span class="stat-value" id="stat-cloud">0</span></span>
+            <span class="stat-item stat-cloud"><span class="stat-label">Cloud </span><span class="stat-value" id="stat-cloud">0</span></span>
             <span class="stat-item"><span class="stat-label">Local </span><span class="stat-value" id="stat-local">0</span></span>
         </div>
     </div>
@@ -2521,6 +2779,7 @@
 
 <!--  Input bar  -->
 <div id="input-area">
+    <div id="link-banner" class="link-banner" role="status" hidden></div>
     <div id="file-chips"></div>
     <div class="input-wrap">
         <button id="attach-btn" title="Attach files (private: read only by your local model, never by the cloud)" aria-label="Attach files (private: read only by your local model, never by the cloud)">
@@ -2531,9 +2790,28 @@
         <button id="send" title="Send (Enter)" aria-label="Send (Enter)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
+        <button id="queue" title="Queue: run this as a task of its own after the running one" aria-label="Queue: run this as a task of its own after the running one">Queue</button>
         <button id="stop" title="Stop task" aria-label="Stop task">
             <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
         </button>
+    </div>
+    <div class="composer-options" id="chat-options">
+        <label title="Time vs cost for this chat: sent with your next message and kept for the chat's next ones. Default follows the settings page.">Time vs cost
+            <select id="cost-mode">
+                <option value="">Default</option>
+                <option value="fast">Fastest</option>
+                <option value="cheaper">Cheaper</option>
+                <option value="free">Free</option>
+            </select>
+        </label>
+        <label title="How much the models think, for this chat: sent with your next message and kept for the chat's next ones. Default follows the settings page.">Effort
+            <select id="effort-level">
+                <option value="">Default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+            </select>
+        </label>
     </div>
     <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Drag &amp; drop or 📎 to attach files — they stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
@@ -2543,6 +2821,56 @@
 
 <script>
 (function() {
+    //  A message from a link
+    /**
+     * A link can open the chat with a message in the box, ready to send -- an alert's button:
+     * #task=<text>[&new=1][&title=<text>][&exp=<unix time>&sig=<hex>]. After the #, so the text
+     * never reaches the server, its proxy or its logs, nor a referrer. Read before anything else,
+     * kept for this tab until its chat is on screen -- through the login, and a reload at the login
+     * -- and taken out of the address, so a reload or the history does not put it in again. It is
+     * never sent on its own: a mail scanner or a link preview opening the link cannot log in, and
+     * a forged link's text is read before anything is done with it (applyLink).
+     */
+    var LINK_KEY = 'ownclaw.pendingTask';
+    /** Characters of a link's text the box takes; the rest is cut, and the banner says so. */
+    var LINK_MAX = 1500;
+    /** The link's message while it waits; kept here too, for a tab whose storage is blocked. */
+    var pendingLink = null;
+
+    /**
+     * Take a link's message out of the address, to wait for the chat. A second one replaces the
+     * first. One with no text is taken out of the address and puts nothing in.
+     */
+    function captureLink() {
+        var h = new URLSearchParams(location.hash.slice(1));
+        if (!h.has('task')) return false;
+        try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
+        if (!h.get('task').trim()) return false;
+        keepLink({ id: Date.now() + '-' + Math.random(), task: h.get('task'), new: h.get('new') === '1',
+                   title: h.get('title') || '', exp: h.get('exp'), sig: h.get('sig'), chat: null });
+        return true;
+    }
+
+    function keepLink(link) {
+        pendingLink = link;
+        try {
+            if (link) sessionStorage.setItem(LINK_KEY, JSON.stringify(link));
+            else sessionStorage.removeItem(LINK_KEY);
+        } catch (e) {}
+    }
+
+    function waitingLink() {
+        if (pendingLink) return pendingLink;
+        try {
+            var raw = sessionStorage.getItem(LINK_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    captureLink();
+    // A link opened in a tab already on this page changes only the address after the #.
+    window.addEventListener('hashchange', function() { if (captureLink()) applyLink(); });
+
     var authOverlay  = document.getElementById('auth-overlay');
     var authLoading  = document.getElementById('auth-loading');
     var authBox      = document.getElementById('auth-box');
@@ -2578,6 +2906,10 @@
     var inputEl         = document.getElementById('input');
     var sendBtn         = document.getElementById('send');
     var stopBtn         = document.getElementById('stop');
+    var queueBtn        = document.getElementById('queue');
+    var costSel         = document.getElementById('cost-mode');
+    var effortSel       = document.getElementById('effort-level');
+    var idlePlaceholder = inputEl.placeholder;
     var attachBtn       = document.getElementById('attach-btn');
     var fileInput       = document.getElementById('file-input');
     var fileChips       = document.getElementById('file-chips');
@@ -2591,6 +2923,7 @@
     var activityLabel   = document.getElementById('activity-label');
     var activityTokens  = document.getElementById('activity-tokens');
     var activityElapsed = document.getElementById('activity-elapsed');
+    var activityLive    = document.getElementById('activity-live');
     var activityStepsEl = document.getElementById('activity-steps');
     var activityToggle  = document.getElementById('activity-toggle');
     var activityHeader  = document.getElementById('activity-header');
@@ -2619,11 +2952,24 @@
     // "what is it doing" was hidden behind a click nobody knew to make.
     var activityOpen = true;
     var ws;
-    var busy = false;
     var lastMsgSender = null;
     var heartbeatTimer = null;
     var thinkingSafetyTimer = null;
-    var activeSessionId = null;
+    /** How long the page hears nothing of a running task before it asks whether it still runs. */
+    var THINKING_SAFETY_MS = 900000;
+    /** Set while the page waits for the server to say whether its task still runs (stillRunning). */
+    var askedStillRunning = false;
+    /**
+     * The chat this tab works in, kept for its reloads: each tab has its own, and a chat opened in
+     * one leaves the others where they are. The tab's own storage; where it is blocked, the
+     * server names the chat (session_info).
+     */
+    var TAB_CHAT_KEY = 'ownclaw_chat';
+    function storedChat() { try { return sessionStorage.getItem(TAB_CHAT_KEY); } catch (e) { return null; } }
+    function rememberChat(id) {
+        try { if (id) sessionStorage.setItem(TAB_CHAT_KEY, id); else sessionStorage.removeItem(TAB_CHAT_KEY); }
+        catch (e) {}
+    }
     var currentView = 'chat'; // 'chat' or 'tasks'
     var thinkingStartedAt = null;
     var elapsedTimer = null;
@@ -2650,7 +2996,11 @@
             currentView = 'chat';
             document.getElementById('input-area').style.display = '';
             ws.send(JSON.stringify({ type: 'new_session', message: '' }));
+            leaveShownChat();
             clearMessages();
+            // No chat is on screen until the server names the new one (session_info).
+            displayedSessionId = null;
+            updateComposer();
             resetActivity();
             sidebar.classList.remove('mobile-open');
         }
@@ -2680,11 +3030,8 @@
             if (results.length === 0) {
                 searchResults.innerHTML = '<div class="search-empty">No results found</div>';
             } else {
-                // Group by session
-                var seen = {};
+                // One row per chat, best match first: the server groups them.
                 results.forEach(function(r) {
-                    if (seen[r.session_id]) return;
-                    seen[r.session_id] = true;
                     var item = document.createElement('div');
                     item.className = 'search-result-item';
                     item.innerHTML =
@@ -2762,9 +3109,31 @@
     /** The conversation whose transcript is actually on screen. */
     var displayedSessionId = null;
 
+    /** Chats a result was delivered into while they were not on screen, in this window. */
+    var unreadSessions = {};
+
+    function markUnread(sessionId) {
+        if (sessionId) unreadSessions[sessionId] = true;
+        // Fetched again, not only re-marked: the result moved its chat up, and the pinned chat
+        // of scheduled results is created by its first delivery.
+        refreshSessionList();
+    }
+
+    /** How many chats' histories this page has asked for: only the last one asked is drawn. */
+    var historyLoads = 0;
+
     function loadSessionMessages(sessionId) {
         if (!authToken) return;
+        // The working state on screen is the chat's it leaves; the chat opened is told its own.
+        if (sessionId !== displayedSessionId) leaveShownChat();
         displayedSessionId = sessionId;
+        delete unreadSessions[sessionId];
+        rememberChat(sessionId);
+        updateSidebarActive(sessionId);
+        hideElsewhere(sessionId);
+        var listed = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+        if (listed) listed.classList.remove('unread');
+        updateComposer();
         // Show loading spinner in messages area
         clearMessages();
         var loader = document.createElement('div');
@@ -2773,24 +3142,44 @@
         messagesEl.appendChild(loader);
 
         var asked = authToken;   // a reply after logout or another login is dropped
-        fetch('/api/chats/' + sessionId + '/messages', {
+        // And one for a chat left since: a slow history drawn when it came drew one chat over the
+        // chat opened after it, whose name the list and the tab kept -- what was typed then was
+        // filed in a chat not on screen.
+        var load = ++historyLoads;
+        fetch('/api/chats/' + sessionId + '/messages?limit=' + HISTORY_PAGE, {
             headers: { 'Authorization': 'Bearer ' + authToken }
         })
         .then(okJson)
         .then(function(data) {
-            if (authToken !== asked) return;
+            if (authToken !== asked || load !== historyLoads) return;
             clearMessages();
             var msgs = data.messages || [];
+            var lastTask = null;
             msgs.forEach(function(m) {
-                var type = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'response');
-                addMsg(type, m.content, m.task_id);
+                if (m.task_id) lastTask = m.task_id;
+                drawRow(m, thinkingEl);
             });
+            if (data.hasMore) holdEarlier(sessionId, msgs[0].id);
+            settleChoices();
+            showChatOptions(data.options, data.defaults);
+            // A chat opens on its newest message, and follows from there: how far the chat shown
+            // before was scrolled says nothing about this one. At once, not smoothly: scrolled down
+            // from its top, it would ask for its earlier rows on the way.
+            following = true;
+            scrollPane(messagesEl.scrollHeight);
+            // The latest task is read from the newest page: when none of its rows names a task,
+            // no task's counters are read back.
+            if (lastTask) restoreTaskStats(lastTask, sessionId);
+            loadEarlierNearTop();
+            // The chat is on screen: a link's message waiting for it goes in the box.
+            applyLink();
         })
         .catch(function(e) {
             // Say what happened. clearMessages() alone left a blank pane, which is exactly what
             // an empty chat looks like -- so a locked database or an expired token read as "this
             // conversation is gone". The loader must be removed either way, or the pane sits on
             // "Loading messages..." for ever while the global error bar auto-dismisses.
+            if (load !== historyLoads) return;   // a chat opened since is on screen
             clearMessages();
             if (!authToken) return;          // logout already cleared the pane deliberately
             var err = document.createElement('div');
@@ -2803,14 +3192,126 @@
         });
     }
 
+    /**
+     * Draw a saved row of the chat before the given element: the thinking dots for the newest
+     * page, the oldest row on screen for an earlier one.
+     */
+    function drawRow(m, before) {
+        if (m.role === 'progress') { addProgress(m.content, m.progress, before, m.timestamp); return; }
+        // A question saved with the answers it offered is drawn as a question, with them.
+        var asked = m.choices && m.choices.length;
+        var type = m.role === 'user' || m.role === 'system' ? m.role : asked ? 'input_request' : 'response';
+        var drawn = addMsg(type, m.content, m.task_id, before, m.timestamp);
+        if (asked && type === 'input_request') addChoices(drawn, m.choices);
+        // Named by its row, as a bubble drawn live is once its fate comes: a task still
+        // running marks it read, or handed on, after a reload or a switch back too.
+        if (type === 'user') drawn.dataset.messageId = m.id;
+    }
+
+    /**
+     * How many rows of a chat are fetched at a time. A long task saves dozens of progress rows,
+     * and a chat of many was fetched and drawn whole each time it was opened.
+     */
+    var HISTORY_PAGE = 50;
+
+    /**
+     * The chat's rows not drawn yet, which are its earliest: the row the next page of them ends
+     * before, and the line above the drawn rows that stands for them. Null when every row of the
+     * chat on screen is drawn, when a page of them failed to load -- the line then says so -- or
+     * when no chat is on screen.
+     */
+    var earlier = null;
+
+    /** Stand for this chat's rows before the given one, on a line above the drawn rows. */
+    function holdEarlier(sessionId, before) {
+        var line = document.createElement('div');
+        line.className = 'messages-loading earlier';
+        line.innerHTML = '<div class="mini-spinner"></div><span>Loading earlier messages...</span>';
+        messagesEl.insertBefore(line, messagesEl.querySelector('.msg'));
+        earlier = { sessionId: sessionId, before: before, line: line, loading: false };
+    }
+
+    /**
+     * Fetch the next earlier page while the top of what is drawn is less than a screen above the
+     * view: a page is then usually drawn before the owner scrolls up to the line that stands for
+     * it, and a page too short to scroll is followed by the next at once.
+     */
+    function loadEarlierNearTop() {
+        if (messagesEl.scrollTop < messagesEl.clientHeight) loadEarlier();
+    }
+
+    messagesEl.addEventListener('scroll', loadEarlierNearTop);
+
+    /**
+     * Draw the next earlier page above the drawn rows, leaving the rows the owner is reading
+     * where they are on screen.
+     */
+    function loadEarlier() {
+        var page = earlier;
+        if (!page || page.loading) return;
+        page.loading = true;
+        fetch('/api/chats/' + page.sessionId + '/messages?limit=' + HISTORY_PAGE
+                + '&before=' + encodeURIComponent(page.before), {
+            headers: { 'Authorization': 'Bearer ' + authToken }
+        })
+        .then(okJson)
+        .then(function(data) {
+            if (earlier !== page) return;   // the chat was drawn again, or left, since
+            var msgs = data.messages;
+            var oldest = messagesEl.querySelector('.msg');
+            var from = oldest.getBoundingClientRect().top;
+            // A run of one sender's messages is drawn as one, across the pages too: the page's
+            // last sender may go on with the run of the rows below it, and a row drawn live goes
+            // on with the run of the newest message.
+            var run = messagesEl.querySelector('.msg.first-in-run');
+            var following = lastMsgSender;
+            lastMsgSender = null;
+            page.line.remove();
+            msgs.forEach(function(m) { drawRow(m, oldest); });
+            settleChoices();
+            if (run && lastMsgSender === (run.classList.contains('user') ? 'user' : 'ai')) {
+                run.classList.remove('first-in-run');
+            }
+            if (following) lastMsgSender = following;
+            earlier = null;
+            if (data.hasMore) holdEarlier(page.sessionId, msgs[0].id);
+            scrollPane(messagesEl.scrollTop + oldest.getBoundingClientRect().top - from);
+            loadEarlierNearTop();
+        })
+        .catch(function(e) {
+            if (earlier !== page) return;
+            earlier = null;
+            page.line.textContent = 'Could not load earlier messages: '
+                    + (e && e.message ? e.message : 'the server did not respond')
+                    + '. Nothing is lost — open this chat again to see them.';
+            console.error('Failed to load earlier messages:', e);
+        });
+    }
+
+    /**
+     * Scroll the chat to this offset at once, where the pane otherwise scrolls smoothly: the rows
+     * the owner reads would slide away from him while a page is drawn above them, and a chat just
+     * opened would scroll down from its top, asking for its earlier rows on the way.
+     */
+    function scrollPane(top) {
+        messagesEl.style.scrollBehavior = 'auto';
+        messagesEl.scrollTop = top;
+        messagesEl.style.scrollBehavior = '';
+    }
+
     function clearMessages() {
         messagesEl.querySelectorAll('.msg, .messages-loading, .task-history, .task-history-loading, .settings-view, .skills-view').forEach(function(m) { m.remove(); });
         lastMsgSender = null;
+        sentBubbles = {};
+        earlier = null;
     }
 
-    function renderSessionList(sessions, currentActiveId) {
+    /**
+     * The list of the user's chats, the one on screen highlighted -- this tab's, not the account's
+     * open chat, which is the one written in last in any tab.
+     */
+    function renderSessionList(sessions) {
         sessionListEl.innerHTML = '';
-        activeSessionId = currentActiveId;
 
         if (!sessions || sessions.length === 0) {
             var empty = document.createElement('div');
@@ -2821,14 +3322,20 @@
         }
         sessions.forEach(function(s) {
             var item = document.createElement('div');
-            var isActive = (currentView === 'chat' && s.id === activeSessionId);
-            item.className = 'session-item' + (isActive ? ' active' : '');
+            var isActive = (currentView === 'chat' && s.id === displayedSessionId);
+            // The server lists the pinned chat of scheduled results first.
+            item.className = 'session-item' + (isActive ? ' active' : '')
+                    + (s.kind === 'scheduled' ? ' pinned' : '') + (unreadSessions[s.id] ? ' unread' : '')
+                    + (workingChats[s.id] ? ' working' : '');
             item.setAttribute('data-session-id', s.id);
             var timeStr = formatTime(s.updated_at);
             var msgCount = s.message_count || 0;
+            // One line each, so the whole title and preview are on the title attribute.
+            var title = escapeHtml(s.title || 'Untitled');
             item.innerHTML =
-                '<div class="session-title">' + escapeHtml(s.title || 'Untitled') + '</div>' +
-                (s.preview ? '<div class="session-preview">' + escapeHtml(s.preview) + '</div>' : '') +
+                '<div class="session-title" title="' + title + '">' + title + '</div>' +
+                (s.preview ? '<div class="session-preview" title="' + escapeHtml(s.preview) + '">'
+                        + escapeHtml(s.preview) + '</div>' : '') +
                 '<div class="session-meta"><span>' + timeStr + '</span><span>' + msgCount + ' msgs</span></div>' +
                 '<div class="session-actions">' +
                     '<button class="session-action-btn rename" title="Rename">&#x270F;</button>' +
@@ -2837,7 +3344,7 @@
 
             item.addEventListener('click', function(e) {
                 if (e.target.closest('.session-action-btn')) return;
-                if (currentView === 'tasks' || s.id !== activeSessionId) {
+                if (currentView === 'tasks' || s.id !== displayedSessionId) {
                     switchToSession(s.id);
                 } else {
                     // Already active chat — just reload messages
@@ -2947,7 +3454,7 @@
         back.type = 'button';
         back.addEventListener('click', function() {
             if (from !== 'chat') { switchToTaskHistory(); return; }
-            var sid = displayedSessionId || activeSessionId;
+            var sid = displayedSessionId || storedChat();
             if (sid && ws && ws.readyState === 1) { switchToSession(sid); return; }
             // Offline: the transcript comes over REST, so show it rather than wait for the socket.
             ensureChatView();
@@ -2963,7 +3470,7 @@
         var recorded = !!t.recorded;   // requests are recorded from 24 Sep 2026
         var view = taskDetailShell(from);
         view.firstChild.appendChild(node('h2', null, 'Task ' + t.taskId));
-        view.appendChild(node('div', 'task-detail-request', t.request ? tdClip(String(t.request), 400)
+        view.appendChild(node('div', 'task-detail-request', t.request ? String(t.request)
                 : outcome ? 'The request was not recorded.' : 'The request is recorded when the task ends.'));
 
         var stats = node('div', 'task-stats');
@@ -2972,14 +3479,29 @@
             card.appendChild(node('div', 'task-stat-value' + (cls ? ' ' + cls : ''), value));
             card.appendChild(node('div', 'task-stat-label', label));
             stats.appendChild(card);
+            return card;
         }
         var oc = tdOutcome(outcome, steps.filter(function(s) { return s.ok === false; }).length,
                 steps.some(function(s) { return s.ok && s.reportedFailure == null; }));
         stat(oc.words, 'Outcome', 'text' + (oc.tone ? ' ' + oc.tone : ''));
-        stat(formatTokenCount(recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens')), 'Cloud tokens');
+        // The cloud as what it cost, then its tokens kind by kind: together they are mostly cache
+        // reads, at a tenth of the price, and were read as the cost. A task from before requests
+        // were recorded has only the total.
+        if (!recorded) {
+            stat(formatTokenCount(tdSum(steps, 'cloudTokens')), 'Cloud tokens')
+                    .appendChild(node('div', 'task-stat-split', 'cost and kinds not recorded'));
+        } else if (!calls.length) {
+            stat('none', 'Cloud', 'text');
+        } else {
+            var cloudCard = stat(cloudCost(totals), 'Cloud');
+            var split = node('div', 'task-stat-split');
+            cloudParts(totals).forEach(function(p, i) {
+                if (i) split.appendChild(document.createTextNode(' · '));
+                split.appendChild(node('span', 'cloud-part', p));
+            });
+            cloudCard.appendChild(split);
+        }
         stat(formatTokenCount(outcome ? outcome.localTokens : tdSum(steps, 'localTokens')), 'Local tokens');
-        stat(!recorded ? 'not recorded' : calls.length ? (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd)
-                : 'none', 'Cost', calls.length ? '' : 'text');
         view.appendChild(stats);
 
         var stepsPanel = node('div');
@@ -3019,7 +3541,9 @@
         var runEl = node('div', 'task-run');
         var header = node('div', 'task-run-header');
         header.appendChild(node('div', 'task-run-status ' + (unknown ? 'unknown' : s.ok ? 'completed' : 'failed')));
-        header.appendChild(node('div', 'task-run-desc', s.step + ' · ' + s.tool));
+        var stepDesc = node('div', 'task-run-desc', s.step + ' · ' + s.tool);
+        stepDesc.title = stepDesc.textContent;
+        header.appendChild(stepDesc);
         var meta = node('div', 'task-run-meta');
         meta.appendChild(tdTierBadge(s.tier));
         meta.appendChild(node('span', 'task-run-duration', formatDuration(s.durationMs)));
@@ -3035,17 +3559,29 @@
         if (s.tool === 'delegate') {
             // No local tokens is not "never reached it": a call that fails -- a full context
             // window, a parse error, a timeout -- throws before its tokens are counted.
-            d.appendChild(tdRow('Carried out by', s.tier === 'local' ? 'the local model'
+            d.appendChild(tdRow('Carried out by', s.notStarted ? 'nobody: it was not started'
+                    : s.tier === 'local' ? 'the local model'
                     : 'not known: no local tokens were counted'));
+            // What the cloud asked of the local model, whole: here, and not in the chat.
+            if (s.goal) {
+                d.appendChild(tdRow('Goal', 'what the cloud asked the local model to do'));
+                d.appendChild(node('div', 'task-result-content', s.goal));
+            }
+            // The texts it handed over by name, each whole: what {{name}} in a call stood for.
+            Object.keys(s.texts || {}).forEach(function(name) {
+                d.appendChild(tdRow('{{' + name + '}}', 'a text it was handed, put in exactly where a call names it'));
+                d.appendChild(node('div', 'task-result-content', s.texts[name]));
+            });
         }
         d.appendChild(tdRow('Cloud calls', s.cloudCalls == null ? 'not recorded' : String(s.cloudCalls)));
-        // A failed call has no tokens and no cost on record; if that is all there was, say so.
+        // A failed call can have no tokens and no cost on record; if that is all there was, say so.
+        // Otherwise what the calls cost, then their tokens kind by kind (cloudLine).
         var unrecorded = s.costIsFloor && !s.cloudTokens;
-        d.appendChild(tdRow('Tokens', (unrecorded ? 'not recorded' : formatTokenCount(s.cloudTokens)) + ' cloud / '
-                + formatTokenCount(s.localTokens) + ' local'));
-        d.appendChild(tdRow('Cost', unrecorded ? 'not recorded: the call failed'
-                : s.costUsd != null ? (s.costIsFloor ? '≥ ' : '') + formatUsd(s.costUsd)
-                : recorded ? 'none: no cloud call' : 'not recorded'));
+        d.appendChild(tdRow('Cloud', unrecorded ? 'not recorded: the call failed'
+                : s.costUsd != null ? cloudLine(s)
+                : recorded ? 'none: no cloud call'
+                : formatTokenCount(s.cloudTokens) + ' tokens; their cost was not recorded'));
+        d.appendChild(tdRow('Local tokens', formatTokenCount(s.localTokens)));
         if (s.reportedFailure) {
             d.appendChild(tdRow('Result', 'Failed: the skill reported ok:false', 'error'));
         } else if (!s.ok) {
@@ -3069,13 +3605,15 @@
         var panel = node('div');
         var calls = t.calls || [], totals = t.totals || {}, dec = totals.decisions || {};
         if (calls.length) {
-            // A failed call is not "went": whether it reached the provider is not recorded.
+            // A failed call is not "went". One the provider had reported tokens for reached it;
+            // for one with nothing on record, whether it did is not recorded.
             var went = (dec.SENT || 0) + (dec.OBSERVED_LEAK || 0), failedN = dec.ERROR || 0;
+            var unknownN = calls.filter(function(c) { return c.decision === 'ERROR' && c.promptTokens == null; }).length;
             var head = tdCount(went, 'request', 'requests') + ' went to the cloud model'
-                    + (failedN ? '; ' + failedN + ' failed, and whether ' + (failedN === 1 ? 'it' : 'they')
-                        + ' reached the provider is not recorded' : '') + '. Together: '
-                    + formatBytes(totals.bytesOut) + ', ' + formatTokenCount(tdBilled(totals)) + ' tokens, '
-                    + (totals.costIsFloor ? '≥ ' : '') + formatUsd(totals.costUsd) + '.';
+                    + (failedN ? '; ' + failedN + ' failed' : '')
+                    + (!unknownN ? '' : ', and whether ' + (unknownN === failedN ? (failedN === 1 ? 'it' : 'they')
+                        : unknownN + ' of them') + ' reached the provider is not recorded') + '. Together: '
+                    + formatBytes(totals.bytesOut) + ', ' + cloudLine(totals) + '.';
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
             if (dec.unparsed) head += ' ' + tdCount(dec.unparsed, 'record', 'records') + ' could not be read.';
             panel.appendChild(node('div', 'task-trace-headline', head));
@@ -3106,8 +3644,9 @@
         if (!priv.length) panel.appendChild(node('div', 'task-trace-note', 'No private result was recorded for this task.'));
         priv.forEach(function(a) {
             var item = node('div', 'task-trace-item');
-            // A file the owner sent, and the local model's answer from it, are said in words;
-            // the file's name is shown here only, the cloud was never told it.
+            // A file the owner sent, and an answer the local model wrote after reading something
+            // private, are said in words; the file's name is shown here only, the cloud was never
+            // told it.
             var file = a.tool === 'attachment', answer = a.tool === 'local_answer';
             item.appendChild(node('div', 'task-trace-line', file
                     ? a.handle + ' your file' + (a.name != null ? ' "' + a.name + '"' : '') + ' · '
@@ -3194,19 +3733,25 @@
         d.appendChild(tdRow('Contents', tdCount(c.messages.count, 'message part', 'message parts')
                 + ' (' + tdChars(c.messages.chars) + '), ' + tdCount(c.tools.count, 'tool definition', 'tool definitions')
                 + ' (' + tdChars(c.tools.chars) + ')'));
+        // A failed call with tokens on record has what the provider had reported when it failed:
+        // the input it read, and little of the output, which is counted at the end.
+        var failed = c.decision === 'ERROR';
         d.appendChild(tdRow('Tokens', c.decision === 'REFUSED' ? 'none: it was not sent'
                 : c.promptTokens == null ? 'not recorded: the call failed'
-                : 'in ' + formatTokenCount(c.promptTokens) + ' · cache read ' + formatTokenCount(c.cacheReadTokens)
-                    + ' · cache write ' + formatTokenCount(c.cacheWriteTokens) + ' · out ' + formatTokenCount(c.completionTokens)));
+                : cloudParts(c).join(' · ') + (failed ? ', as reported before the call failed' : '')));
         d.appendChild(tdRow('Cost', c.decision === 'REFUSED' ? 'none'
-                : c.costUsd == null ? 'not recorded: the call failed' : formatUsd(c.costUsd)));
-        if (c.scrubs > 0) d.appendChild(tdRow('Vault values replaced', String(c.scrubs)));
+                : c.costUsd == null ? 'not recorded: the call failed' : (failed ? '≥ ' : '') + formatUsd(c.costUsd)));
+        if (c.scrubs > 0) d.appendChild(tdRow('Secrets removed', String(c.scrubs)));
+        if (c.identifiers > 0) d.appendChild(tdRow('Identifiers replaced', String(c.identifiers)));
         var why = c.refusal ? ' (' + c.refusal + ')' : '';
         d.appendChild(c.decision === 'SENT' ? tdRow('Decision', 'Sent')
                 : c.decision === 'REFUSED' ? tdRow('Decision', 'Stopped before sending' + why + '. Nothing was sent.', 'error')
                 : c.decision === 'OBSERVED_LEAK' ? tdRow('Decision', 'Sent although it contained private text' + why
                         + ': the check was only observing.', 'error')
-                : tdRow('Decision', 'The call failed' + why + '. Whether it reached the provider is not recorded.', 'error'));
+                : tdRow('Decision', 'The call failed' + why + (c.promptTokens == null
+                        ? '. Whether it reached the provider is not recorded.'
+                        : ', after the provider had begun to answer.'), 'error'));
+        if (c.stopReason) d.appendChild(tdRow('Reply ended', c.stopReason));
         runEl.appendChild(d);
         return runEl;
     }
@@ -3215,10 +3760,6 @@
 
     function isTaskId(s) {
         return typeof s === 'string' && /^[0-9a-f]{8}$/.test(s);
-    }
-
-    function tdClip(s, max) {
-        return s.length > max ? s.slice(0, max) + '…' : s;
     }
 
     /** SQLite's '2026-09-24 05:03:48' is UTC with no zone; the space form fails in Safari. */
@@ -3235,6 +3776,30 @@
     /** Tokens billed: in, out, and both cache directions. */
     function tdBilled(o) {
         return (o.promptTokens || 0) + (o.completionTokens || 0) + (o.cacheReadTokens || 0) + (o.cacheWriteTokens || 0);
+    }
+
+    /**
+     * What the cloud cost, from the task page's totals or one of its steps, or a status's `cloud`:
+     * "≥" when a call failed and its tokens are counted only as far as they were reported.
+     */
+    function cloudCost(o) {
+        return (o.costIsFloor ? '≥ ' : '') + formatUsd(o.costUsd);
+    }
+
+    /**
+     * The cloud's tokens kind by kind, as they are billed: new input, output, read from the cache
+     * -- a tenth of the price of new input -- and written to it. Shown instead of their sum, which
+     * is mostly cache reads and was read as what the task cost.
+     */
+    function cloudParts(o) {
+        return [formatTokenCount(o.promptTokens || 0) + ' in', formatTokenCount(o.completionTokens || 0) + ' out',
+                formatTokenCount(o.cacheReadTokens || 0) + ' from cache',
+                formatTokenCount(o.cacheWriteTokens || 0) + ' to cache'];
+    }
+
+    /** "$4.60 · 46.2K in · 13.0K out · 590.0K from cache · 419.0K to cache" */
+    function cloudLine(o) {
+        return [cloudCost(o)].concat(cloudParts(o)).join(' · ');
     }
 
     function tdCount(n, one, many) {
@@ -3280,11 +3845,13 @@
     function tdOutcome(outcome, failedSteps, unverified) {
         if (!outcome) return { words: 'Not recorded', tone: '' };
         var r = outcome.reason;
+        // MAX_STEPS and TIMEOUT are no longer endings; rows of tasks from before keep them.
         var words = {
             COMPLETED: failedSteps ? 'Completed, ' + tdCount(failedSteps, 'step', 'steps') + ' failed' : 'Completed',
             NEEDS_INPUT: 'Waiting for your answer', PRIVACY_BLOCKED: 'Stopped: it would have sent private data',
             MAX_STEPS: 'Step limit reached', STALLED: 'No progress', TIMEOUT: 'Time limit',
-            FAILURE_LIMIT: 'Too many failed steps', ERROR: 'Internal error', CANCELLED: 'Cancelled'
+            FAILURE_LIMIT: 'Too many failed steps', ERROR: 'Internal error', CANCELLED: 'Cancelled',
+            CONTEXT_WINDOW: 'Longer than the model can read'
         }[r] || String(r || 'Not recorded');
         // Not green while any step's success is unverified (a row from before 24 Sep 2026).
         var tone = r === 'COMPLETED' ? (failedSteps ? 'warn' : unverified ? '' : 'green')
@@ -3438,9 +4005,10 @@
                 var loadMore = document.createElement('button');
                 loadMore.className = 'task-load-more';
                 loadMore.textContent = 'Load more...';
-                loadMore.addEventListener('click', function() {
-                    loadMoreRuns(runs.length, container, loadMore);
-                });
+                // One handler, which loadMoreRuns replaces as it pages on. Added beside it with
+                // addEventListener, it ran again on every later click and fetched the second page
+                // once more each time.
+                loadMore.onclick = function() { loadMoreRuns(runs.length, container, loadMore); };
                 container.appendChild(loadMore);
             }
         }
@@ -3480,7 +4048,8 @@
         header.innerHTML =
             '<span class="active-task-type ' + typeClass + '">' + escapeHtml(t.task_type) + '</span>' +
             '<span class="task-status-badge ' + escapeHtml(t.status) + '">' + escapeHtml(t.status) + '</span>' +
-            '<span class="active-task-desc">' + escapeHtml(t.description || 'Untitled task') + '</span>' +
+            '<span class="active-task-desc" title="' + escapeHtml(t.description || 'Untitled task') + '">'
+                    + escapeHtml(t.description || 'Untitled task') + '</span>' +
             actionsHtml +
             '<span class="task-card-toggle">\u25BC</span>';
 
@@ -3704,7 +4273,8 @@
         header.className = 'task-run-header';
         header.innerHTML =
             '<div class="task-run-status ' + statusClass + '"></div>' +
-            '<div class="task-run-desc">' + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
+            '<div class="task-run-desc" title="' + escapeHtml(run.description || 'Task #' + run.task_id) + '">'
+                    + escapeHtml(run.description || 'Task #' + run.task_id) + '</div>' +
             '<div class="task-run-meta">' +
                 '<span>' + timeStr + '</span>' +
                 (tokenStr ? '<span class="task-run-tokens">' + tokenStr + '</span>' : '') +
@@ -3895,11 +4465,31 @@
         // ── Cloud Provider section ──
         var cloudSection = document.createElement('div');
         cloudSection.className = 'settings-section';
-        var cloudDotClass = (provider === 'openai' && openaiKeySet) || (provider === 'anthropic' && anthropicKeySet) ? 'ok' : 'warn';
+        var cloudDotClass = data.local_only ? 'off'
+                : (provider === 'openai' && openaiKeySet) || (provider === 'anthropic' && anthropicKeySet) ? 'ok' : 'warn';
         cloudSection.innerHTML =
             '<div class="settings-section-title">' +
                 '<span class="status-dot ' + cloudDotClass + '"></span>' +
                 'Cloud LLM Provider' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label for="settings-cost">Default time vs cost</label>' +
+                '<input type="range" id="settings-cost" min="0" max="2" step="1" value="' + costStop(data) + '" style="width:100%">' +
+                '<div style="display:flex;justify-content:space-between;font-size:12px;opacity:.75">' +
+                    '<span>Fastest</span><span>Cheaper</span><span>Free</span>' +
+                '</div>' +
+                '<div class="field-hint" id="settings-cost-hint">' + escapeHtml(COST_STOPS[costStop(data)]) + '</div>' +
+                '<div class="field-hint">Each chat can override it next to the message box.</div>' +
+            '</div>' +
+            '<div class="settings-field">' +
+                '<label for="settings-effort">Default thinking effort</label>' +
+                '<select id="settings-effort">' +
+                    '<option value="low"' + (data.thinking_effort === 'low' ? ' selected' : '') + '>Low</option>' +
+                    '<option value="medium"' + (data.thinking_effort === 'medium' ? ' selected' : '') + '>Medium</option>' +
+                    '<option value="high"' + (data.thinking_effort === 'high' ? ' selected' : '') + '>High</option>' +
+                '</select>' +
+                '<div class="field-hint" id="settings-effort-hint">' + escapeHtml(EFFORT_HINTS[data.thinking_effort]) + '</div>' +
+                '<div class="field-hint">Each chat can override it next to the message box.</div>' +
             '</div>' +
             '<div class="settings-field">' +
                 '<label>Active Provider</label>' +
@@ -4032,13 +4622,49 @@
             }
         });
 
+        document.getElementById('settings-cost').addEventListener('input', function() {
+            document.getElementById('settings-cost-hint').textContent = COST_STOPS[Number(this.value)];
+        });
+        document.getElementById('settings-effort').addEventListener('change', function() {
+            document.getElementById('settings-effort-hint').textContent = EFFORT_HINTS[this.value];
+        });
         document.getElementById('settings-save').addEventListener('click', function() {
             saveSettings(data);
         });
+        // The page reloads them after a save: "Default" next to Send names the new ones.
+        nameDefaults({ costMode: ['fast', 'cheaper', 'free'][costStop(data)], effort: data.thinking_effort });
     }
+
+    /** The time-vs-cost slider's stops, as the settings page says them. */
+    var COST_STOPS = [
+        'Fastest: the cloud model runs the skills itself. The local model reads private data and takes over when the cloud can\'t be reached.',
+        'Cheaper: the cloud model plans and the local model runs the skills. Slower -- each hand-off takes minutes -- and cheaper.',
+        'Free: local only. No cloud model is called; every task runs on the local model, best effort.'
+    ];
+
+    function costStop(data) {
+        return data.local_only ? 2 : (data.prefer_cost ? 1 : 0);
+    }
+
+    /** The thinking effort's levels, as the settings page says them. */
+    var EFFORT_HINTS = {
+        low: 'Low: Claude thinks least -- fastest and cheapest. The local model also answers without reasoning first, so its steps are much faster.',
+        medium: 'Medium: Claude thinks less than at high -- faster and cheaper.',
+        high: 'High: Claude thinks the most of the three -- the most careful, the slowest and dearest.'
+    };
 
     function saveSettings(originalData) {
         var payload = {};
+
+        // Time vs cost: local only is the last stop; the first two say whether the cloud runs
+        // the skills itself, and leave prefer_cost as it was on the last.
+        var stop = Number(document.getElementById('settings-cost').value);
+        var localOnly = stop === 2;
+        if (localOnly !== !!originalData.local_only) payload.local_only = String(localOnly);
+        if (stop < 2 && (stop === 1) !== !!originalData.prefer_cost) payload.prefer_cost = String(stop === 1);
+
+        var effort = document.getElementById('settings-effort').value;
+        if (effort !== originalData.thinking_effort) payload.thinking_effort = effort;
 
         // Provider
         var provider = document.getElementById('settings-provider').value;
@@ -4327,8 +4953,8 @@
 
                 card.innerHTML =
                     actionsHtml +
-                    '<div class="skill-card-name"><span class="skill-icon">\uD83D\uDC0D</span>' + escapeHtml(skill.name) + '</div>' +
-                    '<div class="skill-card-desc">' + escapeHtml(skill.description || '') + '</div>' +
+                    '<div class="skill-card-name" title="' + escapeHtml(skill.name) + '"><span class="skill-icon">\uD83D\uDC0D</span>' + escapeHtml(skill.name) + '</div>' +
+                    '<div class="skill-card-desc" title="' + escapeHtml(skill.description || '') + '">' + escapeHtml(skill.description || '') + '</div>' +
                     '<div class="skill-card-tags">' + tagsHtml + '</div>' +
                     '<div class="skill-card-stats">' +
                         '<span class="skill-card-stat">\uD83D\uDCE6 ' + paramStr + '</span>' +
@@ -4810,13 +5436,13 @@
         if (!authToken) return;
         // "Is this the chat on screen", not "is this the account's active chat".
         //
-        // activeSessionId tracks what the SERVER considers active, which another window can
-        // change at any time. Deleting a different chat then wiped the pane the owner was
-        // reading, and deleting the one he WAS reading left it on screen -- both decided by a
-        // window he was not looking at. It also has to be the chat view at all: deleting from
-        // Settings used to clear the settings form and replace it with an empty transcript the
-        // composer is hidden for, leaving the app unreachable by its own buttons.
-        var wasActive = (currentView === 'chat' && sessionId === activeSessionId);
+        // The account's open chat is the one written in last, in any window. Deciding by it,
+        // deleting a different chat wiped the pane the owner was reading, and deleting the one he
+        // WAS reading left it on screen -- both decided by a window he was not looking at. It also
+        // has to be the chat view at all: deleting from Settings used to clear the settings form
+        // and replace it with an empty transcript the composer is hidden for, leaving the app
+        // unreachable by its own buttons.
+        var wasActive = (currentView === 'chat' && sessionId === displayedSessionId);
 
         // Optimistic UI: immediately mark the item as deleting, then fade out
         var itemEl = sessionListEl.querySelector('.session-item[data-session-id="' + sessionId + '"]');
@@ -4837,10 +5463,12 @@
             return resp.json();
         })
         .then(function(data) {
-            // Server returns updated session list + activeSessionId
-            renderSessionList(data.sessions || [], data.activeSessionId || '');
+            // Server returns updated session list + activeSessionId: the account's open chat,
+            // which this tab opens in place of the one deleted -- and says so, as a switch does.
+            renderSessionList(data.sessions || []);
             if (wasActive && data.activeSessionId) {
-                loadSessionMessages(data.activeSessionId);
+                if (ws && ws.readyState === 1) switchToSession(data.activeSessionId);
+                else loadSessionMessages(data.activeSessionId);
             }
         })
         .catch(function(e) {
@@ -4868,7 +5496,7 @@
         })
         .then(okJson)
         .then(function(data) {
-            renderSessionList(data.sessions || [], data.activeSessionId);
+            renderSessionList(data.sessions || []);
         })
         .catch(function(e) {
             console.error('Failed to refresh sessions:', e);
@@ -4913,6 +5541,7 @@
     });
 
     function showActivity(text, detailData) {
+        hideLiveLine();
         activityWrap.style.display = 'block';
         // Reflect the open state on the panel itself, so a default-open trace is actually
         // rendered rather than only being marked open in a variable.
@@ -4991,12 +5620,26 @@
         return m + 'm ' + s + 's';
     }
 
-    /** Update live stats bar from observe detail data. */
+    /**
+     * Update live stats bar from observe detail data. The cloud as what it cost, then its tokens
+     * kind by kind (cloudParts): all of them together read as inflated, most being cache reads at
+     * a tenth of the price. Before its first cloud call a task has none; a task from before they
+     * were recorded apart has only the total.
+     */
     function updateStats(d) {
         if (d.totalSteps != null) statSteps.textContent = d.totalSteps;
         if (d.successCount != null) statSuccess.textContent = d.successCount;
         if (d.totalSteps != null && d.successCount != null) statFail.textContent = d.totalSteps - d.successCount;
-        if (d.cloudTokens != null) statCloud.textContent = d.cloudTokens.toLocaleString();
+        if (d.cloud && tdBilled(d.cloud) > 0) {
+            statCloud.textContent = '';
+            statCloud.appendChild(node('span', 'cloud-part', cloudCost(d.cloud)));
+            cloudParts(d.cloud).forEach(function(p) {
+                statCloud.appendChild(document.createTextNode(' · '));
+                statCloud.appendChild(node('span', 'cloud-part', p));
+            });
+        } else if (d.cloudTokens != null) {
+            statCloud.textContent = d.cloudTokens ? d.cloudTokens.toLocaleString() + ' tokens' : '0';
+        }
         if (d.localTokens != null) statLocal.textContent = d.localTokens.toLocaleString();
         activityStats.classList.add('visible');
     }
@@ -5012,6 +5655,7 @@
             showActivity(text, null);
             return;
         }
+        hideLiveLine();
         activityWrap.style.display = 'block';
         activityLabel.textContent = text;
         if (activityStepList.length > 0) {
@@ -5022,6 +5666,56 @@
         var span = last.querySelector('.step-dot + span');
             if (span) span.textContent = text;
         }
+    }
+
+    /**
+     * A model call's live state (a LIVE status), in place of the frame before it: the label and
+     * the latest step say which model, what for, what it is doing, for how long and how much it
+     * has written, and the latest line of its reasoning goes under the label, whole. The frame
+     * that says the call has ended says how long it ran, and takes the line away.
+     */
+    function showLive(live, content) {
+        updateActivity(live && live.summary ? live.summary : content);
+        var line = live && !live.ended && live.line ? live.line : '';
+        activityLive.textContent = line ? '“' + line + '”' : '';
+        activityLive.classList.toggle('visible', !!line);
+    }
+
+    /** The line of a model call's reasoning goes when anything else is shown in its place. */
+    function hideLiveLine() {
+        activityLive.classList.remove('visible');
+        activityLive.textContent = '';
+    }
+
+    /**
+     * The counters of the chat's latest task -- running or finished -- from the server. They were
+     * fed only by live frames, so a reload or a chat switch showed zeros for a task that had
+     * spent a million tokens. The totals are the task page's own (renderTaskDetail), so the two
+     * cannot disagree; live frames that arrive afterwards go on updating them as before.
+     */
+    function restoreTaskStats(taskId, sessionId) {
+        if (!authToken || !isTaskId(taskId)) return;
+        var asked = authToken;
+        fetch('/api/tasks/' + taskId, { headers: { 'Authorization': 'Bearer ' + authToken } })
+        .then(okJson)
+        .then(function(t) {
+            if (authToken !== asked || displayedSessionId !== sessionId) return;
+            var steps = t.steps || [], totals = t.totals || {}, outcome = t.outcome;
+            var cloud = t.recorded ? tdBilled(totals) : tdSum(steps, 'cloudTokens');
+            // The totals carry the cloud's tokens kind by kind and its cost, under the names a
+            // live frame's `cloud` does; a task from before requests were recorded has neither.
+            var cloudUse = t.recorded ? totals : null;
+            var local = outcome ? (outcome.localTokens || 0) : tdSum(steps, 'localTokens');
+            var ok = steps.filter(function(st) { return st.ok !== false; }).length;
+            if (activityWrap.style.display !== 'block') {
+                activityWrap.style.display = 'block';
+                activityLabel.textContent = outcome ? 'Last task' : 'Working...';
+                if (outcome) doneActivity();
+            }
+            updateStats({ totalSteps: steps.length, successCount: ok, cloudTokens: cloud, cloud: cloudUse, localTokens: local });
+            updateTokens({ cloudTokens: cloud, cloud: cloudUse, localTokens: local });
+        })
+        .catch(function(e) { console.error('Task ' + taskId + ' totals:', e); });
     }
 
     /** Update the live token counter in the activity header. */
@@ -5035,10 +5729,11 @@
         var local = data.localTokens || 0;
         var total = cloud + local;
         if (total === 0) { activityTokens.textContent = ''; return; }
+        // The cloud as what it cost; its tokens kind by kind are in the stats row (updateStats).
         var parts = [];
-        if (cloud > 0) parts.push(cloud.toLocaleString() + ' cloud');
-        if (local > 0) parts.push(local.toLocaleString() + ' local');
-        activityTokens.textContent = parts.join(' + ') + ' tok';
+        if (cloud > 0) parts.push(data.cloud ? cloudCost(data.cloud) + ' cloud' : cloud.toLocaleString() + ' cloud tok');
+        if (local > 0) parts.push(local.toLocaleString() + ' local tok');
+        activityTokens.textContent = parts.join(' + ');
     }
 
     function doneActivity() {
@@ -5060,6 +5755,7 @@
      * the union of both, and there is only one of it.
      */
     function resetActivity() {
+        traceTaskId = null;
         activityWrap.style.display = 'none';
         activitySpinner.classList.remove('done');
         activityLabel.textContent = 'Working...';
@@ -5067,6 +5763,7 @@
         activityElapsed.textContent = '';
         activityStepsEl.innerHTML = '';
         activityStepList = [];
+        hideLiveLine();
         activityToggle.classList.remove('open');
         activityStepsEl.classList.remove('visible');
         activityStats.classList.remove('visible');
@@ -5081,6 +5778,35 @@
         // blank for the rest of a task that was still running. The task is not over; only
         // setThinking(false) decides that. Keep the real start time and restart the tick.
         if (thinkingStartedAt) startElapsedTimer();
+    }
+
+    /**
+     * A status of unattended work -- a scheduled run, /bg. Its steps are shown where scheduled
+     * results go: in the activity strip of the pinned chat of scheduled results, while that chat
+     * is on screen and nothing asked in this window is running. Never as the working state --
+     * the spinner under the chat, Stop, the elapsed time: nobody is waiting on this work, and its
+     * result arrives as a message of its own. Its trace, left on screen once another chat is
+     * shown, goes with its next status.
+     */
+    function showBackgroundStatus(data, content) {
+        var shown = currentView === 'chat' && !thinkingEl.classList.contains('active')
+                && !!sessionListEl.querySelector('.session-item.pinned[data-session-id="' + displayedSessionId + '"]');
+        if (!shown) {
+            if (data.taskId && data.taskId === traceTaskId) resetActivity();
+            return;
+        }
+        // A trace of its own, as each task has.
+        if (data.taskId && data.taskId !== traceTaskId) {
+            if (traceTaskId) resetActivity();
+            traceTaskId = data.taskId;
+        }
+        var sub = data.status || '';
+        updateTokens(data.data);
+        if (data.data.totalSteps != null) updateStats(data.data);
+        if (sub === 'live') showLive(data.data.live, content);
+        else if (sub === 'progress') updateActivity(content);
+        else showActivity(content, data.data.category ? data.data : null);
+        if (sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input') doneActivity();
     }
 
 
@@ -5119,7 +5845,9 @@
      * refused by the API regardless of what the client chooses to render.
      */
     function applyOwnerVisibility(isOwner) {
-        ['skills-btn', 'settings-btn'].forEach(function(id) {
+        // Time vs cost and effort next to Send too: another account's chats run on the owner's
+        // defaults, whatever they would choose.
+        ['skills-btn', 'settings-btn', 'chat-options'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) el.style.display = isOwner ? '' : 'none';
         });
@@ -5249,8 +5977,19 @@
         // Every view, not only messages: a task page or the Tasks list left on screen would be
         // shown to whoever signs in next in this tab.
         clearMessages();
+        // And a link's message, with its banner, and one waiting: not left for whoever signs in next.
+        if (linkText !== null && inputEl.value === linkText) inputEl.value = '';
+        hideLinkBanner();
         ensureChatView();
-        activeSessionId = null;
+        // Whoever signs in next in this tab starts in a chat of theirs.
+        rememberChat(null);
+        displayedSessionId = null;
+        workingChats = {};
+        keptStates = {};
+        sentFrom = {};
+        activeTaskId = null;
+        steeredChatId = null;
+        hideElsewhere(null);
         sessionListEl.innerHTML = '';
         searchResults.innerHTML = '';
         searchResults.classList.remove('visible');
@@ -5286,11 +6025,80 @@
     }
     function hideConnBanner() { connBanner.classList.remove('visible'); }
 
+    /** The run of the server this page was loaded from (session_info's version). */
+    var serverVersion = null;
+
+    /**
+     * OwnClaw restarted since this page was loaded -- updated, as a rule: say so, with a button
+     * to reload. A page left open across a deploy kept its old code and only reconnected, so a
+     * new setting was simply not there until the owner happened to reload.
+     */
+    /**
+     * Something arrived in a chat this tab does not show -- an answer, a question: said in a
+     * notice of its own, with a button that opens that chat, gone once that chat is opened or the
+     * notice is dismissed. It was the connection banner's line, which stays until the next
+     * reconnect: with chats working side by side, one spun on for every answer elsewhere.
+     */
+    function showElsewhere(text, sessionId) {
+        var bar = document.getElementById('elsewhere-banner');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'elsewhere-banner';
+            bar.setAttribute('role', 'status');
+            bar.style.cssText = 'position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:1000;'
+                    + 'background:var(--surface);border:1px solid var(--border-mid);border-radius:8px;'
+                    + 'padding:8px 12px;display:flex;gap:10px;align-items:center;font-size:13px';
+            var line = document.createElement('span');
+            var open = document.createElement('button');
+            open.textContent = 'Open';
+            open.addEventListener('click', function() {
+                var chat = bar.dataset.sessionId;
+                bar.remove();
+                if (ws && ws.readyState === 1) switchToSession(chat);
+                else { ensureChatView(); loadSessionMessages(chat); }
+            });
+            var close = document.createElement('button');
+            close.textContent = '\u00d7';
+            close.setAttribute('aria-label', 'Dismiss');
+            close.addEventListener('click', function() { bar.remove(); });
+            bar.appendChild(line);
+            bar.appendChild(open);
+            bar.appendChild(close);
+            document.body.appendChild(bar);
+        }
+        bar.dataset.sessionId = sessionId;
+        bar.firstChild.textContent = text;
+    }
+
+    /** The notice of showElsewhere goes: when its chat is opened, or with every chat (null). */
+    function hideElsewhere(sessionId) {
+        var bar = document.getElementById('elsewhere-banner');
+        if (bar && (!sessionId || bar.dataset.sessionId === sessionId)) bar.remove();
+    }
+
+    function showUpdated() {
+        if (document.getElementById('updated-banner')) return;
+        var bar = document.createElement('div');
+        bar.id = 'updated-banner';
+        bar.setAttribute('role', 'status');
+        bar.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:1000;'
+                + 'background:var(--surface);border:1px solid var(--border-mid);border-radius:8px;'
+                + 'padding:8px 12px;display:flex;gap:10px;align-items:center;font-size:13px';
+        var text = document.createElement('span');
+        text.textContent = 'OwnClaw has been updated. Reload to use the new version.';
+        var reload = document.createElement('button');
+        reload.textContent = 'Reload';
+        reload.addEventListener('click', function() { location.reload(); });
+        bar.appendChild(text);
+        bar.appendChild(reload);
+        document.body.appendChild(bar);
+    }
+
     //  WebSocket 
     function startHeartbeat() {
         stopHeartbeat();
         heartbeatTimer = setInterval(function() {
-            try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }
+            try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', sessionId: displayedSessionId })); }
             catch(e) {}
         }, 25000);
     }
@@ -5316,7 +6124,10 @@
 
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         var tokenParam = authToken ? '?token=' + encodeURIComponent(authToken) : '';
-        ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam);
+        // And the chat this tab works in, so what the server says on connect is about that chat.
+        var tabChat = displayedSessionId || storedChat();
+        var chatParam = '&tabs=1' + (tabChat ? '&chat=' + encodeURIComponent(tabChat) : '');
+        ws = new WebSocket(proto + '//' + location.host + '/ws/chat' + tokenParam + chatParam);
         needsInitialLoad = true;
 
         ws.onopen = function() {
@@ -5328,6 +6139,8 @@
 
         ws.onclose = function(e) {
             setConnState(false, 'Disconnected');
+            // Kept for the reconnect, whose session_info says whether the task still runs.
+            keepShownState();
             setThinking(false);
             stopHeartbeat();
             if (e.code === 1008) { logout(); return; }
@@ -5344,12 +6157,25 @@
                 var type    = data.type    || 'response';
                 var content = data.content || '';
                 if (type === 'session_info') {
+                    // The server's run this page first connected to: a later one is a restart --
+                    // a deploy, as a rule -- and this page still runs the code it loaded before.
+                    if (data.version) {
+                        if (serverVersion && data.version !== serverVersion) showUpdated();
+                        serverVersion = serverVersion || data.version;
+                    }
                     // Session list update from server
-                    renderSessionList(data.sessions || [], data.activeSessionId || '');
-                    // Only load messages on initial connect / reconnect, not on every
-                    // switch/new_session (those handle message loading themselves).
+                    renderSessionList(data.sessions || []);
+                    setWorkingChats(data.workingChats);
+                    // Show the chat this tab works in, as the server has it -- the one its
+                    // address or frames named, or else the account's open chat -- when it is not
+                    // the one on screen: on connect and reconnect (then always, for what came
+                    // while away), and after New Chat, /new or /switch, which open a chat and
+                    // say so only here. Left on the old chat, the page drew a result
+                    // for it into the new chat's empty pane, and the answer to the first
+                    // question asked there went unshown, as one for another chat.
                     // Skip if user is viewing task history.
-                    if (needsInitialLoad && data.activeSessionId && currentView === 'chat') {
+                    if ((needsInitialLoad || data.activeSessionId !== displayedSessionId)
+                            && data.activeSessionId && currentView === 'chat') {
                         loadSessionMessages(data.activeSessionId);
                         needsInitialLoad = false;
                     }
@@ -5358,101 +6184,116 @@
                     // showed an idle chat with an enabled Send button -- which reads as "the
                     // request was lost", and the natural response is to send it again and run
                     // the whole thing twice.
+                    // And show what that task is doing now, as the status this page would
+                    // otherwise wait for says it -- its model call under way, or the step it is
+                    // on: a reload during a long local call used to show only that a task was
+                    // running, until the call ended.
+                    // Of the chat on screen alone: tasks of other chats are theirs, marked in the list.
                     if (data.taskRunning) {
-                        setThinking(true);
-                        showActivity('Working — reconnected to a task already running', null);
+                        resumeShownChat();
+                        if (data.doing) showStatus(data.doing);
+                        else showActivity('Working — reconnected to a task already running', null);
+                    } else {
+                        delete keptStates[displayedSessionId];
                     }
                 } else if (type === 'session_updated') {
-                    // The id is the point, and it used to be discarded.
-                    //
-                    // The active session belongs to the ACCOUNT, not to a window. When another
-                    // tab (or the phone) switches or creates a chat, the server now tells every
-                    // window -- but this branch only refreshed the sidebar, so the highlight
-                    // moved while the transcript stayed on the old chat. Anything typed here was
-                    // then saved into the chat the server considers active, i.e. not the one on
-                    // screen. Following the switch is the only reading that is not a lie.
+                    // The list of chats changed: a chat was opened, created or written in, in this
+                    // window or another. Fetched again; the chat on screen stays. Each tab works in
+                    // its own chat and names it in what it sends, so another tab's switch moves
+                    // nothing here -- it used to take this one along, as the account had one open
+                    // chat and what was typed here was filed in it.
                     refreshSessionList();
-                    if (content && content !== activeSessionId && currentView === 'chat') {
-                        activeSessionId = content;
-                        updateSidebarActive(content);
-                        // Keep anything half-typed: it belongs to the person, not the chat.
-                        loadSessionMessages(content);
-                    } else if (content) {
-                        activeSessionId = content;
-                        updateSidebarActive(content);
+                } else if (type === 'fate') {
+                    // What became of a message this page sent: handed to the running task, or
+                    // queued. Said under its bubble, which is named by its row from now on.
+                    var sentBubble = sentBubbles[data.clientId];
+                    delete sentBubbles[data.clientId];
+                    if (sentBubble && data.messageId) sentBubble.dataset.messageId = data.messageId;
+                    markFate(sentBubble, content);
+                    // Drawn as it was sent, it shows when it was saved from now on, as a reload will.
+                    var savedAt = tdTime(data.timestamp);
+                    var sentAt = sentBubble ? sentBubble.querySelector('time.msg-time') : null;
+                    if (sentAt && savedAt) showTime(sentAt, savedAt);
+                    // And where Send reaches the running task: the chat this message started or
+                    // reached it in. Sent there without Queue and not taken, it says that task
+                    // takes nothing more from here.
+                    if (data.fate === 'started' || data.fate === 'steered') {
+                        steeredChatId = data.sessionId;
+                        steeredOptions = data.options;
+                    } else if (!data.queue && data.sessionId === steeredChatId) steeredChatId = null;
+                    updateComposer();
+                    // Filed in a chat other than the one it was sent from -- that one was deleted
+                    // meanwhile, or none was on screen yet: the message is in that chat, and so
+                    // is this tab from now on, unless the owner has opened another since.
+                    var sentIn = sentFrom[data.clientId];
+                    delete sentFrom[data.clientId];
+                    if (data.sessionId && data.sessionId !== displayedSessionId && sentIn === displayedSessionId
+                            && currentView === 'chat' && ws && ws.readyState === 1) {
+                        switchToSession(data.sessionId);
                     }
                 } else if (type === 'status') {
-                    var sub = data.status || '';
-                    var detail = data.data && data.data.category ? data.data : null;
-                    // Update token counter whenever data.data has token info
-                    if (data.data) updateTokens(data.data);
-                    // Update stats bar whenever data.data carries stats fields
-                    if (data.data && data.data.totalSteps != null) updateStats(data.data);
-                    // Claim this window's working state for the first task we hear from.
-                    if (data.taskId && !activeTaskId
-                            && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
-                        activeTaskId = data.taskId;
-                    }
-                    if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
-                            || sub === 'need_input') {
-                        // Only the task we are actually following may end the working state.
-                        // When either side has no id, behave as before rather than risk a
-                        // spinner that never stops.
-                        if (data.taskId && activeTaskId && data.taskId !== activeTaskId) {
-                            showActivity(content, null);   // note it, but keep working
-                        } else {
-                            showActivity(content, null);
-                            setThinking(false);
-                            doneActivity();
-                            activeTaskId = null;
-                        }
-                    } else if (sub === 'scheduled' || sub === 'warning') {
-                        // Notices, not evidence that work is in flight. The scheduler emits
-                        // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
-                        // has already delivered its result, and budget warnings arrive whenever a
-                        // threshold is crossed. Both fell into the catch-all below, which calls
-                        // setThinking(true) -- so the spinner restarted with nothing left to stop
-                        // it and Send stayed disabled for the full 15-minute safety timeout, while
-                        // Enter (which gates on `busy`, never set on this path) still worked. Two
-                        // controls disagreeing, after every single recurring task.
-                        resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
-                        showActivity(content, detail);
-                    } else if (sub === 'progress') {
-                        // PROGRESS updates the last step in-place (no new entry)
-                        setThinking(true);
-                        resetThinkingSafetyTimer();
-                        updateActivity(content);
-                    } else {
-                        setThinking(true);
-                        resetThinkingSafetyTimer();
-                        showActivity(content, detail);
-                    }
+                    showStatus(data);
                 } else if (type === 'input_request') {
-                    // The task stopped to ask the user something. Clear the working state: it
-                    // disables the send button, so until now the only way to reply was the
-                    // Enter handler, which happens not to check it. Clicking Send did nothing.
+                    // A question in another chat: that chat's task waits there, and this one's
+                    // working state is not touched. Marked, and said, as an answer there is.
+                    markWorking(data.sessionId, false);
+                    if (data.sessionId && data.sessionId !== displayedSessionId) {
+                        showElsewhere('A question arrived in another chat.', data.sessionId);
+                        markUnread(data.sessionId);
+                        return;
+                    }
+                    // A task is waiting for an answer: the working state is over. It used to
+                    // disable the Send button, and clicking Send did nothing.
                     // doneActivity() as well as setThinking(false): without it the activity
                     // strip kept a spinner turning above a task that had already stopped and was
                     // waiting on the user, which reads as "still working, do not touch it".
                     setThinking(false);
                     doneActivity();
                     ensureChatView();   // unanswerable, then deleted, if Settings is open
-                    addMsg('input_request', content, data.taskId);
+                    addChoices(addMsg('input_request', content, data.taskId, null, data.timestamp), data.choices);
                     try { inputEl.focus(); } catch (e) {}
                 } else if (type === 'debug') {
-                    addMsg('debug', content);
+                    // In the chat of the task it is about.
+                    if (!data.sessionId || data.sessionId === displayedSessionId) addMsg('debug', content);
+                } else if (type === 'progress') {
+                    // A running task saying what it is doing, in the chat it was asked from: drawn
+                    // there while that chat is on screen (it is saved, so a reload shows it too),
+                    // and evidence that the work goes on -- never the end of it.
+                    if (data.sessionId && data.sessionId !== displayedSessionId) markWorking(data.sessionId, true);
+                    else resetThinkingSafetyTimer();
+                    if (currentView === 'chat' && data.sessionId === displayedSessionId) {
+                        addProgress(content, data.progress, null, data.timestamp);
+                    }
+                    // The row that says the task read messages sent while it worked names them.
+                    (data.read || []).forEach(function(id) { markFate(bubbleOf(id), 'Read by the task.'); });
                 } else if (type === 'pong' || type === 'ping') {
-                    // heartbeat
+                    // The heartbeat's. One that comes while the page asks whether its task still
+                    // runs answers that (stillRunning): ended only when no task runs.
+                    if (type === 'pong') setWorkingChats(data.workingChats);
+                    if (type === 'pong' && askedStillRunning && typeof data.taskRunning === 'boolean') {
+                        askedStillRunning = false;
+                        if (!data.taskRunning) { setThinking(false); doneActivity(); }
+                    }
                 } else {
-                    // 'system' is how a slash-command result comes back. send() sets busy and
-                    // starts the spinner for every message including commands, and nothing here
-                    // cleared it: /help answered instantly and then left the composer dead for
-                    // fifteen minutes -- Send greyed out while Enter, which gates on `busy`,
-                    // still worked.
+                    // 'system' is how a slash-command result comes back. send() starts the spinner
+                    // for every message including commands, and nothing here cleared it: /help
+                    // answered instantly and then left the working state on for fifteen minutes.
                     // 'result' is the output of work nobody was waiting for -- a scheduled run
                     // or /bg. It must read as an assistant message but must NOT end whatever the
                     // user is currently watching, so it is deliberately absent from the list
-                    // below and rendered with the same styling as a response.
+                    // below and rendered with the same styling as a response. It is saved into
+                    // its own chat -- the pinned chat of scheduled results, or the one /bg was
+                    // typed in -- and appended only while that chat is on screen; otherwise that
+                    // chat is marked unread. Appended to whatever was open, a morning digest
+                    // turned up in the middle of an unrelated conversation.
+                    if (type === 'result') {
+                        if (currentView === 'chat' && data.sessionId === displayedSessionId) {
+                            addMsg('response', content, data.taskId, null, data.timestamp);
+                        } else {
+                            markUnread(data.sessionId);
+                        }
+                        return;
+                    }
                     // Do not append a message that belongs to another conversation.
                     //
                     // An answer is saved into the chat it was asked from and pushed to every
@@ -5461,18 +6302,25 @@
                     // follow-up in a third place. Say it arrived instead of rendering it into
                     // the wrong transcript, and do not drop it silently: the owner waited
                     // minutes for it.
-                    if (data.sessionId && displayedSessionId && data.sessionId !== displayedSessionId) {
-                        showConnBanner('An answer arrived in another chat — open it to read it.');
-                        refreshSessionList();
-                        if (type === 'response' || type === 'result') { setThinking(false); doneActivity(); }
+                    // Another chat's while no chat is on screen yet, after New Chat, as well.
+                    if (data.sessionId && data.sessionId !== displayedSessionId) {
+                        // That chat's task has ended; the one on screen goes on.
+                        showElsewhere('An answer arrived in another chat.', data.sessionId);
+                        if (type === 'response') markWorking(data.sessionId, false);
+                        markUnread(data.sessionId);
                         return;
                     }
-                    if (type === 'result') { addMsg('response', content, data.taskId); return; }
-                    if (type === 'response' || type === 'system') {
+                    // A command's reply ends the working state its own sending started -- not a
+                    // task's: a command typed while a task runs is answered at once, and the task
+                    // goes on, as it does after Stop is acknowledged.
+                    if (type === 'response' || (type === 'system' && !activeTaskId)) {
                         setThinking(false);
                         doneActivity();
                     }
-                    addMsg(type, content, data.taskId);
+                    var drawnMsg = addMsg(type, content, data.taskId, null, data.timestamp);
+                    // The server's echo of a slash text this page sent: "/queue ..." is a message,
+                    // and what became of it is said under this bubble.
+                    if (type === 'user' && data.clientId) sentBubbles[data.clientId] = drawnMsg;
                 }
             } catch(ex) {
                 setThinking(false);
@@ -5482,42 +6330,213 @@
         };
     }
 
+    /**
+     * A task's status: a frame of its own, or what a session_info says the running task is doing
+     * now (its "doing").
+     */
+    function showStatus(data) {
+        var content = data.content || '';
+        // Unattended work -- a scheduled run, /bg -- is shown apart: its statuses
+        // filled the activity strip of whatever chat was open, and started its spinner.
+        if (data.data && data.data.background) { showBackgroundStatus(data, content); return; }
+        var sub = data.status || '';
+        // A status of a task in another chat marks that chat in the list, and the chat on screen
+        // is left alone: tasks of different chats run side by side. One that names no chat is of
+        // no chat's task, and shown as it always was.
+        var ending = sub === 'completed' || sub === 'failed' || sub === 'rollback' || sub === 'need_input';
+        if (data.sessionId) markWorking(data.sessionId, !ending);
+        if (data.sessionId && data.sessionId !== displayedSessionId) return;
+        var detail = data.data && data.data.category ? data.data : null;
+        // Claim this window's working state for the first task we hear from. A task
+        // that was queued behind the one whose trace is shown starts a trace of its own.
+        if (data.taskId && !activeTaskId
+                && sub !== 'completed' && sub !== 'failed' && sub !== 'rollback') {
+            if (traceTaskId && traceTaskId !== data.taskId) resetActivity();
+            activeTaskId = traceTaskId = data.taskId;
+        }
+        // Update token counter whenever data.data has token info
+        if (data.data) updateTokens(data.data);
+        // Update stats bar whenever data.data carries stats fields
+        if (data.data && data.data.totalSteps != null) updateStats(data.data);
+        // A message the running task ended without reading: it runs as its own task.
+        if (data.data && data.data.requeued) markFate(bubbleOf(data.data.requeued), content);
+        if (sub === 'completed' || sub === 'failed' || sub === 'rollback'
+                || sub === 'need_input') {
+            // Only the task we are actually following may end the working state.
+            // When either side has no id, behave as before rather than risk a
+            // spinner that never stops.
+            if (data.taskId && activeTaskId && data.taskId !== activeTaskId) {
+                showActivity(content, null);   // note it, but keep working
+            } else {
+                showActivity(content, null);
+                setThinking(false);
+                doneActivity();
+                activeTaskId = null;
+            }
+        } else if (sub === 'scheduled' || sub === 'warning') {
+            // Notices, not evidence that work is in flight. The scheduler emits
+            // SCHEDULED "Recurring task #N completed. Next run: 07:00" AFTER the run
+            // has already delivered its result, and budget warnings arrive whenever a
+            // threshold is crossed. Both fell into the catch-all below, which calls
+            // setThinking(true) -- so the spinner restarted with nothing left to stop
+            // it, for the full 15-minute safety timeout, after every single recurring
+            // task.
+            resetThinkingSafetyTimer();   // no-op when idle; keeps the watchdog fresh otherwise
+            showActivity(content, detail);
+        } else if (sub === 'live') {
+            // A model call's live state, in place of the one before it: the work goes on.
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            showLive(data.data && data.data.live, content);
+        } else if (sub === 'progress') {
+            // PROGRESS updates the last step in-place (no new entry)
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            updateActivity(content);
+        } else {
+            setThinking(true);
+            resetThinkingSafetyTimer();
+            showActivity(content, detail);
+        }
+    }
+
+    /**
+     * What the working state of a chat was when this tab left it while its task ran: since when,
+     * and the options Send reaches that task with. The working state on screen is the shown
+     * chat's alone -- tasks of different chats run side by side -- so it goes when the chat does,
+     * and comes back with it: the server says whether its task still runs and what it is doing
+     * (session_info), and this, since when, and whether Send reaches it.
+     */
+    var keptStates = {};
+
+    /** Keep the working state of the chat on screen, while its task runs (keptStates). */
+    function keepShownState() {
+        if (!displayedSessionId || !thinkingEl.classList.contains('active')) return;
+        keptStates[displayedSessionId] = { startedAt: thinkingStartedAt,
+                steered: steeredChatId === displayedSessionId ? steeredOptions : null };
+    }
+
+    /** The chat on screen is left for another: its working state is kept, and goes from the screen. */
+    function leaveShownChat() {
+        keepShownState();
+        setThinking(false);
+        activeTaskId = null;
+        resetActivity();
+    }
+
+    /** The task of the chat on screen runs, the server says: its working state is shown, as it was kept. */
+    function resumeShownChat() {
+        var kept = keptStates[displayedSessionId];
+        delete keptStates[displayedSessionId];
+        setThinking(true);
+        if (kept && kept.startedAt) { thinkingStartedAt = kept.startedAt; updateElapsed(); }
+        if (kept && kept.steered) { steeredChatId = displayedSessionId; steeredOptions = kept.steered; updateComposer(); }
+    }
+
+    /**
+     * The chats with a task asked in them running or waiting, marked in the list: as the server
+     * last said (session_info, pong), and as their statuses say since.
+     */
+    var workingChats = {};
+
+    function setWorkingChats(ids) {
+        if (!ids) return;
+        workingChats = {};
+        ids.forEach(function(id) { workingChats[id] = true; });
+        // What was kept of a chat whose task has ended since is no state of its next task's.
+        Object.keys(keptStates).forEach(function(id) { if (!workingChats[id]) delete keptStates[id]; });
+        paintWorking();
+    }
+
+    function markWorking(id, on) {
+        if (id && !on) delete keptStates[id];
+        if (!id || !!workingChats[id] === on) return;
+        if (on) workingChats[id] = true; else delete workingChats[id];
+        paintWorking();
+    }
+
+    function paintWorking() {
+        sessionListEl.querySelectorAll('.session-item').forEach(function(el) {
+            el.classList.toggle('working', !!workingChats[el.getAttribute('data-session-id')]);
+        });
+    }
+
+    /**
+     * The working state. Send stays enabled in it: what is sent while a task runs goes to that
+     * task where the task takes it, and the task reads it before its next step -- or, with Queue,
+     * it runs as a task of its own after it (updateComposer). Stop stays beside them.
+     */
     function setThinking(on) {
-        if (!on) stopPressed = false;
+        if (!on) { stopPressed = false; steeredChatId = null; askedStillRunning = false; }
         if (thinkingSafetyTimer) { clearTimeout(thinkingSafetyTimer); thinkingSafetyTimer = null; }
+        stopBtn.classList.toggle('visible', on);
         if (on) {
             thinkingEl.classList.add('active');
-            sendBtn.disabled = true;
-            stopBtn.classList.add('visible');
             scrollBottom();
             // Start elapsed timer
             if (!thinkingStartedAt) {
                 thinkingStartedAt = Date.now();
                 startElapsedTimer();
             }
-            // Safety net: auto-hide if no messages arrive for 15 minutes
-            thinkingSafetyTimer = setTimeout(function() {
-                setThinking(false);
-                doneActivity();
-            }, 900000);
+            // Fifteen minutes without a word of the task: ask whether it still runs (stillRunning).
+            thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
         } else {
             thinkingEl.classList.remove('active');
-            sendBtn.disabled = false;
-            stopBtn.classList.remove('visible');
-            busy = false;
             thinkingStartedAt = null;
             stopElapsedTimer();
         }
+        updateComposer();
+    }
+
+    /**
+     * The chat where Send reaches the running task, once the server has said so: the fate of a
+     * message this page sent there names it. Null while nothing says so -- the task takes
+     * nothing from this page (one asked from Telegram, a scheduled run, /bg), or was not reached
+     * from it yet -- and while no task runs.
+     */
+    var steeredChatId = null;
+
+    /**
+     * What the message that started or reached the running task there was sent with: the task
+     * takes no message sent with other options (Inbox#offer) -- one sent on Free is not read by a
+     * task on the cloud -- so Send reaches it only while the same are chosen.
+     */
+    var steeredOptions = null;
+
+    /**
+     * Promise only what Send does: the running task, with Queue beside Send, only in the chat
+     * where Send is known to reach it, with what it was sent with chosen. Anywhere else nothing is
+     * promised, and the line under the bubble says what became of the message.
+     */
+    function updateComposer() {
+        var chosen = chosenOptions();
+        var steering = thinkingEl.classList.contains('active')
+                && steeredChatId !== null && steeredChatId === displayedSessionId
+                && chosen.costMode === steeredOptions.costMode && chosen.effort === steeredOptions.effort;
+        queueBtn.classList.toggle('visible', steering);
+        inputEl.placeholder = steering ? 'Send to the running task, or Queue it for after...' : idlePlaceholder;
     }
 
     function resetThinkingSafetyTimer() {
         if (thinkingSafetyTimer) {
             clearTimeout(thinkingSafetyTimer);
-            thinkingSafetyTimer = setTimeout(function() {
-                setThinking(false);
-                doneActivity();
-            }, 900000);
+            thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
         }
+    }
+
+    /**
+     * Nothing has been heard of the task for THINKING_SAFETY_MS: ask the server whether it still
+     * runs, with a ping, whose pong says (taskRunning), and end the working state only when it
+     * does not. The silence was taken for the task's end: on 2026-10-08 a local model reasoned for
+     * two and a half hours without a word, and the spinner and Stop went after fifteen minutes,
+     * while the task ran on. Asked again each THINKING_SAFETY_MS, so a lost pong is asked about
+     * again; a page that cannot ask keeps its state, and its reconnect's session_info says.
+     */
+    function stillRunning() {
+        askedStillRunning = true;
+        try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', sessionId: displayedSessionId })); }
+        catch (e) {}
+        thinkingSafetyTimer = setTimeout(stillRunning, THINKING_SAFETY_MS);
     }
 
     function startElapsedTimer() {
@@ -5555,54 +6574,206 @@
      */
     var activeTaskId = null;
 
-    function addMsg(type, text, taskId) {
+    /** The task whose trace the activity strip shows, which stays there after it ends. */
+    var traceTaskId = null;
+
+    /**
+     * @param before    for a saved row of the chat, the element it is drawn before; whoever draws a
+     *                  page of them sets the scroll position once it is drawn
+     * @param timestamp when the row was saved, as the server sends it with the row (rowTime)
+     */
+    function addMsg(type, text, taskId, before, timestamp) {
         var isUserMsg = type === 'user';
         var isAiMsg   = (type === 'response' || type === 'error' || type === 'question' || type === 'input_request' || type === 'debug');
         var senderKey = isUserMsg ? 'user' : (isAiMsg ? 'ai' : null);
         var firstInRun = senderKey !== null && senderKey !== lastMsgSender;
         if (senderKey) lastMsgSender = senderKey;
+        var at = rowTime(timestamp, before);
 
         var div = document.createElement('div');
         div.className = 'msg ' + type + (firstInRun ? ' first-in-run' : '');
+        // Every row drawn here alike: its content, then the meta line under it -- when it was
+        // saved, and under an answer of a task what that task did -- at the row's own edge (CSS).
+        // A step says when it was saved at the end of its header instead (addProgress).
+        var main = node('div', 'msg-main');
+        var meta = node('div', 'msg-meta');
+        if (at) meta.appendChild(timeOf(at));
 
         if (isUserMsg) {
             var bubble = document.createElement('div');
             bubble.className = 'bubble';
             bubble.textContent = text;
-            div.appendChild(bubble);
+            main.appendChild(bubble);
+            div.dataset.said = text;
         } else if (isAiMsg) {
             var avatar = document.createElement('div');
             avatar.className = 'msg-avatar';
             avatar.setAttribute('aria-hidden', 'true');
             avatar.textContent = String.fromCodePoint(0x1F980);
+            div.appendChild(avatar);
 
             var body = document.createElement('div');
             body.className = 'msg-body md';
             body.innerHTML = renderMarkdown(text);
             body.querySelectorAll('pre').forEach(wrapCodeBlock);
+            main.appendChild(body);
 
-            // After the markdown, never inside it: mdSanitize forces target=_blank on every <a>,
-            // and this opens a page in this window rather than leaving it.
+            // In the meta line, never inside the markdown: mdSanitize forces target=_blank on
+            // every <a>, and this opens a page in this window rather than leaving it.
             if (isTaskId(taskId)) {
                 var trace = node('button', 'msg-trace-link', 'What this task did \u2192');
                 trace.type = 'button';
                 trace.addEventListener('click', function() { openTaskDetail(taskId, 'chat'); });
-                body.appendChild(trace);
+                meta.appendChild(trace);
             }
-
-            div.appendChild(avatar);
-            div.appendChild(body);
         } else {
-            div.innerHTML = renderMarkdown(text);
-            div.classList.add('md');
-            div.querySelectorAll('pre').forEach(wrapCodeBlock);
-            if (text.indexOf('\n') === -1 && text.length < 80) div.classList.add('short');
+            var words = node('div', 'msg-text md');
+            words.innerHTML = renderMarkdown(text);
+            // A task's own rows fold their code, as a step's does (addProgress).
+            words.querySelectorAll('pre').forEach(type === 'progress' ? foldCodeBlock : wrapCodeBlock);
+            main.appendChild(words);
         }
+        if (meta.firstChild) main.appendChild(meta);
+        div.appendChild(main);
 
-        messagesEl.insertBefore(div, thinkingEl);
+        messagesEl.insertBefore(div, before || thinkingEl);
+        if (before) return div;
+        // The owner's message answers the questions before it: their choices are done.
+        if (isUserMsg) settleChoices();
         // Force for the user's own message: sending is an explicit action, so jumping
         // to it is expected. Everything else only follows if already following.
         scrollBottom(type === 'user');
+        return div;
+    }
+
+    /**
+     * A question's answers, as buttons under it: a click sends one as the owner's reply, as if it
+     * had been typed. Drawn for a saved question as well; done once the reply is on screen
+     * (settleChoices) -- shown still, the one picked marked, but no longer sent.
+     */
+    function addChoices(row, choices) {
+        if (!row || !choices || !choices.length) return;
+        var group = node('div', 'msg-choices');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', 'Answers to pick from');
+        choices.forEach(function(choice) {
+            var b = node('button', 'choice-btn', choice);
+            b.type = 'button';
+            b.addEventListener('click', function() {
+                if (!group.classList.contains('retired')) send(false, choice);
+            });
+            group.appendChild(b);
+        });
+        var main = row.querySelector('.msg-main');
+        main.insertBefore(group, main.querySelector('.msg-meta'));
+        scrollBottom(false);
+    }
+
+    /**
+     * Mark done the choices of every question answered on screen, by the owner's nearest message
+     * after it -- not a command, which answers nothing and is not kept. Run once a page of rows is
+     * drawn, and when a message is sent: a page of earlier rows is drawn above the rows on screen,
+     * a row at a time, so a question's reply may be drawn after the question, or be on the page
+     * below its own.
+     */
+    function settleChoices() {
+        messagesEl.querySelectorAll('.msg-choices:not(.retired)').forEach(function(group) {
+            for (var n = group.closest('.msg').nextElementSibling; n; n = n.nextElementSibling) {
+                if (!n.classList.contains('user')) continue;
+                var said = n.dataset.said || '';
+                if (said.trim().charAt(0) === '/') continue;
+                retireChoices(group, said);
+                return;
+            }
+        });
+    }
+
+    function retireChoices(group, said) {
+        group.classList.add('retired');
+        group.querySelectorAll('.choice-btn').forEach(function(b) {
+            b.disabled = true;
+            if (said != null && b.textContent === said.trim()) b.classList.add('picked');
+        });
+    }
+
+    /**
+     * A running task's progress row. Its header is the text's first line, as the server wrote it
+     * for Telegram and the stored row alike: who acts as an emoji -- the cloud or the local
+     * model -- then the step, the local model's turn or the result, the tool, the time the task
+     * has run and what it has cost. The page draws the emoji as a chip, styled by who acts from
+     * the data sent with the row, and the rest of the line as it is; the rest of the text under
+     * the header. A row saved before the header was kept comes without the data, and is drawn as
+     * its text. A saved row is drawn before the element given, as addMsg draws one; when it was
+     * saved ends the header.
+     */
+    function addProgress(text, header, before, timestamp) {
+        if (!header || (header.actor !== 'cloud' && header.actor !== 'local')) {
+            addMsg('progress', text, null, before, timestamp);
+            return;
+        }
+        var div = node('div', 'msg progress');
+        var main = node('div', 'msg-main');
+        var head = node('div', 'progress-head');
+        var lineBreak = text.indexOf('\n');
+        var line = lineBreak < 0 ? text : text.slice(0, lineBreak);
+        var space = line.indexOf(' ');
+        var chip = node('span', 'progress-chip ' + header.actor, line.slice(0, space) + ' ' + header.actor);
+        chip.title = header.actor === 'local' ? 'The local model, on this machine' : 'The cloud model';
+        head.appendChild(chip);
+        head.appendChild(node('span', 'progress-what', line.slice(space + 1)));
+        var at = rowTime(timestamp, before);
+        if (at) head.appendChild(timeOf(at));
+        main.appendChild(head);
+        var body = lineBreak < 0 ? '' : text.slice(lineBreak + 1).trim();
+        if (body) {
+            var b = node('div', 'progress-body md');
+            b.innerHTML = renderMarkdown(body);
+            b.querySelectorAll('pre').forEach(foldCodeBlock);
+            main.appendChild(b);
+        }
+        div.appendChild(main);
+        if (before) { messagesEl.insertBefore(div, before); return; }
+        messagesEl.insertBefore(div, thinkingEl);
+        scrollBottom(false);
+    }
+
+    /**
+     * When a row was saved, from the timestamp the server sends with it: SQLite's datetime('now'),
+     * UTC to the second with no zone (tdTime). A row drawn live without one is not kept -- a
+     * command's reply, a failed upload -- or its frame does not say, and came as it is drawn: this
+     * page's clock says when. A saved row drawn without one shows no time.
+     *
+     * @param before the element a saved row is drawn before (addMsg); none for a row drawn live
+     */
+    function rowTime(timestamp, before) {
+        return tdTime(timestamp) || (before ? null : new Date());
+    }
+
+    /**
+     * A row's time: a <time>, which the markdown of a row's text never makes (MD_ALLOWED), so the
+     * one a row holds is its own.
+     */
+    function timeOf(at) {
+        return showTime(node('time', 'msg-time'), at);
+    }
+
+    /**
+     * Show a moment as a row's time, in this browser's language: the time, with the date when it
+     * was not today, and the year when not this year; the whole date and time, to the second, in
+     * its tooltip.
+     */
+    function showTime(time, at) {
+        var now = new Date();
+        var shown = { hour: '2-digit', minute: '2-digit' };
+        if (at.toDateString() !== now.toDateString()) {
+            shown.day = 'numeric';
+            shown.month = 'numeric';
+            if (at.getFullYear() !== now.getFullYear()) shown.year = 'numeric';
+        }
+        time.textContent = at.toLocaleString(undefined, shown);
+        time.dateTime = at.toISOString();
+        time.title = at.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' });
+        return time;
     }
 
     // Chat messages are persisted and re-rendered on every load, so anything unsafe here is
@@ -5714,8 +6885,17 @@
     }
 
     function wrapCodeBlock(pre) {
+        codeBlock(pre, false);
+    }
+
+    /** A task step's code block, folded to its header line until it is clicked open. */
+    function foldCodeBlock(pre) {
+        codeBlock(pre, true);
+    }
+
+    function codeBlock(pre, folded) {
         var wrapper = document.createElement('div');
-        wrapper.className = 'code-block-wrap';
+        wrapper.className = 'code-block-wrap' + (folded ? ' folded' : '');
         pre.parentNode.insertBefore(wrapper, pre);
         wrapper.appendChild(pre);
         var btn = document.createElement('button');
@@ -5729,7 +6909,29 @@
                 setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
             });
         };
-        wrapper.appendChild(btn);
+        btn.type = 'button';
+        if (!folded) { wrapper.appendChild(btn); return; }
+        // Its header: what it is and how long, its first line, and Copy -- the whole block a click away.
+        var code = pre.querySelector('code');
+        var lang = code && /(?:^|\s)language-(\S+)/.exec(code.className);
+        var lines = (code ? code.textContent : pre.textContent).replace(/\n$/, '').split('\n');
+        var head = node('div', 'code-head');
+        var toggle = node('button', 'code-toggle');
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        var arrow = node('span', 'code-arrow', '\u25B8');
+        toggle.appendChild(arrow);
+        toggle.appendChild(node('span', 'code-lang', (lang ? lang[1] + ' \u00B7 ' : '') + lines.length
+                + (lines.length === 1 ? ' line' : ' lines')));
+        toggle.appendChild(node('span', 'code-first', lines[0]));
+        toggle.addEventListener('click', function() {
+            var open = wrapper.classList.toggle('folded') === false;
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            arrow.textContent = open ? '\u25BE' : '\u25B8';
+        });
+        head.appendChild(toggle);
+        head.appendChild(btn);
+        wrapper.insertBefore(head, pre);
     }
 
     //  File Upload 
@@ -5812,8 +7014,256 @@
     }
 
     //  Send 
-    function send() {
-        var text = inputEl.value.trim();
+    /**
+     * The bubbles this page drew for messages it sent, by the name it gave each, until the server
+     * says what became of the message (a 'fate' frame naming it).
+     */
+    var sentBubbles = {};
+    var sentCount = 0;
+    /**
+     * The chat on screen when each message was sent, by its name, until its fate frame: a fate
+     * naming another chat takes this tab there only while the chat it was sent from is still the
+     * one on screen -- not after the owner has opened another meanwhile.
+     */
+    var sentFrom = {};
+
+    var linkBanner = document.getElementById('link-banner');
+    /** The text a link put in the box, while it is there unchanged: a second link replaces it without asking. */
+    var linkText = null;
+    /** Counts the link messages shown, so a signature's answer for one replaced since is not shown. */
+    var linksShown = 0;
+    /** Set while a chat is being made for a link (makeLinkChat): one at a time. */
+    var makingLinkChat = false;
+    /** How long a chat for a link is waited for before its message goes in the chat on screen. */
+    var LINK_CHAT_WAIT = 20000;
+    /** Set once this page is being left: a request that ends with it has not failed. */
+    var pageLeaving = false;
+    window.addEventListener('pagehide', function() { pageLeaving = true; });
+
+    /**
+     * Put the waiting link's message in the box, once this tab's chat is on screen -- in a chat of
+     * its own first, when the link asks for one. Never sent: Send or Enter is the owner's. As text,
+     * never as markup, shaped as linkTextOf says. Refused before anything is made for it when it is
+     * a command -- one Send would run it: a forged link's /cred set, put above what the box showed,
+     * stored a secret of its own -- or holds what the box does not show. A draft in the box is not
+     * replaced without asking, and the link waits for the answer; a message an earlier link put
+     * there, unchanged, is replaced.
+     */
+    function applyLink() {
+        var link = waitingLink();
+        if (!link || !authToken || !ws || ws.readyState !== 1 || !displayedSessionId) return;
+        // Drawn again, in the chat view, and then here again.
+        if (currentView !== 'chat') { switchToSession(displayedSessionId); return; }
+        var shaped = linkTextOf(link.task);
+        var refused = !shaped.text
+                ? 'A link asked to put a message in the box that cannot be shown there, so nothing was put in it.'
+                : LINK_COMMAND.test(shaped.text)
+                ? 'A link asked to put a command in the box (its message starts with /). A link may not, so nothing was put in it.'
+                : LINK_HIDDEN.test(shaped.text)
+                ? 'A link asked to put text with invisible characters in the box, which can hide or reorder what the '
+                        + 'agent is sent. A link may not, so nothing was put in it.'
+                : null;
+        if (refused) {
+            keepLink(null);
+            showLinkBanner(refused, false);
+            return;
+        }
+        if (link.new && !link.chat) {
+            makeLinkChat(link);   // opened, its history drawn, this runs again
+            return;
+        }
+        if (inputEl.value.trim() && inputEl.value !== linkText) {
+            var shown = ++linksShown;
+            showLinkBanner('Replace your draft with the message from the link?', false, [
+                { label: 'Replace', act: function() { if (shown === linksShown) fillFromLink(link, shaped); } },
+                { label: 'Keep my draft', act: function() { if (shown === linksShown) hideLinkBanner(); } }
+            ]);
+            return;
+        }
+        fillFromLink(link, shaped);
+    }
+
+    /**
+     * Make the chat a link asks for, titled as it says, and open it by its id. Its own: a later
+     * link that asks for a new chat has another, and no chat is renamed for a link. A link that has
+     * replaced this one meanwhile is applied as it asks. When the chat cannot be made -- refused, or
+     * no answer within LINK_CHAT_WAIT -- the message goes in the chat on screen, and the banner says
+     * so; a page being left has not failed, and the link waits for the page that follows.
+     */
+    function makeLinkChat(link) {
+        if (makingLinkChat) return;
+        makingLinkChat = true;
+        var stop = new AbortController();
+        var timer = setTimeout(function() { stop.abort(); }, LINK_CHAT_WAIT);
+        fetch('/api/chats', {
+            method: 'POST',
+            signal: stop.signal,
+            headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(link.title ? { title: link.title } : {})
+        })
+        .then(okJson)
+        .then(function(made) {
+            clearTimeout(timer);
+            makingLinkChat = false;
+            var now = waitingLink();
+            if (!now || now.id !== link.id) { applyLink(); return; }
+            now.chat = made.sessionId;
+            keepLink(now);
+            refreshSessionList();
+            switchToSession(made.sessionId);
+        })
+        .catch(function() {
+            clearTimeout(timer);
+            makingLinkChat = false;
+            if (pageLeaving) return;
+            var now = waitingLink();
+            if (now && now.id === link.id) {
+                now.new = false;
+                now.noChat = true;
+                keepLink(now);
+            }
+            applyLink();
+        });
+    }
+
+    /**
+     * What the chat reads as a command, as the server reads one (CommandHandler.isCommand): a slash
+     * after nothing but blanks -- spaces, controls and invisible format characters among them.
+     */
+    var LINK_COMMAND = /^[\s\p{Z}\p{Cc}\p{Cf}]*\//u;
+
+    /**
+     * A character the box does not draw, or draws in another order than the agent reads it -- a
+     * Unicode tag, a direction override or isolate, a zero-width space, a soft hyphen, a variation
+     * selector, a control: every format, control and default-ignorable character but a line break,
+     * and the joiners and the two selectors that hold an emoji, or a word of some scripts, together.
+     */
+    var LINK_HIDDEN = /(?![\n\u200C\u200D\uFE0E\uFE0F])[\p{Cf}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
+
+    /** A run of what looks blank on a line: spaces of every width, and the fillers that draw as nothing. */
+    var BLANK_RUN = /[\s\p{Z}\u115F\u1160\u2800\u3164\uFFA0]+/gu;
+
+    /**
+     * A link's text as the box takes it: line ends as the box writes them; on a line, each run of
+     * blanks one space, and none at its ends; no run of blank lines -- blank space, rows of it,
+     * is where a forged link pushes what it hides out of view -- and at most LINK_MAX code points,
+     * cut where a character as a reader sees it ends (never in an emoji). In time linear in the
+     * text: a link of megabytes is read once. {text, cut, same}: same when the text is the link's
+     * exactly, which a signature is over.
+     */
+    function linkTextOf(task) {
+        var kept = [];
+        String(task).replace(/\r\n?/g, '\n').split('\n').forEach(function(line) {
+            var l = line.replace(BLANK_RUN, ' ');
+            if (l.charAt(0) === ' ') l = l.slice(1);
+            if (l.charAt(l.length - 1) === ' ') l = l.slice(0, -1);
+            if (l || (kept.length && kept[kept.length - 1])) kept.push(l);
+        });
+        while (kept.length && !kept[kept.length - 1]) kept.pop();
+        var text = kept.join('\n');
+        // Read as far as the cut, no further.
+        var parts = window.Intl && Intl.Segmenter
+                ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)[Symbol.iterator]()
+                : text[Symbol.iterator]();
+        var cut = false, count = 0, upTo = '';
+        for (var step = parts.next(); !step.done; step = parts.next()) {
+            var part = typeof step.value === 'string' ? step.value : step.value.segment;
+            var n = Array.from(part).length;
+            if (count + n > LINK_MAX) { cut = true; break; }
+            count += n;
+            upTo += part;
+        }
+        if (cut) text = upTo;
+        return { text: text, cut: cut, same: text === String(task) };
+    }
+
+    function fillFromLink(link, shaped) {
+        keepLink(null);
+        var text = shaped.text;
+        inputEl.value = text;
+        linkText = text;
+        inputEl.focus();
+        inputEl.setSelectionRange(text.length, text.length);
+        // All of it in view, from its start, as far as the screen allows: typing shrinks the box again.
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, Math.max(160, Math.round(window.innerHeight * 0.45))) + 'px';
+        inputEl.scrollTop = 0;
+        var shown = ++linksShown;
+        var after = (link.noChat ? ' A chat of its own could not be made for it, so it is in this one.' : '')
+                + (shaped.cut ? ' Cut to its first ' + LINK_MAX.toLocaleString('en') + ' characters.' : '')
+                + (inputEl.scrollHeight > inputEl.clientHeight + 1 ? ' It is longer than the box shows: scroll it to read all of it.' : '');
+        if (!link.sig) {
+            showLinkBanner('Message from a link: check it before sending.' + after, false);
+            return;
+        }
+        showLinkBanner('Message from a link: checking its signature\u2026' + after, false);
+        var asked = authToken;
+        fetch('/api/links/verify', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task: link.task, exp: link.exp, sig: link.sig })
+        })
+        .then(okJson)
+        .then(function(r) {
+            if (authToken !== asked || shown !== linksShown) return;
+            // Green for the text signed, whole, as it is in the box: not once it is cut or tidied,
+            // nor once it is edited (the box's input listener).
+            if (r.valid && !r.expired && shaped.same && inputEl.value === linkText) showLinkBanner('Guardian alert: verified.' + after, true);
+            else if (r.valid && !r.expired && shaped.same) showLinkBanner('Message from a link, changed since: check it before sending.', false);
+            else if (r.valid && !r.expired) showLinkBanner('Guardian alert: the signature holds for the message as sent, '
+                    + 'but the box does not hold all of it as sent. Check it before sending.' + after, false);
+            else if (r.valid) showLinkBanner('Guardian alert: its signature has expired. Check it before sending.' + after, false);
+            else if (!r.configured) showLinkBanner('Message from a link: unverified, as no GUARDIAN_LINK_SECRET is stored for '
+                    + 'your account (/cred set). Check it before sending.' + after, false);
+            else showLinkBanner('Message from a link: unverified, its signature does not match. Check it before sending.' + after, false);
+        })
+        .catch(function() {
+            if (shown === linksShown) {
+                showLinkBanner('Message from a link: its signature could not be checked. Check it before sending.' + after, false);
+            }
+        });
+    }
+
+    /** The banner above the box: its words, green when verified, and buttons with what each does. */
+    function showLinkBanner(words, verified, buttons) {
+        linkBanner.innerHTML = '';
+        linkBanner.classList.toggle('verified', !!verified);
+        linkBanner.appendChild(node('span', 'link-banner-text', words));
+        (buttons || []).forEach(function(b) {
+            var button = node('button', null, b.label);
+            button.type = 'button';
+            button.addEventListener('click', b.act);
+            linkBanner.appendChild(button);
+        });
+        var close = node('button', 'link-close', '\u00D7');
+        close.type = 'button';
+        close.title = 'Dismiss';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.addEventListener('click', hideLinkBanner);
+        linkBanner.appendChild(close);
+        linkBanner.hidden = false;
+    }
+
+    /** The banner gone, and with it a link waiting on it: dismissed, answered, or sent past. */
+    function hideLinkBanner() {
+        linksShown++;
+        linkText = null;
+        keepLink(null);
+        linkBanner.hidden = true;
+        linkBanner.innerHTML = '';
+    }
+
+    /**
+     * Send what is typed. While a task runs it goes to that task, which reads it before its next
+     * step -- or, queued, runs as a task of its own after the work ahead of it; the server decides,
+     * and says which under the bubble.
+     *
+     * @param choice a question's answer the owner clicked (addChoices), sent in place of what is in
+     *               the box -- which stays there, with the files attached to it
+     */
+    function send(queued, choice) {
+        var picked = typeof choice === 'string';
+        var text = picked ? choice : inputEl.value.trim();
         if (!text) return;
         // Say so instead of doing nothing. The socket can be closed for up to 30 seconds while
         // reconnect backoff climbs, and this used to return silently: the text stayed in the
@@ -5827,36 +7277,68 @@
         // unconditionally -- so the attachment was dropped from THIS message and silently rode
         // along with the next, unrelated one. The agent answered "which document?" now and
         // referred to a forgotten PDF an hour later.
-        if (fileChips.querySelector('.file-chip.uploading')) {
+        if (!picked && fileChips.querySelector('.file-chip.uploading')) {
             showConnBanner('Still uploading — send again in a moment.');
             return;
         }
 
         // Collect file attachment IDs
-        var attachmentIds = pendingFiles.map(function(f) { return f.id; }).filter(Boolean);
+        var files = picked ? [] : pendingFiles;
+        var attachmentIds = files.map(function(f) { return f.id; }).filter(Boolean);
 
         // Show attached file names in the user message bubble
         var display = text;
-        if (pendingFiles.length > 0) {
-            var names = pendingFiles.map(function(f) { return '📎 ' + f.name; });
+        if (files.length > 0) {
+            var names = files.map(function(f) { return '📎 ' + f.name; });
             display = names.join('\n') + '\n' + text;
         }
-        addMsg('user', display);
+        // A slash text is drawn by the server's echo, as it read it: "/cred set KEY VALUE" comes
+        // back with the value masked (CommandHandler.displayed). Drawn here it stayed as typed.
+        var clientId = 'm' + (++sentCount);
+        // Of a message, which a fate answers: a command is answered as a command, never with one.
+        if (text.charAt(0) !== '/' || /^\/queue\b/i.test(text)) sentFrom[clientId] = displayedSessionId;
+        var drawn = text.charAt(0) !== '/' ? addMsg('user', display) : null;
+        if (drawn) sentBubbles[clientId] = drawn;
 
-        var payload = { message: text };
+        // With what is chosen next to Send, which its task runs on and the chat keeps from now on.
+        var options = chosenOptions();
+        var payload = { message: text, clientId: clientId, costMode: options.costMode, effort: options.effort };
+        // Filed in the chat on screen, whichever chat another tab has open.
+        if (displayedSessionId) payload.sessionId = displayedSessionId;
+        if (queued) payload.queue = true;
         if (attachmentIds.length > 0) payload.attachmentIds = attachmentIds;
         ws.send(JSON.stringify(payload));
 
         // Clear
-        inputEl.value = '';
-        inputEl.style.height = 'auto';
-        pendingFiles = [];
-        fileChips.innerHTML = '';
-        busy = true;
-        // This message's task has no id yet; the first status carrying one claims it.
-        activeTaskId = null;
-        resetActivity();
+        if (!picked) {
+            inputEl.value = '';
+            inputEl.style.height = 'auto';
+            pendingFiles = [];
+            fileChips.innerHTML = '';
+            hideLinkBanner();
+        }
+        // Sent while a task runs, it does not start a trace of its own: that task's goes on, and
+        // a queued task's starts when it does (see the claim in the status handler).
+        if (!thinkingEl.classList.contains('active')) {
+            // This message's task has no id yet; the first status carrying one claims it.
+            activeTaskId = null;
+            resetActivity();
+        }
         setThinking(true);
+    }
+
+    /** Say under a bubble this page drew what became of its message. */
+    function markFate(bubble, text) {
+        if (!bubble || !text) return;
+        var inner = bubble.querySelector('.bubble') || bubble;
+        var line = inner.querySelector('.msg-fate');
+        if (!line) { line = node('span', 'msg-fate'); inner.appendChild(line); }
+        line.textContent = text;
+    }
+
+    /** The bubble of the message saved as this row, when this page drew it and the server named it. */
+    function bubbleOf(messageId) {
+        return messageId ? messagesEl.querySelector('.msg.user[data-message-id="' + CSS.escape(messageId) + '"]') : null;
     }
 
     /**
@@ -5870,16 +7352,48 @@
      * Sticking to the bottom is right when you are already at the bottom: that is following
      * along. It is wrong when you have deliberately scrolled away. The 80px tolerance keeps it
      * feeling sticky rather than brittle, so being a line or two off the bottom still follows.
+     *
+     * Whether you follow is kept from your own scrolling (the listener below), not measured here.
+     * Measured here, it was measured after the new message had been added: one taller than the
+     * tolerance read as you having scrolled away, so a long answer or progress row arrived out
+     * of sight and the chat stopped following. Forced -- your own message, a chat opened -- it
+     * follows from then on.
+     *
+     * The chat only: the task history, Settings and a skill's page are drawn into the same pane
+     * and open at their top, where the measurement this replaced left any taller than the pane.
      */
     function scrollBottom(force) {
-        var nearBottom = (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 80;
-        if (!force && !nearBottom) return;
+        if (currentView !== 'chat') return;
+        if (force) following = true;
+        else if (!following) return;
         requestAnimationFrame(function() { messagesEl.scrollTop = messagesEl.scrollHeight; });
     }
+
+    /** Whether the conversation follows its newest message (scrollBottom). */
+    var following = true;
+    var lastScrollTop = 0;
+    // Scrolled up, away from the bottom, you are reading: it stops following. Back within the
+    // tolerance of the bottom -- by hand, or by a scroll of this page's -- it follows again. A
+    // scroll down that stops short changes nothing: it may be a smooth scroll still under way.
+    messagesEl.addEventListener('scroll', function() {
+        var top = messagesEl.scrollTop;
+        if (messagesEl.scrollHeight - top - messagesEl.clientHeight < 80) following = true;
+        else if (top < lastScrollTop) following = false;
+        lastScrollTop = top;
+    });
+    // The view shrinks when the activity strip appears or opens under it, and as the composer
+    // grows: following, it stays on the newest message. Without this, the strip a chat's counters
+    // are restored into, shown just after the chat opens, pushed its newest message's last lines
+    // out of view.
+    new ResizeObserver(function() { scrollBottom(false); }).observe(messagesEl);
 
     inputEl.addEventListener('input', function() {
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+        // Verified is of the text the link put in the box: changed, it is the owner's text now.
+        if (linkText !== null && inputEl.value !== linkText && linkBanner.classList.contains('verified')) {
+            showLinkBanner('Message from a link, changed since: check it before sending.', false);
+        }
     });
 
     // A phone's Return key fires this same event and a soft keyboard has no Shift+Enter, so on
@@ -5888,22 +7402,44 @@
     var hardKeyboard = !window.matchMedia || !matchMedia('(pointer: coarse)').matches;
 
     inputEl.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey && hardKeyboard) {
+        // Not a held key's repeats: one held from the login would send what a link put in the box.
+        if (e.key === 'Enter' && !e.shiftKey && !e.repeat && hardKeyboard) {
             e.preventDefault();
-            // Respect the same state as the Send button. `busy` was set and cleared but never
-            // read, so Enter submitted regardless while Send sat disabled — two controls for
-            // the same action behaving differently. Tasks run on a single worker for minutes,
-            // so the second message queued silently behind the first and the reply arrived
-            // much later, looking like the app had ignored the input.
-            //
-            // A pending skill question is not this case: that path calls setThinking(false)
-            // precisely so the answer can be sent, which clears busy.
-            if (busy) return;
-            send();
+            // What Send does, in every state: while a task runs, the message goes to it.
+            send(false);
         }
     });
 
-    sendBtn.addEventListener('click', send);
+    sendBtn.addEventListener('click', function() { send(false); });
+    queueBtn.addEventListener('click', function() { send(true); });
+    costSel.addEventListener('change', updateComposer);
+    effortSel.addEventListener('change', updateComposer);
+
+    /** The options' names, as the settings page says them. */
+    var COST_NAMES = { fast: 'Fastest', cheaper: 'Cheaper', free: 'Free' };
+    var EFFORT_NAMES = { low: 'Low', medium: 'Medium', high: 'High' };
+
+    /**
+     * Show what the chat opened runs on: what it has chosen, or, where it has chosen nothing,
+     * "Default: ..." naming the default on the settings page it follows.
+     */
+    function showChatOptions(options, defaults) {
+        nameDefaults(defaults);
+        costSel.value = options.costMode || '';
+        effortSel.value = options.effort || '';
+        updateComposer();
+    }
+
+    /** Name, in each "Default" choice next to Send, the default on the settings page it follows. */
+    function nameDefaults(defaults) {
+        costSel.options[0].textContent = 'Default: ' + COST_NAMES[defaults.costMode];
+        effortSel.options[0].textContent = 'Default: ' + EFFORT_NAMES[defaults.effort];
+    }
+
+    /** What is chosen next to Send: null where it follows the default. */
+    function chosenOptions() {
+        return { costMode: costSel.value || null, effort: effortSel.value || null };
+    }
 
     /** Set when Stop has been pressed once and we are waiting for the task to notice. */
     var stopPressed = false;
@@ -5917,16 +7453,16 @@
             return;
         }
         if (ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'cancel' }));
+            // This chat's work: tasks of other chats go on.
+            ws.send(JSON.stringify({ type: 'cancel', sessionId: displayedSessionId }));
         }
         // Do NOT clear the working state here.
         //
         // Cancellation is cooperative: the task checks a flag at its next checkpoint, and a tool
         // call or a local model call already in flight has to return first, which can be a
         // minute or more. Clearing immediately told the owner it had stopped when it had not --
-        // so he retyped the request, it was accepted because `busy` was false, and it queued
-        // behind the task still running. The real terminal status arrives when it actually
-        // stops and clears this properly.
+        // so he retyped the request, and it queued behind the task still running. The real
+        // terminal status arrives when it actually stops and clears this properly.
         stopPressed = true;
         showActivity('Stopping — waiting for the current step to finish…', null);
     });

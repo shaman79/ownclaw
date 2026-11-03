@@ -10,10 +10,13 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -29,8 +32,8 @@ import java.util.concurrent.TimeUnit;
  *       {@code capabilities: ["completion"]} and a template of {@code {{ .Prompt }}}. The chat
  *       endpoint then cannot render the messages array, so the system prompt and the role
  *       structure are discarded — {@code prompt_eval_count} comes back far smaller than the
- *       prompt and the model answers something unrelated. Delegation, conversation
- *       compression, tool pre-selection and scheduled summaries all return nonsense.</li>
+ *       prompt and the model answers something unrelated. Delegation, and every other call
+ *       made to the local model, returns nonsense.</li>
  * </ul>
  * Runs on a daemon thread so a cold or unreachable Ollama never delays startup. The same facts
  * are available on demand, with a live chat round-trip, from {@code GET /api/ops/ollama}.
@@ -70,13 +73,67 @@ public class LocalModelCheck {
         return toolsCapable;
     }
 
+    /**
+     * Each model's context length, from the first {@code /api/show} this process made for it --
+     * at startup, for a substitute, on a status check, or when a call needed it.
+     */
+    private final Map<String, Integer> contextLengths = new ConcurrentHashMap<>();
+
+    @Autowired
     public LocalModelCheck(OwnClawConfig config, ObjectMapper mapper) {
-        this.config = config;
-        this.mapper = mapper;
-        this.http = new OkHttpClient.Builder()
+        // Seconds, not the chat client's hour: every question here is answered from the model
+        // files without inference, so a server silent for longer has stopped answering.
+        this(config, mapper, new OkHttpClient.Builder()
                 .connectTimeout(4, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
-                .build();
+                .build());
+    }
+
+    /** With the HTTP client given, so a test can answer the calls itself. */
+    LocalModelCheck(OwnClawConfig config, ObjectMapper mapper, OkHttpClient http) {
+        this.config = config;
+        this.mapper = mapper;
+        this.http = http;
+    }
+
+    /**
+     * A local model's context window in tokens: {@code <general.architecture>.context_length}
+     * from Ollama's {@code /api/show}. Every {@code /api/chat} this application sends carries it
+     * as num_ctx ({@link OllamaProvider#streamChat}), so the local model always has its whole
+     * window and never one chosen for it.
+     * <p>
+     * Known from the first {@code /api/show} made for the model, whoever made it; for a model
+     * none has been made for yet -- a substitute chosen at runtime, a model named by a request --
+     * it is read now. When it cannot be read, the call that needed it fails with the reason, and
+     * the next call reads again.
+     *
+     * @throws LlmException when Ollama cannot be asked, or does not say
+     */
+    public int contextLength(String model) {
+        Integer known = contextLengths.get(model);
+        if (known != null) return known;
+        String url = config.getExecutor().getUrl();
+        try {
+            show(url, model);
+        } catch (Exception e) {
+            throw new LlmException("ollama", "could not read the context window of '" + model
+                    + "' from /api/show: " + e.getMessage(), 0, e);
+        }
+        known = contextLengths.get(model);
+        if (known == null) {
+            throw new LlmException("ollama", "/api/show gives no context length for '" + model
+                    + "', so its context window is unknown");
+        }
+        return known;
+    }
+
+    /** {@code <general.architecture>.context_length} from an {@code /api/show} reply, or null. */
+    static Integer contextLengthIn(JsonNode show) {
+        JsonNode info = show.path("model_info");
+        String architecture = info.path("general.architecture").asText("");
+        JsonNode length = info.path(architecture + ".context_length");
+        return architecture.isEmpty() || !length.canConvertToInt() || length.asInt() <= 0
+                ? null : length.asInt();
     }
 
     /**
@@ -113,8 +170,8 @@ public class LocalModelCheck {
         try {
             installed = installedModels(url);
         } catch (Exception e) {
-            log.warn("Local tier unavailable: {} is not reachable ({}). Delegation, conversation "
-                            + "compression and scheduled summaries will fail until it is.",
+            log.warn("Local tier unavailable: {} is not reachable ({}). Delegation, and every "
+                            + "other local call, will fail until it is.",
                     url, e.getMessage());
             return;
         }
@@ -143,9 +200,9 @@ public class LocalModelCheck {
                                 + "capabilities={}, template is the bare \"{{ .Prompt }}\" placeholder and "
                                 + "Ollama has no built-in renderer for this architecture, so it cannot "
                                 + "render the message list: the system prompt and the roles are discarded "
-                                + "(prompt_eval_count comes back near 1) and delegation, conversation "
-                                + "compression, tool pre-selection and scheduled summaries all receive "
-                                + "unrelated text. The weights are almost certainly fine — the GGUF simply "
+                                + "(prompt_eval_count comes back near 1) and delegation, like every other "
+                                + "local call, receives unrelated text. The weights are almost certainly "
+                                + "fine — the GGUF simply "
                                 + "ships without a chat_template, which is common for community HuggingFace "
                                 + "GGUF uploads. Either point OWNCLAW_EXECUTOR_MODEL at a model whose "
                                 + "template renders messages, or re-create this one with a Modelfile that "
@@ -157,13 +214,9 @@ public class LocalModelCheck {
             }
 
             toolsCapable = capabilities.contains("tools");
-            if (capabilities.contains("thinking")) {
-                log.info("Local model '{}' ready on {} (capabilities={}) — a thinking model, so its "
-                        + "reasoning shares the output budget with the answer; local calls need enough "
-                        + "max_tokens for both.", model, url, capabilities);
-            } else {
-                log.info("Local model '{}' ready on {} (capabilities={})", model, url, capabilities);
-            }
+            Integer window = contextLengths.get(model);
+            log.info("Local model '{}' ready on {} (capabilities={}, context window {})", model, url,
+                    capabilities, window == null ? "not stated by /api/show" : window + " tokens");
         } catch (Exception e) {
             log.warn("Could not inspect local model '{}' on {}: {}", model, url, e.getMessage());
         }
@@ -238,6 +291,20 @@ public class LocalModelCheck {
     /** The configured model that was abandoned this boot, or null if none was. */
     public String substitutedFrom() {
         return substitutedFrom;
+    }
+
+    /**
+     * Whether the server answers {@code /api/tags} now, within this check's timeouts: the probe
+     * {@link OllamaProvider#isAvailable()} makes. It only proves the server answers -- whether
+     * the model can be driven is {@link #status()}'s question.
+     */
+    public boolean reachable() {
+        try {
+            installedModels(config.getExecutor().getUrl());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -352,7 +419,7 @@ public class LocalModelCheck {
     }
 
     private List<String> installedModels(String url) throws Exception {
-        Request req = new Request.Builder().url(url + "/api/tags").get().build();
+        Request req = new Request.Builder().url(OllamaProvider.endpoint(url, "/api/tags")).get().build();
         try (Response resp = http.newCall(req).execute()) {
             String body = resp.body() == null ? "" : resp.body().string();
             if (!resp.isSuccessful()) {
@@ -366,16 +433,20 @@ public class LocalModelCheck {
         }
     }
 
+    /** The one place this class asks Ollama about a model; what it says of the window is kept. */
     private JsonNode show(String url, String model) throws Exception {
         RequestBody body = RequestBody.create(
                 mapper.writeValueAsString(java.util.Map.of("model", model)), JSON);
-        Request req = new Request.Builder().url(url + "/api/show").post(body).build();
+        Request req = new Request.Builder().url(OllamaProvider.endpoint(url, "/api/show")).post(body).build();
         try (Response resp = http.newCall(req).execute()) {
             String text = resp.body() == null ? "" : resp.body().string();
             if (!resp.isSuccessful()) {
                 throw new IllegalStateException("HTTP " + resp.code() + ": " + text);
             }
-            return mapper.readTree(text);
+            JsonNode show = mapper.readTree(text);
+            Integer window = contextLengthIn(show);
+            if (window != null) contextLengths.put(model, window);
+            return show;
         }
     }
 }

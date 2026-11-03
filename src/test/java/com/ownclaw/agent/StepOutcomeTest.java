@@ -112,7 +112,7 @@ class StepOutcomeTest {
     void quotedPrivateTextIsWithheld() {
         var ctx = new AgentContext("u1", "t1", "parse the statement");
         String statement = "Account CZ65 0800 0000 1920 0014 5399 balance 41200 CZK statement for September";
-        ctx.privateIndex().addPrivate(1, statement);
+        ctx.egress("test").index().addPrivate(1, statement);
         var parse = new AgentAction("json_parse_file", Map.of(), "");
         var quoted = AgentObservation.failure("json_parse_file", "JSONDecodeError while parsing: " + statement, 5);
         assertFalse(AgentLoop.stepDetails(ctx, parse, quoted, 3).containsKey("reason"));
@@ -121,24 +121,24 @@ class StepOutcomeTest {
     }
 
     @Test
-    @DisplayName("the excerpt is the head and the tail")
-    void excerpt() {
-        assertEquals("", AgentLoop.failureExcerpt(null));
-        assertEquals("short", AgentLoop.failureExcerpt("short"));
-        String long_ = "H".repeat(300) + "M".repeat(400) + "T".repeat(300);
-        String e = AgentLoop.failureExcerpt(long_);
-        assertEquals("H".repeat(200) + "\n…\n" + "T".repeat(200), e);
+    @DisplayName("how a step failed is kept whole: the middle of a traceback is where it failed")
+    void theReasonIsWhole() {
+        String traceback = "Traceback (most recent call last):\n" + "  File \"skill.py\", line 12\n".repeat(200)
+                + "KeyError: 'uid'";
+        var d = outcome(AgentObservation.failure("imap_fetch", traceback, 5), Optional.empty());
+        assertEquals(traceback, d.get("reason"));
+        // Mutation: cut it to a head and a tail again -> the reason is shorter than the failure.
     }
 
     @Test
-    @DisplayName("an attachment's row names it and its label, never its text")
+    @DisplayName("an attachment's row gives its file by id and its label, never its text")
     void attachmentRowHasNoText() {
         String marker = "IBAN-CZ65-0800-0000-1920-0014-5399-MARKER";
-        var a = new Artifact(1, "attachment", Map.of(), Map.of(),
+        var a = new Artifact(1, "attachment", Map.of("fileId", "f1"), Map.of("fileId", "f1"),
                 "acct," + marker + ",41200", true, Label.PRIVATE, List.of("uploaded file"), true);
-        var d = AgentLoop.attachmentDetails(a, "statement.csv");
+        var d = AgentLoop.attachmentDetails(a);
         assertEquals("{{1}}", d.get("artifact"));
-        assertEquals("statement.csv", d.get("name"), "the owner's task page shows which file");
+        assertEquals("f1", d.get("fileId"), "the owner's task page looks the file's name up by it");
         assertEquals("PRIVATE", d.get("label"));
         assertEquals(true, d.get("indexed"));
         assertFalse(String.valueOf(d).contains(marker));

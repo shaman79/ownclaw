@@ -72,7 +72,7 @@ class AgentOutcomeTest {
             AgentResult r = build(f);
             assertNotNull(r.terminationReason(), f.getName() + " left the reason null");
             String expected = f.getName().replaceAll("([a-z])([A-Z])", "$1_$2").toUpperCase();
-            // needsInput -> NEEDS_INPUT, failureLimit -> FAILURE_LIMIT, maxSteps -> MAX_STEPS
+            // needsInput -> NEEDS_INPUT, failureLimit -> FAILURE_LIMIT, contextWindow -> CONTEXT_WINDOW
             assertEquals(expected, r.terminationReason().name(),
                     f.getName() + "() reports " + r.terminationReason()
                             + " — a factory that sets a reason other than its own name is how an "
@@ -88,8 +88,6 @@ class AgentOutcomeTest {
 
         Set<AgentResult.TerminationReason> missing = EnumSet.allOf(AgentResult.TerminationReason.class);
         missing.removeAll(reachable);
-        // TIMEOUT is retained for stored results from older builds; nothing produces it now.
-        missing.remove(AgentResult.TerminationReason.TIMEOUT);
         assertTrue(missing.isEmpty(),
                 "No factory produces " + missing + ". A reason nothing can construct is either "
                         + "dead or a missing factory, and both mislead whoever reads the enum.");
@@ -108,7 +106,6 @@ class AgentOutcomeTest {
         for (AgentResult other : new AgentResult[]{
                 AgentResult.completed("done", new AgentTrajectory(), 1L),
                 AgentResult.cancelled("stopped", new AgentTrajectory(), 1L),
-                AgentResult.maxSteps("ran out", new AgentTrajectory(), 1L),
                 AgentResult.stalled("stuck", new AgentTrajectory(), 1L),
                 AgentResult.error("broke", new AgentTrajectory(), 1L),
                 AgentResult.failureLimit("gave up", new AgentTrajectory(), 1L)}) {

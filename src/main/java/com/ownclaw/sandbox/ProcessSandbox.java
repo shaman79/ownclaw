@@ -8,7 +8,6 @@ import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -19,9 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -36,58 +33,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ProcessSandbox implements SandboxManager {
 
     private static final Logger log = LoggerFactory.getLogger(ProcessSandbox.class);
-
-    /**
-     * The most a run's stdout, or its stderr, may hold. Both are kept in memory for the result,
-     * so without a bound a skill that prints without end takes the JVM's heap with it. Past it
-     * the process is killed, and the result says why.
-     */
-    public static final int OUTPUT_LIMIT = 16 * 1024 * 1024;
-
-    /**
-     * {@code in}, ending after {@link #OUTPUT_LIMIT} bytes; when there is more, {@code overLimit}
-     * is set and {@code process} killed.
-     */
-    public static InputStream limited(InputStream in, Process process, AtomicBoolean overLimit) {
-        return new FilterInputStream(in) {
-            private long left = OUTPUT_LIMIT;
-
-            @Override
-            public int read() throws IOException {
-                byte[] one = new byte[1];
-                return read(one, 0, 1) == -1 ? -1 : one[0] & 0xff;
-            }
-
-            @Override
-            public int read(byte[] b, int off, int len) throws IOException {
-                if (len == 0) return 0;
-                if (left == 0) {
-                    // Output that ends exactly at the limit is not over it: one more byte decides.
-                    if (super.read() == -1) return -1;
-                    overLimit.set(true);
-                    process.destroyForcibly();
-                    return -1;
-                }
-                int n = super.read(b, off, (int) Math.min(len, left));
-                if (n > 0) left -= n;
-                return n;
-            }
-        };
-    }
-
-    private static SandboxResult killedOverLimit(Path scriptPath, String stdout, String stderr, long durationMs) {
-        log.warn("Sandbox killed {}: its output went past {} MB", scriptPath.getFileName(), OUTPUT_LIMIT >> 20);
-        return new SandboxResult(-1, stdout, "Killed: the skill's output went past the "
-                + (OUTPUT_LIMIT >> 20) + " MB limit.\n" + stderr, durationMs, false);
-    }
-
-    /**
-     * A thread of its own for each task: where each of a run's output streams is read, as its
-     * input is written on one. Not the common pool, whose few threads a blocking read holds for
-     * as long as the process runs: with more runs at once than it has threads, a later run's
-     * output went unread, and the stall timer killed it while it printed.
-     */
-    static final Executor OWN_THREAD = r -> Thread.ofVirtual().start(r);
 
     /** Reads the progress lines a skill prints; nothing else. */
     private static final ObjectMapper PROGRESS = new ObjectMapper();
@@ -107,8 +52,16 @@ public class ProcessSandbox implements SandboxManager {
     public SandboxResult execute(String python, Path scriptPath, Path workingDir,
                                  String stdinJson, Map<String, String> envVars, int timeoutSec,
                                  ProgressCallback progressCallback, List<Path> readOnly) {
+        return execute(python, scriptPath, workingDir, stdinJson, envVars, timeoutSec, progressCallback,
+                readOnly, null);
+    }
+
+    @Override
+    public SandboxResult execute(String python, Path scriptPath, Path workingDir,
+                                 String stdinJson, Map<String, String> envVars, int timeoutSec,
+                                 ProgressCallback progressCallback, List<Path> readOnly, String tmpOwner) {
         try (SkillJail.Launch launch = jail.prepare(
-                List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly)) {
+                List.of(python, scriptPath.toAbsolutePath().toString()), workingDir, readOnly, tmpOwner)) {
             if (launch.refusal() != null) return SandboxResult.refused(launch.refusal());
             ProcessBuilder pb = new ProcessBuilder(launch.argv());
             pb.directory(workingDir.toFile());
@@ -156,8 +109,8 @@ public class ProcessSandbox implements SandboxManager {
 
     /**
      * Start {@code pb} -- a skill's Python, jailed or not, or the container runtime's run of one
-     * -- and see it through: {@code stdinJson} on its stdin, both streams read within
-     * {@link #OUTPUT_LIMIT}, killed when it prints nothing for {@code timeoutSec}. Progress lines
+     * -- and see it through: {@code stdinJson} on its stdin, both streams read whole, killed when
+     * it prints nothing for {@code timeoutSec}. Progress lines
      * the skill emits ({@code {"type":"progress","message":"...","percent":N}}) are forwarded
      * through the callback when there is one -- a callback that throws is logged -- and are never
      * part of the final stdout, from which the result is parsed: a progress line ahead of the
@@ -165,12 +118,12 @@ public class ProcessSandbox implements SandboxManager {
      * with no callback. A result whose top-level "type" is progress is taken for a progress line
      * too; the skill contract reserves the key.
      * <p>
-     * Each stream is read on a thread of its own ({@link #OWN_THREAD}), started first; the input
+     * Each stream is read on a thread of its own ({@link StreamReaders}), started first; the input
      * is written last, on a thread of its own too: a process that never reads it and never exits
      * is then ended by the stall timeout like any other, and one that exits or closes its stdin
      * before reading all of it gives its own exit code and stderr as the result.
      *
-     * @param alsoKill run after the process is killed for stalling or for its output: what else
+     * @param alsoKill run after the process is killed for stalling: what else
      *                 must end with it
      * @throws IOException when it cannot be started
      */
@@ -183,17 +136,14 @@ public class ProcessSandbox implements SandboxManager {
         AtomicLong lastActivity = new AtomicLong(System.currentTimeMillis());
 
         // Drain stderr async to prevent pipe-buffer deadlock.
-        AtomicBoolean overLimit = new AtomicBoolean(false);
-        CompletableFuture<byte[]> stderrFuture = CompletableFuture.supplyAsync(() ->
-                drainStreamWithActivity(limited(process.getErrorStream(), process, overLimit), lastActivity),
-                OWN_THREAD);
+        CompletableFuture<byte[]> stderrFuture = StreamReaders.read(() ->
+                drainStreamWithActivity(process.getErrorStream(), lastActivity));
 
         // Read stdout line-by-line so a progress line is forwarded as it arrives.
-        CompletableFuture<byte[]> stdoutFuture = CompletableFuture.supplyAsync(() -> {
+        CompletableFuture<byte[]> stdoutFuture = StreamReaders.read(() -> {
             ByteArrayOutputStream buf = new ByteArrayOutputStream(8192);
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(limited(process.getInputStream(), process, overLimit),
-                            StandardCharsets.UTF_8))) {
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     lastActivity.set(System.currentTimeMillis());
@@ -219,7 +169,7 @@ public class ProcessSandbox implements SandboxManager {
                 }
             } catch (IOException ignored) {}
             return buf.toByteArray();
-        }, OWN_THREAD);
+        });
 
         Thread.ofVirtual().name("skill-stdin-" + process.pid()).start(() -> writeInput(process, stdinJson));
 
@@ -242,10 +192,6 @@ public class ProcessSandbox implements SandboxManager {
 
         String stdout = new String(stdoutFuture.join(), StandardCharsets.UTF_8);
         String stderr = new String(stderrFuture.join(), StandardCharsets.UTF_8);
-        if (overLimit.get()) {
-            alsoKill.run();
-            return killedOverLimit(scriptPath, stdout, stderr, durationMs);
-        }
 
         int exitCode = process.exitValue();
         log.debug("Sandbox completed [exit={}] {} in {}ms", exitCode, scriptPath.getFileName(), durationMs);

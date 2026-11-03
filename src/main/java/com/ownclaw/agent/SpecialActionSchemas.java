@@ -45,13 +45,17 @@ public final class SpecialActionSchemas {
                             + "in 'message' — it is what the user reads.",
                     params("message", ToolParam.required("string", "The complete answer."))),
 
-            spec(AgentAction.ASK_USER,
+            withStringItems(spec(AgentAction.ASK_USER,
                     "Ask the user one question and stop until they answer. Only when you genuinely "
                             + "cannot proceed: on unattended work nobody is there to reply, so "
-                            + "prefer deciding and stating the assumption.",
-                    params("message", ToolParam.required("string", "The question to ask."))),
+                            + "prefer deciding and stating the assumption. When the answer is one "
+                            + "of a few, list them in 'choices': the user picks one with a click.",
+                    params("message", ToolParam.required("string", "The question to ask."),
+                            "choices", ToolParam.optional("array", "The likely answers, each a short "
+                                    + "string, sent as the user's reply when picked (\"Delete them\", "
+                                    + "\"Keep them\"). The user can still type their own."))), "choices"),
 
-            // No 'code' parameter, deliberately. AgentLoop calls generateSkillCodeWithCloud
+            // No 'code' parameter, deliberately. AgentLoop calls generateSkillCode
             // before SkillManager ever sees these params and injects the code it produced, so
             // anything the model writes here is discarded -- it was being asked to generate a
             // whole Python module on every skill_create for nothing. The description is the
@@ -106,11 +110,15 @@ public final class SpecialActionSchemas {
                             "key", ToolParam.optional("string", "Vault key name, for check."))),
 
             spec(AgentAction.MEMORY_MANAGE,
-                    "Store, list or delete facts that should survive this conversation.",
+                    "Store, list or delete facts that should survive this conversation, or recall "
+                            + "past tasks. Of past tasks you are shown only this chat's, under Prior "
+                            + "Context: recall returns every past task whose record matches the "
+                            + "query, each in full, the most relevant first.",
                     params(
-                            "action", ToolParam.required("string", "store | list | delete"),
+                            "action", ToolParam.required("string", "store | list | delete | recall"),
                             "key", ToolParam.optional("string", "Identifier for the fact."),
-                            "content", ToolParam.optional("string", "The fact, for store."))),
+                            "content", ToolParam.optional("string", "The fact, for store."),
+                            "query", ToolParam.optional("string", "What to look for, for recall."))),
 
             spec(AgentAction.SCHEDULE_MANAGE,
                     "Schedule work for later, or manage what is already scheduled.",
@@ -124,23 +132,99 @@ public final class SpecialActionSchemas {
                             "max_runs", ToolParam.optional("integer", "Stop after this many runs."),
                             "task_id", ToolParam.optional("integer", "Which task, for cancel/pause/resume."))),
 
-            spec(AgentAction.DELEGATE,
+            withTextsAsStrings(spec(AgentAction.DELEGATE,
+                    // The cloud's; the local model running a task itself is given its own below.
                     "Hand a sub-goal to the local model, which runs it on this machine with the "
-                            + "tools you name and your credentials, and costs nothing. Best for work "
-                            + "on this machine, the LAN, servers and private data. About a minute "
-                            + "per step, so prefer it when nobody is waiting. Give it a goal; it "
-                            + "works out the steps. A delegation starts with no results and "
-                            + "cannot see earlier ones, so say in words what it should fetch. "
+                            + "tools you name and your credentials, and costs nothing. It reads "
+                            + "what you cannot: a private result or a file the user sent reaches "
+                            + "you only as a description, so to read, summarise, search, compare "
+                            + "or answer a question about one, delegate and name its handle "
+                            + "({{N}}) in the goal -- every earlier result the goal names is given "
+                            + "to it whole, and it sees no other. Its answer comes back to you -- "
+                            + "as a handle to pass on when it quotes private data. Never create a "
+                            + "skill only to read or summarise data: a skill is for a deterministic program "
+                            + "(parsing at scale, changing configuration, repeated runs). For work "
+                            + "on this machine, the LAN and its servers, delegate a sequence of "
+                            + "tool calls it can run. Speed: it reads about 100 tokens a second "
+                            + "and writes about 8, so reading a long result or writing a long "
+                            + "answer takes minutes. Give it a goal; it works out the steps. "
                             + "Observations name results as {{N}}. When you have a tool that "
-                            + "takes a result, put {{N}} or {{N.field}} as the whole value of that "
-                            + "argument to pass it on verbatim without reading it.",
+                            + "takes a result, put {{N}} or {{N.field}} in that argument -- as the "
+                            + "whole value, or inside text such as a message body -- and the result "
+                            + "is filled in when the call runs, without your reading it. Any text "
+                            + "it must use exactly -- a script, a configuration file, a message body "
+                            + "-- goes in 'texts' under a name, and the goal says where by writing "
+                            + "{{name}}: the local model writes {{name}} in its tool call and the text "
+                            + "is put there exactly, never retyped. It does not retype long text "
+                            + "exactly, so a goal holding a heredoc or a fenced block of more than "
+                            + "one line is refused.",
                     params(
-                            "goal", ToolParam.required("string", "What to achieve, stated fully."),
+                            "goal", ToolParam.required("string", "What to achieve, stated fully, "
+                                    + "with the handle of each earlier result it should read, and "
+                                    + "{{name}} where each of the texts is to be used."),
                             // A string, not an array: OpenAI rejects an array schema with no
                             // items, and one bad schema fails every request that carries it.
                             "tools", ToolParam.optional("string", "Comma-separated exact names of "
                                     + "the tools it will need. Only these, and any the goal or an "
-                                    + "unattended (scheduled or /bg) task names, are loaded: the local model's context is small, and every "
-                                    + "tool definition takes room it needs for the work."),
-                            "max_steps", ToolParam.optional("integer", "Step ceiling, default 10."))));
+                                    + "unattended (scheduled or /bg) task names, are loaded: every tool "
+                                    + "definition takes room in the local model's context that the work needs."),
+                            "texts", ToolParam.optional("object", "Exact texts by name, as in "
+                                    + "{\"watchdog_script\": \"#!/bin/sh\\n...\"}. A name is a lowercase "
+                                    + "letter, then lowercase letters, digits and underscores. Each "
+                                    + "text is inserted exactly where the local model writes its "
+                                    + "{{name}} in a tool call.")))));
+
+    /**
+     * The spec with its 'texts' parameter declared an object of strings, which {@link ToolParam}
+     * has no way to say: a text that is not a string is refused (LocalExecutor#texts), so the
+     * schema says so first.
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withTextsAsStrings(ToolSpec spec) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get("texts").put("additionalProperties", Map.of("type", "string"));
+        return spec;
+    }
+
+    /**
+     * The spec with an array parameter's items declared strings, which {@link ToolParam} has no way
+     * to say: OpenAI rejects an array schema with no items, and one bad schema fails every request
+     * that carries it.
+     */
+    @SuppressWarnings("unchecked")
+    private static ToolSpec withStringItems(ToolSpec spec, String param) {
+        var properties = (Map<String, Map<String, Object>>) spec.inputSchema().get("properties");
+        properties.get(param).put("items", Map.of("type", "string"));
+        return spec;
+    }
+
+    /**
+     * The local model running a task itself is given the tools likeliest to fit it, not all of
+     * them ({@code ThinkingEngine#toolsFor}); this finds the rest. Never offered to the cloud.
+     */
+    static final ToolSpec FIND_TOOLS = spec(AgentAction.FIND_TOOLS,
+            "Search all the skills for what you need -- 'send email', 'router wifi settings', 'fetch a web "
+                    + "page' -- by English keywords. The matches are listed best first, " + ToolFinder.PAGE
+                    + " at a time, and you can call each of them from your next step, with its whole "
+                    + "description and parameters. Search before creating a skill: one may already exist.",
+            params(
+                    "query", ToolParam.required("string", "What the tool should do, in English keywords."),
+                    "page", ToolParam.optional("integer", "Which page of the matches, from 1: an answer "
+                            + "says how many matches there are.")));
+
+    /**
+     * Delegate, as the local model running a task itself reads it ({@code ThinkingEngine#toolsFor}):
+     * every skill is its own to call, so the work is its own, and a delegation is a run of itself --
+     * the way a private result, which it too sees only as a description, is read.
+     */
+    static final String DELEGATE_ON_THE_LOCAL_MODEL = "Hand a sub-goal to a separate run of the local "
+            + "model. You are the local model too, and every skill is yours to call -- find_tools finds "
+            + "the ones you were not given -- so do the work yourself; delegate only to read private data. "
+            + "A private result or a file the user sent reaches you only as a description: to read, summarise, search, compare or answer a question about one, delegate "
+            + "and name its handle ({{N}}) in the goal -- every earlier result the goal names is given to "
+            + "it whole, and it sees no other. Its answer comes back to you -- as a handle to pass on when "
+            + "it quotes private data. Observations name results as {{N}}. When you have a tool that takes "
+            + "a result, put {{N}} or {{N.field}} in that argument -- as the whole value, or inside text "
+            + "such as a message body -- and the result is filled in when the call runs, without your "
+            + "reading it.";
 }

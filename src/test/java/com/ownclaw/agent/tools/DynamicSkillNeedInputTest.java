@@ -36,8 +36,8 @@ class DynamicSkillNeedInputTest {
         Files.writeString(skillDir.resolve("skill.py"), code);
         var env = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override
-            public PythonResolution resolveExecution(Path dir, String name) {
-                return new PythonResolution("python3", Map.of(), null);
+            public PythonResolution resolveExecution(Path dir, String name, java.util.function.BooleanSupplier stopped, Runnable waiting) {
+                return new PythonResolution("python3", Map.of(), null, null);
             }
         };
         var skill = new DynamicSkill("asker", "asks", Map.of(), skillDir, false, false, 30,
@@ -69,6 +69,8 @@ class DynamicSkillNeedInputTest {
         var result = run("def run(params):\n"
                 + "    return {'output': 'form parsed', 'data': {'need_input': False, 'mode': 'need_input'}}\n");
         assertTrue(result.success(), result.output());
-        assertEquals("form parsed", result.output());
+        // Every key it returned is kept, so the output is the whole result.
+        assertTrue(result.output().contains("form parsed"), result.output());
+        assertNotEquals(DynamicSkill.NEED_INPUT_UNSUPPORTED, result.output());
     }
 }

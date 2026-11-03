@@ -1,19 +1,31 @@
 package com.ownclaw.agent;
 
+import java.util.List;
+
 /**
  * The final result of an agent execution.
  *
  * @param success        whether the task was completed successfully
- * @param response       the final response message to the user
+ * @param response       the final response message to the user. For every ending of a task the
+ *                       loop ran but COMPLETED and NEEDS_INPUT, the loop sets it to why the task
+ *                       stopped, a clause ("you pressed Stop"), and {@link TaskEnding} writes the
+ *                       ending around it before anything reads it. The queue's own results -- a
+ *                       task dropped before it started, a run that failed outside the loop, a
+ *                       full queue -- are whole sentences the queue writes
  * @param trajectory     the full execution trajectory
- * @param totalSteps     number of action-observation cycles
+ * @param totalSteps     the steps the task took ({@link AgentTrajectory#steps}): its
+ *                       action-observation cycles, not the messages the user sent it
  * @param totalDurationMs wall-clock time of the entire execution
- * @param terminationReason why the agent stopped (COMPLETED, CANCELLED, MAX_STEPS, TIMEOUT, ERROR)
+ * @param terminationReason why the agent stopped
  * @param ownerText      what the owner's own screen shows in place of {@code response}, or null
- *                       when that is the same text. Set only for an answer that holds private
- *                       data: {@code response} is then a note that the answer exists, and it is
- *                       what every other reader gets -- history, memory, search, the
- *                       scheduler's records. The web chat and Telegram show ownerText.
+ *                       when that is the same text. Set only for a text that holds private
+ *                       data: {@code response} is then the text without it, and it is what
+ *                       every other reader gets -- history, memory, search, the scheduler's
+ *                       records. The web chat and Telegram show ownerText.
+ * @param choices        the answers a question offers ({@code ask_user}'s choices), which the web
+ *                       chat draws as buttons under it and Telegram as keys: one is sent as the
+ *                       owner's reply when picked. Empty for every other result, and for a
+ *                       question that offers none -- the owner types the answer
  */
 public record AgentResult(
         boolean success,
@@ -23,28 +35,42 @@ public record AgentResult(
         long totalDurationMs,
         TerminationReason terminationReason,
         String taskId,
-        String ownerText
+        String ownerText,
+        List<String> choices
 ) {
+    public AgentResult {
+        choices = choices == null ? List.of() : List.copyOf(choices);
+    }
+
     /** Without an id — every factory below builds this shape and the loop stamps it after. */
     public AgentResult(boolean success, String response, AgentTrajectory trajectory,
                        int totalSteps, long totalDurationMs, TerminationReason terminationReason) {
         this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, null, null);
     }
 
+    /** With no choices: every result but a question that offers some. */
+    public AgentResult(boolean success, String response, AgentTrajectory trajectory, int totalSteps,
+                       long totalDurationMs, TerminationReason terminationReason, String taskId, String ownerText) {
+        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, taskId, ownerText,
+                List.of());
+    }
+
     public enum TerminationReason {
         /** Agent determined the task is complete and responded. */
         COMPLETED,
-        /** The user cancelled the task. */
+        /** Stopped on request -- the owner's Stop or /cancel, or the ops API; the ending says which. */
         CANCELLED,
-        /** Maximum number of steps reached. */
-        MAX_STEPS,
-        /** Task-level timeout exceeded (legacy — prefer STALLED). */
-        TIMEOUT,
-        /** Task stalled — no progress for stall-timeout seconds. */
+        /** The stall watchdog stopped it: nothing moved for the stall timeout. */
         STALLED,
         /** Unrecoverable error. */
         ERROR,
-        /** Too many consecutive failures. */
+        /**
+         * The model was given more than its context window holds -- the chat, or the task's own
+         * work -- and refused it. Not an ERROR like any other: the task's chat is read whole by
+         * every later message in it, so its ending says to carry on in a new chat.
+         */
+        CONTEXT_WINDOW,
+        /** Steps in a row produced nothing that could be run. */
         FAILURE_LIMIT,
         /** The cloud request contained bytes of a PRIVATE artifact; nothing was sent. */
         PRIVACY_BLOCKED,
@@ -63,27 +89,24 @@ public record AgentResult(
     }
 
     public static AgentResult completed(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(true, response, trajectory, trajectory.size(), durationMs, TerminationReason.COMPLETED);
+        return new AgentResult(true, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.COMPLETED);
     }
 
     public static AgentResult cancelled(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.CANCELLED);
-    }
-
-    public static AgentResult maxSteps(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.MAX_STEPS);
-    }
-
-    public static AgentResult timeout(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.TIMEOUT);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.CANCELLED);
     }
 
     public static AgentResult stalled(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.STALLED);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.STALLED);
     }
 
     public static AgentResult error(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.ERROR);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.ERROR);
+    }
+
+    /** The model refused what it was given as longer than its context window. */
+    public static AgentResult contextWindow(String response, AgentTrajectory trajectory, long durationMs) {
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.CONTEXT_WINDOW);
     }
 
     /**
@@ -94,7 +117,7 @@ public record AgentResult(
      * and rendering it as a failure is the opposite error to the one this reason fixes.
      */
     public static AgentResult needsInput(String question, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, question, trajectory, trajectory.size(), durationMs, TerminationReason.NEEDS_INPUT);
+        return new AgentResult(false, question, trajectory, trajectory.steps().size(), durationMs, TerminationReason.NEEDS_INPUT);
     }
 
     /**
@@ -111,19 +134,25 @@ public record AgentResult(
     /**
      * Stamp the id of the task that produced this.
      * <p>
-     * Carries {@code ownerText}: the loop stamps the id after the answer is made, so dropping it
-     * here would lose the owner's answer silently, with the note that it exists delivered in
-     * its place.
+     * Carries {@code ownerText} and the choices: the loop stamps the id after the answer is made,
+     * so dropping it here would lose the owner's answer silently, with the note that it exists
+     * delivered in its place.
      */
     public AgentResult withTaskId(String taskId) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText);
+                terminationReason, taskId, ownerText, choices);
     }
 
     /** The same result, with the text only the owner's own screen shows. */
     public AgentResult withOwnerText(String ownerText) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText);
+                terminationReason, taskId, ownerText, choices);
+    }
+
+    /** The same result, offering these answers to pick from. */
+    public AgentResult withChoices(List<String> choices) {
+        return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
+                terminationReason, taskId, ownerText, choices);
     }
 
     /**
@@ -140,11 +169,11 @@ public record AgentResult(
     }
 
     public static AgentResult failureLimit(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.FAILURE_LIMIT);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.FAILURE_LIMIT);
     }
 
     /** The gateway refused to send. Not a success, and not a reasoning failure either. */
     public static AgentResult privacyBlocked(String response, AgentTrajectory trajectory, long durationMs) {
-        return new AgentResult(false, response, trajectory, trajectory.size(), durationMs, TerminationReason.PRIVACY_BLOCKED);
+        return new AgentResult(false, response, trajectory, trajectory.steps().size(), durationMs, TerminationReason.PRIVACY_BLOCKED);
     }
 }

@@ -63,4 +63,41 @@ class StallWatchdogTest {
         assertTrue(ctx.msSinceLastProgress() < 20,
                 "a step finishing must clear the stall clock");
     }
+
+    @Test
+    @DisplayName("a tool call under way -- an SSH command, a long skill -- is not silence, and its end is progress")
+    void aToolCallUnderWayIsNotSilence() throws Exception {
+        // A delegation's SSH command ran for 20 minutes with no model call and no progress line
+        // between its start and its end; the watchdog counted it as silence and stopped the task
+        // while it was still working, and the change set it had made went unreported.
+        AgentContext ctx = new AgentContext("u1", "t1", "run the backup test");
+        Thread.sleep(30);
+        String out = ctx.runningTool(() -> {
+            try { Thread.sleep(40); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            assertEquals(0, ctx.msSinceLastProgress(), "the watchdog counted the tool run as silence");
+            return "done";
+        });
+        assertEquals("done", out);
+        assertTrue(ctx.msSinceLastProgress() < 20,
+                "the end of the tool run is progress: " + ctx.msSinceLastProgress());
+        Thread.sleep(30);
+        assertTrue(ctx.msSinceLastProgress() >= 20,
+                "once the tool has returned, silence accumulates again -- the count came back down");
+    }
+
+    @Test
+    @DisplayName("a model call under way -- a request, or a wait to send one again -- is not silence, and its end is progress")
+    void aCallUnderWayIsNotSilence() throws Exception {
+        // Ollama sends nothing while it loads the model and reads the prompt, and a call that was
+        // overloaded waits before it tries again: each is bounded by its own timeout or schedule.
+        AgentContext ctx = new AgentContext("u1", "t1", "audit the routers");
+        var hook = ctx.progress();
+        Thread.sleep(30);
+        hook.calling(() -> { });              // the call is under way, and nothing has arrived
+        Thread.sleep(30);
+        assertEquals(0, ctx.msSinceLastProgress(), "the watchdog counted the call as silence");
+        hook.calling(null);                   // it returned
+        assertTrue(ctx.msSinceLastProgress() < 20,
+                "the end of the call is progress, not the 60 ms before it: " + ctx.msSinceLastProgress());
+    }
 }

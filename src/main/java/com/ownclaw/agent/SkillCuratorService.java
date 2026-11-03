@@ -5,6 +5,7 @@ import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.Tool;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.llm.*;
+import com.ownclaw.privacy.VaultSecrets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
@@ -36,15 +37,13 @@ public class SkillCuratorService {
     private static final Logger log = LoggerFactory.getLogger(SkillCuratorService.class);
 
     private final JdbcTemplate jdbc;
-    private final LlmRouter llmRouter;
     private final ToolRegistry toolRegistry;
     private final DynamicSkillRegistry dynamicSkillRegistry;
 
-    public SkillCuratorService(JdbcTemplate jdbc, LlmRouter llmRouter,
+    public SkillCuratorService(JdbcTemplate jdbc,
                                @Lazy ToolRegistry toolRegistry,
                                DynamicSkillRegistry dynamicSkillRegistry) {
         this.jdbc = jdbc;
-        this.llmRouter = llmRouter;
         this.toolRegistry = toolRegistry;
         this.dynamicSkillRegistry = dynamicSkillRegistry;
     }
@@ -69,8 +68,9 @@ public class SkillCuratorService {
      * to test a skill, produces failures the skill is not responsible for. Real calls that
      * really broke are the only inputs that are certainly worth passing.
      * <p>
-     * Parameters are redacted and truncated on the way in: a skill parameter can carry a token
-     * or a password, and this database already holds the owner's conversation history.
+     * Kept whole, with one exception: a parameter whose name says it is a secret is stored as
+     * [REDACTED] -- a skill parameter can carry a token or a password, and this database already
+     * holds the owner's conversation history.
      */
     public void recordUsage(String toolName, String userId, String taskId,
                             boolean success, long durationMs,
@@ -79,6 +79,8 @@ public class SkillCuratorService {
     }
 
     /**
+     * @param error the failure's text, whole but for vault values, which the caller has scrubbed
+     *              out of it ({@code CloudGateway.scrub}): ops serves this row
      * @param label whether the invocation's error text may reach a cloud model; the row keeps
      *              the error either way, because it is the owner's diagnostic
      */
@@ -91,7 +93,7 @@ public class SkillCuratorService {
                     "INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms, "
                     + "params_json, error, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     toolName, userId, taskId, success ? 1 : 0, durationMs,
-                    redactParams(params), truncate(error, 2000),
+                    redactParams(userId, params), VaultSecrets.scrub(userId, error),
                     label == null ? null : label.name()
             );
         } catch (Exception e) {
@@ -100,35 +102,30 @@ public class SkillCuratorService {
     }
 
 
-    private String redactParams(Map<String, Object> params) {
+    /**
+     * The parameters as the row keeps them: one named as a secret is not kept, and the user's
+     * secret vault values are taken out of the rest -- before they are written as JSON, where a
+     * value of more than one line is no longer the text it was. A model that has read a skill's
+     * output can put a password it found there into a command.
+     */
+    private String redactParams(String userId, Map<String, Object> params) {
         if (params == null || params.isEmpty()) return null;
         var out = new LinkedHashMap<String, Object>();
         for (var e : params.entrySet()) {
             String k = e.getKey();
-            if (k != null && com.ownclaw.users.CredentialVault.isSecretKey(k)) {
+            if (com.ownclaw.privacy.Redactor.isSecretName(k)) {
                 out.put(k, "[REDACTED]");
             } else {
-                Object v = e.getValue();
-                out.put(k, v instanceof String s ? truncate(s, 500) : v);
+                out.put(k, VaultSecrets.scrubDeep(userId, e.getValue()));
             }
         }
         try {
-            return truncate(new com.fasterxml.jackson.databind.ObjectMapper()
-                    .writeValueAsString(out), 4000);
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(out);
         } catch (Exception ex) {
             return null;
         }
     }
 
-    private static String truncate(String s, int max) {
-        if (s == null) return null;
-        return s.length() <= max ? s : s.substring(0, max) + "…";
-    }
-
-    /**
-     * The failed invocations of a skill, most recent first — the cases a repair must fix, and
-     * the cases a repaired version must then survive.
-     */
     /**
      * Tool sequences that keep succeeding together, as candidates for one skill.
      * <p>
@@ -208,21 +205,35 @@ public class SkillCuratorService {
         return out;
     }
 
-    public List<Map<String, Object>> recentFailures(String toolName, int limit) {
+    /**
+     * Every recorded failure of a skill that may go to the cloud, newest first -- the cases a
+     * repair must fix, and the cases a repaired version must then survive. The same call failing
+     * the same way is one row, with how many times it did ({@code times}).
+     */
+    public List<Map<String, Object>> failures(String toolName) {
         try {
             return jdbc.queryForList(
                     // PUBLIC rows only: these go into the code-generation prompt, which goes to
                     // the cloud. A private skill's traceback carries what it fetched. Rows from
                     // before the label existed are NULL and are treated as not public.
-                    "SELECT params_json, error, created_at FROM skill_usage "
+                    "SELECT params_json, error, COUNT(*) AS times FROM skill_usage "
                     + "WHERE tool_name = ? AND success = 0 AND params_json IS NOT NULL "
                     + "AND label = 'PUBLIC' "
-                    + "ORDER BY created_at DESC LIMIT ?",
-                    toolName, limit);
+                    + "GROUP BY params_json, error ORDER BY MAX(id) DESC",
+                    toolName);
         } catch (Exception e) {
             log.debug("Could not read failures for '{}': {}", toolName, e.getMessage());
             return List.of();
         }
+    }
+
+    /**
+     * The skills {@code userId} has run successfully, most runs first -- deleted ones among them.
+     * A tie goes by name, not by the latest run, so the set changes only when the counts do.
+     */
+    public List<String> mostUsedTools(String userId) {
+        return jdbc.queryForList("SELECT tool_name FROM skill_usage WHERE user_id = ? AND success = 1 "
+                + "GROUP BY tool_name ORDER BY COUNT(*) DESC, tool_name", String.class, userId);
     }
 
     /**
@@ -311,9 +322,17 @@ public class SkillCuratorService {
     /**
      * Perform an LLM-powered analysis of the entire skill library.
      * Returns structured recommendations for pruning, merging, refactoring,
-     * and capability gap identification.
+     * and capability gap identification -- or, when there is no whole reply, an ERROR line that
+     * says why.
+     *
+     * @param provider the model the asking task's calls go to ({@link LlmRouter#selectProvider})
+     * @param progress the asking task's hook: the call counts as its progress, and its Stop ends
+     *                 the call
+     * @param billed   the asking task's account, handed the reply the call was billed for -- the
+     *                 one a refused or cut-off call carries too -- and the provider that served it
      */
-    public String analyzeLibrary(com.ownclaw.llm.EgressContext egress) {
+    public String analyzeLibrary(LlmProvider provider, com.ownclaw.llm.EgressContext egress, LlmProgress progress,
+                                 java.util.function.BiConsumer<LlmProvider, LlmResponse> billed) {
         var sb = new StringBuilder();
 
         sb.append("Analyze this tool inventory. Recommend improvements to keep the library lean.\n\n");
@@ -375,26 +394,27 @@ public class SkillCuratorService {
         sb.append("merge_candidates[{skills[],into,reason}], capability_gaps[{description,suggested_name}]}\n");
         sb.append("Only non-empty arrays. Concise. Only modify/delete [modifiable] tools.\n");
 
-        // Use cloud provider for best analytical reasoning
         try {
-            LlmProvider provider = llmRouter.cloud().isAvailable()
-                    ? llmRouter.cloud()
-                    : llmRouter.local();
 
             // Every skill's full source goes out in this call. It carries the asking task's
             // context like the other two sites, so it is scrubbed, checked and ledgered -- and
             // the ledger row will show its size, which is the first time anyone sees it.
-            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, 4096, true, null)
-                    .withEgress(egress);
+            LlmRequestConfig requestConfig = new LlmRequestConfig(null, null, true)
+                    .withEgress(egress).withProgress(progress);
             LlmResponse response = provider.chat(
                     List.of(LlmMessage.user(sb.toString())),
                     requestConfig
             );
+            billed.accept(provider, response);
             return response.content();
 
         } catch (LlmException e) {
+            // A refused or cut-off reply arrives here too (requireComplete), never as half a
+            // JSON, and was billed all the same. "ERROR", so the step is recorded as the failure
+            // it is.
+            billed.accept(provider, e.reply());
             log.error("Skill library analysis failed: {}", e.getMessage());
-            return "{\"error\": \"Analysis failed: " + e.getMessage() + "\"}";
+            return "ERROR: the analysis of the skill library failed: " + e.getMessage();
         }
     }
 }

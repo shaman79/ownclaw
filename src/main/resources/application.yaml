@@ -34,15 +34,16 @@ spring:
 
   servlet:
     multipart:
-      # FileUploadController accepts files up to 50 MB (its MAX_FILE_SIZE) and says so when it
-      # refuses one, but the container parses the upload before the controller runs, and Spring's
-      # defaults there are 1 MB a file and 10 MB a request. Any file over 1 MB -- a scanned
-      # statement, a PDF with images -- was refused before the controller saw it. Keep both equal
-      # to MAX_FILE_SIZE; MultipartLimitTest reads this file and fails when they differ. The
-      # browser sends every file picked at once in one request, so together they must fit in
-      # max-request-size.
-      max-file-size: 50MB
-      max-request-size: 50MB
+      # 100 MB: the request body Cloudflare accepts in front of production -- a larger upload
+      # never reaches this server, so nothing lower is set here. FileUploadController accepts
+      # files up to the same size (its MAX_FILE_SIZE) and says so when it refuses one, but the
+      # container parses the upload before the controller runs, and Spring's defaults there are
+      # 1 MB a file and 10 MB a request. Any file over 1 MB -- a scanned statement, a PDF with
+      # images -- was refused before the controller saw it. Keep both equal to MAX_FILE_SIZE;
+      # MultipartLimitTest reads this file and fails when they differ. The browser sends every
+      # file picked at once in one request, so together they must fit in max-request-size.
+      max-file-size: 100MB
+      max-request-size: 100MB
 
 server:
   port: ${OWNCLAW_SERVER_PORT:${ownclaw.server.port:8080}}
@@ -56,26 +57,24 @@ ownclaw:
     provider: ollama
     url: ${OWNCLAW_EXECUTOR_URL:http://localhost:11434}
     model: ${OWNCLAW_EXECUTOR_MODEL:qwen2.5:14b}
-    temperature: 0.3
-
-    # Context window for local calls (Ollama num_ctx).
-    #
-    # 16384 was too small for the job the local tier actually does. A delegation prompt carries
-    # the whole tool manifest plus the results accumulated so far, and production measured it at
-    # 17226 tokens -- 5% over -- so Ollama returned
-    #   HTTP 400 exceed_context_size_error: request (17226 tokens) exceeds the available
-    #   context size (16384 tokens)
-    # and both scheduled tasks fell back to the cloud on 2026-09-21. The near-misses were worse
-    # than the outright failures: when the prompt fits with only a couple of hundred tokens to
-    # spare, a thinking model spends every one of them reasoning and returns an empty answer
-    # (done_reason=length), which looks like a broken model rather than a full window.
-    #
-    # 24576 gives ~40% headroom over the measured prompt. It is not set higher because the KV
-    # cache grows with it and VRAM on that host is the binding constraint -- raising this too far
-    # pushes layers onto the CPU and makes every local call far slower, which is a worse failure
-    # than an occasional overflow because it is silent. Raise it with OWNCLAW_EXECUTOR_CONTEXT
-    # after checking headroom on the box.
-    context-window: ${OWNCLAW_EXECUTOR_CONTEXT:24576}
+    # How the local model chooses each next piece of a reply, sent with every local call: for a
+    # reply it reasons on first, and for one it gives straight away. The model publisher's
+    # recommendation for Qwen3.6-35B-A3B (general tasks); set another model's own when it changes.
+    # The presence penalty keeps the model out of reasoning loops.
+    thinking:
+      temperature: 1.0
+      top-p: 0.95
+      top-k: 20
+      min-p: 0.0
+      presence-penalty: 1.5
+    answering:
+      temperature: 0.7
+      top-p: 0.80
+      top-k: 20
+      min-p: 0.0
+      presence-penalty: 1.5
+    # No context-window setting: every local call is sent the model's own context length
+    # (num_ctx), read from Ollama's /api/show.
 
   mentor:
     provider: ${OWNCLAW_MENTOR_PROVIDER:openai}
@@ -83,29 +82,27 @@ ownclaw:
     api-key: ${OPENAI_API_KEY:}
     anthropic-api-key: ${ANTHROPIC_API_KEY:}
     anthropic-model: ${OWNCLAW_ANTHROPIC_MODEL:claude-sonnet-4-20250514}
-    max-tokens-per-task: 10000
     temperature: 0.4
 
-    # Optional: use the local LLM (Ollama) to pre-select which tools to include
-    # in the cloud prompt, to reduce the step-0 cloud prompt size.
-    #
-    # OFF by default, because on this hardware it costs far more than it saves. A local call
-    # measures 60-133 seconds and holds the single Ollama permit, and this one runs at step 0
-    # of every task — before the cloud has been asked anything — so it is pure added latency on
-    # the critical path of an attended turn, to save roughly 1 kB of prompt.
-    #
-    # It also does not reliably shrink anything: the deterministic heuristic in ToolSelector
-    # sends every tool in full detail below its MAX_DETAILED_TOOLS threshold, so with a small
-    # library the local call can only narrow the manifest below what would have been sent
-    # anyway — and a narrower manifest is how the model ends up not seeing the tool it should
-    # have reused.
-    #
-    # Turn it back on only with a much larger library AND a measurement showing the cloud
-    # prompt actually shrinks by more than the local call costs.
-    local-tool-selection: false
-    local-tool-selection-max-tools: 12
-    local-tool-selection-candidate-limit: 120
-    tool-name-preview-limit: 50
+    # Local only: call no cloud model; every task runs on the local model, best effort. The
+    # settings page and /local on|off set it (saved, so it survives a restart). It is the default:
+    # a chat can choose its own time vs cost next to its message box. Off, a task whose cloud
+    # model cannot be reached -- no internet, a rejected key, no credit, an outage the retries did
+    # not outlast -- moves to the local model by itself.
+    local-only: ${OWNCLAW_LOCAL_ONLY:false}
+
+    # Cost over speed on a chat: the cloud plans and the local model runs every skill -- the
+    # owner's time-vs-cost slider, saved by the settings page; the default, as local-only is. Off,
+    # the cloud runs skills itself.
+    prefer-cost: ${OWNCLAW_PREFER_COST:true}
+
+    # How much the models think before they act: low, medium or high -- saved by the settings
+    # page; the default, which a chat can override next to its message box. A cloud model that
+    # takes an effort is sent it on every step and on the skill code it writes; at low the local
+    # model also answers without reasoning first -- on those calls when it runs a task itself, and
+    # in delegations -- so its steps are much faster. Medium and high change nothing on the local
+    # model.
+    thinking-effort: ${OWNCLAW_THINKING_EFFORT:high}
 
     # Offer tools natively instead of asking for a JSON envelope in the prompt.
     #
@@ -130,12 +127,18 @@ ownclaw:
 
   privacy:
     # The canary: every outbound cloud body is checked, byte-wise, against the task's PRIVATE
-    # artifacts before the socket opens. ENFORCE refuses a hit and ends the task
+    # artifacts before the socket opens -- all of it but the replayed assistant turns and the
+    # tools' descriptions and schemas (see CloudGateway). ENFORCE refuses a hit and ends the task
     # PRIVACY_BLOCKED; OBSERVE sends it and records OBSERVED_LEAK. There is no off: the door
     # being the only path to a provider, labels at source, descriptors for private results,
-    # secrets scrubbed and every call ledgered are not policies. Expected hits in normal
-    # operation: zero. Flip at runtime: POST /api/ops/config/privacy-canary?mode=observe
+    # secrets removed and identifiers replaced by the filter (privacy.Redactor), and every call
+    # ledgered are not policies. Expected hits in normal operation: zero. Flip at runtime:
+    # POST /api/ops/config/privacy-canary?mode=observe
     canary: ${OWNCLAW_PRIVACY_CANARY:ENFORCE}
+    # Personal-content sources: a result of a skill whose required credentials include a key
+    # starting with one of these is PRIVATE -- the cloud model is shown a description of it, and
+    # only the local model reads it. Any other result goes to the cloud through the filter.
+    personal-sources: [IMAP_, POP3_]
 
   budgets:
     daily-cloud-tokens: 0
@@ -143,30 +146,24 @@ ownclaw:
     warning-threshold: 0.8
 
   queue:
+    # How many tasks run at once: one at a time per chat, tasks of different chats side by side,
+    # scheduled and /bg work beside them but never on the last worker. The local model still
+    # works on one task at a time (the agent loop's local lane). 1 runs every task after the one
+    # before it, as all of them ran until there was more than one worker.
     max-concurrent-tasks: 5
     ollama-concurrency: 1
     cloud-concurrency: 3
     sandbox-concurrency: 3
     max-queued-tasks: 50
-    # Give background work (priority 2 — the scheduler) its own worker thread, so a task
-    # that runs for minutes stops blocking an interactive chat behind it.
-    #
-    # OFF by default on purpose. It is the first time two agent tasks can run at once, and
-    # everything that made that unsafe has been fixed first — cancellation is per task and a
-    # Stop is bounded in time, status carries a task id — but the flag exists so the change
-    # can be turned on deliberately, and off again in one edit if something surfaces.
-    separate-background-lane: false
 
   tasks:
     # No wall-clock timeout — tasks run until done.
     # Stalled tasks (no progress for stall-timeout) are killed instead.
     step-timeout: 600
-    max-plan-steps: 20
     long-running-threshold: 120
     stall-timeout: 600
     heartbeat-interval: 30
     scheduler-poll-interval: 30
-    max-scheduled-tasks-per-user: 50
 
   telegram:
     enabled: ${OWNCLAW_TELEGRAM_ENABLED:false}
@@ -192,7 +189,9 @@ ownclaw:
     # (their runs and checks, venv and pip) runs inside an unprivileged bubblewrap jail that
     # sees the host read-only and cannot see the database, .env, uploads it was not handed,
     # other skills, logs, backups, the systemd journal, crash dumps, or /run (the resolver
-    # aside). /tmp is its own, and the same directory is its /var/tmp. Network stays shared.
+    # aside). Its /tmp -- the same directory is its /var/tmp -- is its account's: shared by that
+    # account's skills and kept between their runs, as the service's own /tmp was, and emptied
+    # when OwnClaw restarts; the checks and pip get a fresh one each time. Network stays shared.
     # A skill with system_packages runs in docker/podman instead when one is available --
     # refused while the jail refuses.
     #   auto      jail when /usr/bin/bwrap is installed and passes its self-check. While
@@ -228,6 +227,7 @@ ownclaw:
     bwrap-path: ${OWNCLAW_SANDBOX_BWRAP_PATH:/usr/bin/bwrap}
     # Host paths a jailed skill may still read, read-only, e.g. a HOME dotfile it needs:
     #   OWNCLAW_SANDBOX_EXPOSE=/opt/ownclaw/.ssh,/opt/ownclaw/.config/rclone
+    # ~/.cache/ms-playwright (the browsers Playwright installs) is exposed without being listed.
     # Entries that overlap data/, uploads, .env, skills/, logs/, backups/, repo/, the journal,
     # the crash dumps, docker's socket, the system bus or /run/user are dropped, as are /tmp and
     # /var/tmp as a whole.
@@ -248,18 +248,11 @@ ownclaw:
     cache-skip-threshold: 0.7
 
   observability:
-    event-log-retention-days: 30
     chat-status-messages: true
     status-verbosity: concise
 
   feedback:
     max-rounds: 3
-    teaching-log-max-entries: 30
-
-  plan-cache:
-    enabled: true
-    max-entries: 500
-    ttl-hours: 168
 
 logging:
   file:

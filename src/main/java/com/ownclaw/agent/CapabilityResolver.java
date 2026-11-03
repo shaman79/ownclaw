@@ -9,7 +9,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * Deterministic capability gap detection — runs BEFORE the LLM thinks.
@@ -244,13 +243,13 @@ public class CapabilityResolver {
                             + "Returns structured JSON: [{\"uid\": \"...\", \"from\": \"...\", \"to\": \"...\", \"subject\": \"...\", "
                             + "\"date\": \"...\", \"body_text\": \"...\", \"has_attachments\": true/false}]. "
                             + "Handles encoding (RFC2047 headers, multipart bodies, charset detection). "
-                            + "Extracts plain text body (prefers text/plain, falls back to text/html with tag stripping). "
-                            + "Limits body to first 2000 chars per email to avoid huge outputs.",
+                            + "Extracts the whole plain text body (prefers text/plain, falls back to text/html with tag stripping). "
+                            + "Returns every matching email unless 'limit' is given.",
                     List.of(),
                     List.of(),
                     "{ \"mailbox\": { \"type\": \"string\", \"description\": \"IMAP mailbox folder (default: INBOX)\", \"required\": false }, "
                             + "\"search\": { \"type\": \"string\", \"description\": \"IMAP search criteria (default: UNSEEN). Examples: UNSEEN, ALL, FROM \\\"user@example.com\\\", SUBJECT \\\"keyword\\\"\", \"required\": false }, "
-                            + "\"limit\": { \"type\": \"string\", \"description\": \"Max number of emails to fetch (default: 20)\", \"required\": false } }",
+                            + "\"limit\": { \"type\": \"string\", \"description\": \"How many of the newest matching emails to fetch (default: every match)\", \"required\": false } }",
                     60,
                     List.of("email", "mail", "imap", "inbox", "unread", "fetch", "check"),
                     List.of("IMAP_HOST", "IMAP_PORT", "IMAP_USER", "IMAP_PASS")
@@ -484,37 +483,6 @@ public class CapabilityResolver {
                               String parametersJson, int timeout) {
             this(category, suggestedName, description, systemPackages, pipPackages,
                     parametersJson, timeout, List.of());
-        }
-        /**
-         * Render this hint as a directive for the LLM system prompt.
-         * This is designed to be a clear, unambiguous instruction that even
-         * a small model will follow correctly.
-         */
-        public String toPromptDirective() {
-            var sb = new StringBuilder();
-            sb.append("## ACTION REQUIRED\n");
-            sb.append("Missing ").append(category.replace('_', ' ')).append(" capability. Use skill_create FIRST:\n\n");
-            sb.append("{tool: skill_create, params: {");
-            sb.append("name: \"").append(suggestedName).append("\", ");
-            sb.append("description: \"").append(description).append("\", ");
-            sb.append("parameters: '").append(parametersJson).append("'");
-            if (!systemPackages.isEmpty()) {
-                sb.append(", system_packages: \"").append(String.join(" ", systemPackages)).append("\"");
-            }
-            if (!pipPackages.isEmpty()) {
-                sb.append(", requirements: \"").append(String.join("\n", pipPackages)).append("\"");
-            }
-            if (!credentials.isEmpty()) {
-                sb.append(", credentials: \"").append(String.join(",", credentials)).append("\"");
-            }
-            sb.append(", timeout: ").append(timeout);
-            sb.append("}}\n\n");
-            sb.append("Do NOT refuse. ");
-            if (!systemPackages.isEmpty()) {
-                sb.append("system_packages auto-installed in Docker. ");
-            }
-            sb.append("Execute now.\n");
-            return sb.toString();
         }
     }
 

@@ -64,7 +64,7 @@ class AuthoredFilesPreconditionTest {
         var sandbox = new ProcessSandbox(jail);
         tools = new ToolRegistry(List.of());
         dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
-        manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);
+        manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null, null);
     }
 
     private String create(String code, String requirements) {
@@ -105,7 +105,7 @@ class AuthoredFilesPreconditionTest {
 
         // The skills page reads the same files for the browser, by the same rule.
         var jdbc = MigratedDatabase.at(root.resolve("page.db"));
-        var page = new SkillController(manager, dynamic, new SkillCuratorService(jdbc, null, tools, dynamic), null)
+        var page = new SkillController(manager, dynamic, new SkillCuratorService(jdbc, tools, dynamic), null)
                 .getSkill("greet_user").getBody();
         assertNotNull(page);
         assertFalse(String.valueOf(page).contains("canary-env-secret"), "the link's target reached the page: " + page);
@@ -124,16 +124,13 @@ class AuthoredFilesPreconditionTest {
         var fake = new com.ownclaw.llm.LlmProvider() {
             public com.ownclaw.llm.LlmResponse chat(List<com.ownclaw.llm.LlmMessage> m, com.ownclaw.llm.LlmRequestConfig c) {
                 m.forEach(x -> sent.append(x.content()));
-                return new com.ownclaw.llm.LlmResponse("{}", 1, 1);
+                return com.ownclaw.llm.Replies.of("{}", 1, 1);
             }
             public boolean isAvailable() { return true; }
             public String name() { return "anthropic"; }
         };
-        var cfg = new OwnClawConfig();
-        var gateway = new com.ownclaw.llm.CloudGateway(fake, fake, cfg, row -> { }, null);
-        var router = new LlmRouter(fake, gateway, cfg, null);
-        new SkillCuratorService(jdbc, router, tools, dynamic)
-                .analyzeLibrary(new AgentContext("u1", "t1", "tidy up my skills").egress("analyze"));
+        new SkillCuratorService(jdbc, tools, dynamic)
+                .analyzeLibrary(fake, null, null, (provider, reply) -> { });
         return sent.toString();
     }
 
@@ -310,14 +307,15 @@ class AuthoredFilesPreconditionTest {
         }
         assertTrue(Files.exists(skillDir().resolve("running")), "the skill never started");
 
-        // The update SkillManager makes while that run is still going: every authored file rewritten.
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("name", "greet_user");
-        p.put("description", "Says hello, updated version.");
-        p.put("parameters", PARAMS);
-        p.put("code", code);
-        String updated = manager.createSkill(p);
-        assertFalse(updated.startsWith("ERROR"), updated);
+        // A rewrite of every authored file while that run is still going. A skill_create of it
+        // waits for its runs now (SkillLocks); what still writes them beside a run is another
+        // run of the same skill, whose self-heal adds a package to requirements.txt -- through
+        // SkillJail.writeAuthored, as here.
+        Path dir = skillDir();
+        SkillJail.writeAuthored(dir.resolve("SKILL.yaml"),
+                Files.readString(dir.resolve("SKILL.yaml")).replace("Says hello", "Says hello, updated version"));
+        SkillJail.writeAuthored(dir.resolve("skill.py"), code + "\n# updated\n");
+        SkillJail.writeAuthored(dir.resolve("requirements.txt"), "requests\n");
         var after = new LinkedHashMap<String, String>();
         for (String f : SkillJail.AUTHORED) after.put(f, Files.readString(skillDir().resolve(f)));
         Files.createFile(skillDir().resolve("updated"));

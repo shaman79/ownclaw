@@ -60,7 +60,8 @@ class ResultDeliveryTest {
     @DisplayName("a private answer is saved and sent beside the safe text, never as it")
     void privateAnswerIsSavedAndEmittedSafely(@TempDir Path tmp) throws Exception {
         var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        var conversations = new ConversationService(jdbc);
+        String session = conversations.createSession("u1", "Where it was asked");
         var emitter = new ChatStatusEmitter();
         var messages = new ArrayList<StatusMessage>();
         var telegram = new ArrayList<String>();
@@ -74,8 +75,8 @@ class ResultDeliveryTest {
 
         // With a task id and without one: the two are emitted by different calls.
         var delivery = new ResultDelivery(conversations, emitter);
-        delivery.deliver("u1", "Background task", answer.withTaskId("a1b2c3d4"));
-        delivery.deliver("u1", "Background task", answer);
+        delivery.deliver("u1", () -> session, "Background task", answer.withTaskId("a1b2c3d4"));
+        delivery.deliver("u1", () -> session, "Background task", answer);
 
         var rows = jdbc.queryForList("SELECT content, private_content FROM conversations");
         assertEquals(2, rows.size());
@@ -95,6 +96,67 @@ class ResultDeliveryTest {
         assertEquals(2, telegram.size());
         assertTrue(telegram.stream().allMatch(t -> t.contains(secret)),
                 "Telegram gets the owner's answer -- his decision: " + telegram);
+    }
+
+    @Test
+    @DisplayName("a result is saved into the chat the caller names, not the open one, and says which")
+    void savedIntoTheNamedChat(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
+        String asked = conversations.createSession("u1", "Where /bg was typed");
+        String open = conversations.createSession("u1", "Opened since");   // the active chat now
+        var emitter = new ChatStatusEmitter();
+        var messages = new ArrayList<StatusMessage>();
+        emitter.subscribe("u1", "web", messages::add);
+
+        new ResultDelivery(conversations, emitter).deliver("u1", () -> asked, "Background task",
+                AgentResult.completed("the weather is fine", new AgentTrajectory(), 1));
+
+        assertEquals(List.of(asked), jdbc.queryForList(
+                "SELECT session_id FROM conversations WHERE content LIKE '%the weather is fine%'", String.class));
+        assertEquals(open, conversations.getCurrentSession("u1"), "delivering does not switch chats");
+        assertEquals(asked, messages.get(0).data().get("sessionId"), "the page is told which chat it is for");
+    }
+
+    /** What /bg's delivery saves for {@code result}: its content row. */
+    private static String deliveredAsBg(Path tmp, AgentResult result) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var conversations = new ConversationService(jdbc);
+        String session = conversations.createSession("u1", "Where /bg was typed");
+        new ResultDelivery(conversations, new ChatStatusEmitter())
+                .deliver("u1", () -> session, "Background task: digest", result);
+        return jdbc.queryForObject("SELECT content FROM conversations", String.class);
+    }
+
+    /** A run whose delegation reported one private result; a public direct call reports none. */
+    private static AgentTrajectory mixedRun() {
+        return runWith(List.of(Map.of("n", 2, "tool", "imap_fetch", "label", "PRIVATE", "chars", 61))).trajectory();
+    }
+
+    @Test
+    @DisplayName("a run that did not finish is delivered as its ending, which lists every result: no second count beneath it")
+    void anEndingIsNotCountedTwice(@TempDir Path tmp) throws Exception {
+        String ending = "**Stopped:** no progress for 10m 0s.\n\n**What it produced:**\n"
+                + "- result 1 (web_fetch): 54 chars, public — in full below.\n"
+                + "- result 2 (imap_fetch): 61 chars, private (personal source) — shown to you only.";
+        String saved = deliveredAsBg(tmp, AgentResult.stalled(ending, mixedRun(), 30));
+        assertTrue(saved.endsWith(ending), "a line counting \"1 result\" under a list of two: " + saved);
+    }
+
+    @Test
+    @DisplayName("a finished answer, which lists no results, still says what stayed on this machine")
+    void anAnswerIsCounted(@TempDir Path tmp) throws Exception {
+        String saved = deliveredAsBg(tmp, AgentResult.completed("Your digest: sunny.", mixedRun(), 30));
+        assertTrue(saved.endsWith("Your digest: sunny.\n\n_1 result, 1 withheld from the cloud (imap_fetch)_"), saved);
+    }
+
+    @Test
+    @DisplayName("the header of a run that did not finish says so; why is the ending's first line, said once")
+    void theHeaderDoesNotRepeatWhy(@TempDir Path tmp) throws Exception {
+        String saved = deliveredAsBg(tmp, AgentResult.stalled("**Stopped:** no progress for 10m 0s.",
+                new AgentTrajectory(), 30));
+        assertEquals("**Background task: digest — did not finish**\n\n**Stopped:** no progress for 10m 0s.",
+                saved);
     }
 
     @Test

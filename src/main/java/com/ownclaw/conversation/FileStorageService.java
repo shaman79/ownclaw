@@ -87,14 +87,6 @@ public class FileStorageService {
     }
 
     /**
-     * Link a file to a conversation message.
-     */
-    public void attachToMessage(String messageId, String fileId) {
-        jdbc.update("INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
-                messageId, fileId);
-    }
-
-    /**
      * Get metadata for a file by ID. Returns null if not found.
      */
     public Map<String, Object> getFileInfo(String fileId) {
@@ -179,15 +171,6 @@ public class FileStorageService {
     }
 
     /**
-     * List file attachment IDs for a specific conversation message.
-     */
-    public List<String> getMessageAttachments(String messageId) {
-        return jdbc.queryForList(
-                "SELECT file_id FROM message_attachments WHERE message_id = ?",
-                String.class, messageId);
-    }
-
-    /**
      * Get full info for all files attached to a message.
      */
     public List<Map<String, Object>> getMessageAttachmentDetails(String messageId) {
@@ -240,18 +223,21 @@ public class FileStorageService {
     }
 
     /**
-     * Read file content as text (for LLM context injection).
-     * Returns null if file is too large (>100KB) or not readable.
+     * Read a file's content as text, whole. Returns null if there is no such file or it cannot
+     * be read as UTF-8 text.
+     * <p>
+     * A file over 100 KB used to come back as null, so its text was never indexed for the privacy
+     * canary and nothing of it could be recognised on its way out. The upload limit is the only
+     * bound on its size.
      */
     public String readAsText(String fileId) {
         Path path = getFilePath(fileId);
         if (path == null || !Files.exists(path)) return null;
         try {
-            long size = Files.size(path);
-            if (size > 100 * 1024) return null; // skip files > 100KB
             return Files.readString(path);
         } catch (IOException e) {
-            log.warn("Failed to read file as text: {}", path, e);
+            // The id, not the path: the stored name carries the name the owner gave the file.
+            log.warn("Could not read file {} as text ({})", fileId, e.getClass().getSimpleName());
             return null;
         }
     }

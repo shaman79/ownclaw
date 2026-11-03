@@ -96,14 +96,14 @@ class DynamicSkillGrantTest {
     private PythonEnvironmentService environment(Path envDir, List<List<String>> installs) {
         return new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override
-            public PythonResolution resolveExecution(Path skillDir, String skillName) {
-                return new PythonResolution("python3", Map.of(), envDir);
+            public PythonResolution resolveExecution(Path skillDir, String skillName, java.util.function.BooleanSupplier stopped, Runnable waiting) {
+                return new PythonResolution("python3", Map.of(), envDir, null);
             }
 
             @Override
-            public boolean installPackages(Path skillDir, String skillName, List<String> packages) {
+            public void installPackages(Path skillDir, String skillName, List<String> packages, java.util.function.BooleanSupplier stopped, Runnable waiting) throws java.io.IOException {
                 installs.add(packages);
-                return true;
+                return;
             }
         };
     }

@@ -271,7 +271,7 @@ public final class JailTestKit {
             Map.entry("--die-with-parent", 0), Map.entry("--new-session", 0),
             Map.entry("--ro-bind", 2), Map.entry("--ro-bind-try", 2), Map.entry("--bind", 2),
             Map.entry("--dev-bind", 2), Map.entry("--mqueue", 1), Map.entry("--tmpfs", 1), Map.entry("--proc", 1),
-            Map.entry("--remount-ro", 1), Map.entry("--chdir", 1));
+            Map.entry("--remount-ro", 1), Map.entry("--chdir", 1), Map.entry("--setenv", 2));
 
     /** The options before `--`; an unknown option fails, so a new one gets a test first. */
     static List<Op> ops(List<String> argv) {

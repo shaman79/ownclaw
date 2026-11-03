@@ -54,20 +54,23 @@ class ScheduledPrivateAnswerTest {
     }
 
     private JdbcTemplate jdbc;
+    private ConversationService conversations;
     private Finished queue;
     private ScheduledTaskService scheduler;
     private final List<StatusMessage> results = new ArrayList<>();
+    private final List<StatusMessage> notices = new ArrayList<>();
 
     private void start(Path tmp) throws Exception {
         jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
-        var conversations = new ConversationService(jdbc, null);
+        conversations = new ConversationService(jdbc);
         var emitter = new ChatStatusEmitter();
         emitter.subscribe("u1", "web", m -> {
             if (m.type() == StatusMessage.Type.RESULT) results.add(m);
+            else notices.add(m);
         });
         queue = new Finished();
         scheduler = new ScheduledTaskService(jdbc, queue, emitter, new EventLogService(jdbc),
-                conversations, new OwnClawConfig(), null, null, new ResultDelivery(conversations, emitter));
+                conversations, new ResultDelivery(conversations, emitter));
         scheduler.scheduleDeferred("u1", "summarise the statement in my inbox",
                 Instant.now().minusSeconds(60));
     }
@@ -75,8 +78,10 @@ class ScheduledPrivateAnswerTest {
     /** The one delivered row: its private text reaches the owner, its content does not carry it. */
     private void assertDeliveredToTheOwnerAlone() {
         var rows = jdbc.queryForList(
-                "SELECT content, private_content FROM conversations WHERE role = 'assistant'");
+                "SELECT session_id, content, private_content FROM conversations WHERE role = 'assistant'");
         assertEquals(1, rows.size(), String.valueOf(rows));
+        assertEquals(conversations.scheduledSession("u1"), rows.get(0).get("session_id"),
+                "into the pinned chat of scheduled results");
         String content = String.valueOf(rows.get(0).get("content"));
         assertTrue(content.contains(NOTE), content);
         assertFalse(content.contains(SECRET), "content feeds every later prompt: " + content);
@@ -115,5 +120,21 @@ class ScheduledPrivateAnswerTest {
         scheduler.pollDueTasks();
 
         assertDeliveredToTheOwnerAlone();
+    }
+
+    @Test
+    @DisplayName("the scheduler's notices about a run -- firing, completed -- are unattended work's, kept out of the chat on screen")
+    void theRunsNoticesAreBackground(@TempDir Path tmp) throws Exception {
+        start(tmp);
+        notices.clear();   // "Task scheduled for ..." answers the owner's own request in the chat
+
+        scheduler.pollDueTasks();
+
+        assertTrue(notices.stream().anyMatch(n -> n.text().startsWith("Scheduled task firing")), String.valueOf(notices));
+        assertTrue(notices.stream().anyMatch(n -> n.text().startsWith("Deferred task #")), String.valueOf(notices));
+        for (StatusMessage n : notices) {
+            assertEquals(Boolean.TRUE, n.data() == null ? null : n.data().get(ChatStatusEmitter.BACKGROUND),
+                    "shown in the chat that was open, and a completed one ended its working state: " + n.text());
+        }
     }
 }

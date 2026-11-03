@@ -6,6 +6,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
+import com.ownclaw.llm.Replies;
 import com.ownclaw.llm.ToolCall;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -41,7 +42,7 @@ class StepModeGateTest {
         ToolRegistry registry = new ToolRegistry(List.of());
         // llmRouter is null: every test pre-answers the local health question on the context,
         // which is the whole point of deciding it once per task rather than per step.
-        return new ThinkingEngine(registry, new ToolSelector(registry), config, null);
+        return new ThinkingEngine(registry, config, null);
     }
 
     private static OwnClawConfig config(boolean nativeTools, boolean localFirst) {
@@ -75,10 +76,73 @@ class StepModeGateTest {
     }
 
     @Test
-    @DisplayName("attended work is never restricted")
-    void attendedIsExempt() {
-        assertFalse(mode(true, true, true, false, true).localFirst(),
-                "the user is waiting; a local step costs about a minute");
+    @DisplayName("a chat is restricted only when its task runs cost over speed (the slider, its default or the chat's)")
+    void attendedFollowsTheSlider() {
+        var cfg = config(true, true);
+        var fastest = context(false, true);
+        fastest.setOptions(new TaskOptions(false, false, "high"));
+        assertFalse(engine(cfg).stepMode(fastest, provider(true)).localFirst(),
+                "fastest: the cloud runs the skills; a local step costs minutes");
+        var cheaper = context(false, true);
+        cheaper.setOptions(new TaskOptions(false, true, "high"));
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
+                "cheaper: the cloud plans and the local model runs them");
+        cfg.getMentor().setPreferCost(false);
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
+                "the task's options, not the default as it is now");
+        cfg.getMentor().setLocalFirstUnattended(false);
+        assertTrue(engine(cfg).stepMode(cheaper, provider(true)).localFirst(),
+                "the unattended flag is not the chat's");
+        var notReady = context(false, false);
+        notReady.setOptions(new TaskOptions(false, true, "high"));
+        assertFalse(engine(cfg).stepMode(notReady, provider(true)).localFirst(),
+                "and never with a local tier that cannot take the work");
+    }
+
+    @Test
+    @DisplayName("on a chat that delegates, a question that needs no skill is answered at once; the words say why skills are not its own")
+    void aChatThatDelegates() {
+        var cfg = config(true, true);
+        var engine = engine(cfg);
+        var chat = context(false, true);
+        var mode = engine.stepMode(chat, provider(true));
+        LlmProvider answering = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                return com.ownclaw.llm.Replies.of("", 10, 5, 0, 0, "tool_use",
+                        List.of(new com.ownclaw.llm.ToolCall("c1", AgentAction.RESPOND, Map.of("message", "It is 4."))));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+        };
+        assertEquals(AgentAction.RESPOND, engine.decideNextActionFull(chat, answering).action().tool(),
+                "a question needing no skill would be refused as 'a plan, not an answer'");
+
+        String text = engine.buildMessages(chat, "anthropic", mode).stream().map(LlmMessage::content)
+                .reduce("", String::concat);
+        assertTrue(text.contains("The owner has chosen cost over speed, so the skills run on the local model: "
+                + "delegate the work."), text);
+        assertTrue(text.contains("what the last result showed and what you are doing next, only what is new "
+                + "since your last update"), "each update restated the same suspicion: " + text);
+        String delegate = engine.toolsFor(chat, mode).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
+                .findFirst().orElseThrow().description();
+        assertTrue(delegate.contains("The owner has chosen cost over speed, so while the local model can do the work you are not given the skills to run yourself"), delegate);
+        assertFalse(delegate.contains("unattended work"), delegate);
+    }
+
+    @Test
+    @DisplayName("a skill the cloud calls on a chat that delegates is refused in the chat's words")
+    void theRefusalOnAChat(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("noop", List.of(), p -> "ran")));
+        var ctx = new AgentContext("u1", "t1", "check it");
+        ctx.setOfferedTools(java.util.Set.of(AgentAction.DELEGATE));   // what a chat that delegates offers
+        var execute = AgentLoop.class.getDeclaredMethod("executeTool", AgentAction.class, AgentContext.class);
+        execute.setAccessible(true);
+        var obs = (AgentObservation) execute.invoke(rig.loop, new AgentAction("noop", Map.of(), ""), ctx);
+        assertFalse(obs.success());
+        assertTrue(obs.output().contains("The owner has chosen cost over speed, so the work runs on the local model"),
+                obs.output());
+        assertFalse(obs.output().contains("Nobody is waiting"), "the owner is: " + obs.output());
     }
 
     @Test
@@ -165,12 +229,12 @@ class StepModeGateTest {
     }
 
     private static LlmResponse respondCall(String message) {
-        return new LlmResponse("", 10, 5, 0, 0, "tool_use",
+        return Replies.of("", 10, 5, 0, 0, "tool_use",
                 List.of(new ToolCall("t1", AgentAction.RESPOND, Map.of("message", message))));
     }
 
     @Test
-    @DisplayName("a native respond call before any work is a reasoning failure, not an answer")
+    @DisplayName("a native respond call before any work produces nothing to run, not an answer")
     void nativeRespondBeforeAnyWorkIsRefused() {
         // The channel the prompt actually teaches: under native tools it says "For respond, put
         // the whole answer in the message argument". So a model that cannot run
@@ -182,9 +246,37 @@ class StepModeGateTest {
         var result = engine.decideNextActionFull(ctx,
                 answering(true, respondCall("I'll fetch today's news digest first.")));
 
-        assertEquals(AgentAction.RESPOND, result.action().tool());
-        assertEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
-                "AgentLoop keys its retry off this string; without it the task ends green");
+        assertEquals(ThinkingEngine.THINKING, result.action().tool(),
+                "AgentLoop keys its retry off this step; as a respond the task ends green");
+        assertTrue(result.action().reasoning().contains("I'll fetch today's news digest first."),
+                "the model is shown what it answered: " + result.action().reasoning());
+        assertTrue(result.action().reasoning().contains("Call 'delegate'"), result.action().reasoning());
+    }
+
+    @Test
+    @DisplayName("prose before any work produces nothing to run either")
+    void proseBeforeAnyWorkIsRefused() {
+        var result = engine(config(true, true)).decideNextActionFull(context(true, true),
+                answering(true, Replies.of("I'll fetch today's news digest first.", 10, 5)));
+
+        assertEquals(ThinkingEngine.THINKING, result.action().tool());
+        assertEquals("I'll fetch today's news digest first.", result.action().params().get("message"));
+    }
+
+    @Test
+    @DisplayName("a respond envelope written as text before any work produces nothing to run either")
+    void aTextEnvelopeBeforeAnyWorkIsRefused() {
+        // The third channel: a local model orchestrating in the cloud's place ignores the tools
+        // array and writes the old JSON envelope as text. It was parsed and returned as the answer
+        // before the guard was asked, so the run ended COMPLETED with nothing run.
+        var result = engine(config(true, true)).decideNextActionFull(context(true, true),
+                answering(true, Replies.of("{\"tool\": \"respond\", \"params\": {\"message\": "
+                        + "\"I'll fetch today's news digest first.\"}}", 10, 5)));
+
+        assertEquals(ThinkingEngine.THINKING, result.action().tool(),
+                "as a respond the task ends green having done nothing");
+        assertEquals("I'll fetch today's news digest first.", result.action().params().get("message"));
+        assertTrue(result.action().reasoning().contains("Call 'delegate'"), result.action().reasoning());
     }
 
     @Test
@@ -198,7 +290,7 @@ class StepModeGateTest {
 
         var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Sent.")));
 
-        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+        assertEquals(AgentAction.RESPOND, result.action().tool(),
                 "it did the work and is reporting it; refusing that would loop forever");
     }
 
@@ -210,7 +302,7 @@ class StepModeGateTest {
 
         var result = engine.decideNextActionFull(ctx, answering(true, respondCall("Paris.")));
 
-        assertNotEquals(AgentLoop.ANSWERED_WITHOUT_WORKING, result.action().reasoning(),
+        assertEquals(AgentAction.RESPOND, result.action().tool(),
                 "the user asked a question; answering it is the whole job");
     }
 
@@ -226,7 +318,7 @@ class StepModeGateTest {
 
         // Then native tools go off — the documented kill switch — and the step offers nothing.
         engine(config(false, true)).decideNextActionFull(ctx,
-                answering(true, new LlmResponse("{\"tool\":\"respond\",\"params\":{}}", 1, 1)));
+                answering(true, Replies.of("{\"tool\":\"respond\",\"params\":{}}", 1, 1)));
 
         assertNull(ctx.offeredTools(),
                 "toolsFor is the only writer, so without an explicit clear the last restriction "
@@ -258,7 +350,29 @@ class StepModeGateTest {
         assertEquals("think", e.purpose());
         assertEquals("t1", e.taskId());
         assertEquals("u1", e.userId());
-        assertSame(ctx.privateIndex(), e.index(), "the task's own index, not an empty one");
+        assertSame(ctx.egress("think").index(), e.index(), "the task's own index, not an empty one");
+    }
+
+    @Test
+    @DisplayName("a step is priced as the model that wrote the reply, which a declined request can change")
+    void theServedModelIsPriced() {
+        // Anthropic's server-side fallback answers a declined request with another model, in the
+        // same call; the provider reports which one wrote the reply.
+        LlmProvider fallback = new LlmProvider() {
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
+                return new LlmResponse("",
+                        List.of(new ToolCall("t1", AgentAction.RESPOND, Map.of("message", "Paris."))),
+                        null, "tool_use", null, "claude-opus-4-8", 128_000, 1_000_000,
+                        List.of(new LlmResponse.Usage("claude-opus-4-8", 10, 5, 0, 0)));
+            }
+            public boolean isAvailable() { return true; }
+            public boolean supportsTools() { return true; }
+            public String name() { return "anthropic"; }
+            public String model() { return "claude-opus-5"; }
+        };
+        var result = engine(config(true, false)).decideNextActionFull(context(false, true), fallback);
+        assertEquals("claude-opus-4-8", result.reply().model(),
+                "the reply the loop prices, which names the model that wrote it");
     }
 
     // ── the health answer is settled once ──

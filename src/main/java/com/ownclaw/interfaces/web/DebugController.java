@@ -5,33 +5,33 @@ import com.ownclaw.agent.AgentResult;
 import com.ownclaw.agent.AgentTrajectory;
 import com.ownclaw.agent.SkillManager;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.DebugSessionService;
+import com.ownclaw.privacy.VaultSecrets;
 import com.ownclaw.users.AuthService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.nio.file.Path;
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 /**
- * REST API for automated testing, debugging, and deployment.
+ * REST API for automated testing and debugging.
  *
- * Designed to be called by an AI assistant for the test → monitor → fix → deploy loop:
+ * Designed to be called by an AI assistant for the test → monitor → fix loop:
  *   POST /api/debug/prompt    — inject a test prompt and get full execution trace
  *   GET  /api/debug/output/{taskId} — retrieve stored trace from a previous run
- *   POST /api/debug/deploy    — trigger git pull + build + restart on the server
- *   POST /api/debug/restart   — force JVM exit so systemd restarts with current JAR
- *   GET  /api/debug/status    — system health: registered skills, queue info
+ *   GET  /api/debug/traces    — the stored traces, oldest first
+ *   GET  /api/debug/status    — the registered tools
  *
  * All endpoints are JWT-protected (handled by JwtAuthFilter).
  */
@@ -41,8 +41,8 @@ public class DebugController {
 
     private static final Logger log = LoggerFactory.getLogger(DebugController.class);
 
-    /** Max number of stored traces before oldest are evicted. */
-    private static final int MAX_STORED_TRACES = 50;
+    /** How long a stored trace stays readable. */
+    private static final Duration TRACE_KEPT = Duration.ofDays(1);
 
     private final AgentLoop agentLoop;
     private final ToolRegistry toolRegistry;
@@ -51,12 +51,19 @@ public class DebugController {
     private final ChatStatusEmitter statusEmitter;
     private final JdbcTemplate jdbc;
     private final AuthService authService;
+    /** Milliseconds now: what stored traces are aged by. */
+    private final LongSupplier clock;
 
-    /** Stored execution traces, keyed by taskId. */
-    private final Map<String, Map<String, Object>> storedTraces = new ConcurrentHashMap<>();
-    /** Ordered list of taskIds for eviction. */
-    private final List<String> traceOrder = new CopyOnWriteArrayList<>();
+    /** A stored execution trace, and when it was stored. */
+    private record StoredTrace(long storedAtMs, Map<String, Object> trace) {}
 
+    /**
+     * Stored execution traces by taskId, oldest first, each kept for {@link #TRACE_KEPT}. Read
+     * through {@link #storedTraces()}, which drops the expired ones first.
+     */
+    private final Map<String, StoredTrace> traces = Collections.synchronizedMap(new LinkedHashMap<>());
+
+    @Autowired
     public DebugController(
             AgentLoop agentLoop,
             ToolRegistry toolRegistry,
@@ -66,6 +73,14 @@ public class DebugController {
             JdbcTemplate jdbc,
             AuthService authService
     ) {
+        this(agentLoop, toolRegistry, skillManager, debugService, statusEmitter, jdbc, authService,
+                System::currentTimeMillis);
+    }
+
+    /** With the clock stored traces are aged by, so a test can move it. */
+    DebugController(AgentLoop agentLoop, ToolRegistry toolRegistry, SkillManager skillManager,
+                    DebugSessionService debugService, ChatStatusEmitter statusEmitter,
+                    JdbcTemplate jdbc, AuthService authService, LongSupplier clock) {
         this.agentLoop = agentLoop;
         this.toolRegistry = toolRegistry;
         this.skillManager = skillManager;
@@ -73,6 +88,7 @@ public class DebugController {
         this.statusEmitter = statusEmitter;
         this.jdbc = jdbc;
         this.authService = authService;
+        this.clock = clock;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -105,8 +121,12 @@ public class DebugController {
         if (message == null || message.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Message is required"));
         }
+        // As on the ops API: a secret command is the chat's, not a prompt's.
+        if (CommandHandler.carriesSecret(message)) {
+            return ResponseEntity.badRequest().body(Map.of("error", CommandHandler.MISPLACED_SECRET_ANSWER));
+        }
 
-        log.info("Debug API prompt from user={}: {}", userId, truncate(message, 200));
+        log.info("Debug API prompt from user={}: {} chars", userId, message.length());
 
         // Ensure debug mode is on for this user so we get detailed logging
         boolean wasDebugEnabled = debugService.isEnabled(userId);
@@ -124,7 +144,10 @@ public class DebugController {
         try {
             AgentResult result = agentLoop.executeFull(userId, message);
 
-            Map<String, Object> trace = buildTrace(result, message, capturedMessages);
+            // The trajectory holds each tool's output and parameters as they came, and the trace
+            // is kept for a day to be fetched again: the user's secret vault values go first.
+            Map<String, Object> trace = VaultSecrets.scrubDeep(userId,
+                    buildTrace(result, message, capturedMessages));
             trace.put("userId", userId);   // so a trace can be scoped to whoever produced it
             String taskId = (String) trace.get("taskId");
             storeTrace(taskId, trace);
@@ -160,11 +183,11 @@ public class DebugController {
     public ResponseEntity<?> getOutput(@PathVariable String taskId,
                                        @RequestAttribute("userId") String userId) {
         if (!authService.isOwner(userId)) return ownerOnly();
-        var trace = storedTraces.get(taskId);
-        if (trace == null) {
+        var stored = storedTraces().get(taskId);
+        if (stored == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(trace);
+        return ResponseEntity.ok(stored.trace());
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -175,18 +198,16 @@ public class DebugController {
     public ResponseEntity<?> listTraces(@RequestAttribute("userId") String userId) {
         if (!authService.isOwner(userId)) return ownerOnly();
         List<Map<String, Object>> summaries = new ArrayList<>();
-        for (String taskId : traceOrder) {
-            var trace = storedTraces.get(taskId);
-            if (trace != null) {
-                summaries.add(Map.of(
-                        "taskId", taskId,
-                        "message", truncate(String.valueOf(trace.get("message")), 100),
-                        "success", trace.getOrDefault("success", false),
-                        "totalSteps", trace.getOrDefault("totalSteps", 0),
-                        "durationMs", trace.getOrDefault("durationMs", 0L),
-                        "terminationReason", String.valueOf(trace.getOrDefault("terminationReason", "?"))
-                ));
-            }
+        for (var e : new ArrayList<>(storedTraces().entrySet())) {
+            var trace = e.getValue().trace();
+            summaries.add(Map.of(
+                    "taskId", e.getKey(),
+                    "message", String.valueOf(trace.get("message")),
+                    "success", trace.getOrDefault("success", false),
+                    "totalSteps", trace.getOrDefault("totalSteps", 0),
+                    "durationMs", trace.getOrDefault("durationMs", 0L),
+                    "terminationReason", String.valueOf(trace.getOrDefault("terminationReason", "?"))
+            ));
         }
         return ResponseEntity.ok(summaries);
     }
@@ -287,11 +308,9 @@ public class DebugController {
             steps.add(step);
         }
 
-        // Derive taskId from result trajectory size and time for uniqueness
-        String taskId = UUID.randomUUID().toString().substring(0, 8);
-
         Map<String, Object> trace = new LinkedHashMap<>();
-        trace.put("taskId", taskId);
+        // The task's own id, so a trace lines up with its events rows and log lines.
+        trace.put("taskId", result.taskId());
         trace.put("message", message);
         trace.put("success", result.success());
         trace.put("response", result.response());
@@ -305,35 +324,14 @@ public class DebugController {
     }
 
     private void storeTrace(String taskId, Map<String, Object> trace) {
-        storedTraces.put(taskId, trace);
-        traceOrder.add(taskId);
-
-        // Evict oldest if over limit
-        while (traceOrder.size() > MAX_STORED_TRACES) {
-            String oldest = traceOrder.removeFirst();
-            storedTraces.remove(oldest);
-        }
+        storedTraces().put(taskId, new StoredTrace(clock.getAsLong(), trace));
     }
 
-    private String findDeployScript() {
-        // Try standard server location first
-        String serverPath = "/opt/ownclaw/repo/deploy/deploy.sh";
-        if (Path.of(serverPath).toFile().exists()) {
-            return serverPath;
-        }
-
-        // Try relative to working directory (dev mode)
-        String devPath = "deploy/deploy.sh";
-        if (Path.of(devPath).toFile().exists()) {
-            return devPath;
-        }
-
-        return null;
-    }
-
-    private String truncate(String s, int maxLen) {
-        if (s == null) return "";
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    /** The stored traces, less those stored more than {@link #TRACE_KEPT} ago. */
+    private Map<String, StoredTrace> storedTraces() {
+        long now = clock.getAsLong();
+        traces.values().removeIf(t -> now - t.storedAtMs() > TRACE_KEPT.toMillis());
+        return traces;
     }
 
     // GET /api/debug/credentials was REMOVED on 2026-09-17. It returned every vault entry in

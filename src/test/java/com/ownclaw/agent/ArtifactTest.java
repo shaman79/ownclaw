@@ -2,6 +2,7 @@ package com.ownclaw.agent;
 
 import com.ownclaw.agent.tools.ToolResult;
 import com.ownclaw.privacy.Label;
+import com.ownclaw.privacy.PrivateIndex;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -15,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>
  * {@link Artifact#asObservation} is the one place a result's bytes are either admitted to the
  * trajectory or replaced by a descriptor. Everything downstream — both prompt renderers, the
- * progress summary, the episode, the events rows — reads that observation, so if this is right,
+ * episode, the events rows — reads that observation, so if this is right,
  * nothing else has to know about privacy. If it is wrong, nothing else can save it.
  */
 class ArtifactTest {
@@ -27,21 +28,48 @@ class ArtifactTest {
 
     private static Artifact privateResult(String tool, String output, boolean ok) {
         return new Artifact(2, tool, Map.of(), Map.of(), output, ok, Label.PRIVATE,
-                List.of("credentials (1)"));
+                List.of("personal source"));
     }
 
     // ── labelFor: every clause on its own ──
 
     @Test
-    @DisplayName("a skill that declared credentials produces a PRIVATE result")
-    void credentialsMakeItPrivate() {
-        var d = Artifact.labelFor(List.of("IMAP_PASS"), List.of());
+    @DisplayName("a skill that reads a personal source produces a PRIVATE result; credentials alone do not")
+    void aPersonalSourceMakesItPrivate() {
+        var d = Artifact.labelFor(true, List.of());
         assertEquals(Label.PRIVATE, d.label());
-        assertEquals(List.of("credentials (1)"), d.why(),
-                "the COUNT, not the names: the skill harness words a vault miss as 'Missing "
-                        + "required credentials: SMTP_PASS, SMTP_USER', so naming them here put "
-                        + "a run of the OUTPUT into the descriptor and the canary refused the "
-                        + "call that carried it");
+        assertEquals(List.of("personal source"), d.why(),
+                "that it is one, not the key names: the skill harness words a vault miss as "
+                        + "'Missing required credentials: IMAP_PASS, IMAP_USER', so naming them "
+                        + "here put a run of the OUTPUT into the descriptor and the canary "
+                        + "refused the call that carried it");
+
+        // Which skills those are is the configuration's: IMAP_ and POP3_ by default, any key
+        // starting so, in any case. A router password is a credential and not a personal source.
+        var ctx = new AgentContext("u1", "t1", "check the router");
+        assertTrue(ctx.readsPersonalSource(List.of("IMAP_USER", "IMAP_PASS")));
+        assertTrue(ctx.readsPersonalSource(List.of("SMTP_PASS", "pop3_pass")));
+        assertFalse(ctx.readsPersonalSource(List.of("OPENWRT_PASS")));
+        assertFalse(ctx.readsPersonalSource(List.of()));
+        assertEquals(Label.PUBLIC, ctx.decide(List.of("OPENWRT_PASS"), List.of(), false,
+                "option ssid 'x'").label(), "credentials (N) alone no longer make a result PRIVATE");
+        assertEquals(Label.PRIVATE, ctx.decide(List.of("IMAP_PASS"), List.of(), false, "a mail").label());
+        ctx.setPersonalSources(List.of("BANK_"));
+        assertFalse(ctx.readsPersonalSource(List.of("IMAP_PASS")));
+        assertTrue(ctx.readsPersonalSource(List.of("BANK_TOKEN")));
+    }
+
+    @Test
+    @DisplayName("application.yaml names the same personal sources the code defaults to")
+    void personalSourcesAreConfigured() throws Exception {
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader().load("application.yaml",
+                new org.springframework.core.io.ClassPathResource("application.yaml"));
+        var bound = new org.springframework.boot.context.properties.bind.Binder(
+                org.springframework.boot.context.properties.source.ConfigurationPropertySources.from(sources))
+                .bind("ownclaw.privacy.personal-sources",
+                        org.springframework.boot.context.properties.bind.Bindable.listOf(String.class))
+                .get();
+        assertEquals(com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES, bound);
     }
 
     @Test
@@ -53,7 +81,7 @@ class ArtifactTest {
         var attachment = new Artifact(1, "attachment", Map.of(), Map.of(),
                 "acct,balance\nCZ4720100123,41200", true, Label.PRIVATE, List.of("uploaded file"));
         var used = References.resolve(Map.of("text", "{{1}}"), List.of(attachment)).used();
-        var d = Artifact.labelFor(List.of(), used);
+        var d = Artifact.labelFor(false, used);
         assertEquals(Label.PRIVATE, d.label());
         assertEquals(List.of("references {{1}}"), d.why());
     }
@@ -67,7 +95,7 @@ class ArtifactTest {
         // public page then tripped the canary, and a run whose email had been sent reported
         // "did not finish". What the model WRITES after reading private content is withheld
         // elsewhere (LocalExecutor.completed, verbatimFailures); the label has two facts only.
-        var d = Artifact.labelFor(List.of(), List.of());
+        var d = Artifact.labelFor(false, List.of());
         assertEquals(Label.PUBLIC, d.label());
     }
 
@@ -76,20 +104,20 @@ class ArtifactTest {
     void referenceToPrivateMakesItPrivate() {
         var priv = privateResult("imap_fetch", "{\"body_text\":\"x\"}", true);   // handle {{2}}
         var used = References.resolve(Map.of("body", "{{1.body_text}}"), List.of(priv)).used();
-        var d = Artifact.labelFor(List.of(), used);
+        var d = Artifact.labelFor(false, used);
         assertEquals(Label.PRIVATE, d.label(), "derived from private is private");
         assertEquals(List.of("references {{2}}"), d.why(),
                 "named by its TASK handle, which is what the cloud reads in the descriptor");
 
         var pub = new Artifact(2, "x", Map.of(), Map.of(), "{}", true, Label.PUBLIC, List.of());
-        assertEquals(Label.PUBLIC, Artifact.labelFor(List.of(), List.of(pub)).label(),
+        assertEquals(Label.PUBLIC, Artifact.labelFor(false, List.of(pub)).label(),
                 "a PUBLIC result is not a reason");
     }
 
     @Test
     @DisplayName("with none of the facts, a result is PUBLIC — exactly as today")
     void nothingMakesItPublic() {
-        var d = Artifact.labelFor(List.of(), List.of());
+        var d = Artifact.labelFor(false, List.of());
         assertEquals(Label.PUBLIC, d.label());
         assertTrue(d.why().isEmpty());
     }
@@ -101,7 +129,7 @@ class ArtifactTest {
     void descriptorCarriesShapeNotContent() {
         String d = privateResult("smtp_send_email", PRIVATE_JSON, false).describe();
 
-        assertTrue(d.startsWith("{{2}} smtp_send_email ✗ — PRIVATE (credentials (1))"), d);
+        assertTrue(d.startsWith("{{2}} smtp_send_email ✗ — PRIVATE (personal source)"), d);
         assertTrue(d.contains("json"), d);
         assertTrue(d.contains("ok=false"),
                 "a success envelope around a failure is the normal shape of a skill result; a "
@@ -133,39 +161,40 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("the field list is bounded")
-    void fieldListIsBounded() {
+    @DisplayName("every field is listed and offered, however many there are")
+    void everyFieldIsListed() {
+        // Twelve listed and 240 characters of references once left an imap envelope's body_text,
+        // past the twelfth key, with no reference at all -- so the cloud wrote the email itself.
         var sb = new StringBuilder("{");
-        for (int i = 0; i < 40; i++) sb.append("\"field_number_").append(i).append("\": 1,");
+        for (int i = 0; i < 70; i++) sb.append("\"field_number_").append(i).append("\": 1,");
         sb.setLength(sb.length() - 1);
         sb.append("}");
         String d = privateResult("t", sb.toString(), true).describe();
-        assertTrue(d.contains("field_number_0"));
-        assertTrue(d.length() < 900,
-                "bounded by characters, which is what 'a descriptor that has become the "
-                        + "content' actually meant: " + d.length() + " chars");
-        assertTrue(d.contains("more"), "and it says how many it did not name: " + d);
+        for (int i = 0; i < 70; i++) {
+            assertTrue(d.contains("field_number_" + i + " (number)"), "listed: " + i);
+            assertTrue(d.contains("{{2.field_number_" + i + "}}"), "offered: " + i);
+        }
+        assertFalse(d.contains(" more"), "nothing is left for a '+N more': " + d);
     }
 
     // ── asObservation: the substitution point ──
 
     @Test
-    @DisplayName("a PUBLIC result enters the trajectory byte for byte, structured data included")
+    @DisplayName("a PUBLIC result enters the trajectory byte for byte")
     void publicIsUnchanged() {
-        var r = ToolResult.success("the digest text", Map.of("count", 8));
+        var r = ToolResult.success("the digest text");
         var a = new Artifact(1, "daily_news_digest", Map.of(), Map.of(), r.output(), true,
                 Label.PUBLIC, List.of());
 
         var obs = Artifact.asObservation(a, r, 12);
         assertEquals("the digest text", obs.output(), "exactly as today");
-        assertEquals(Map.of("count", 8), obs.structured());
         assertTrue(obs.success());
     }
 
     @Test
-    @DisplayName("a PRIVATE result enters the trajectory as its descriptor, with no structured data")
+    @DisplayName("a PRIVATE result enters the trajectory as its descriptor, with metadata for its bytes")
     void privateIsSubstituted() {
-        var r = ToolResult.success(PRIVATE_JSON, Map.of("body_text", "confidential"));
+        var r = ToolResult.success(PRIVATE_JSON);
         var a = privateResult("smtp_send_email", PRIVATE_JSON, false);
 
         var obs = Artifact.asObservation(a, r, 12);
@@ -173,12 +202,10 @@ class ArtifactTest {
         assertFalse(obs.success(), "the outcome is not hidden with the content");
         assertFalse(obs.output().contains("confidential"));
 
-        // The skill's own structured map is the same content in another shape and never
-        // travels. What replaces it is metadata about the artifact -- the shape the delegation
-        // already reports -- so a privately-executed direct call is still countable by the
-        // withheld line, which otherwise printed nothing and read as "nothing was withheld".
-        assertFalse(obs.structured().containsKey("body_text"),
-                "the skill's own keys are content and must not survive");
+        // What travels in place of the bytes is metadata about the artifact -- the shape the
+        // delegation already reports -- so a privately-executed direct call is still countable
+        // by the withheld line, which otherwise printed nothing and read as "nothing was
+        // withheld". None of the content is in it.
         assertFalse(String.valueOf(obs.structured()).contains("confidential"));
         assertEquals(List.of(Map.of("n", a.n(), "tool", "smtp_send_email",
                         "label", "PRIVATE", "chars", PRIVATE_JSON.length())),
@@ -196,7 +223,7 @@ class ArtifactTest {
         withNull.put("cc", null);
 
         var a = assertDoesNotThrow(() -> new Artifact(2, "smtp_send_email", withNull, withNull,
-                "{\"ok\":true}", true, Label.PRIVATE, List.of("credentials (1)")));
+                "{\"ok\":true}", true, Label.PRIVATE, List.of("personal source")));
         assertTrue(a.written().containsKey("cc"));
         assertNull(a.written().get("cc"));
         assertDoesNotThrow(a::describe);
@@ -204,7 +231,7 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("field names cannot carry a 32-character run of the output")
+    @DisplayName("field names cannot carry a 32-character run of the output: a long one is a position")
     void fieldNamesAreTooShortToLeak() {
         String key = "a_very_long_field_name_that_would_otherwise_be_a_window";
         String json = "{\"" + key + "\": \"x\"}";
@@ -225,31 +252,31 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("jsonFieldNames: the real keys of a JSON object, none for anything else")
-    void jsonFieldNames() {
-        assertEquals(List.of("ok", "body_text"),
-                Artifact.jsonFieldNames("{\"ok\": true, \"body_text\": \"text\"}"));
-        assertTrue(Artifact.jsonFieldNames("not json").isEmpty());
-        assertTrue(Artifact.jsonFieldNames("[1,2]").isEmpty());
-        assertTrue(Artifact.jsonFieldNames(null).isEmpty());
+    @DisplayName("fieldRefs: a reference to every key of a JSON object, none for anything else")
+    void fieldRefs() {
+        assertEquals(List.of(new ArtifactRef(2, "ok"), new ArtifactRef(2, "body_text")),
+                privateResult("t", "{\"ok\": true, \"body_text\": \"text\"}", true).fieldRefs());
+        assertTrue(privateResult("t", "not json", true).fieldRefs().isEmpty());
+        assertTrue(privateResult("t", "[1,2]", true).fieldRefs().isEmpty());
+        assertTrue(privateResult("t", null, true).fieldRefs().isEmpty());
     }
 
     @Test
-    @DisplayName("a name the model is told to reference is never truncated")
-    void referenceNamesAreNeverTruncated() {
-        // The descriptor abbreviates a long key and marks the cut with an ellipsis. Deriving
-        // the reference list from it handed the model "{{1.rendered_html_for_ema…}}", which
-        // resolves to nothing and is not recognised as a reference either, so it reached the
-        // tool as the literal argument.
+    @DisplayName("a long field name is offered by its position, and that reference resolves")
+    void longNamesAreOfferedByPosition() {
+        // A shortened name used to be offered -- "{{1.rendered_html_for_ema…}}" -- and resolved
+        // by its visible beginning, which a second key sharing it turned into a guess.
         String key = "rendered_html_for_email_body_with_inline_css";
-        assertTrue(key.length() > Artifact.MAX_FIELD_NAME, "the case only exists above the cut");
-        String json = "{\"" + key + "\": \"x\"}";
+        String json = "{\"ok\": true, \"" + key + "\": \"<p>Polévka</p>\"}";
+        var a = new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of());
 
-        assertEquals(List.of(key), Artifact.jsonFieldNames(json),
-                "this list is what the model types back; it has to be the real key");
-        assertTrue(new Artifact(1, "t", Map.of(), Map.of(), json, true, Label.PRIVATE, List.of())
-                        .describe().contains("…"),
-                "while the descriptor still bounds what it prints — they differ on purpose");
+        assertTrue(a.describe().contains("#2 (string, 14 chars)"), a.describe());
+        assertTrue(a.describe().contains("use: {{1}}, {{1.ok}}, {{1.#2}}"), a.describe());
+        assertFalse(a.describe().contains("rendered_html"), "not the name, not a piece of it");
+        assertEquals("<p>Polévka</p>",
+                References.resolve(Map.of("body", "{{1.#2}}"), List.of(a)).params().get("body"));
+        assertTrue(References.available(List.of(a)).contains("fields: ok, #2"),
+                "the local model is told the same references: " + References.available(List.of(a)));
     }
 
     @Test
@@ -261,7 +288,7 @@ class ArtifactTest {
         // description and the owner gets a confident message with no menu in it.
         var a = new Artifact(1, "daily_menu_fetcher", Map.of(), Map.of(),
                 "{\"body_text\": \"Polévka: česneková\"}", true, Label.PRIVATE,
-                List.of("credentials (2)"));
+                List.of("personal source"));
         String d = a.describe();
 
         // Complete tokens, not a template. "pass <handle>.<field>" beside a list that annotates
@@ -274,32 +301,11 @@ class ArtifactTest {
     }
 
     @Test
-    @DisplayName("the reference list is capped, like the descriptor it sits beside")
-    void referenceNamesAreCapped() {
-        var sb = new StringBuilder("{");
-        for (int i = 0; i < 40; i++) sb.append(i > 0 ? "," : "").append("\"f").append(i).append("\":1");
-        List<String> names = Artifact.jsonFieldNames(sb.append("}").toString());
-
-        assertEquals(40, names.size(),
-                "bounded, but by its own cap. Borrowing the descriptor's MAX_FIELDS hid the "
-                        + "thirteenth key from the local model too, and on an imap envelope "
-                        + "body_text sits past the twelfth — so the one field the task needed "
-                        + "could be named by nobody");
-        var wide = new StringBuilder("{");
-        for (int i = 0; i < Artifact.MAX_REFERENCE_NAMES + 20; i++) {
-            wide.append(i > 0 ? "," : "").append("\"g").append(i).append("\":1");
-        }
-        assertEquals(Artifact.MAX_REFERENCE_NAMES,
-                Artifact.jsonFieldNames(wide.append("}").toString()).size(),
-                "and it is still a cap");
-    }
-
-    @Test
     @DisplayName("the body of an imap envelope is offered even when it is the twentieth key")
-    void theContentIsOfferedFirst() {
-        // The reference list is budgeted, so its ORDER decides what gets named. In key order the
-        // budget went on the envelope and body_text — past the twelfth key — was never offered;
-        // the cloud had nothing to forward and wrote the email from the description instead.
+    void theContentIsOffered() {
+        // When the reference list had a budget, the envelope spent it and body_text -- past the
+        // twelfth key -- was never offered; the cloud had nothing to forward and wrote the email
+        // from the description instead.
         var sb = new StringBuilder("{");
         String[] envelope = {"from", "to", "cc", "subject", "date", "message_id", "uid", "flags",
                 "folder", "size", "seen", "snippet", "has_attachments", "in_reply_to",
@@ -308,20 +314,177 @@ class ArtifactTest {
         sb.append("\"body_text\":\"").append("Polévka dne: česneková. ".repeat(120)).append("\"}");
         String d = privateResult("imap_fetch", sb.toString(), true).describe();
 
-        assertTrue(d.contains("{{2.body_text}}"),
-                "the biggest text in the result is what a task forwards: " + d);
-        assertTrue(d.indexOf("{{2.body_text}}") < d.indexOf("{{2.from}}"),
-                "and it is offered before the envelope, not after it runs the budget out");
+        assertTrue(d.contains("{{2.body_text}}"), "the text a task forwards: " + d);
+        assertTrue(d.contains("{{2.from}}") && d.contains("{{2.charset}}"), "and every other key: " + d);
         assertFalse(d.contains("česneková"), "still never the content");
     }
 
     @Test
-    @DisplayName("a truncated field name can never be long enough to be a canary window")
-    void fieldNamesStayUnderTheCanaryWindow() {
-        assertTrue(Artifact.MAX_FIELD_NAME < com.ownclaw.privacy.PrivateIndex.WINDOW,
-                "the descriptor prints the field names of a PRIVATE result; if one could reach "
-                        + com.ownclaw.privacy.PrivateIndex.WINDOW + " characters it would itself "
-                        + "be a window of the private text — the descriptor would leak, and then "
-                        + "refuse the call carrying it");
+    @DisplayName("a name shorter than a canary window is shown whole; a window's length is not")
+    void namesAreShownBelowTheCanaryWindow() {
+        // The descriptor prints the field names of a PRIVATE result; a name of a whole window
+        // could itself be a window of the private text -- the descriptor would leak, and then
+        // refuse the call carrying it.
+        int window = com.ownclaw.privacy.PrivateIndex.WINDOW;
+        String shortest = "k".repeat(window - 1), longest = "l".repeat(window);
+        String json = "{\"" + shortest + "\": 1, \"" + longest + "\": 2}";
+        String d = privateResult("t", json, true).describe();
+        assertTrue(d.contains("{{2." + shortest + "}}"), d);
+        assertTrue(d.contains("{{2.#2}}"), d);
+        assertFalse(d.contains(longest), d);
+    }
+
+    @Test
+    @DisplayName("a name is measured as the canary measures it: one that normalises to a window is a position")
+    void namesAreMeasuredAfterNormalising() {
+        // 31 characters as written; the dotted capital I lowercases to two, so the canary sees 32
+        // -- a whole window of the private result, which the descriptor printed, and the gateway
+        // then refused every cloud call that carried the descriptor.
+        String key = "İnvoice_reference_for_2026_0930";
+        assertEquals(31, key.length());
+        assertEquals(PrivateIndex.WINDOW, PrivateIndex.normalise(key).length());
+        var ctx = new AgentContext("u1", "t1", "which invoice was it?");
+        Artifact a = ctx.addArtifact("invoice_lookup", Map.of(), Map.of(),
+                "{\"ok\": true, \"" + key + "\": \"value 4711\"}", true,
+                new Artifact.Decision(Label.PRIVATE, List.of("personal source")));
+
+        String d = a.describe();
+        assertNull(ctx.egress("test").index().firstLeakIn(d, (h, w) -> false), "the canary finds its own window in: " + d);
+        assertTrue(d.contains("use: {{1}}, {{1.ok}}, {{1.#2}}"), d);
+
+        // A ligature unfolds the same way: sixteen of them are a window, fifteen are not.
+        assertEquals("#1", ArtifactRef.toField(1, "ﬁ".repeat(16), 1).field());
+        assertEquals("ﬁ".repeat(15), ArtifactRef.toField(1, "ﬁ".repeat(15), 1).field());
+    }
+
+    /** A credentialed result, recorded as the loop records one. */
+    private static Artifact mailSummary(AgentContext ctx, String output) {
+        return ctx.addArtifact("mail_summary", Map.of(), Map.of(), output, true,
+                ctx.decide(List.of("IMAP_PASS"), List.of(), false, output));
+    }
+
+    @Test
+    @DisplayName("a shorter name the result also mentions is a position when the separators around it complete a window")
+    void aNameTheResultMentionsIsAPosition() {
+        // Each key is data the result also names in its text, the way a summary keyed by sender
+        // says who wrote. Around the name the descriptor prints a separator -- a space, ", ",
+        // ": ", " (" -- and the result has the same one there: name and separators are a whole
+        // window of the result, and the gateway refused every request carrying the descriptor.
+        String[][] cases = {
+                // the key, and what the result says in its text; beside each, why they make a window
+                {"alice.novak@company.example.org", "5 new messages from alice.novak@company.example.org today"},  // 31 + a space
+                {"nas-backup-01.home.example.org", "Host nas-backup-01.home.example.org is down"},                 // 30 + a space each side
+                {"bob.brook@mailbox.example.net", "Anna, bob.brook@mailbox.example.net (Bob)"},                    // 29 + ", " and " ("
+                {"carol.jones@mail.example.net", "Petr, carol.jones@mail.example.net (Carol)"},                    // 28 + ", " and " ("
+        };
+        for (String[] c : cases) {
+            String key = c[0];
+            var ctx = new AgentContext("u1", "t1", "summarise my new mail");
+            Artifact a = mailSummary(ctx, "{\"ok\": true, \"" + key + "\": 5, \"summary\": \"" + c[1] + "\"}");
+
+            String d = a.describe();
+            assertNull(ctx.firstLeakIn(d), key + ": the door refuses " + d);
+            assertFalse(d.contains(key), d);
+            // Around bob.brook@... the run holds "ok" too, inside "brook": only the longest name
+            // in a run is withheld.
+            assertTrue(d.contains(" · ok=true · fields: ok, #2 (number), summary (string, "), d);
+            assertTrue(d.contains("use: {{1}}, {{1.ok}}, {{1.#2}}, {{1.summary}} — "), "the others keep their names: " + d);
+            assertEquals("5", References.resolve(Map.of("v", "{{1.#2}}"), List.of(a)).params().get("v"));
+            assertTrue(References.available(List.of(a)).contains("fields: ok, #2, summary"),
+                    "the local model is offered the same references: " + References.available(List.of(a)));
+        }
+
+        // The first field, after "fields: ", in an e-mail header; and a failed result's last
+        // field, a boolean, which ends the descriptor.
+        var ctx = new AgentContext("u1", "t1", "who wrote to me?");
+        String d = mailSummary(ctx, "{\"nas-backup-01.home.example.org\": 2, \"last\": \"From: nas-backup-01.home.example.org\"}").describe();
+        assertNull(ctx.firstLeakIn(d), d);
+        assertTrue(d.contains("fields: #1 (number), last (string, "), d);
+        ctx = new AgentContext("u1", "t1", "block the sender");
+        d = mailSummary(ctx, "{\"ok\": false, \"error\": \"blocked alice.novak@company.example.org today\", "
+                + "\"alice.novak@company.example.org\": true}").describe();
+        assertNull(ctx.firstLeakIn(d), d);
+        assertTrue(d.contains(" · ok=false · #3=true · fields: ok, error (string, ") && d.endsWith(" chars), #3"), d);
+
+        // A run that holds no whole name: "s: " and the first 29 characters of a host the text
+        // names another of. Nothing says which name made it, so none is shown.
+        var hosts = new AgentContext("u1", "t1", "which hosts are down?");
+        String listed = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10), () -> mailSummary(hosts,
+                "{\"server-01.rack-12.dc-east.lan1\": \"up\", \"note\": \"Hosts: server-01.rack-12.dc-east.lan2 is down\"}")
+                .describe());
+        assertNull(hosts.firstLeakIn(listed), listed);
+        assertTrue(listed.contains("fields: #1 (string, 2 chars), #2 (string, "), listed);
+    }
+
+    @Test
+    @DisplayName("a name the result does not repeat around separators is shown, however long below a window")
+    void aNameOnlyItsKeyHoldsIsShown() {
+        var ctx = new AgentContext("u1", "t1", "summarise my new mail");
+        String d = mailSummary(ctx, "{\"alice.novak@company.example.org\": 5, "
+                + "\"summary\": \"5 new messages, the newest <alice.novak@company.example.org>\"}").describe();
+        assertTrue(d.contains("use: {{1}}, {{1.alice.novak@company.example.org}}, {{1.summary}} — "), d);
+        assertNull(ctx.firstLeakIn(d), d);
+    }
+
+    @Test
+    @DisplayName("through the real loop: a mail summary keyed by sender does not stop the task, run after run")
+    void aSummaryKeyedBySenderIsNotADeadEnd(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        String key = "alice.novak@company.example.org";
+        String output = "{\"" + key + "\": 5, \"summary\": \"5 new messages from " + key + " today\"}";
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("mail_summary", List.of("IMAP_PASS"), p -> output)));
+        String session = rig.chat.createSession("u1", "Mail");
+        for (String message : List.of("summarise my new mail", "and again")) {
+            rig.cloud.think.add(LoopRig.call("mail_summary", Map.of()));
+            rig.cloud.think.add(LoopRig.respond("You have 5 new messages."));
+
+            AgentResult r = rig.turn(session, message);
+
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        }
+        assertEquals(List.of(), rig.jdbc.queryForList("SELECT details FROM events WHERE event_type = 'egress' "
+                + "AND json_extract(details, '$.decision') <> 'SENT'"), "every request was sent");
+        assertEquals(4, rig.cloud.calls("think").size());
+    }
+
+    @Test
+    @DisplayName("one reading of a JSON output: two objects in a row are text to every reader")
+    void oneReadingOfAJsonOutput() {
+        // A record per host, as a scanner prints them. Read leniently, its first record was the
+        // result: that record's ok:false failed the whole call and its fields were offered, while
+        // a skill's output was kept whole by a strict reading -- the two disagreed on what an
+        // envelope is.
+        String records = "{\"ok\": false, \"host\": \"192.0.2.1\"}\n{\"ok\": true, \"host\": \"192.0.2.2\"}";
+        var a = new Artifact(1, "net_scan", Map.of(), Map.of(), records, true, Label.PRIVATE,
+                List.of("personal source"));
+
+        assertTrue(a.succeeded(), "one record's ok is not the call's");
+        assertTrue(a.describe().contains(" · text · "), a.describe());
+        assertFalse(References.resolve(Map.of("v", "{{1.host}}"), List.of(a)).ok(),
+                "no field of one record resolves");
+        assertTrue(References.resolve(Map.of("v", "{{1}}"), List.of(a)).ok());
+    }
+
+    @Test
+    @DisplayName("booleans are shown in key order")
+    void booleansKeepTheirOrder() {
+        String json = "{\"ok\": true, \"sent\": false, \"queued\": true, \"retried\": false, "
+                + "\"archived\": true, \"flagged\": false}";
+        String d = privateResult("smtp_send_email", json, true).describe();
+        assertTrue(d.contains(" · ok=true · sent=false · queued=true · retried=false · archived=true"
+                + " · flagged=false · "), "the order the skill wrote them in, every time: " + d);
+    }
+
+    @Test
+    @DisplayName("a name the grammar would read differently is offered by its position too")
+    void unreadableNamesAreOfferedByPosition() {
+        // Each of these, written after "{{2.", would resolve to some other field or to none.
+        String json = "{\" padded \": 1, \"#1\": 2, \"a{{b\": 3, \"\": 4, \"plain\": 5}";
+        var a = new Artifact(2, "t", Map.of(), Map.of(), json, true, Label.PUBLIC, List.of());
+        assertEquals(List.of("#1", "#2", "#3", "#4", "plain"),
+                a.fieldRefs().stream().map(ArtifactRef::field).toList());
+        for (int k = 1; k <= 4; k++) {
+            assertEquals(String.valueOf(k), References.resolve(Map.of("v", "{{1.#" + k + "}}"),
+                    List.of(a)).params().get("v"), "position " + k);
+        }
     }
 }

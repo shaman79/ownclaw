@@ -614,7 +614,7 @@ class SkillJailIntegrationTest {
             var res = svc.resolveExecution(m.skillDir(), "probe_skill");
 
             Path venv = m.root().resolve("skills/_envs/probe_skill");
-            assertEquals(venv, res.envDir(), String.valueOf(svc.getLastProvisionError(m.skillDir(), "probe_skill")));
+            assertEquals(venv, res.envDir(), String.valueOf(res.installError()));
             assertTrue(Files.isRegularFile(venv.resolve("bin/python")), "the venv must land on the host");
             assertTrue(Files.isRegularFile(venv.resolve(".req_hash"), LinkOption.NOFOLLOW_LINKS));
             List<String> seen = Files.readAllLines(venv.resolve("observed"));

@@ -40,6 +40,7 @@ public class SetupWizardService {
     private final ObjectMapper mapper;
     private final ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider;
     private final ObjectProvider<LlmRouter> llmRouterProvider;
+    private final com.ownclaw.llm.LocalModelCheck localModelCheck;
 
     /** Cached diagnostic result, refreshed on demand. */
     private volatile DiagnosticResult lastDiagnostic;
@@ -54,12 +55,14 @@ public class SetupWizardService {
 
     public SetupWizardService(JdbcTemplate jdbc, OwnClawConfig config, ObjectMapper mapper,
                               ObjectProvider<com.ownclaw.interfaces.telegram.TelegramBotService> telegramBotProvider,
-                              ObjectProvider<LlmRouter> llmRouterProvider) {
+                              ObjectProvider<LlmRouter> llmRouterProvider,
+                              com.ownclaw.llm.LocalModelCheck localModelCheck) {
         this.jdbc = jdbc;
         this.config = config;
         this.mapper = mapper;
         this.telegramBotProvider = telegramBotProvider;
         this.llmRouterProvider = llmRouterProvider;
+        this.localModelCheck = localModelCheck;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
@@ -123,10 +126,9 @@ public class SetupWizardService {
     }
 
     private boolean checkOllama() {
-        String base = normalizeUrl(config.getExecutor().getUrl());
         try {
             Request req = new Request.Builder()
-                    .url(base + "/api/tags")
+                    .url(com.ownclaw.llm.OllamaProvider.endpoint(config.getExecutor().getUrl(), "/api/tags"))
                     .get().build();
             try (Response resp = http.newCall(req).execute()) {
                 return resp.isSuccessful();
@@ -139,14 +141,13 @@ public class SetupWizardService {
     /** Fetch selected model details (parameter size, quantization) from Ollama. */
     private Optional<OllamaModelDetails> fetchOllamaModelDetails(String modelName) {
         if (modelName == null || modelName.isBlank()) return Optional.empty();
-        String base = normalizeUrl(config.getExecutor().getUrl());
         try {
             String bodyJson = mapper.createObjectNode().put("name", modelName).toString();
             okhttp3.RequestBody body = okhttp3.RequestBody.create(
                     bodyJson, okhttp3.MediaType.parse("application/json"));
 
             Request req = new Request.Builder()
-                    .url(base + "/api/show")
+                    .url(com.ownclaw.llm.OllamaProvider.endpoint(config.getExecutor().getUrl(), "/api/show"))
                     .post(body)
                     .build();
 
@@ -190,9 +191,10 @@ public class SetupWizardService {
             return Optional.of(lastOllamaPerf);
         }
 
-        String base = normalizeUrl(config.getExecutor().getUrl());
         try {
-            // Use a longer read timeout than the main diagnostics client.
+            // The sample is streamed, so this bounds the silence between two lines rather than
+            // the reply: a warm model's first line comes within seconds and the rest follow, and
+            // a cold model, minutes from its first line while it loads, gets no sample.
             OkHttpClient benchHttp = new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
@@ -201,27 +203,18 @@ public class SetupWizardService {
 
             var bodyNode = mapper.createObjectNode();
             bodyNode.put("model", modelName);
-            bodyNode.put("stream", false);
-            var options = bodyNode.putObject("options");
-            options.put("temperature", 0);
-            options.put("num_predict", 64);
+            bodyNode.putObject("options").put("temperature", 0);
             var msgs = bodyNode.putArray("messages");
             msgs.addObject()
                 .put("role", "user")
                 .put("content", "Benchmark: output the word OK 64 times separated by spaces, no punctuation.");
 
-            String bodyJson = bodyNode.toString();
-            okhttp3.RequestBody body = okhttp3.RequestBody.create(
-                bodyJson, okhttp3.MediaType.parse("application/json"));
-
-            Request req = new Request.Builder()
-                .url(base + "/api/chat")
-                .post(body)
-                .build();
-
-            try (Response resp = benchHttp.newCall(req).execute()) {
-            if (!resp.isSuccessful() || resp.body() == null) return Optional.empty();
-            JsonNode json = mapper.readTree(resp.body().string());
+            // No num_predict, and sent the way every local call is sent, with the same num_ctx,
+            // truncate and shift: a sample taken with other settings would make Ollama load the
+            // model again, which takes minutes, for the sample and again for the next real call.
+            JsonNode json = com.ownclaw.llm.OllamaProvider.streamChat(benchHttp,
+                config.getExecutor().getUrl(), bodyNode, localModelCheck.contextLength(modelName),
+                com.ownclaw.llm.LlmProgress.NONE, mapper);
             int promptTokens = json.path("prompt_eval_count").asInt(0);
             int completionTokens = json.path("eval_count").asInt(0);
             long promptDurationNs = json.path("prompt_eval_duration").asLong(0);
@@ -240,7 +233,6 @@ public class SetupWizardService {
             lastOllamaPerfAtMs = now;
             lastOllamaPerfModel = modelName;
             return Optional.of(sample);
-            }
         } catch (Exception e) {
             log.debug("Failed to benchmark Ollama speed: {}", e.getMessage());
             return Optional.empty();
@@ -249,10 +241,9 @@ public class SetupWizardService {
 
     /** List models available on the configured Ollama instance. */
     private List<String> listOllamaModels() {
-        String base = normalizeUrl(config.getExecutor().getUrl());
         try {
             Request req = new Request.Builder()
-                    .url(base + "/api/tags")
+                    .url(com.ownclaw.llm.OllamaProvider.endpoint(config.getExecutor().getUrl(), "/api/tags"))
                     .get().build();
             try (Response resp = http.newCall(req).execute()) {
                 if (!resp.isSuccessful() || resp.body() == null) return List.of();
@@ -270,15 +261,6 @@ public class SetupWizardService {
             log.debug("Failed to list Ollama models: {}", e.getMessage());
             return List.of();
         }
-    }
-
-    /** Strip trailing slashes and /v1 suffix — Ollama native API has no /v1 prefix. */
-    private static String normalizeUrl(String url) {
-        if (url == null) return "";
-        url = url.strip();
-        while (url.endsWith("/")) url = url.substring(0, url.length() - 1);
-        if (url.endsWith("/v1")) url = url.substring(0, url.length() - 3);
-        return url;
     }
 
     private String detectPython() {
@@ -318,6 +300,9 @@ public class SetupWizardService {
         getSetting("openai_api_key").ifPresent(key -> config.getMentor().setApiKey(key));
         getSetting("anthropic_api_key").ifPresent(key -> config.getMentor().setAnthropicApiKey(key));
         getSetting("cloud_provider").ifPresent(p -> config.getMentor().setProvider(p));
+        getSetting(LocalMode.SETTING).ifPresent(v -> config.getMentor().setLocalOnly(Boolean.parseBoolean(v)));
+        getSetting(LocalMode.PREFER_COST).ifPresent(v -> config.getMentor().setPreferCost(Boolean.parseBoolean(v)));
+        getSetting(ThinkingEffort.SETTING).ifPresent(v -> config.getMentor().setThinkingEffort(v));
         getSetting("anthropic_model").ifPresent(model -> config.getMentor().setAnthropicModel(model));
         getSetting("ollama_url").ifPresent(url -> config.getExecutor().setUrl(url));
         getSetting("ollama_model").ifPresent(model -> config.getExecutor().setModel(model));
@@ -403,6 +388,7 @@ public class SetupWizardService {
     }
 
     private WizardResponse processCloudProvider(String input) {
+        boolean unknown = false;
         if (!isSkip(input)) {
             String choice = input.strip().toLowerCase();
             String provider;
@@ -411,14 +397,23 @@ public class SetupWizardService {
             } else if ("2".equals(choice) || "anthropic".equals(choice) || "claude".equals(choice)) {
                 provider = "anthropic";
             } else {
-                // Unknown — treat as provider name anyway
-                provider = choice;
+                // Not a provider -- Settings accepts these two only -- so the setting is kept, and
+                // the text is not repeated below: it can be the API key pasted one step early, and
+                // this reply is saved into the chat that later prompts are built from.
+                provider = null;
+                unknown = true;
             }
-            saveSetting("cloud_provider", provider);
-            config.getMentor().setProvider(provider);
+            if (provider != null) {
+                saveSetting("cloud_provider", provider);
+                config.getMentor().setProvider(provider);
+            }
         }
         String currentProvider = config.getMentor().getProvider();
         var sb = new StringBuilder();
+        if (unknown) {
+            sb.append("⚠️ That is not one of the providers (`openai`, `anthropic`), so it was not used. ")
+              .append("Run `/setup` again to change it.\n\n");
+        }
         sb.append("☁️ Cloud provider: `").append(currentProvider).append("`\n\n");
 
         sb.append("**Step 2/5 — Cloud API Key**\n");
@@ -472,7 +467,7 @@ public class SetupWizardService {
 
     private WizardResponse processOllamaUrl(String input) {
         if (!isSkip(input)) {
-            String url = normalizeUrl(input);
+            String url = com.ownclaw.llm.OllamaProvider.baseUrl(input);
             saveSetting("ollama_url", url);
             config.getExecutor().setUrl(url);
         }

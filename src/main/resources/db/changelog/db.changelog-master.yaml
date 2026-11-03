@@ -56,3 +56,15 @@ databaseChangeLog:
   - include:
       file: db/changelog/019-conversation-private-content.sql
       relativeToChangelogFile: false
+  - include:
+      file: db/changelog/020-chat-session-kind.sql
+      relativeToChangelogFile: false
+  - include:
+      file: db/changelog/021-privacy-placeholders.sql
+      relativeToChangelogFile: false
+  - include:
+      file: db/changelog/022-chat-options.sql
+      relativeToChangelogFile: false
+  - include:
+      file: db/changelog/023-ops-and-scheduled-out-of-chats.sql
+      relativeToChangelogFile: false

@@ -21,9 +21,12 @@ import java.util.Map;
  * The critic can:
  * - Block invalid tool references
  * - Detect infinite loops (repeated identical actions)
- * - Enforce safety limits (max consecutive failures, budget)
  * - Validate required parameters
  * - Flag high-risk actions for logging
+ * - Warn when most of the model's steps have failed
+ * It never refuses a call for how much work the task has done or how many of its calls failed:
+ * a call it blocks runs nothing, and steps in a row that run nothing end the task
+ * (AgentLoop#NOTHING_TO_RUN_IN_A_ROW).
  */
 @Component
 public class CriticAgent {
@@ -41,9 +44,6 @@ public class CriticAgent {
      * (0.20) — those are genuinely different capabilities that happen to share a prefix word.
      */
     private static final double NAME_OVERLAP_BLOCK = 0.6;
-
-    /** Maximum consecutive failures before the critic recommends stopping. */
-    private static final int MAX_CONSECUTIVE_FAILURES = 5;
 
     private final ToolRegistry toolRegistry;
 
@@ -73,7 +73,9 @@ public class CriticAgent {
             return Verdict.allow(warnings);
         }
 
-        // 1b. skill_manage gets loop detection — prevent endless list/analyze cycles
+        // 1b. skill_manage gets loop detection — prevent endless list/analyze cycles. How many
+        // times a task inspects skills is no measure of a loop: a long task that reads or removes
+        // one skill after another is working, so only a call repeated as it was is refused.
         if (action.isSkillManage()) {
             AgentTrajectory trajectory = context.trajectory();
             int identicalCount = countIdenticalTrailingActions(trajectory, action);
@@ -88,13 +90,17 @@ public class CriticAgent {
                         "If an existing tool fits, call it. Only create a new skill if you have " +
                         "checked the inventory and nothing covers this capability.");
             }
-            // Also detect any excessive skill_manage calls (different params but same tool)
-            long totalManage = trajectory.toolInvocationCount("skill_manage");
-            if (totalManage >= 4) {
-                return Verdict.block("You have called skill_manage " + totalManage +
-                        " times. Stop inspecting and act on what you already know: call an " +
-                        "existing tool, combine several, or — if nothing covers this capability " +
-                        "— create one new general skill that takes the specifics as parameters.");
+            return Verdict.allow(warnings);
+        }
+
+        // 1b'. find_tools: the same search again finds the same skills. Its matches are already
+        // in the context, so a third identical one is a loop.
+        if (action.isFindTools()) {
+            int identicalCount = countIdenticalTrailingActions(context.trajectory(), action);
+            if (identicalCount >= 2) {
+                return Verdict.block("You have searched for the same thing " + identicalCount + " times in a "
+                        + "row and the skills have not changed. The matches are already in your context: call "
+                        + "one, search with other words, or create a skill if none fits.");
             }
             return Verdict.allow(warnings);
         }
@@ -139,45 +145,19 @@ public class CriticAgent {
                     " times consecutively. Try a different approach.");
         }
 
-        // 5. Check consecutive failure limit
-        int failures = trajectory.consecutiveFailures();
-        if (failures >= MAX_CONSECUTIVE_FAILURES) {
-            return Verdict.block("There have been " + failures +
-                    " consecutive failures. Consider responding with what you've learned so far.");
-        }
-
-        // 6. Flag side-effect tools
+        // 5. Flag side-effect tools
         if (tool.hasSideEffects()) {
             warnings.add("Tool '" + toolName + "' has side effects.");
         }
 
-        // 7. Check excessive tool reuse
-        long totalUses = trajectory.toolInvocationCount(toolName);
-        if (totalUses > 10) {
-            warnings.add("Tool '" + toolName + "' has been used " + totalUses + " times in this task.");
-        }
-
-        // 8. Check if task is taking too long (step count)
-        if (trajectory.size() > 15) {
-            warnings.add("Task has taken " + trajectory.size() + " steps. Consider wrapping up.");
-        }
-
-        // 9. Wasted-effort detection — tiered response.
-        //    Moderate waste: warn + redirect to different strategy (agent can still act).
-        //    Extreme waste: hard block — force wrap-up.
-        int blockedOrFailed = 0;
-        for (var turn : trajectory.turns()) {
-            if (!turn.observation().success()) blockedOrFailed++;
-        }
-        int totalSteps = trajectory.size();
-        if (totalSteps >= 12 && blockedOrFailed * 4 > totalSteps * 3) {
-            // 75%+ failures at 12+ steps — nothing is working, force wrap-up
-            return Verdict.block(blockedOrFailed + " of " + totalSteps
-                    + " steps have failed. Respond now with what you've accomplished "
-                    + "and what went wrong.");
-        }
+        // 6. Wasted-effort detection: when most of the model's steps have failed, a redirect --
+        //    information, never a block. Counted over the steps the model took
+        //    (AgentTrajectory#modelSteps): a reflection the loop injected, or a reply it recorded
+        //    as having nothing to run, is not one of them.
+        var steps = trajectory.modelSteps();
+        int blockedOrFailed = (int) steps.stream().filter(t -> !t.observation().success()).count();
+        int totalSteps = steps.size();
         if (totalSteps >= 8 && blockedOrFailed * 2 > totalSteps) {
-            // 50%+ failures at 8+ steps — strong redirect, not a block
             warnings.add("STRATEGY WARNING: " + blockedOrFailed + " of " + totalSteps
                     + " steps have failed. Your current approach is not working. "
                     + "CHANGE STRATEGY: search the internet for solutions, try a completely "
@@ -288,11 +268,13 @@ public class CriticAgent {
     }
 
     /**
-     * Count how many identical actions (same tool + same params) trail the trajectory.
+     * Count how many identical actions (same tool + same params) trail the model's steps
+     * ({@link AgentTrajectory#modelSteps}): a reflection the loop injected between two of them
+     * does not make the second one new.
      */
     private int countIdenticalTrailingActions(AgentTrajectory trajectory, AgentAction proposed) {
         int count = 0;
-        var turns = trajectory.turns();
+        var turns = trajectory.modelSteps();
         for (int i = turns.size() - 1; i >= 0; i--) {
             AgentAction past = turns.get(i).action();
             if (past.tool().equals(proposed.tool()) && paramsEqual(past.params(), proposed.params())) {

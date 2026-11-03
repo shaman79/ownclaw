@@ -8,6 +8,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.ownclaw.agent.tools.DynamicSkill;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
+import com.ownclaw.agent.tools.ToolSchemas;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -72,46 +73,71 @@ public class SkillManager {
     private final SandboxManager sandbox;
     private final PythonEnvironmentService pythonEnv;
     private final SkillCuratorService curatorService;
+    /**
+     * Who is the owner: a skill's code is global, so who may change it is decided by its author
+     * and the owner ({@link #changeRefusal}). Null in a test that makes its own manager.
+     */
+    private final com.ownclaw.users.AuthService authService;
 
     public SkillManager(DynamicSkillRegistry dynamicSkillRegistry,
                         @Lazy ToolRegistry toolRegistry,
                         OwnClawConfig config,
                         SandboxManager sandbox,
                         PythonEnvironmentService pythonEnv,
-                        SkillCuratorService curatorService) {
+                        SkillCuratorService curatorService,
+                        @Lazy com.ownclaw.users.AuthService authService) {
         this.dynamicSkillRegistry = dynamicSkillRegistry;
         this.toolRegistry = toolRegistry;
         this.config = config;
         this.sandbox = sandbox;
         this.pythonEnv = pythonEnv;
         this.curatorService = curatorService;
+        this.authService = authService;
     }
 
     // ────────────────────── Create / Update ──────────────────────
 
-    /**
-     * Create (or update) a Python skill.
-     *
-     * @param params must contain: name, description, code, parameters (JSON string).
-     *               Optional: requirements, requires_network, has_side_effects, timeout.
-     * @return human-readable result message
-     */
-    public String createSkill(Map<String, Object> params) {
-        String name = str(params, "name");
-        String description = str(params, "description");
-        String code = str(params, "code");
-        // --- Validate ---
+    /** A lowercase letter, then lowercase letters, digits and underscores. */
+    private static final java.util.regex.Pattern SKILL_NAME_SHAPE =
+            java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");
 
-        if (name == null || !name.matches("[a-z][a-z0-9_]*")) {
-            return "ERROR: Invalid skill name. Must start with a lowercase letter and " +
-                    "contain only lowercase letters, digits, and underscores.";
+    /** {@link #isSkillName}, in words: what a refusal tells whoever gave the name. */
+    public static final String SKILL_NAME_RULE = "a skill's name starts with a lowercase letter, "
+            + "has only lowercase letters, digits and underscores, and is at most 64 characters "
+            + "long: it is the tool's name, and the model providers accept no longer one";
+
+    /**
+     * What a skill may be called: the one rule, for creating one, for recording which one ran,
+     * and for naming one to read through the ops API.
+     * <p>
+     * The name is a directory, a Python-friendly identifier, and the tool's name on every
+     * request -- where the model providers accept at most 64 characters
+     * ({@link ToolSchemas#isApiSafeName}). A longer name used to be accepted here and then left
+     * out of every tools array, so the skill existed and nothing could call it.
+     */
+    public static boolean isSkillName(String name) {
+        return name != null && SKILL_NAME_SHAPE.matcher(name).matches()
+                && ToolSchemas.isApiSafeName(name);
+    }
+
+    /**
+     * Why no skill may be made under this name, as the ERROR line a skill_create step records, or
+     * null when one may: the one rule for a skill's name ({@link #isSkillName}), and no variant of
+     * a skill that exists -- web_fetch_v2, web_fetch_fixed -- which is updated under its own name
+     * instead. {@link #createSkill} asks it, and so does the agent loop before a model writes the
+     * skill's code: the name does not depend on the code, and asked only after it, a refused
+     * name cost a whole code generation every time.
+     */
+    public String nameRefusal(String name) {
+        if (!isSkillName(name)) {
+            return "ERROR: Invalid skill name: " + SKILL_NAME_RULE + ".";
         }
 
         // When every launch is being refused, stop before touching anything. The syntax and load
         // checks below could not run, their failure would read as the code's, and what follows a
         // failed check -- restoring the previous version, quarantining a new one -- would act on
         // an outage as though it were a verdict.
-        var down = sandbox.unavailable();
+        var down = sandbox == null ? java.util.Optional.<String>empty() : sandbox.unavailable();
         if (down.isPresent()) return "ERROR: " + down.get();
 
         // Reject variant names like web_fetch_v2, web_fetch_fixed, web_fetch_new, etc.
@@ -123,6 +149,92 @@ public class SkillManager {
                     "To fix or update a skill, use skill_create with the SAME name '" + baseName + "' — " +
                     "it will overwrite the existing skill in-place.";
         }
+        return null;
+    }
+
+    /**
+     * Create (or update) a Python skill.
+     *
+     * @param params must contain: name, description, code, parameters (JSON string).
+     *               Optional: requirements, requires_network, has_side_effects, timeout.
+     * @return human-readable result message
+     */
+    public String createSkill(Map<String, Object> params) {
+        return createSkill(params, null, () -> false, () -> {});
+    }
+
+    /**
+     * {@link #createSkill(Map)} for a task of {@code requester}'s: refused when the skill exists
+     * and is another account's ({@link #changeRefusal}); while the skill's runs under way in
+     * other tasks end, it is said to wait ({@code waiting}), which the stall watchdog counts as
+     * progress, and a Stop of it ({@code stopped}) ends the wait with nothing written.
+     *
+     * @param requester the account the task runs for; null for the owner's own pages and
+     *                  maintenance, which are not an account's task
+     */
+    public String createSkill(Map<String, Object> params, String requester,
+                              java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        String name = str(params, "name");
+        if (name == null) return createSkillHeld(params, requester);
+        // Held to write while its files are written, checked and registered: another task's
+        // skill_create of the same name waits, and so does every run of it.
+        var changing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
+        if (!com.ownclaw.agent.tools.SkillLocks.take(changing, stopped, waiting)) {
+            return "ERROR: Stopped while a run of skill '" + name + "' was under way: nothing was written.";
+        }
+        try {
+            return createSkillHeld(params, requester);
+        } finally {
+            changing.unlock();
+        }
+    }
+
+    /**
+     * Why {@code requester} may not change or delete the skill whose files are in {@code skillDir},
+     * or null when it may. A skill's code is global -- every account's tasks are offered it -- and
+     * it runs with the vault values and the files of whoever runs it, so a skill the owner runs
+     * must not be one another account replaced: overwritten, account B's code would read the
+     * owner's credentials and attached files the next time he ran it. The account that first
+     * wrote a skill is its author, kept in its SKILL.yaml; it and the owner may change it, nobody
+     * else. A skill written before authors were kept has none, and is the owner's. A new name is
+     * anyone's to take. Checked with the skill's write lock held, so the author read is the one
+     * the write replaces.
+     */
+    private String changeRefusal(String name, Path skillDir, String requester, String change) {
+        if (requester == null) return null;                         // the owner's pages, maintenance
+        Path yamlFile = skillDir.resolve("SKILL.yaml");
+        if (!Files.exists(yamlFile)) return null;                   // a new skill: anyone's to write
+        if (authService != null && authService.isOwner(requester)) return null;
+        if (requester.equals(authorOf(yamlFile))) return null;      // its author
+        return "ERROR: the skill '" + name + "' belongs to another account, so it cannot be " + change
+                + " -- only its author or the owner can. Create a skill of your own under another name.";
+    }
+
+    /**
+     * The account that first wrote this skill, from its SKILL.yaml; null when none is kept. Read
+     * as every authored file is ({@link SkillJail#readAuthored}): a link at the name is refused,
+     * not followed to a file that names another author.
+     */
+    private static String authorOf(Path yamlFile) {
+        try {
+            String text = SkillJail.readAuthored(yamlFile);
+            if (text == null) return null;
+            Map<String, Object> yaml = yamlMapper.readValue(text, new TypeReference<>() {});
+            Object author = yaml.get("author");
+            return author == null || author.toString().isBlank() ? null : author.toString();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private String createSkillHeld(Map<String, Object> params, String requester) {
+        String name = str(params, "name");
+        String description = str(params, "description");
+        String code = str(params, "code");
+        // --- Validate ---
+
+        String refused = nameRefusal(name);
+        if (refused != null) return refused;
 
         if (description == null || description.isBlank()) return "ERROR: Description is required.";
         if (code == null || code.isBlank()) return "ERROR: Code is required.";
@@ -145,8 +257,8 @@ public class SkillManager {
         List<String> credentials;
         try {
             credentials = DynamicSkillRegistry.credentialNames(params.get("credentials"));
-        } catch (IllegalArgumentException refused) {
-            return "ERROR: " + refused.getMessage();
+        } catch (IllegalArgumentException badName) {
+            return "ERROR: " + badName.getMessage();
         }
 
         String syntaxError = checkPythonSyntax(code);
@@ -163,6 +275,12 @@ public class SkillManager {
 
         try {
             Path skillDir = Path.of(config.getSkills().getGeneratedPath()).resolve(name);
+            String notYours = changeRefusal(name, skillDir, requester, "changed");
+            if (notYours != null) return notYours;
+            // The author is kept across updates: the owner repairing another account's skill
+            // does not take it over. A new skill is its requester's.
+            String existingAuthor = authorOf(skillDir.resolve("SKILL.yaml"));
+            String author = existingAuthor != null ? existingAuthor : requester;
             Files.createDirectories(skillDir);
 
             // Snapshot EVERY authored file before touching any of them.
@@ -183,7 +301,7 @@ public class SkillManager {
             String previousRequirements = SkillJail.readAuthored(reqFile);
 
             SkillJail.writeAuthored(yamlFile,
-                    buildSkillYaml(name, description, parametersDef, requiresNetwork, hasSideEffects,
+                    buildSkillYaml(name, author, description, parametersDef, requiresNetwork, hasSideEffects,
                             timeout, credentials, systemPackagesStr, containerImage));
             SkillJail.writeAuthored(codeFile, code);
             // A skill that declares nothing still gets requirements.txt -- empty, which resolves
@@ -226,7 +344,8 @@ public class SkillManager {
             if (skill == null) return "ERROR: Failed to load — check SKILL.yaml format.";
 
             boolean isUpdate = toolRegistry.find(name).isPresent();
-            dynamicSkillRegistry.unregister(name);
+            // Registered over the old one, not after unregistering it: in between, another task's
+            // look-up of the skill found no such tool.
             dynamicSkillRegistry.register(skill);
 
             return "Skill '" + name + "' " + (isUpdate ? "updated" : "created") +
@@ -306,13 +425,38 @@ public class SkillManager {
      * is in flight.
      */
     public String deleteSkill(String name) {
+        return deleteSkill(name, null, () -> false, () -> {});
+    }
+
+    /**
+     * {@link #deleteSkill(String)} for a task of {@code requester}'s: refused for another account's
+     * skill as a change is ({@link #changeRefusal}), and waiting as
+     * {@link #createSkill(Map, String, java.util.function.BooleanSupplier, Runnable)} does.
+     */
+    public String deleteSkill(String name, String requester, java.util.function.BooleanSupplier stopped,
+                              Runnable waiting) {
         if (name == null || name.isBlank()) return "ERROR: Skill name is required.";
+        // Held to write: the runs of it under way end first, and none starts while it goes.
+        var removing = com.ownclaw.agent.tools.SkillLocks.of(name).writeLock();
+        if (!com.ownclaw.agent.tools.SkillLocks.take(removing, stopped, waiting)) {
+            return "ERROR: Stopped while a run of skill '" + name + "' was under way: it was not deleted.";
+        }
+        try {
+            return deleteSkillHeld(name, requester);
+        } finally {
+            removing.unlock();
+        }
+    }
+
+    private String deleteSkillHeld(String name, String requester) {
         if (!dynamicSkillRegistry.isDynamic(name)) {
             return "ERROR: '" + name + "' is not a modifiable skill.";
         }
 
         var skillOpt = dynamicSkillRegistry.getDynamic(name);
         if (skillOpt.isEmpty()) return "ERROR: Skill '" + name + "' not found.";
+        String notYours = changeRefusal(name, skillOpt.get().skillDir(), requester, "deleted");
+        if (notYours != null) return notYours;
         DynamicSkill skill = skillOpt.get();
 
         // Never while a run of it is going on: the run can go on writing the directory and its
@@ -360,8 +504,10 @@ public class SkillManager {
     /**
      * LLM-powered library analysis.
      */
-    public String analyzeSkills(com.ownclaw.llm.EgressContext egress) {
-        return curatorService.analyzeLibrary(egress);
+    public String analyzeSkills(com.ownclaw.llm.LlmProvider provider, com.ownclaw.llm.EgressContext egress,
+                                com.ownclaw.llm.LlmProgress progress,
+                                java.util.function.BiConsumer<com.ownclaw.llm.LlmProvider, com.ownclaw.llm.LlmResponse> billed) {
+        return curatorService.analyzeLibrary(provider, egress, progress, billed);
     }
 
     // ────────────────────── Helpers ──────────────────────
@@ -408,7 +554,11 @@ public class SkillManager {
                         + "do real work; put it inside run().";
             }
             String detail = result.stderr().isBlank() ? result.stdout() : result.stderr();
-            return detail.isBlank() ? "Import failed with exit code " + result.exitCode() : detail;
+            if (detail.isBlank()) detail = "Import failed with exit code " + result.exitCode();
+            // The import error names the module it missed; why the requirements that declare it
+            // are not installed is pip's to say, and the next attempt needs it as much.
+            return resolution.installError() == null ? detail
+                    : detail.strip() + "\n[requirements not installed: " + resolution.installError().strip() + "]";
         } catch (Exception e) {
             // A failure of the CHECK must not block a skill. Better to register something
             // unverified than to lose a capability because the sandbox hiccuped.
@@ -464,12 +614,14 @@ public class SkillManager {
         }
     }
 
-    private String buildSkillYaml(String name, String description, Map<String, Object> parametersDef,
+    private String buildSkillYaml(String name, String author, String description, Map<String, Object> parametersDef,
                                   boolean requiresNetwork, boolean hasSideEffects, int timeout,
                                   List<String> credentials, String systemPackages, String containerImage)
             throws IOException {
         Map<String, Object> yaml = new LinkedHashMap<>();
         yaml.put("name", name);
+        // Who may change it besides the owner (changeRefusal); none for one the owner's pages write.
+        if (author != null) yaml.put("author", author);
         yaml.put("description", description);
         yaml.put("version", 1);
         if (parametersDef != null && !parametersDef.isEmpty()) {

@@ -178,7 +178,7 @@ class RunnerHarnessRegressionTest {
         var sandbox = new ProcessSandbox(JailTestKit.off());
         var tools = new ToolRegistry(List.of());
         return new SkillManager(new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null),
-                tools, cfg, sandbox, env, null);
+                tools, cfg, sandbox, env, null, null);
     }
 
     private static Map<String, Object> skill(String name, String code) {
@@ -250,7 +250,11 @@ class RunnerHarnessRegressionTest {
                     subprocess.run([sys.executable, '-c', 'print(\\'{"status": "ok"}\\')'], check=True)
                     return {'output': 'the real result'}
                 """);
-        assertEquals("the real result", runSkill());
+        // The result is the harness's last line; what the child printed before it is kept beside
+        // it, as everything a skill prints is, never taken for it.
+        String result = runSkill();
+        assertTrue(result.startsWith("the real result"), result);
+        assertTrue(result.contains("[skill stdout: {\"status\": \"ok\"}]"), result);
         assertTrue(lastStdout.startsWith("{\"status\": \"ok\"}"), "the child printed nothing first: " + lastStdout);
     }
 }

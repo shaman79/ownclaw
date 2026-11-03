@@ -126,7 +126,7 @@ class SkillJailHealthTest {
         return new OpsService(config, jdbc, new ToolRegistry(List.of()),
                 new DynamicSkillRegistry(config, null, null, null, null, null, null),
                 new TaskQueue(null, null, null, config, null),
-                new AuthService(jdbc, new UserRepository(jdbc), config), null, new ObjectMapper(), jail);
+                new AuthService(jdbc, new UserRepository(jdbc), config), null, new ObjectMapper(), null, jail);
     }
 
     @SuppressWarnings("unchecked")
@@ -149,7 +149,7 @@ class SkillJailHealthTest {
     private static String status(SkillJail jail) {
         var commands = new CommandHandler(null, null, null, null, null, null,
                 new TaskQueue(null, null, null, new OwnClawConfig(), null), null, null, null, null,
-                null, null, jail);
+                null, null, null, null, jail);
         return commands.handle("u1", "/status").orElseThrow();
     }
 

@@ -24,9 +24,12 @@ Restart=on-failure
 RestartSec=10
 
 # Security hardening
-# NOTE: NoNewPrivileges is intentionally OFF so that Podman rootless can
-# create user namespaces for container-based skill sandboxing.
-# Container isolation replaces the privilege restriction.
+# Nothing the service starts can gain privileges: a setuid or setcap program -- sudo, su,
+# pkexec, a capability on ping -- runs without them, so a skill cannot use one to become root.
+# Production runs no container runtime (skills with system_packages run on the host) and
+# bubblewrap needs no privilege, so nothing here depends on one. Rootless Podman does (its
+# newuidmap is setuid): a host that runs skills in rootless Podman cannot keep this on.
+NoNewPrivileges=true
 ProtectSystem=strict
 # Load-bearing for skill isolation: the jail shows skills the host read-only as this unit sees
 # it, so this is what keeps /home and /root out of their sight. It hides /run/user too, where

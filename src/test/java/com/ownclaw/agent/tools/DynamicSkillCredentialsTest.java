@@ -70,8 +70,8 @@ class DynamicSkillCredentialsTest {
         Files.writeString(skillDir.resolve("skill.py"), code);
         var env = new PythonEnvironmentService(new OwnClawConfig(), JailTestKit.off()) {
             @Override
-            public PythonResolution resolveExecution(Path dir, String name) {
-                return new PythonResolution("python3", Map.of(), null);
+            public PythonResolution resolveExecution(Path dir, String name, java.util.function.BooleanSupplier stopped, Runnable waiting) {
+                return new PythonResolution("python3", Map.of(), null, null);
             }
         };
         return new DynamicSkill("mailer", "sends mail", Map.of(), skillDir, false, false, 30, sandbox, env,

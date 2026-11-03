@@ -47,14 +47,14 @@ class CommandDispatchOnceTest {
         final List<String> asked = new ArrayList<>();
 
         CountingCommandHandler(ConversationService conversations, TaskQueue queue) {
-            super(null, conversations, null, null, null, null, queue, null, null, null, null, null, null,
+            super(null, conversations, null, null, null, null, queue, null, null, null, null, null, null, null, null,
                     JailTestKit.off());
         }
 
         @Override
-        public Optional<String> handle(String userId, String message) {
+        public Optional<String> handle(String userId, String message, String sessionId) {
             asked.add(message);
-            return super.handle(userId, message);
+            return super.handle(userId, message, sessionId);
         }
     }
 
@@ -82,7 +82,7 @@ class CommandDispatchOnceTest {
     private WebSocketSession socket;
 
     private void start(Path tmp) throws Exception {
-        conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")), null);
+        conversations = new ConversationService(MigratedDatabase.at(tmp.resolve("t.db")));
         queue = new CountingQueue();
         commands = new CountingCommandHandler(conversations, queue);
         chat = new ChatWebSocketHandler(queue, null, conversations, null, commands, null, null,
@@ -140,7 +140,7 @@ class CommandDispatchOnceTest {
 
         type("/nosuchcommand");
         assertEquals(1, commands.asked.size(), String.valueOf(commands.asked));
-        assertTrue(sent.stream().anyMatch(s -> s.contains("Unknown command: /nosuchcommand")), String.valueOf(sent));
+        assertTrue(sent.stream().anyMatch(s -> s.contains(CommandHandler.UNKNOWN_COMMAND)), String.valueOf(sent));
 
         // The web chat adds its own line to the shared status text.
         commands.asked.clear();

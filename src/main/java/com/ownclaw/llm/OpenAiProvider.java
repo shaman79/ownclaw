@@ -1,18 +1,17 @@
 package com.ownclaw.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ownclaw.config.OwnClawConfig;
 import okhttp3.*;
+import okio.BufferedSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,7 +19,8 @@ import java.util.regex.Pattern;
 /**
  * OpenAI REST API provider for cloud LLM inference (Mentor).
  * <p>
- * API: POST https://api.openai.com/v1/chat/completions
+ * API: POST https://api.openai.com/v1/chat/completions, with the reply streamed as server-sent
+ * events. No max_completion_tokens is sent, so the model may write up to its own maximum.
  * <p>
  * Reasoning models reject sampling parameters — see {@link #supportsSampling(String)}.
  */
@@ -31,15 +31,6 @@ class OpenAiProvider implements LlmProvider {
     private static final Logger log = LoggerFactory.getLogger(OpenAiProvider.class);
     private static final MediaType JSON_TYPE = MediaType.get("application/json");
     private static final String BASE_URL = "https://api.openai.com/v1";
-
-    /**
-     * Fallback output budget when the caller doesn't set one. Set well above the old
-     * 4096 because on reasoning models {@code max_completion_tokens} also has to cover
-     * the hidden reasoning tokens — a tight ceiling burns the whole budget on reasoning
-     * and returns empty or truncated content. 16k still returns comfortably inside the
-     * non-streaming read timeout.
-     */
-    private static final int DEFAULT_MAX_TOKENS = 16000;
 
     /** The {@code o<n>} reasoning family: o1, o3-mini, o4-mini-2025-04-16, ... */
     private static final Pattern REASONING_FAMILY = Pattern.compile("^o\\d");
@@ -52,18 +43,25 @@ class OpenAiProvider implements LlmProvider {
     private final OkHttpClient httpClient;
 
     OpenAiProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper) {
+        this(ownClawConfig, mapper, new OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                // The reply is streamed, so this is the longest silence allowed between two
+                // chunks, not the length of the call.
+                .readTimeout(300, TimeUnit.SECONDS)
+                .writeTimeout(10, TimeUnit.SECONDS)
+                .build());
+    }
+
+    /** With the HTTP client given, so a test can answer the calls itself. */
+    OpenAiProvider(OwnClawConfig ownClawConfig, ObjectMapper mapper, OkHttpClient httpClient) {
         this.config = ownClawConfig.getMentor();
         this.mapper = mapper;
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(300, TimeUnit.SECONDS)  // code generation can be slow
-                .writeTimeout(10, TimeUnit.SECONDS)
-                .build();
+        this.httpClient = httpClient;
     }
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
-        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "openai");
+        return RateLimitBackoff.execute(() -> chatInternal(messages, reqConfig), "openai", reqConfig.progress());
     }
 
     private LlmResponse chatInternal(List<LlmMessage> messages, LlmRequestConfig reqConfig) {
@@ -73,11 +71,38 @@ class OpenAiProvider implements LlmProvider {
         }
 
         String model = reqConfig.model() != null ? reqConfig.model() : config.getModel();
-        int maxTokens = reqConfig.maxTokens() != null ? reqConfig.maxTokens() : DEFAULT_MAX_TOKENS;
 
+        Request request = new Request.Builder()
+                .url(BASE_URL + "/chat/completions")
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .post(RequestBody.create(requestBody(messages, reqConfig, model).toString(), JSON_TYPE))
+                .build();
+
+        return StreamedCall.send(httpClient, request, "openai", reqConfig.progress(), response -> {
+            ResponseBody responseBody = response.body();
+            if (!response.isSuccessful()) {
+                int code = response.code();
+                String error = responseBody != null ? responseBody.string() : "";
+                if (code == 400 && error.contains("context_length_exceeded")) {
+                    throw new OutputTruncated("openai", OutputTruncated.Limit.CONTEXT_WINDOW, null, null);
+                }
+                throw new LlmException("openai", "HTTP " + code + ": " + error, code, null);
+            }
+            if (responseBody == null) {
+                throw new LlmException("openai", "HTTP " + response.code() + " with no body", 0, null);
+            }
+            return read(responseBody.source(), model, reqConfig.progress());
+        });
+    }
+
+    /** The request body for one call. Package-private so a test can see exactly what would be sent. */
+    ObjectNode requestBody(List<LlmMessage> messages, LlmRequestConfig reqConfig, String model) {
         ObjectNode body = mapper.createObjectNode();
         body.put("model", model);
-        body.put("max_completion_tokens", maxTokens);
+        body.put("stream", true);
+        // Without it the stream carries no token counts at all.
+        body.putObject("stream_options").put("include_usage", true);
 
         // Reasoning models pick their own sampling and reject any explicit value with
         // HTTP 400 "Unsupported value: 'temperature' ... Only the default (1) is supported."
@@ -97,6 +122,7 @@ class OpenAiProvider implements LlmProvider {
 
         ArrayNode msgs = body.putArray("messages");
         for (LlmMessage msg : messages) {
+            if (msg.role() == LlmMessage.Role.TOOLS) continue;   // its tools join the array
             ObjectNode m = msgs.addObject();
             m.put("role", msg.role().apiValue());
             m.put("content", msg.content());
@@ -104,7 +130,7 @@ class OpenAiProvider implements LlmProvider {
 
         if (reqConfig.hasTools()) {
             ArrayNode toolsArray = body.putArray("tools");
-            for (ToolSpec spec : reqConfig.tools()) {
+            for (ToolSpec spec : ToolSpec.offered(reqConfig.tools(), messages)) {
                 ObjectNode fn = toolsArray.addObject().put("type", "function").putObject("function");
                 fn.put("name", spec.name());
                 fn.put("description", spec.description() == null ? "" : spec.description());
@@ -114,65 +140,105 @@ class OpenAiProvider implements LlmProvider {
             // silently dropping work the model asked for.
             body.put("parallel_tool_calls", false);
         }
+        return body;
+    }
 
-        Request request = new Request.Builder()
-                .url(BASE_URL + "/chat/completions")
-                .header("Authorization", "Bearer " + apiKey)
-                .header("Content-Type", "application/json")
-                .post(RequestBody.create(body.toString(), JSON_TYPE))
-                .build();
+    /**
+     * The reply, chunk by chunk, until {@code data: [DONE]}. The progress hook hears every
+     * chunk, and what each carried ({@link LlmProgress#received}), and whatever it throws leaves
+     * through here untouched, closing the stream. An
+     * attempt that ends here without a reply after its counts arrived first tells the hook what
+     * it is billed for ({@link LlmProgress#billed}).
+     */
+    private LlmResponse read(BufferedSource source, String requestedModel, LlmProgress progress)
+            throws IOException {
+        var events = new ServerSentEvents(source);
+        var reply = new StreamedReply("openai", mapper);
+        String servedModel = requestedModel;
+        String finishReason = null;
+        int promptTokens = 0, completionTokens = 0, cachedPromptTokens = 0;
+        boolean done = false;
 
-        try (Response response = clientForRequest(reqConfig).newCall(request).execute()) {
-            String responseBody = response.body() != null ? response.body().string() : "";
-
-            if (!response.isSuccessful()) {
-                throw new LlmException("openai", "HTTP " + response.code() + ": " + responseBody,
-                        response.code(), null);
-            }
-
-            JsonNode json = mapper.readTree(responseBody);
-            String content = json.path("choices").path(0)
-                    .path("message").path("content").asText("");
-            int promptTokens = json.path("usage").path("prompt_tokens").asInt(0);
-            int completionTokens = json.path("usage").path("completion_tokens").asInt(0);
-            // OpenAI reports cached prompt tokens INSIDE prompt_tokens and breaks them out under
-            // prompt_tokens_details.cached_tokens. They were priced at the full input rate, which
-            // on a long conversation is the dominant term and about ten times what it costs. The
-            // cached portion is split out so ModelPricing can charge it as a cache read; the sum
-            // still equals prompt_tokens, so no token is counted twice.
-            int cachedPromptTokens = json.path("usage").path("prompt_tokens_details")
-                    .path("cached_tokens").asInt(0);
-            int uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens);
-
-            log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
-                    model, promptTokens, cachedPromptTokens, completionTokens);
-            // OpenAI returns arguments as a JSON STRING, unlike Anthropic and Ollama which
-            // return an object. Parsed strictly: OpenAI emits valid JSON, and quietly accepting
-            // malformed arguments would hand a skill values nothing ever checked.
-            var toolCalls = new java.util.ArrayList<ToolCall>();
-            for (JsonNode tc : json.path("choices").path(0).path("message").path("tool_calls")) {
-                String argsRaw = tc.path("function").path("arguments").asText("");
-                Map<String, Object> args = Map.of();
-                try {
-                    if (!argsRaw.isBlank()) {
-                        args = mapper.readValue(argsRaw, new TypeReference<Map<String, Object>>() {});
-                    }
-                } catch (Exception e) {
-                    log.warn("OpenAI tool call '{}' had unparseable arguments ({}); treating as "
-                                    + "empty so the step fails visibly rather than on bad values.",
-                            tc.path("function").path("name").asText("?"), e.getMessage());
+        try {
+            ServerSentEvents.Event event;
+            while ((event = events.next()) != null) {
+                progress.onProgress();
+                if ("[DONE]".equals(event.data().strip())) {
+                    done = true;
+                    break;
                 }
-                toolCalls.add(new ToolCall(tc.path("id").asText(null),
-                        tc.path("function").path("name").asText(null), args));
+                JsonNode chunk = reply.parse(event.data());
+                if (chunk.hasNonNull("error")) throw streamError(chunk.path("error"));
+                servedModel = chunk.path("model").asText(servedModel);
+                for (JsonNode choice : chunk.path("choices")) {
+                    JsonNode delta = choice.path("delta");
+                    if (delta.path("content").isTextual()) {
+                        String text = delta.path("content").asText();
+                        reply.text(text);
+                        if (!text.isEmpty()) progress.received(LlmProgress.Part.ANSWER, text);
+                    }
+                    // Arguments arrive as a JSON STRING in fragments, unlike Anthropic's input
+                    // object; the first fragment of a call carries its id and name.
+                    for (JsonNode tc : delta.path("tool_calls")) {
+                        String name = tc.path("function").path("name").asText(null);
+                        String fragment = tc.path("function").path("arguments").asText(null);
+                        reply.call(tc.path("index").asInt(), tc.path("id").asText(null), name, fragment);
+                        if (name != null && !name.isEmpty()) progress.received(LlmProgress.Part.CALL, name);
+                        if (fragment != null && !fragment.isEmpty()) {
+                            progress.received(LlmProgress.Part.ARGUMENTS, fragment);
+                        }
+                    }
+                    finishReason = choice.path("finish_reason").asText(finishReason);
+                }
+                // The last chunk before [DONE]: no choices, only the counts.
+                JsonNode usage = chunk.path("usage");
+                if (usage.isObject()) {
+                    promptTokens = usage.path("prompt_tokens").asInt(0);
+                    completionTokens = usage.path("completion_tokens").asInt(0);
+                    cachedPromptTokens = usage.path("prompt_tokens_details").path("cached_tokens").asInt(0);
+                }
             }
-
-            return new LlmResponse(content, uncachedPromptTokens, completionTokens,
-                    0, cachedPromptTokens,
-                    json.path("choices").path(0).path("finish_reason").asText(null), toolCalls);
-
-        } catch (IOException e) {
-            throw new LlmException("openai", "Connection failed: " + e.getMessage(), 0, e);
+            if (!done) {
+                throw new LlmException("openai",
+                        "the reply stream ended before [DONE], so the reply is incomplete", 0, null);
+            }
+        } catch (IOException | RuntimeException noReply) {
+            if (promptTokens + completionTokens > 0) {
+                progress.billed(billed(servedModel, promptTokens, completionTokens, cachedPromptTokens));
+            }
+            throw noReply;
         }
+
+        log.debug("OpenAI [{}]: {} prompt ({} cached) + {} completion tokens",
+                servedModel, promptTokens, cachedPromptTokens, completionTokens);
+        return reply.response(List.of(billed(servedModel, promptTokens, completionTokens, cachedPromptTokens)),
+                finishReason, null, servedModel, null, null);
+    }
+
+    /**
+     * What one attempt is billed for, from the counts OpenAI reported.
+     * <p>
+     * OpenAI reports cached prompt tokens INSIDE prompt_tokens and breaks them out under
+     * prompt_tokens_details.cached_tokens. They were priced at the full input rate, which on a
+     * long conversation is the dominant term and about ten times what it costs. The cached
+     * portion is split out so ModelPricing can charge it as a cache read; the sum still equals
+     * prompt_tokens, so no token is counted twice.
+     */
+    private static LlmResponse.Usage billed(String model, int promptTokens, int completionTokens,
+                                            int cachedPromptTokens) {
+        return new LlmResponse.Usage(model, Math.max(0, promptTokens - cachedPromptTokens),
+                completionTokens, 0, cachedPromptTokens);
+    }
+
+    /** An error in the middle of a reply, with the status the same error has as a whole response. */
+    private static LlmException streamError(JsonNode error) {
+        String type = error.path("type").asText("error");
+        String code = error.path("code").asText("");
+        int status = type.contains("rate_limit") || code.contains("rate_limit") ? 429
+                : "server_error".equals(type) ? 500
+                : 0;
+        return new LlmException("openai", "the reply stream reported " + type + ": "
+                + error.path("message").asText(""), status, null);
     }
 
     /**
@@ -234,18 +300,4 @@ class OpenAiProvider implements LlmProvider {
 
     @Override
     public String model() { return config.getModel(); }
-
-    /**
-     * Return an OkHttpClient with the read timeout from reqConfig (if set),
-     * otherwise use the default httpClient. Uses newBuilder() so the
-     * connection pool and dispatcher are shared.
-     */
-    private OkHttpClient clientForRequest(LlmRequestConfig reqConfig) {
-        if (reqConfig.readTimeoutSec() != null && reqConfig.readTimeoutSec() > 0) {
-            return httpClient.newBuilder()
-                    .readTimeout(reqConfig.readTimeoutSec(), TimeUnit.SECONDS)
-                    .build();
-        }
-        return httpClient;
-    }
 }

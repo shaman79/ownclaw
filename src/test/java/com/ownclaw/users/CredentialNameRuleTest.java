@@ -4,7 +4,6 @@ import com.ownclaw.agent.SkillManager;
 import com.ownclaw.agent.tools.DynamicSkillRegistry;
 import com.ownclaw.agent.tools.ToolRegistry;
 import com.ownclaw.config.OwnClawConfig;
-import com.ownclaw.core.TaskQueue;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.sandbox.JailTestKit;
 import com.ownclaw.sandbox.ProcessSandbox;
@@ -16,36 +15,87 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The one rule for a credential's name -- the name of a variable in the skill's own environment
- * -- and the one parser for the names a skill declares, each place a name is made holding to
- * them: /cred set, skill_create, SKILL.yaml.
+ * The one rule for a credential's name -- the name of the variable a skill reads it from -- held
+ * where a name is stored (/cred set) or declared (skill_create, SKILL.yaml), and the one parser for
+ * the names a skill declares. A value typed where the name goes was stored as the name, and the names
+ * the vault holds go to the cloud model with every prompt.
  */
 class CredentialNameRuleTest {
 
     @TempDir Path tmp;
 
-    private static final String REFUSED = CredentialVault.nameRefusal("API-KEY");
+    private static final String REFUSED = CredentialVault.NAME_RULE;
 
     @Test
     @DisplayName("a name is upper-case letters, digits and underscores, starting with a letter")
     void theRule() {
-        for (String name : List.of("SMTP_PASSWORD", "IMAP_USER", "API_TOKEN", "X1", "LD_PRELOAD", "DOCKER_HOST",
-                "HOME", "PATH")) {
+        for (String name : List.of("SMTP_PASSWORD", "SSH_PRIVATE_KEY", "IMAP_USER", "X1", "A_")) {
             assertTrue(CredentialVault.validName(name), name);
         }
-        for (String name : List.of("", "smtp_password", "Smtp_Password", "1KEY", "API-KEY", "A B", "_X", "A.B",
-                "A=B")) {
+        for (String name : List.of("", "smtp_password", "1KEY", "API-KEY", "A B", "_X", "A.B", "A=B",
+                "SMTP_PASS=HUNTER2", "K\u0000", "Ä")) {
             assertFalse(CredentialVault.validName(name), name);
         }
         assertFalse(CredentialVault.validName(null));
+    }
+
+    @Test
+    @DisplayName("the vault refuses a bad name before it reaches for the database, and lower case is upper-cased first")
+    void theVaultRefuses() {
+        var vault = new CredentialVault(null);
+        var e = assertThrows(IllegalArgumentException.class, () -> vault.storeCredential("u1", " api-key ", "x"));
+        assertEquals(CredentialVault.NAME_RULE, e.getMessage());
+        // A good name, lower-cased, passes the rule and goes on to the database -- here none.
+        var past = assertThrows(RuntimeException.class, () -> vault.storeCredential("u1", "smtp_pass", "x"));
+        assertEquals("Failed to store credential", past.getMessage());
+    }
+
+    @Test
+    @DisplayName("what a credential cannot be: a name in mixed case, a value with a NUL, a value holding another secret command")
+    void refusals() {
+        assertNull(CredentialVault.refusal("smtp_pass", "x"));
+        assertNull(CredentialVault.refusal("SMTP_PASS", "line one\nline two"));
+        assertEquals(CredentialVault.NAME_RULE, CredentialVault.refusal("Tr0ub4dor", "OPENWRT_PASS"));
+        assertEquals(CredentialVault.NAME_RULE, CredentialVault.refusal("Smtp_Pass", "x"));
+        assertNotNull(CredentialVault.refusal("K", "hunter2\u0000x"));
+        assertNotNull(CredentialVault.refusal("A", "x\n/cred set B y"), "two commands in one message");
+        assertNotNull(CredentialVault.refusal("A", "x\n  /USER add bob pw"));
+        assertNull(CredentialVault.refusal("A", "x\n/credentials are kept elsewhere"), "a word that starts so");
+        var vault = new CredentialVault(null);
+        assertThrows(IllegalArgumentException.class, () -> vault.storeCredential("u1", "A", "x\n/cred set B y"));
+    }
+
+    @Test
+    @DisplayName("/cred set refuses a bad name, stores nothing, and does not repeat what was typed")
+    void credSetRefuses() {
+        List<String> stored = new ArrayList<>();
+        var vault = new CredentialVault(null) {
+            @Override public void storeCredential(String userId, String key, String value) {
+                stored.add(key);
+            }
+        };
+        var commands = new CommandHandler(null, null, null, null, vault, null, null, null, null,
+                null, null, null, null, null, null, null);
+
+        assertEquals(Optional.of("Not stored: " + CredentialVault.NAME_RULE),
+                commands.handle("u1", "/cred set api-key x"));
+        Optional<String> typo = commands.handle("u1", "/cred set SMTP_PASS=hunter2 x");
+        assertEquals(Optional.of("Not stored: " + CredentialVault.NAME_RULE), typo);
+        assertFalse(typo.get().toLowerCase(Locale.ROOT).contains("hunter2"));
+        assertTrue(stored.isEmpty(), "stored " + stored);
+
+        assertTrue(commands.handle("u1", "/cred set ssh_private_key line one\nline two").get().contains("stored"));
+        assertEquals(List.of("SSH_PRIVATE_KEY"), stored);
     }
 
     @Test
@@ -62,19 +112,6 @@ class CredentialNameRuleTest {
         assertEquals(REFUSED, e.getMessage());
     }
 
-    @Test
-    @DisplayName("/cred set refuses a name that breaks the rule, in any case, and says why; nothing is stored")
-    void credSetRefusesABadName() {
-        // No database: the name is refused before the vault reaches for one.
-        var vault = new CredentialVault(null);
-        var e = assertThrows(IllegalArgumentException.class, () -> vault.storeCredential("u1", " api-key ", "x"));
-        assertEquals(REFUSED, e.getMessage());
-
-        var commands = new CommandHandler(null, null, null, null, vault, null,
-                new TaskQueue(null, null, null, new OwnClawConfig(), null), null, null, null, null,
-                null, null, JailTestKit.off());
-        assertEquals(Optional.of("Not stored: " + REFUSED), commands.handle("u1", "/cred set api-key x"));
-    }
 
     @Test
     @DisplayName("skill_create refuses a bad credential name before writing anything; a SKILL.yaml declaring one does not load")
@@ -89,7 +126,7 @@ class CredentialNameRuleTest {
         var sandbox = new ProcessSandbox(jail);
         var tools = new ToolRegistry(List.of());
         var dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
-        var manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);
+        var manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null, null);
 
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("name", "mail_sender");

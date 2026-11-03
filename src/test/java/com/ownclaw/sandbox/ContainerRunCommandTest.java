@@ -288,57 +288,6 @@ class ContainerRunCommandTest {
         assertEquals(List.of("half", "half"), seen);
     }
 
-    @ParameterizedTest(name = "fd {0}")
-    @ValueSource(ints = {1, 2})
-    @DisplayName("a container run printing past the output limit on either stream is killed, and its result says why")
-    void pastTheOutputLimitIsKilled(int fd) throws Exception {
-        // A run prints without end on the stream it is told, as a skill in the container would
-        // through the CLI. One process throughout, with no child to hold the streams open once
-        // it is killed.
-        var fake = fakeRuntime("c=x; i=0; while [ $i -lt 16 ]; do c=\"$c$c\"; i=$((i+1)); done\n"
-                + "n=0; while [ $n -le 256 ]; do printf '%s' \"$c\" >&" + fd + "; n=$((n+1)); done\n"
-                + "exec sleep 30\n");
-
-        long start = System.nanoTime();
-        var result = fake.execute("test-image", "python3", skillDir.resolve("_runner_x.py"), skillDir, null,
-                60, null, null);
-        long ms = (System.nanoTime() - start) / 1_000_000;
-
-        assertFalse(result.isSuccess(), "a run past the output limit succeeded");
-        assertTrue(result.stderr().startsWith("Killed: the skill's output went past the 16 MB limit."),
-                result.stderr().substring(0, Math.min(200, result.stderr().length())));
-        assertTrue(ms < 20_000, "the run was left to go on for " + ms + " ms");
-        assertTheRunWasKilled();
-    }
-
-    @Test
-    @DisplayName("an image build printing past the output limit is stopped, and fails saying why")
-    void aBuildPastTheOutputLimitFails() throws Exception {
-        // `image inspect` finds nothing, so every candidate base image is built -- and prints
-        // 17 MB of lines, then waits.
-        Path runtime = Files.createDirectories(tmp.resolve("bin")).resolve("fake-docker");
-        Files.writeString(runtime, "#!/bin/sh\n"
-                + "[ \"$1\" = version ] && exit 0\n"
-                + "[ \"$1\" = image ] && exit 1\n"
-                + "yes building | head -c 17000000\n"
-                + "exec sleep 30\n");
-        Files.setPosixFilePermissions(runtime, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
-        var config = new OwnClawConfig();
-        config.getSkills().setGeneratedPath(tmp.resolve("skills/generated").toString());
-        config.getDatabase().setPath(tmp.resolve("data/ownclaw.db").toString());
-        config.getSandbox().setContainerRuntime(runtime.toString());
-        // Well above the 5 s between two looks: every build is killed at the limit long before.
-        config.getSandbox().setStallTimeout(20);
-        var fake = new ContainerSandbox(config);
-        fake.init();
-
-        long start = System.nanoTime();
-        var e = assertThrows(IOException.class, () -> fake.ensureImage(List.of("nmap"), null, skillDir, null, null));
-        long ms = (System.nanoTime() - start) / 1_000_000;
-        assertTrue(e.getMessage().contains("Build output went past the 16 MB limit"), e.getMessage());
-        assertTrue(ms < 60_000, "the builds were left to go on for " + ms + " ms");
-    }
-
     @Test
     @DisplayName("the image sets what a run needs -- nmap told it has no raw sockets among it -- and the run command sets no variable at all")
     void theImageSetsWhatARunNeeds() throws Exception {

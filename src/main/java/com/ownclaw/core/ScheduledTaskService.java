@@ -1,11 +1,7 @@
 package com.ownclaw.core;
 
-import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.conversation.ConversationService;
-import com.ownclaw.llm.LlmMessage;
-import com.ownclaw.llm.LlmRequestConfig;
-import com.ownclaw.llm.OllamaProvider;
-import com.ownclaw.llm.OllamaSemaphore;
+import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.ChatStatusEmitter.StatusMessage;
 import com.ownclaw.observability.EventLogService;
@@ -44,6 +40,8 @@ import java.util.regex.Pattern;
  *   <li>Due tasks are submitted to the {@link TaskQueue} at P2 (background) priority.</li>
  *   <li>After execution, the result is recorded and (for recurring tasks) the next
  *       run time is computed from the cron expression.</li>
+ *   <li>The result is delivered into the owner's pinned chat of scheduled results
+ *       ({@link ConversationService#scheduledSession}), not whichever chat is open.</li>
  * </ol>
  */
 @Service
@@ -56,9 +54,6 @@ public class ScheduledTaskService {
     private final ChatStatusEmitter statusEmitter;
     private final EventLogService eventLog;
     private final ConversationService conversationService;
-    private final OwnClawConfig config;
-    private final OllamaProvider ollama;
-    private final OllamaSemaphore ollamaSemaphore;
     private final ResultDelivery resultDelivery;
 
     // Track task submission timestamps for duration calculation
@@ -80,17 +75,13 @@ public class ScheduledTaskService {
 
     public ScheduledTaskService(JdbcTemplate jdbc, TaskQueue taskQueue,
                                 ChatStatusEmitter statusEmitter, EventLogService eventLog,
-                                ConversationService conversationService, OwnClawConfig config,
-                                OllamaProvider ollama, OllamaSemaphore ollamaSemaphore,
+                                ConversationService conversationService,
                                 ResultDelivery resultDelivery) {
         this.jdbc = jdbc;
         this.taskQueue = taskQueue;
         this.statusEmitter = statusEmitter;
         this.eventLog = eventLog;
         this.conversationService = conversationService;
-        this.config = config;
-        this.ollama = ollama;
-        this.ollamaSemaphore = ollamaSemaphore;
         this.resultDelivery = resultDelivery;
     }
 
@@ -116,6 +107,18 @@ public class ScheduledTaskService {
     // ──────────────────────────────────────────────────────────────────────
 
     /**
+     * A task's text never holds a secret command ({@link CommandHandler#carriesSecret}): run, it
+     * would hand the secret to the model on every run, and the row keeps it. The chats refuse
+     * one as it is typed; this refuses it wherever else a task's text comes from -- the page's
+     * edit form, the agent's own schedule actions.
+     */
+    private static void refuseSecret(String description) {
+        if (CommandHandler.carriesSecret(description)) {
+            throw new IllegalArgumentException(CommandHandler.MISPLACED_SECRET_ANSWER);
+        }
+    }
+
+    /**
      * Schedule a one-shot deferred task.
      *
      * @param userId    the user who owns this task
@@ -124,8 +127,7 @@ public class ScheduledTaskService {
      * @return the created task ID
      */
     public long scheduleDeferred(String userId, String description, Instant runAt) {
-        enforceLimit(userId);
-
+        refuseSecret(description);
         long taskId = insertReturningId(
                 "INSERT INTO scheduled_tasks (user_id, task_type, description, next_run_at, status) "
                         + "VALUES (?, 'deferred', ?, ?, 'active')",
@@ -134,7 +136,7 @@ public class ScheduledTaskService {
         eventLog.info(userId, null, "scheduled.created",
                 "Deferred task #" + taskId + " scheduled for " + formatTime(runAt));
         statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
-                "Task scheduled for " + formatTime(runAt) + ": " + truncate(description, 80));
+                "Task scheduled for " + formatTime(runAt) + ": " + description);
 
         log.info("Deferred task #{} created for user {} — runs at {}", taskId, userId, runAt);
         return taskId;
@@ -151,8 +153,7 @@ public class ScheduledTaskService {
      */
     public long scheduleRecurring(String userId, String description, String cronExpression,
                                   Integer maxRuns) {
-        enforceLimit(userId);
-
+        refuseSecret(description);
         // Validate the cron expression
         CronExpression cron = CronExpression.parse(cronExpression);
         LocalDateTime nextRun = cron.next(LocalDateTime.now());
@@ -170,7 +171,7 @@ public class ScheduledTaskService {
                 "Recurring task #" + taskId + " [" + cronExpression + "], next run: " + formatTime(nextRunInstant));
         statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
                 "Recurring task scheduled [" + cronExpression + "], next run: "
-                        + formatTime(nextRunInstant) + " — " + truncate(description, 60));
+                        + formatTime(nextRunInstant) + " — " + description);
 
         log.info("Recurring task #{} created for user {} — cron={}, next={}",
                 taskId, userId, cronExpression, nextRunInstant);
@@ -185,16 +186,27 @@ public class ScheduledTaskService {
      * Parse a natural-language time expression into an {@link Instant}.
      * Supports: "in 30 minutes", "in 2 hours", "in 1 day", "tomorrow",
      * "tomorrow at 9am", "at 14:30".
+     * <p>
+     * The whole expression must be one of these. Found anywhere in it, "2 hours" made "2 hours
+     * backup my notes" a time too, and /schedule, which takes the longest run of leading words
+     * that is a time, kept only "notes" of the task. A time that does not exist -- "30" read as
+     * a clock time, "14:75" -- is not one either: it used to throw.
      *
      * @return the parsed instant, or empty if the expression is not recognized
      */
     public Optional<Instant> parseTimeExpression(String expression) {
         if (expression == null || expression.isBlank()) return Optional.empty();
-        String expr = expression.trim().toLowerCase();
+        try {
+            return parseTime(expression.trim().toLowerCase());
+        } catch (DateTimeException | ArithmeticException | NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
 
+    private Optional<Instant> parseTime(String expr) {
         // "in N unit(s)"
         Matcher durMatch = DURATION_PATTERN.matcher(expr);
-        if (durMatch.find()) {
+        if (durMatch.matches()) {
             int amount = Integer.parseInt(durMatch.group(1));
             String unit = durMatch.group(2).toLowerCase();
             Instant result = switch (unit) {
@@ -211,7 +223,7 @@ public class ScheduledTaskService {
 
         // "tomorrow" or "tomorrow at HH:mm"
         Matcher tomorrowMatch = TOMORROW_PATTERN.matcher(expr);
-        if (tomorrowMatch.find()) {
+        if (tomorrowMatch.matches()) {
             LocalDate tomorrow = LocalDate.now().plusDays(1);
             int hour = tomorrowMatch.group(1) != null ? Integer.parseInt(tomorrowMatch.group(1)) : 9;
             int minute = tomorrowMatch.group(2) != null ? Integer.parseInt(tomorrowMatch.group(2)) : 0;
@@ -223,7 +235,7 @@ public class ScheduledTaskService {
 
         // "at HH:mm" — today if in the future, otherwise tomorrow
         Matcher atMatch = AT_TIME_PATTERN.matcher(expr);
-        if (atMatch.find()) {
+        if (atMatch.matches()) {
             int hour = Integer.parseInt(atMatch.group(1));
             int minute = atMatch.group(2) != null ? Integer.parseInt(atMatch.group(2)) : 0;
             String ampm = atMatch.group(3);
@@ -348,7 +360,9 @@ public class ScheduledTaskService {
     }
 
     /**
-     * Format a user-friendly summary of all active scheduled tasks.
+     * Every scheduled task of a user, each with its instruction in full: the owner reads this
+     * through /schedule, and the model through schedule_manage 'list' before it cancels, pauses
+     * or edits one -- it used to see 60 characters of each, and nothing after the 20th task.
      */
     public String formatTasksSummary(String userId) {
         var tasks = listTasks(userId, null);
@@ -356,12 +370,10 @@ public class ScheduledTaskService {
 
         var sb = new StringBuilder("### Scheduled Tasks\n");
         var fmt = DateTimeFormatter.ofPattern("MMM d, HH:mm").withZone(ZoneId.systemDefault());
-        int n = 0;
         for (var t : tasks) {
-            n++;
             String type = String.valueOf(t.get("task_type"));
             String status = String.valueOf(t.get("status"));
-            String desc = truncate(String.valueOf(t.get("description")), 60);
+            String desc = String.valueOf(t.get("description"));
             String nextRun = t.get("next_run_at") != null
                     ? fmt.format(Instant.parse(String.valueOf(t.get("next_run_at"))))
                     : "—";
@@ -385,11 +397,6 @@ public class ScheduledTaskService {
               .append(" — next: ").append(nextRun)
               .append(runs > 0 ? " (ran " + runs + "×)" : "")
               .append(" [").append(status).append("]\n");
-
-            if (n >= 20) {
-                sb.append("  ... and more\n");
-                break;
-            }
         }
         return sb.toString();
     }
@@ -403,6 +410,7 @@ public class ScheduledTaskService {
      */
     public boolean updateTask(String userId, long taskId, String description,
                               String cronExpression) {
+        refuseSecret(description);
         var task = getTask(userId, taskId);
         if (task.isEmpty()) return false;
 
@@ -534,8 +542,20 @@ public class ScheduledTaskService {
             String description = String.valueOf(task.get("description"));
             String taskType = String.valueOf(task.get("task_type"));
 
-            log.info("Firing scheduled task #{} for user {} — {}", taskId, userId,
-                    truncate(description, 50));
+            // A row made before the scheduler refused one (refuseSecret) can still hold a secret
+            // command: run, it would hand the secret to the model every time. It is paused, and
+            // the owner told which, by number -- not by its text.
+            if (CommandHandler.carriesSecret(description)) {
+                jdbc.update("UPDATE scheduled_tasks SET status = 'paused', updated_at = datetime('now') "
+                        + "WHERE id = ? AND status = 'active'", taskId);
+                log.warn("Scheduled task #{} holds a secret command: paused, not run", taskId);
+                background(userId, StatusMessage.Type.WARNING, "Scheduled task #" + taskId
+                        + " was paused, not run: its text holds a /cred set or /user add, which would "
+                        + "have gone to the model as text. Edit or cancel it.");
+                continue;
+            }
+
+            log.info("Firing scheduled task #{} for user {}", taskId, userId);
 
             // Mark as running to prevent re-pickup
             // Claim the task, and skip it if the claim fails.
@@ -558,8 +578,7 @@ public class ScheduledTaskService {
             }
 
             // Notify user
-            statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
-                    "Scheduled task firing: " + truncate(description, 80));
+            background(userId, StatusMessage.Type.SCHEDULED, "Scheduled task firing: " + description);
 
             // Track start time for duration calculation
             taskStartTimes.put(taskId, System.currentTimeMillis());
@@ -588,14 +607,17 @@ public class ScheduledTaskService {
                             // owner's review item -- a scheduled run never asks, it finishes
                             // partial and says what stopped it.
                             onTaskFailed(taskId, userId, taskType, description,
-                                    describeFailure(result), used, agentTaskId, "partial");
+                                    describeFailure(result, result.response()),
+                                    ownersFailure(result), used, agentTaskId, "partial");
                         } else {
                             onTaskFailed(taskId, userId, taskType, description,
-                                    describeFailure(result), used, agentTaskId);
+                                    describeFailure(result, result.response()),
+                                    ownersFailure(result), used, agentTaskId, "failed");
                         }
                     })
                     .exceptionally(ex -> {
-                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null, null);
+                        onTaskFailed(taskId, userId, taskType, description, ex.getMessage(), null,
+                                null, null, "failed");
                         return null;
                     });
         }
@@ -637,26 +659,30 @@ public class ScheduledTaskService {
     }
 
     /**
-     * Why a scheduled run did not deliver, in a line the owner can act on.
-     * <p>
-     * The reason alone ("MAX_STEPS") does not say what it was trying to do, and the response
-     * alone reads like an answer. Both together are the only honest summary — and a question
-     * from unattended work is worth naming as such, because the fix is to give the task enough
-     * detail up front rather than to retry it unchanged.
+     * Why a scheduled run did not deliver: the run's whole ending, which says why it stopped and
+     * what it did ({@code TaskEnding}) -- said once, there. Prefixed with the reason and a step
+     * count, it said both twice, and the count disagreed with the ending's own: it counted the
+     * loop's reflection turns as steps. A question from unattended work is named as such, because
+     * the fix is to give the task enough detail up front rather than to retry it unchanged.
+     *
+     * @param ending the run's response, or the owner's private text in its place
      */
-    private String describeFailure(com.ownclaw.agent.AgentResult result) {
-        String detail = truncate(result.response(), 400);
+    private static String describeFailure(com.ownclaw.agent.AgentResult result, String ending) {
         if (result.awaitingUser()) {
             return "The task stopped to ask a question, and scheduled runs have nobody to answer: "
-                    + detail;
+                    + ending;
         }
-        return result.terminationReason() + " after " + result.totalSteps() + " steps: " + detail;
+        return ending;
+    }
+
+    /** The failure as the owner is shown it, with his private text, or null if the run has none. */
+    private static String ownersFailure(com.ownclaw.agent.AgentResult result) {
+        return result.ownerText() == null ? null : describeFailure(result, result.ownerText());
     }
 
     /**
      * Called when a scheduled task completes successfully.
-     */
-    /**
+     *
      * @param withheld the one line on what stayed on this machine, or "". The scheduler calls
      *                 the String overload of deliver (it has a header of its own), so the
      *                 AgentResult overload that computes this never ran for a scheduled task --
@@ -664,8 +690,7 @@ public class ScheduledTaskService {
      *                 with private results in it, said nothing.
      * @param ownerText the owner's private answer, or null. Delivered beside the response and
      *                  nowhere else: the run's record and last_result keep the response, as every
-     *                  reader but the owner's chat does -- ops and the schedule list read them,
-     *                  and last_result is shortened by a model.
+     *                  reader but the owner's chat does -- ops and the schedule list read them.
      */
     private void onTaskCompleted(long taskId, String userId, String taskType,
                                  String description, String response, String ownerText,
@@ -683,16 +708,16 @@ public class ScheduledTaskService {
         } catch (Exception e) {
             log.warn("Scheduled task #{} finished but its run count could not be updated ({}). "
                     + "Delivering the result anyway.", taskId, e.getMessage());
-            resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld, agentTaskId, owner);
+            resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
+                    "Scheduled task: " + description, response + withheld, agentTaskId, owner);
             return;
         }
 
         // Deliver the output, not just a note that output happened. Until this line the result
         // went into scheduled_tasks.last_result and the user saw "Recurring task #3 completed.
         // Next run: 07:00" — so a digest was written in full every morning and read by nobody.
-        resultDelivery.deliver(userId, "Scheduled task: " + truncate(description, 60),
-                response + withheld, agentTaskId, owner);
+        resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
+                "Scheduled task: " + description, response + withheld, agentTaskId, owner);
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, "completed", response, null,
@@ -714,10 +739,10 @@ public class ScheduledTaskService {
                                last_run_at = datetime('now'), last_result = ?,
                                updated_at = datetime('now')
                         WHERE id = ?
-                        """, summarizeIfNeeded(response, 4000), taskId);
-                    statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
+                        """, response, taskId);
+                    background(userId, StatusMessage.Type.COMPLETED,
                             "Recurring task #" + taskId + " completed (max runs reached): "
-                                    + truncate(description, 60));
+                                    + description);
                 } else {
                     // Calculate next run
                     Instant nextRun = calculateNextRun(cronExpr);
@@ -726,8 +751,8 @@ public class ScheduledTaskService {
                                next_run_at = ?, last_run_at = datetime('now'),
                                last_result = ?, updated_at = datetime('now')
                         WHERE id = ?
-                        """, nextRun.toString(), summarizeIfNeeded(response, 4000), taskId);
-                    statusEmitter.emit(userId, StatusMessage.Type.SCHEDULED,
+                        """, nextRun.toString(), response, taskId);
+                    background(userId, StatusMessage.Type.SCHEDULED,
                             "Recurring task #" + taskId + " completed. Next run: "
                                     + formatTime(nextRun));
                 }
@@ -739,34 +764,51 @@ public class ScheduledTaskService {
                        last_run_at = datetime('now'), last_result = ?,
                        updated_at = datetime('now')
                 WHERE id = ?
-                """, summarizeIfNeeded(response, 4000), taskId);
-            statusEmitter.emit(userId, StatusMessage.Type.COMPLETED,
-                    "Deferred task #" + taskId + " completed: " + truncate(description, 80));
+                """, response, taskId);
+            background(userId, StatusMessage.Type.COMPLETED,
+                    "Deferred task #" + taskId + " completed: " + description);
         }
 
         eventLog.info(userId, null, "scheduled.completed",
                 "Task #" + taskId + " completed (run #" + newRunCount + ")");
     }
 
+    /** Where a failed run's status line sends the owner: to its report, delivered whole. */
+    static final String WHERE_ITS_REPORT_IS = "Its report is in the chat of scheduled results.";
+
     /**
      * Called when a scheduled task fails.
+     *
+     * @param error      what the run said, safe text: delivered, recorded and stored as last_error
+     * @param ownerError the same with the owner's private text, or null. Delivered beside
+     *                   {@code error} to the owner's chat alone, as a successful run's private
+     *                   answer is; it used to be dropped, so a failed run's private results
+     *                   never reached him at all.
+     * @param status     'failed', or 'partial' for a run the privacy door stopped
      */
     private void onTaskFailed(long taskId, String userId, String taskType,
-                              String description, String error, String skillsUsed,
-                              String agentTaskId) {
-        onTaskFailed(taskId, userId, taskType, description, error, skillsUsed, agentTaskId, "failed");
-    }
-
-    private void onTaskFailed(long taskId, String userId, String taskType,
-                              String description, String error, String skillsUsed,
-                              String agentTaskId, String status) {
-        int newRunCount = incrementRunCount(taskId);
-
+                              String description, String error, String ownerError,
+                              String skillsUsed, String agentTaskId, String status) {
         // A failed scheduled run is worth as much of the user's attention as a successful one —
         // arguably more, since a silent failure is how a job stops working without anyone
-        // noticing. The status emissions below say a run failed; this says what it said.
-        resultDelivery.deliver(userId,
-                "Scheduled task did not finish: " + truncate(description, 60), error, agentTaskId);
+        // noticing. The status emissions below say a run failed and where its report is; this
+        // is the report. They used to repeat it, so Telegram, which is sent both, got every
+        // ending twice, part by part.
+        resultDelivery.deliver(userId, () -> conversationService.scheduledSession(userId),
+                "Scheduled task did not finish: " + description, error, agentTaskId, ownerError);
+
+        // Delivered before the bookkeeping, which is guarded as onTaskCompleted guards it: a
+        // schedule the owner deleted while its run was failing has no row to count the run in,
+        // and counting it unguarded threw before the report was delivered -- into the
+        // exceptionally() branch, which came back here and threw again, so the report was lost.
+        int newRunCount;
+        try {
+            newRunCount = incrementRunCount(taskId);
+        } catch (Exception e) {
+            log.warn("Scheduled task #{} failed and its run count could not be updated ({}). "
+                    + "Its report was delivered.", taskId, e.getMessage());
+            return;
+        }
 
         // Record full execution history
         recordRun(taskId, userId, description, taskType, status, null, error,
@@ -784,10 +826,10 @@ public class ScheduledTaskService {
                            next_run_at = ?, last_run_at = datetime('now'),
                            last_error = ?, updated_at = datetime('now')
                     WHERE id = ?
-                    """, nextRun.toString(), summarizeIfNeeded(error, 500), taskId);
-                statusEmitter.emit(userId, StatusMessage.Type.WARNING,
-                        "Recurring task #" + taskId + " failed but will retry at "
-                                + formatTime(nextRun) + ": " + truncate(error, 80));
+                    """, nextRun.toString(), error, taskId);
+                background(userId, StatusMessage.Type.WARNING,
+                        "Recurring task #" + taskId + " failed and runs again at "
+                                + formatTime(nextRun) + ". " + WHERE_ITS_REPORT_IS);
             }
         } else {
             // Deferred — mark failed
@@ -796,13 +838,13 @@ public class ScheduledTaskService {
                        last_run_at = datetime('now'), last_error = ?,
                        updated_at = datetime('now')
                 WHERE id = ?
-                """, summarizeIfNeeded(error, 500), taskId);
-            statusEmitter.emit(userId, StatusMessage.Type.FAILED,
-                    "Deferred task #" + taskId + " failed: " + truncate(error, 80));
+                """, error, taskId);
+            background(userId, StatusMessage.Type.FAILED,
+                    "Deferred task #" + taskId + " failed. " + WHERE_ITS_REPORT_IS);
         }
 
         eventLog.warn(userId, null, "scheduled.failed",
-                "Task #" + taskId + " failed: " + truncate(error, 100));
+                "Task #" + taskId + " failed: " + error);
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -831,64 +873,10 @@ public class ScheduledTaskService {
         return count != null ? count : 0;
     }
 
-    private void enforceLimit(String userId) {
-        int max = config.getTasks().getMaxScheduledTasksPerUser();
-        Integer count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM scheduled_tasks WHERE user_id = ? AND status IN ('active', 'paused')",
-                Integer.class, userId);
-        if (count != null && count >= max) {
-            throw new IllegalStateException(
-                    "Maximum scheduled tasks limit reached (" + max
-                            + "). Cancel some existing tasks first.");
-        }
-    }
-
     private String formatTime(Instant instant) {
         return DateTimeFormatter.ofPattern("MMM d, HH:mm")
                 .withZone(ZoneId.systemDefault())
                 .format(instant);
-    }
-
-    private String summarizeIfNeeded(String text, int maxLen) {
-        if (text == null) return "";
-        if (text.length() <= maxLen) return text;
-
-        try {
-            int wordBudget = maxLen / 5; // rough estimate: ~5 chars per word
-            String systemPrompt = "Summarize the following into " + wordBudget
-                    + " words or fewer. Preserve ALL key facts, numbers, names, URLs, "
-                    + "decisions, and outcomes. Omit filler and repetition. Output ONLY the summary.";
-
-            List<LlmMessage> messages = List.of(
-                    LlmMessage.system(systemPrompt),
-                    LlmMessage.user(text.length() > 8000
-                            ? text.substring(0, 8000) + "\n... [input truncated for summarization]"
-                            : text)
-            );
-
-            ollamaSemaphore.acquire();
-            try {
-                // Brevity is requested in the prompt; a token cap would be spent on reasoning.
-                var response = ollama.chat(messages, LlmRequestConfig.DEFAULT);
-                String summary = response.content();
-                if (summary != null && !summary.isBlank()) {
-                    log.debug("Summarized {} chars -> {} chars", text.length(), summary.length());
-                    return summary;
-                }
-            } finally {
-                ollamaSemaphore.release();
-            }
-        } catch (Exception e) {
-            log.warn("LLM summarization failed, falling back to truncation: {}", e.getMessage());
-        }
-
-        // Fallback: hard truncate if LLM unavailable
-        return text.substring(0, maxLen) + "…";
-    }
-
-    private String truncate(String text, int maxLen) {
-        if (text == null) return "";
-        return text.length() > maxLen ? text.substring(0, maxLen) + "…" : text;
     }
 
     /**
@@ -899,7 +887,7 @@ public class ScheduledTaskService {
      * <p>
      * This used to be an INSERT followed by a separate {@code SELECT last_insert_rowid()}. That
      * is two calls through a pooled DataSource, and last_insert_rowid() is per-connection state:
-     * with four connections shared by the scheduler poll, the compressor and the agent loop,
+     * with four connections shared by the scheduler poll, the agent loop and every request,
      * the second call can land on a different connection and return another statement's id, or
      * zero on a connection that has inserted nothing. The scheduler would then confirm
      * "Task #N scheduled" for an N belonging to someone else's row, and cancel or pause that id
@@ -951,9 +939,10 @@ public class ScheduledTaskService {
     }
 
     /**
-     * Get paginated execution history for a user's scheduled tasks.
+     * A page of the runs of all of a user's scheduled tasks, newest first; {@code limit} and
+     * {@code offset} as in {@link #getTaskRuns}.
      */
-    public List<Map<String, Object>> getRunHistory(String userId, int limit, int offset) {
+    public List<Map<String, Object>> getRunHistory(String userId, long limit, long offset) {
         return jdbc.queryForList("""
             SELECT r.*, t.cron_expression, t.next_run_at, t.max_runs,
                    t.status as task_status
@@ -966,15 +955,18 @@ public class ScheduledTaskService {
     }
 
     /**
-     * Get execution history for a specific task.
+     * A page of one task's runs, newest first.
+     *
+     * @param limit  how many; a negative limit is every run from {@code offset} on
+     * @param offset how many of the newest to skip
      */
-    public List<Map<String, Object>> getTaskRuns(String userId, long taskId, int limit) {
+    public List<Map<String, Object>> getTaskRuns(String userId, long taskId, long limit, long offset) {
         return jdbc.queryForList("""
             SELECT * FROM scheduled_task_runs
             WHERE user_id = ? AND task_id = ?
             ORDER BY executed_at DESC
-            LIMIT ?
-            """, userId, taskId, limit);
+            LIMIT ? OFFSET ?
+            """, userId, taskId, limit, offset);
     }
 
     /**
@@ -1007,5 +999,15 @@ public class ScheduledTaskService {
                 "totalCloudTokens", totalCloudTokens,
                 "totalLocalTokens", totalLocalTokens
         );
+    }
+
+    /**
+     * A notice about a run nobody is waiting on in the chat on screen -- one firing, completed or
+     * failed -- marked as unattended work's (ChatStatusEmitter#BACKGROUND), as the run's own
+     * steps are: unmarked, it showed in whatever chat was open, and a completed or failed one
+     * ended the working state of a task asked there.
+     */
+    private void background(String userId, StatusMessage.Type type, String text) {
+        statusEmitter.emit(userId, type, text, Map.of(ChatStatusEmitter.BACKGROUND, true));
     }
 }

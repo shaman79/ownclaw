@@ -4,6 +4,7 @@ import com.ownclaw.privacy.PrivateIndex;
 
 import java.util.Map;
 import java.util.function.BiPredicate;
+import java.util.function.IntFunction;
 
 /**
  * What a cloud call carries with it so the gateway can decide, scrub, check and record.
@@ -17,18 +18,34 @@ import java.util.function.BiPredicate;
  * @param purpose      think | codegen | analyze — one word, for the ledger row
  * @param index        the task's canary index: every PRIVATE artifact's windows
  * @param secretValues decrypted vault values that must be scrubbed from the body, by key
- * @param allowed      whether a hit (handle, normalised window) is material the cloud was
- *                     already given — the task text, or a PUBLIC artifact recorded before the
- *                     private one — and may go
+ * @param allowed      whether a stretch of hits (handle, normalised text: one window, or several
+ *                     running on) is material the cloud was already given -- the task's text, a
+ *                     PUBLIC artifact recorded before the private one, the rest that
+ *                     AgentContext's {@code Excuses} lists -- and may go
+ * @param toolOf       the tool that produced a result, by handle -- null for a handle it does
+ *                     not know -- so a refusal names the result it found
  */
 public record EgressContext(String userId, String taskId, String purpose, PrivateIndex index,
                             Map<String, String> secretValues,
-                            BiPredicate<Integer, String> allowed) {
+                            BiPredicate<Integer, String> allowed,
+                            IntFunction<String> toolOf) {
 
     public EgressContext {
         index = index == null ? new PrivateIndex() : index;
         secretValues = secretValues == null ? Map.of() : Map.copyOf(secretValues);
         allowed = allowed == null ? (h, w) -> false : allowed;
+        toolOf = toolOf == null ? n -> null : toolOf;
         purpose = purpose == null ? "unspecified" : purpose;
+    }
+
+    /**
+     * Without the vault values -- their names only. A record's own toString prints every
+     * component, and so every decrypted secret, into whatever logs the context or a request
+     * config holding it.
+     */
+    @Override
+    public String toString() {
+        return "EgressContext[userId=" + userId + ", taskId=" + taskId + ", purpose=" + purpose
+                + ", secretValues=" + secretValues.keySet() + "]";
     }
 }

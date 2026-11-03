@@ -14,7 +14,7 @@ OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LL
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
 - **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (a bubblewrap jail on Linux, docker/podman for skills with system packages, a plain child process on Windows).
 
-The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is a fallback — if the cloud is unavailable, the system degrades to local-only mode.
+The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is also the fallback: with local only chosen (the owner's default, or a chat's own), with no cloud configured, or when a task's cloud model cannot be reached (no internet, a rejected key, no credit, an outage the retries did not outlast), the local LLM runs the task itself, best effort.
 
 The system supports **multiple users**, each with isolated profiles, credentials, skill libraries, and conversation state.
 
@@ -68,14 +68,14 @@ scenario breaks the system's ability to handle all others.
 |-----------|-----------|-------------|---------|
 | **AgentLoop** | Main agent loop | Drives the Think→Act→Observe cycle: cloud LLM reasons, picks an action, system executes it, result feeds back | Java (Spring Boot) |
 | **ThinkingEngine** | Prompt builder + LLM caller | Builds system/user prompts, calls the selected LLM provider, parses structured JSON responses | Java |
-| **LlmRouter** | Provider selector | Always selects cloud LLM; falls back to local only if cloud is unavailable | Java |
+| **LlmRouter** | Provider selector | Selects the cloud LLM; the local LLM when local-only is on, no cloud is configured, or the task's cloud could not be reached | Java |
 | **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
 | **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
 | **SkillRunner** | Skill execution engine | Runs Python skill scripts in a bubblewrap jail (SkillJail), or docker/podman for system packages; manages I/O | Java + Python |
 | **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
 | **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
-**Key architectural rule**: The cloud LLM **always** orchestrates the main loop. The local LLM is only used when the cloud issues a `delegate` action with a structured plan, or as a degraded fallback when the cloud is unavailable.
+**Key architectural rule**: The cloud LLM orchestrates the main loop. The local LLM is used when the cloud issues a `delegate` action with a structured plan, or runs the loop itself as a degraded fallback (§4.7).
 
 ### 2.2 Architecture Diagram
 
@@ -120,7 +120,7 @@ scenario breaks the system's ability to handle all others.
 │   │ • OpenAI       │  │  • steps: ordered [{description,          │     │
 │   │ • Anthropic    │  │           tool, params}, ...]             │     │
 │   │                │  │  • checkpoints: verification points       │     │
-│   │ Always drives  │  │  • max_steps: execution limit             │     │
+│   │ Always drives  │  │  • tools: the skills it needs             │     │
 │   │ main loop.     │  │                                          │     │
 │   │ Decides ALL    │  │  Runs mini Think→Act→Observe loop         │     │
 │   │ actions.       │  │  using local LLM (qwen2.5:14b).          │     │
@@ -175,7 +175,7 @@ scenario breaks the system's ability to handle all others.
 
 ### 3.1 The Ollama Bottleneck
 
-A single Ollama instance processes one inference request at a time (GPU-bound). Multiple users and tasks compete for this resource. The Task Queue is the central scheduler.
+The local model runs on one Ollama server, and its GPU is the scarce resource. The task queue runs tasks one at a time per lane: one lane by default, so queued tasks -- and their local calls -- never overlap; with `separate-background-lane` on, a background task runs beside an interactive one, and both can call Ollama. Work outside the queue (an agent run from the ops or debug API, the ops Ollama probe, the setup benchmark) can call it beside a task. Nothing else serializes local calls: the Ollama server decides whether requests that arrive together run side by side or one after the other.
 
 ### 3.2 Queue Design
 
@@ -185,11 +185,11 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 │                                              │
 │  Priority Levels:                            │
 │  P0 — Interactive user waiting (classify,    │
-│        compress, skill-match)                │
+│        skill-match)                          │
 │  P1 — Plan execution (Executor following     │
 │        Mentor's plan)                        │
 │  P2 — Background (scheduled cron tasks,      │
-│        conversation compression, cleanup)    │
+│        cleanup)                              │
 │                                              │
 │  Fairness:                                   │
 │  • Round-robin across users at same priority │
@@ -206,7 +206,7 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 │                                              │
 │  Key rule: skill_exec (SkillRunner) does NOT │
 │  need Ollama — runs concurrently with infer. │
-│  Only "inference" items are serialized.      │
+│  Ollama decides how many inferences run.     │
 └──────────────────────────────────────────────┘
 ```
 
@@ -214,14 +214,14 @@ A single Ollama instance processes one inference request at a time (GPU-bound). 
 
 | Operation | Needs Ollama? | Can run in parallel? |
 |-----------|:---:|:---:|
-| Executor: classify task | Yes | No (queued) |
-| Executor: match skills | Yes | No (queued) |
-| Executor: compress context | Yes | No (queued) |
+| Executor: a delegation's steps | Yes | One task per queue lane |
+| Local model: summary of a private result | Yes | One at a time, and only while no task's work is on the local model |
 | Mentor: plan/review | No (cloud API) | Yes (independent) |
 | SkillRunner: execute script | No (Python process) | Yes (multiple sandboxes) |
-| Executor: compress results | Yes | No (queued) |
 
-**This means**: While Executor is doing inference for User A, SkillRunner can simultaneously execute scripts for User B, and a Mentor API call for User C can be in flight. Only Ollama inference is serialized.
+**This means**: with the background lane on, while one task waits on the local model, the other can be running a skill or waiting on a cloud call. The queue runs one task per lane. The local model's summaries of an attended task's private results are background work (`LocalLane`): written one at a time, after their task has ended too, and a summary under way makes way for a task's local work and is written again afterwards. Nothing else serializes local calls: the Ollama server decides how many of its own inferences run at once.
+
+**Messages while a task runs.** A chat task (web chat, Telegram, an ops chat turn; never a scheduled or `/bg` run) has an inbox while it runs, keyed by its user and chat. A message the owner sends in that chat from where the task was asked -- the one place its answer goes -- goes to it (`TaskQueue.send`): its row is saved first, as always, and the task reads it before its next step -- after a delegation under way has returned -- as a turn of its own in the prompt, in its place, so the prompt only grows at its end; the chat records that the task read it, and it is not counted as one of the task's steps. A message sent with Queue (`/queue <message>`), one sent in another chat, and one the task does not take (`Inbox.offer`: from another channel, or with files) run as tasks of their own after the work ahead of them; after one the task does not take, so does everything sent in that chat until the task ends, so nothing sent later is read before it. Each message takes its place in the queue when it is sent. When the task ends, however it ends, what it did not read is queued then, each in that place, each a task answering its own row; the inbox closes under the lock its offers take, before it is unregistered, so each message is read or queued, once, in the order sent.
 
 ### 3.4 Async & Long-Running Tasks
 
@@ -295,7 +295,7 @@ Long-running tasks emit periodic progress messages to the user's chat:
 **Key rules**:
 - The cloud LLM sees **every** message and makes **every** decision in the main loop
 - The local LLM is **never** called directly in the main loop — only via `delegate`
-- `LlmRouter.selectProvider()` always returns the cloud provider; local is only a fallback if cloud is unavailable
+- `LlmRouter.selectProvider()` returns the cloud provider; the local provider only as the fallback of §4.7
 - All tools except `skill_create` are available to the local LLM during delegation
 
 ### 4.2 The Agent Loop (Think → Act → Observe)
@@ -317,7 +317,7 @@ The main agent loop (`AgentLoop.java`) runs a reactive cycle:
 │  8. Go to step 1                                         │
 │                                                          │
 │  Max iterations: configurable (default 25)               │
-│  Conversation compression after N messages               │
+│  The task's whole chat, every message whole              │
 │  Prompt caching for Anthropic (CACHE_BOUNDARY_MARKER)    │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -345,7 +345,7 @@ When the cloud LLM determines that a task involves multiple routine steps that d
       }
     ],
     "checkpoints": ["Verify files were found before counting"],
-    "max_steps": 10
+    "tools": "shell"
   }
 }
 ```
@@ -356,7 +356,7 @@ public record DelegationPlan(
     String goal,
     List<Step> steps,
     List<String> checkpoints,
-    int maxSteps
+    List<String> tools
 ) {
     public record Step(
         String description,
@@ -387,14 +387,14 @@ public record DelegationPlan(
 │     b. Parse response → tool call or "done" signal       │
 │     c. If tool call → executeToolDirect() via ToolRegistry│
 │     d. Record result as observation                      │
-│     e. Repeat until "done" or maxSteps reached           │
+│     e. Repeat until "done", a stop, a local error, or    │
+│        3 turns in a row that run nothing                 │
 │                                                          │
 │  3. Return consolidated results to AgentLoop             │
 │     (which feeds them back to cloud LLM as observation)  │
 │                                                          │
 │  Constraints:                                            │
 │  • skill_create is BLOCKED (only cloud can create skills)│
-│  • maxSteps hard limit prevents runaway execution        │
 │  • Partial results returned on timeout/error             │
 │  • All tool execution goes through same ToolRegistry     │
 └──────────────────────────────────────────────────────────┘
@@ -405,14 +405,16 @@ public record DelegationPlan(
 `LlmRouter.java` implements a simple routing policy:
 
 ```
-selectProvider():
-  if cloudProvider is available:
-    return cloudProvider          ← ALWAYS cloud for main loop
+selectProvider(task):
+  if local-only is on, or the task has gone local:
+    return localProvider          ← the owner's switch, or the cloud could not be reached
+  if cloudProvider is configured:
+    return cloudProvider          ← the main loop, codegen, the library analysis
   else:
-    return localProvider          ← degraded mode only
+    return localProvider          ← degraded mode
 ```
 
-The old architecture had complex routing logic (confidence thresholds, circuit breakers, blocked-tool escalation, thinking-failure tracking). All of that has been removed. The cloud LLM is always the orchestrator; if it's unavailable, the system degrades to local-only mode where the local LLM drives the main loop directly (reduced capability but functional).
+The old architecture had complex routing logic (confidence thresholds, circuit breakers, blocked-tool escalation, thinking-failure tracking). All of that has been removed. Every model call of a task chooses through `selectProvider`. A cloud call that cannot reach its model (`LlmException.unreachable`: a failed connection, 401/402/403, no credit, a retryable failure the backoff gave up on) is asked again once if it was a first broken connection; otherwise the task goes local for the rest of its steps and the chat says why (`AgentLoop.goesOnWithoutTheCloud`). The next task tries the cloud again.
 
 ### 4.6 Prompt Caching (Anthropic)
 
@@ -425,11 +427,13 @@ When using Anthropic as the cloud provider, the system supports **prompt caching
 
 ### 4.7 Graceful Degradation
 
-| Capability | Cloud Available | Cloud Unavailable (Degraded) |
+Degraded means: the task runs local only (Free in time vs cost: the owner's default, on the settings page or by `/local on`, or its chat's own choice next to the message box), no cloud is configured, or the task's cloud model could not be reached (§4.5).
+
+| Capability | Cloud Available | Degraded (local LLM runs the task) |
 |-----------|----------------|------------------------------|
-| Main agent loop | Cloud LLM orchestrates | Local LLM orchestrates (reduced quality) |
-| Tool execution | All tools available | All tools available |
-| Delegation | Cloud delegates to local | N/A (local is already the main loop) |
+| Main agent loop | Cloud LLM orchestrates | Local LLM orchestrates (reduced quality, told why in its prompt) |
+| Tool execution | All tools available | All tools available, offered to it directly |
+| Delegation | Cloud delegates to local | Only to read private results, which stay descriptors as on the cloud |
 | Skill creation | Available | Available (local LLM generates, lower quality) |
 | Conversational chat | Cloud quality | Local quality |
 
@@ -694,15 +698,16 @@ Example: "send_slack_message" + "send_discord_message" → generalized "send_cha
 
 The Executor can propose generalization: "I have 3 skills that all send messages to different platforms. Should I ask Mentor to unify them?"
 
-### 5.8 Skill Interaction (Mid-Execution User Input)
+### 5.8 Skill Output and Progress
 
-A skill cannot ask the user anything while it runs. Its input is the JSON on stdin, its result the JSON on stdout:
+A skill cannot ask the user anything while it runs. The agent asks between steps (`ask_user`),
+and the owner's answer starts the next task, which reads the chat it came from (§7.1).
 
 ```
 Java → [JSON params via stdin] → skill.py → [JSON result via stdout] → Java
 ```
 
-A line a skill prints is captured into its result like any other output. Its input is read to the end before skill.py is loaded, so no answer could ever reach it: a skill whose result is a `{"type": "need_input", ...}` dict fails, saying need_input is not supported -- on the host and in a container alike (`DynamicSkill`, where the result is parsed). A result that merely has a key or a value named need_input is an ordinary result. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
+A skill's input is read to the end before skill.py is loaded, so no answer could ever reach it: a skill whose result is a `{"type": "need_input", ...}` dict fails, saying need_input is not supported -- on the host and in a container alike (`DynamicSkill`, where the result is parsed). A result that merely has a key or a value named need_input is an ordinary result. A skill that needs something from the user should fail saying what it needs; the agent can ask, and run it again with the answer as a parameter.
 
 **Progress reporting** (any skill):
 ```python
@@ -870,15 +875,17 @@ The Executor maintains a `preferences.json` per user:
 
 ## 7. Conversation Management
 
-### 7.1 Context Window Strategy
+### 7.1 Context: The Whole Chat
 
-The local Executor LLM has a limited context window (typically 8K-32K tokens for 7-14B models). Strategy:
-
-1. **Active context**: Last N messages (configurable, default 10) in full
-2. **Compressed history**: Executor periodically summarizes older messages into a compact summary
-3. **Skill results**: Only keep structured output, not raw execution logs
-4. **User profile + preferences**: Injected as a compact header (~300 tokens total)
-5. **System status messages**: Excluded from LLM context (UI-only)
+A task started from a chat reads that chat — the one its own message was saved in, not whichever
+is open now — oldest first and every message whole: each question asked before it, each answer so
+far, and under the answer of each earlier task that finished, the record of what it did. Only the
+conversation: status lines, command replies and wizard prompts are not part of it. A handle in an
+earlier message is written in words, because the task numbers its own results from 1. A private
+answer is read as the note that it exists, never its text, and a file as a description, never its
+name or its bytes. Nothing is summarised or dropped to fit a window: a chat longer than the model's
+context window ends the task with the provider's plain message that it is. Scheduled and `/bg`
+runs read no chat.
 
 ### 7.2 Conversation Storage
 
@@ -908,14 +915,14 @@ CREATE TABLE session_summaries (
 );
 ```
 
-### 7.3 Prompt Compression
+Nothing writes `compressed_content` or `session_summaries` any more: the summariser is gone (§7.1),
+and the rows it once marked are read like any other.
 
-Executor handles all compression locally (zero cloud cost):
+### 7.3 Nothing Is Compressed
 
-- **Message compression**: Reduce verbose messages to key information
-- **History rolling summary**: Periodically compress N old messages into 1 summary paragraph
-- **Result compression**: Before sending to Mentor, compress execution results to structured summaries
-- **Skill output trimming**: Extract only relevant fields from skill outputs
+Prompts carry every message and every result whole — a private result as its descriptor — and
+code-written endings and records, not summaries. When a prompt does not fit the model's context
+window, the provider says so and the task ends saying it; nothing is cut beforehand.
 
 ---
 
@@ -923,7 +930,7 @@ Executor handles all compression locally (zero cloud cost):
 
 ### 8.1 Sandbox Architecture
 
-Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups), over journald's store and the crash dumps (`/var/crash`, `/var/lib/apport/coredump`, `/var/lib/systemd/coredump`), and over all of `/run` but the resolver's directory (docker's socket, the system bus, the users' runtime directories); the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` (the same directory at `/var/tmp`, fresh on every run: what a skill kept there between runs is lost), `/dev/shm` and `/dev/mqueue` are its own, the PID namespace is new and the network is the host's. So a skill sees the host's files but only its own processes, and systemd's and the host daemons' sockets are gone, except systemd-resolved's own varlink sockets in the resolver's directory: name lookups answer there, and its privileged methods refuse. systemctl, timedatectl, hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it, journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's `SysLogHandler` prints a logging-error traceback to stderr for each record. The network being the host's, everything listening on loopback or on an abstract socket is reachable: CUPS, the service's own HTTP port (as for any client on the LAN), and on a dev host running as the owner, the owner's X11 display (whose `~/.Xauthority` a skill there can read) and a browser's debug port. The kernel session keyring is the JVM's (bubblewrap has no option for a new one): a skill sees its keys and can add its own, which outlive the run. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) passes its self-check; while bwrap is absent or cannot start a jail at all -- a bwrap that cannot mount the jail's own `/dev/mqueue` cannot start one -- it runs skills unjailed with a warning; a self-check that runs and fails an item, or a jail that has worked in this process and stops starting, refuses every launch; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read; entries that overlap what the jail hides are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
+Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups), over journald's store and the crash dumps (`/var/crash`, `/var/lib/apport/coredump`, `/var/lib/systemd/coredump`), and over all of `/run` but the resolver's directory (docker's socket, the system bus, the users' runtime directories); the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` (the same directory at `/var/tmp`) is its account's -- shared by that account's skills and kept between their runs, as the service's own `/tmp` was, and gone when OwnClaw restarts; the checks and venv/pip get a fresh one each time -- `/dev/shm` and `/dev/mqueue` are its own, the PID namespace is new and the network is the host's. So a skill sees the host's files but only its own processes, and systemd's and the host daemons' sockets are gone, except systemd-resolved's own varlink sockets in the resolver's directory: name lookups answer there, and its privileged methods refuse. systemctl, timedatectl, hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it, journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's `SysLogHandler` prints a logging-error traceback to stderr for each record. The network being the host's, everything listening on loopback or on an abstract socket is reachable: CUPS, the service's own HTTP port (as for any client on the LAN), and on a dev host running as the owner, the owner's X11 display (whose `~/.Xauthority` a skill there can read) and a browser's debug port. The kernel session keyring is the JVM's (bubblewrap has no option for a new one): a skill sees its keys and can add its own, which outlive the run. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) passes its self-check; while bwrap is absent or cannot start a jail at all -- a bwrap that cannot mount the jail's own `/dev/mqueue` cannot start one -- it runs skills unjailed with a warning; a self-check that runs and fails an item, or a jail that has worked in this process and stops starting, refuses every launch; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read, `~/.cache/ms-playwright` (Playwright's browsers) among them unasked; entries that overlap what the jail hides are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -1060,6 +1067,55 @@ Chat: "⚠️ New skill 'api_check_stocks' (generated by Mentor)
 | Multi-user data leakage | SQLite per-user isolation, separate encryption keys |
 | Skill regression after update | Version rollback, old versions retained |
 
+### 8.5 What the Cloud Model Is Sent
+
+Every request to a cloud model goes through one door, `CloudGateway`, and every part of it --
+system prompt, messages, the model's own replayed turns, tool descriptions and schemas -- through
+one filter, `privacy.Redactor`:
+
+- **Secrets are removed** and never come back: every vault value stored under a secret's name (as
+  `«vault:KEY»`; one shorter than eight characters where it stands as a word), and what code
+  recognises as a secret -- the value of a key or option named like a password, a key, a token or a
+  secret (UCI, `uci show`, INI and env, JSON, YAML, query strings, command-line flags, `name=value`
+  in a log line), the password in a URL, a WiFi QR code's key, a PEM private key, a password hash, a
+  JWT, a token in a provider's published format (as `«secret removed»`). One rule says which names
+  are a secret's, for the vault's keys and for what a skill prints. A tool call or a skill's code
+  that holds a removed secret is refused before it runs: the marker is no value, and written to a
+  router it would become the WiFi key.
+- **Identifiers are replaced** by placeholders such as `<email_3>` or `<ssid_1>`: e-mail addresses,
+  international phone numbers, IBANs, card numbers, MAC addresses, public IP addresses (private,
+  loopback, link-local, CGNAT, documentation and multicast ranges stay as they are), SSIDs and
+  client hostnames. The same value always gets the same placeholder for a user; the table is kept
+  in `privacy_placeholders` and never sent; a value inside a quoted string is kept with its escapes
+  undone. An SSID or hostname, once found under its name, is replaced wherever it stands as a word.
+  Text that merely has a placeholder's shape goes as a placeholder of its own, so it comes back as
+  itself.
+- **Everything else goes as it is**: a router's configuration read with a password reaches the
+  cloud whole but for its secrets and identifiers.
+
+Every reply is put back before anything else reads it: placeholders the user's table knows become
+the real values again, in the text and in every tool call's arguments, keys and values, so tools,
+generated skill code, delegations, answers, stored chat rows and schedules all hold real values. A
+placeholder that is a whole quoted string comes back between the other quotes when its value holds
+the one, so code stays code. The gateway is the only code that writes or reads a placeholder. Each
+call's ledger row counts the secrets removed and identifiers replaced, the task page shows them,
+and the owner's chat says it after a step whose result the filter changed.
+
+A result is **PRIVATE** -- the cloud is shown a description of it, never its text -- when it holds
+personal content: a file the owner sent, the result of a skill whose credentials name a
+personal-content source (`ownclaw.privacy.personal-sources`, by default `IMAP_` and `POP3_`: reading
+mail), what references or repeats such a result, and, inside a delegation, whatever runs after the
+local model has read one. Needing a credential alone does not make a result private. What the local
+model writes after reading private data -- a delegation's answer -- is labelled by its content: it
+stays private, as a handle the cloud can deliver without reading, only when it repeats a run of 32
+characters, a whole short value, or a word shaped like a credential (letters and digits, eight or
+more) of what it read; otherwise the cloud reads it, through the same filter. On a task holding a
+file the owner is given the local model's answer either way. The canary (`PrivateIndex`) checks
+the filtered request for runs of private results before it is sent.
+
+The filter finds what has a shape or a name. A password in prose, a key with no label, or a
+person's name in free text is not recognised.
+
 ---
 
 ## 9. Error Handling & Recovery
@@ -1079,7 +1135,7 @@ All system-level failures (as opposed to skill/task-level failures) are handled 
 | Sandbox process crash | Non-zero exit + no result JSON | Treat as skill failure (step-level `on_fail` applies). Log stderr. | Normal skill failure flow |
 | Sandbox timeout | Process killed after deadline | Same as crash. Log timeout duration. | "⏱️ Skill timed out after {timeout}s" |
 | WebSocket disconnect mid-task | Connection close event | Task continues running. Pending approvals saved to DB. On reconnect: replay pending prompts + deliver results. | Results delivered on reconnect |
-| Telegram API down | HTTP error | Retry with backoff. Buffer outgoing messages (up to 100). | Messages delivered when Telegram recovers |
+| Telegram API down | HTTP error | Messages go out in order on one sender thread. A 429 is waited out for as long as Telegram says; a 5xx or network failure is tried three times (after 1 s, then 2 s), and a part still not taken ends the message there. | The owner is told which part did not arrive; the web chat has the whole answer |
 | Disk full | IOException on write | Alert immediately. Stop accepting new tasks. In-memory tasks continue. | "❌ Disk full. Cannot save data." |
 
 ### 9.2 Circuit Breaker
@@ -1183,7 +1239,7 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 | Unified interface | Internal adapter pattern (`LlmProvider`) | Java interfaces per provider (OpenAI, Anthropic, Ollama) |
 | Provider routing | `LlmRouter` — always cloud, local fallback | Simplified from old confidence-based routing |
 | Prompt caching | Anthropic `CACHE_BOUNDARY_MARKER` | Static prompt content cached to reduce costs |
-| Ollama serialization | Semaphore (single concurrent request) | 7-14B models need exclusive GPU |
+| Ollama concurrency | None in the application: the Ollama server decides how many requests run at once | 7-14B models need most of the GPU |
 
 ### 10.4 Frontend (WebUI)
 
@@ -1230,19 +1286,17 @@ ownclaw/
 │       │   │   ├── SkillMatcher.java              # LLM-based skill matching + cache lookup
 │       │   │   ├── TaskPreprocessor.java          # Compression, context preparation
 │       │   │   ├── ResultCompressor.java          # Compresses outputs for Mentor
-│       │   │   ├── ConversationCompressor.java    # Rolling history summarization
 │       │   │   └── PreferencesManager.java        # Manages per-user preferences (local LLM)
 │       │   │
 │       │   ├── skillrunner/
 │       │   │   ├── SkillRunnerService.java        # Executes skills in sandbox
-│       │   │   ├── SkillInteractionHandler.java   # A prompt waiting for the user's answer (/setup)
+│       │   │   ├── SkillInteractionHandler.java   # Waits for the answer to a setup-wizard question
 │       │   │   ├── SkillRollbackHandler.java      # Handles versioned rollback on failure
 │       │   │   └── SkillOutputParser.java         # Parses JSON-lines from skill stdout
 │       │   │
 │       │   ├── llm/
 │       │   │   ├── LlmProvider.java               # Interface
 │       │   │   ├── OllamaProvider.java            # Local (Executor + SkillRunner)
-│       │   │   ├── OllamaSemaphore.java           # Serializes Ollama requests
 │       │   │   ├── AnthropicProvider.java          # Cloud (Mentor)
 │       │   │   ├── OpenAiProvider.java             # Cloud (Mentor)
 │       │   │   ├── DeepSeekProvider.java           # Cloud (Mentor)
@@ -1362,14 +1416,13 @@ ownclaw:
     url: http://localhost:11434
     model: qwen2.5:14b
     temperature: 0.3
-    context_window: 16384       # tokens
+    # no context-window setting: num_ctx is the model's own context_length, read from /api/show
 
   # Cloud LLM (Orchestrator — always drives main agent loop)
   mentor:
     provider: openai              # openai | anthropic
     model: gpt-4.1
     api_key: ${OPENAI_API_KEY}
-    max_tokens_per_task: 10000
     temperature: 0.4
 
   # Token budgets (defaults, users can have custom)
@@ -1381,7 +1434,6 @@ ownclaw:
   # Task queue
   queue:
     max_concurrent_tasks: 5          # Total tasks running simultaneously
-    ollama_concurrency: 1            # Serialize Ollama requests (GPU bottleneck)
     cloud_concurrency: 3             # Parallel cloud LLM requests
     sandbox_concurrency: 3           # Parallel sandbox executions
     max_queued_tasks: 50             # Reject if queue exceeds this
@@ -1392,7 +1444,6 @@ ownclaw:
     default_timeout: 300             # seconds, for whole task (not per step)
     step_timeout: 60                 # seconds, per plan step
     long_running_threshold: 120      # seconds; tasks exceeding this become "long-running"
-    max_plan_steps: 20               # Maximum steps in a DAG plan
 
   # Telegram
   telegram:
@@ -1425,13 +1476,6 @@ ownclaw:
     shared_venv_path: ./data/shared_venv
     per_skill_venv_path: ./data/skill_venvs
 
-  # Plan cache
-  plan_cache:
-    enabled: true
-    max_entries: 500             # LRU eviction
-    ttl_hours: 168               # 7 days
-    invalidate_on_skill_change: true
-
   # Database
   database:
     path: ./data/ownclaw.db
@@ -1442,12 +1486,10 @@ ownclaw:
     max_rounds: 3
     auto_review: true
     auto_review_threshold: medium
-    teaching_log_max_entries: 30      # Per-user limit before distillation
     distillation_interval_days: 7     # Periodic teaching log cleanup
 
   # Observability
   observability:
-    event_log_retention_days: 30     # How long to keep events
     chat_status_messages: true       # Send status messages to user chat
     status_verbosity: concise        # concise | verbose
     log_level: INFO                  # DEBUG | INFO | WARN | ERROR
@@ -1479,7 +1521,7 @@ During task execution, the system sends concise status messages to the user's ch
 | `started` | "⚙️ Starting: summarize emails" | Task begins execution |
 | `step` | "→ Step 2/4: filtering unread emails" | Each plan step begins |
 | `progress` | "⏳ Step 2/4: found 23 unread emails" | Skill sends progress update |
-| `need_input` | "❓ Which folder should I search? [Inbox/All]" | A task stopped to ask the user a question |
+| `need_input` | "❓ … waiting for your answer" | The task stopped to ask the user; the answer starts the next task |
 | `credential` | "🔑 Skill requests access to SMTP credentials. [Always/Once/Deny]" | Credential approval needed |
 | `mentor` | "🧠 Escalating to Mentor for planning..." | Cloud LLM invoked |
 | `completed` | "✅ Done: sent summary to john@example.com" | Task finished successfully |
@@ -1519,11 +1561,10 @@ CREATE INDEX idx_events_type ON events(event_type);
 
 Users can query their own event log through chat commands:
 
-- `/log` — Last 10 events
-- `/log task <id>` — All events for a specific task
-- `/log errors` — Recent errors
-- `/log tokens` — Token usage summary (today/week/month)
-- `/log skills` — Recent skill executions
+- `/log [count|all] [page N]` — Recent events, newest first: the last 10 unless a count is given, and
+  older ones a page at a time (`/log 10 page 2`) or all at once (`/log all`)
+- `/log errors [count|all] [page N]` — Recent errors, the same way
+- `/log tokens` — Token usage today
 
 The WebUI may also render a simple event timeline alongside the chat, but the chat interface is the primary access method.
 
@@ -1579,13 +1620,13 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Ollama integration (Executor)
 - [x] Single cloud provider (OpenAI) for Mentor
 - [x] Task orchestrator: Executor classifies → Mentor plans → SkillRunner executes
-- [x] Task queue (priority-based, with Ollama serialization)
+- [x] Task queue (priority-based)
 - [x] DAG plan format (steps with depends_on, on_fail)
 - [x] Skill manifest + 3 core skills (shell_command, file_operations, http_request)
 - [x] ProcessBuilder sandbox (Windows dev-friendly)
 - [x] SQLite persistence (users, conversations, events)
 - [x] Telegram bot (single user)
-- [x] Basic conversation management (last N messages)
+- [x] Conversation management (the whole chat, every message whole)
 - [x] Simple WebUI (chat only, WebSocket)
 - [x] **Event log + chat status messages (observability from day one)**
 - [ ] **Credential grant approval flow (permanent/one-time/declined)** -- grants are recorded, not enforced (§8.3)
@@ -1601,7 +1642,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Skill validation (static analysis + sandbox test)
 - [x] Skill versioning (numbered dirs, regeneration/repair on failure; no automatic quarantine)
 - [x] More core skills (send_email, browse_web, text_summarize)
-- [x] Conversation compression (Executor summarizes history)
+- [x] ~~Conversation compression~~ (removed: a task reads its whole chat)
 - [x] Feedback loop (Mentor reviews, max N rounds)
 - [x] Plan cache (LRU, invalidation on skill changes)
 - [x] User preferences (maintained by Executor, local LLM)

@@ -94,6 +94,30 @@ class TaskTraceServiceTest {
     }
 
     @Test
+    @DisplayName("a step's cloud tokens kind by kind, over the calls before it; a call with none recorded adds none; a step with no call has none")
+    void aStepsTokensKindByKind() {
+        row("egress", egress("SENT", 1000, 50, 0.01, null)
+                .replace("\"cacheWriteTokens\":0,\"cacheReadTokens\":0", "\"cacheWriteTokens\":300,\"cacheReadTokens\":90000"));
+        row("egress", egress("SENT", 200, 10, 0.02, null)
+                .replace("\"cacheWriteTokens\":0,\"cacheReadTokens\":0", "\"cacheWriteTokens\":40,\"cacheReadTokens\":91000"));
+        row("egress", egress("ERROR", 0, 0, 0, null));
+        row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":182600}");
+        row("step", "{\"step\":2,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":0,\"cloudTokens\":182600}");
+
+        var steps = list(TaskTraceService.build(rows), "steps");
+        var first = steps.get(0);
+        assertEquals(1200L, first.get("promptTokens"), "new input");
+        assertEquals(60L, first.get("completionTokens"));
+        assertEquals(181000L, first.get("cacheReadTokens"));
+        assertEquals(340L, first.get("cacheWriteTokens"));
+        assertEquals(182600L, first.get("cloudTokens"), "their sum, as before");
+        for (String kind : List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens")) {
+            assertNull(steps.get(1).get(kind), "no cloud call before it: not recorded as zero " + kind);
+        }
+        // Mutation: the split over every call of the task -> the second step has the first's.
+    }
+
+    @Test
     @DisplayName("a step chosen with no cloud call but more local tokens was the local model's")
     void localFallback() {
         row("step", "{\"step\":1,\"tool\":\"web_fetch\",\"success\":true,\"localTokens\":500,\"cloudTokens\":0}");
@@ -148,6 +172,10 @@ class TaskTraceServiceTest {
         // The failed call is not "went out": whether it reached the provider is not recorded.
         assertEquals(Map.of("checkedCalls", 6, "hits", 3, "leaked", 1, "failed", 1, "unchecked", 1),
                 list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
+        // One the provider had reported tokens for before it failed did reach it: its text went.
+        row("egress", egress("ERROR", 120_000, 1, 0.6, "{{1}} in part 4 (user) at 10 (call then failed: TaskCancelledException)"));
+        assertEquals(Map.of("checkedCalls", 7, "hits", 4, "leaked", 2, "failed", 1, "unchecked", 1),
+                list(TaskTraceService.build(rows), "artifacts").get(0).get("canary"));
 
         // A row from before `indexed` was recorded: still reported when a record names it.
         rows.clear();
@@ -163,11 +191,11 @@ class TaskTraceServiceTest {
     }
 
     @Test
-    @DisplayName("a file keeps its name for the owner's page; no other result is given one")
-    void anAttachmentKeepsItsName() {
-        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"name\":\"statement.pdf\","
+    @DisplayName("a file is given by its id, for the owner's page to name it by; no other result has one")
+    void anAttachmentKeepsItsId() {
+        row("attachment", "{\"artifact\":\"{{1}}\",\"tool\":\"attachment\",\"fileId\":\"f1\","
                 + "\"label\":\"PRIVATE\",\"chars\":0,\"indexed\":true,"
-                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)\"]}");
+                + "\"why\":[\"uploaded file\",\"application/pdf, 84211 bytes, no text read (not text, or not UTF-8)\"]}");
         row("egress", egress("SENT", 1, 1, 0, null));
         row("step", "{\"step\":1,\"tool\":\"delegate\",\"success\":true,\"localTokens\":900,\"cloudTokens\":2,"
                 + "\"artifacts\":[{\"n\":2,\"tool\":\"pdf_text\",\"label\":\"PRIVATE\",\"chars\":12400,"
@@ -180,15 +208,15 @@ class TaskTraceServiceTest {
         var file = arts.get(0);
         assertEquals("{{1}}", file.get("handle"));
         assertEquals("attachment", file.get("tool"));
-        assertEquals("statement.pdf", file.get("name"));
+        assertEquals("f1", file.get("fileId"));
         assertEquals("PRIVATE", file.get("label"));
         assertEquals(0L, file.get("chars"));
-        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, over 100 KB, or not UTF-8)"), file.get("why"));
+        assertEquals(List.of("uploaded file", "application/pdf, 84211 bytes, no text read (not text, or not UTF-8)"), file.get("why"));
         assertNull(file.get("canary"), "a file with no text cannot be looked for");
         assertEquals(1, file.get("requestsAfter"));
 
         assertEquals(List.of("pdf_text", "local_answer"), arts.subList(1, 3).stream().map(a -> a.get("tool")).toList());
-        for (var a : arts.subList(1, 3)) assertNull(a.get("name"), "only the file has a name: " + a);
+        for (var a : arts.subList(1, 3)) assertNull(a.get("fileId"), "only the file has one: " + a);
         @SuppressWarnings("unchecked")
         var limits = (List<String>) t.get("notObserved");
         assertTrue(limits.stream().anyMatch(l -> l.contains("is not private when a later task reads it back")
@@ -240,6 +268,24 @@ class TaskTraceServiceTest {
         var error = list(TaskTraceService.build(rows), "calls").get(1);
         assertNull(error.get("promptTokens"), "a failed call's tokens are not recorded, not 0");
         assertNull(error.get("costUsd"));
+    }
+
+    @Test
+    @DisplayName("a call stopped after the provider reported its tokens shows them, and its step's cost is a lower bound")
+    void aFailedCallShowsWhatWasReported() {
+        row("egress", egress("ERROR", 120_000, 1, 0.64, "TaskCancelledException"));
+        row("step", "{\"step\":1,\"tool\":\"_thinking\",\"success\":false,\"localTokens\":0,\"cloudTokens\":120001}");
+        var t = TaskTraceService.build(rows);
+        var call = list(t, "calls").get(0);
+        assertEquals(120_000L, call.get("promptTokens"));
+        assertEquals(1L, call.get("completionTokens"));
+        assertEquals(0.64, (Double) call.get("costUsd"), 1e-9);
+        var step = list(t, "steps").get(0);
+        assertEquals(120_001L, step.get("cloudTokens"));
+        assertEquals(0.64, (Double) step.get("costUsd"), 1e-9);
+        assertEquals(true, step.get("costIsFloor"), "output streamed before the stop is mostly not in the counts");
+        // Mutation: hide every failed call's figures -> the call shows "not recorded" and the
+        // step 0 tokens, though the ledger row has them.
     }
 
     @Test

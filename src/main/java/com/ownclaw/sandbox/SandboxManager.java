@@ -53,6 +53,20 @@ public interface SandboxManager {
                           List<Path> readOnly);
 
     /**
+     * {@link #execute(String, Path, Path, String, Map, int, ProgressCallback, List)} for a run of a
+     * skill for an account: isolated, its /tmp is that account's, shared by the account's skills
+     * and kept between their runs ({@link SkillJail#sharedTmp}), where a check gets a fresh one.
+     * An implementation that keeps no /tmp of its own runs it as the other.
+     *
+     * @param tmpOwner the account the skill runs for; null for a fresh /tmp
+     */
+    default SandboxResult execute(String pythonPath, Path scriptPath, Path workingDir, String stdinJson,
+                                  Map<String, String> envVars, int timeoutSec, ProgressCallback progressCallback,
+                                  List<Path> readOnly, String tmpOwner) {
+        return execute(pythonPath, scriptPath, workingDir, stdinJson, envVars, timeoutSec, progressCallback, readOnly);
+    }
+
+    /**
      * Why every launch would be refused right now, if it would -- so a caller can stop before
      * doing work whose check it cannot run.
      */

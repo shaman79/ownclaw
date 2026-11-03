@@ -17,20 +17,46 @@ public class AgentContext {
     private final AgentTrajectory trajectory;
     private final Map<String, Object> metadata;
     private final long startTimeMs;
-    /** Timestamp of the last forward progress (step completion, LLM response, etc.). */
+    /**
+     * When the task last moved: a step finished, an event of a model's reply arrived, a model
+     * call ended, or a skill reported its progress. See {@link #msSinceLastProgress}.
+     */
     private volatile long lastProgressMs;
 
     /**
      * True when nobody is waiting for this task — the scheduler submitted it, or the user
      * explicitly sent it to the background. It is a fact about ORIGIN, not a guess: the
      * scheduler genuinely has no one watching. What it buys is permission to spend local
-     * inference time, which is free but slow, on work that would otherwise be truncated.
+     * inference time, which is free but slow, where nobody is waiting for it.
      */
     private boolean unattended;
 
-    private volatile boolean cancelled;
+    /**
+     * How this task runs: decided when it starts ({@link AgentLoop}), the configuration's own
+     * defaults until then.
+     */
+    private TaskOptions options = TaskOptions.of(com.ownclaw.conversation.ChatOptions.NONE,
+            new com.ownclaw.config.OwnClawConfig.Mentor());
+
+    /** What the stall watchdog stopped this task on, or null. See {@link #stall}. */
+    private volatile String stalled;
+    /** How to end the model call this task is waiting on, or null. See {@link #progress}. */
+    private volatile Runnable callInFlight;
+    /**
+     * Tool calls of this task executing now ({@link #runningTool}). A tool run is bounded by its
+     * own timeout -- a skill's, the sandbox's, an SSH command's -- so, like a model call under
+     * way, the stall watchdog does not count it as silence: a 20-minute backup test, run with no
+     * model call and no progress line between its start and its end, used to be stopped at the
+     * ten-minute stall limit while it was still working, and the change set it had made went
+     * unreported. The watchdog stays a backstop for a task stuck with neither a call nor a tool
+     * running.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger toolsInFlight =
+            new java.util.concurrent.atomic.AtomicInteger();
     /** Authoritative external cancellation source (the Stop button). See {@link #isCancelled()}. */
     private volatile java.util.function.BooleanSupplier externalCancel;
+    /** Counts what a model call's attempt without a reply was billed for. See {@link #setBilledWithoutReply}. */
+    private volatile java.util.function.Consumer<com.ownclaw.llm.LlmResponse.Usage> billedWithoutReply = usage -> { };
     private String conversationSummary;
     private String userPreferences;
 
@@ -40,15 +66,28 @@ public class AgentContext {
     /** Credential keys available in the vault for this user (loaded once at task start). */
     private List<String> credentialKeys = List.of();
 
+    /** See {@link #setPersonalSources}. */
+    private List<String> personalSources = com.ownclaw.config.OwnClawConfig.Privacy.DEFAULT_PERSONAL_SOURCES;
+
     /** Null until a step restricts the set; see {@link #offeredTools()}. */
     private volatile java.util.Set<String> offeredTools;
 
     /** Null until the local tier is checked; see {@link #localTierReady()}. */
     private volatile Boolean localTierReady;
 
-    // Per-task token usage counters
+    // Per-task token usage counters, and what the cloud calls cost: the cloud's tokens kind by
+    // kind, as they are billed -- new input, output, read from the cache, written to it.
     private int localTokens;
-    private int cloudTokens;
+    private int cloudInputTokens, cloudOutputTokens, cloudCacheReadTokens, cloudCacheWriteTokens;
+    private double cloudCostUsd;
+    /** See {@link #closeCounters}. */
+    private boolean countersClosed;
+
+    /** Where the task reports its progress; see {@link TaskChat}. */
+    private volatile TaskChat chat = TaskChat.NONE;
+
+    /** See {@link #setCallsNotRun}. */
+    private String callsNotRun;
 
     /**
      * The files sent with this message, as registered: each one this user's, each a PRIVATE
@@ -62,7 +101,7 @@ public class AgentContext {
     private final List<Artifact> artifacts = new java.util.ArrayList<>();
     /** The canary index over every PRIVATE artifact's bytes. */
     private final com.ownclaw.privacy.PrivateIndex privateIndex = new com.ownclaw.privacy.PrivateIndex();
-    /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door. */
+    /** Decrypted secret vault values, by key — decrypted once at task start, scrubbed at the door (see {@link #secretValues}). */
     private Map<String, String> secretValues = Map.of();
 
     /** See {@link #setSkillSource}. */
@@ -76,7 +115,6 @@ public class AgentContext {
         this.metadata = new HashMap<>();
         this.startTimeMs = System.currentTimeMillis();
         this.lastProgressMs = this.startTimeMs;
-        this.cancelled = false;
     }
 
     public String userId() { return userId; }
@@ -93,41 +131,198 @@ public class AgentContext {
     /** Mark forward progress (resets stall timer). */
     public void markProgress() { this.lastProgressMs = System.currentTimeMillis(); }
 
-    /** Milliseconds since the last forward progress. */
-    public long msSinceLastProgress() { return System.currentTimeMillis() - lastProgressMs; }
+    /**
+     * Milliseconds since the last forward progress -- what the stall watchdog reads -- and none
+     * while a model call is under way ({@link #progress}): a request sent and not yet returned,
+     * or a wait before trying one again. Such a call is bounded by its own timeouts, and Ollama
+     * sends nothing, not even its headers, while it loads the model and reads the prompt: at the
+     * hundred tokens a second the production host reads, a result of 60,000 tokens is ten minutes
+     * of silence from a model that is working. Counted, that silence was the stall limit, and a
+     * task that had handed a long result to its local model ended STALLED while the model read it.
+     */
+    public long msSinceLastProgress() {
+        return callInFlight != null || toolsInFlight.get() > 0
+                ? 0 : System.currentTimeMillis() - lastProgressMs;
+    }
 
     /**
-     * Whether this task should stop, consulting both the local flag and the external source
-     * the Stop button writes to.
-     * <p>
-     * This used to read the local flag only, and nothing ever called {@link #cancel()} — zero
-     * callers repo-wide — so it was permanently false for the lifetime of every task. The main
-     * loop polls {@code cancellationService} itself at the top of each step, so Stop appeared to
-     * work; what was dead was everything <em>inside</em> a step. The per-step check in
-     * {@code LocalExecutor} and the {@code context::isCancelled} supplier handed to every tool
-     * could never fire, so a running tool or an in-flight local call — 60 to 133 seconds on this
-     * deployment, and up to ten of them in a delegated plan — carried on to completion after the
-     * user pressed Stop.
-     * <p>
-     * Consulting the external source here revives all of those checks at once, rather than
-     * relying on each caller to remember to poll two places.
+     * Run a tool call of this task. While it runs the stall watchdog does not count the task as
+     * silent ({@link #msSinceLastProgress}): the call is bounded by the tool's own timeout, as a
+     * model call is bounded by the model's. Its end is progress, so the task stays alive through a
+     * run of several back-to-back calls. Used on both paths a tool runs on -- the loop's own step
+     * and a delegation's ({@code AgentLoop.executeTool}, {@code LocalExecutor.act}).
      */
+    public <T> T runningTool(java.util.function.Supplier<T> call) {
+        toolsInFlight.incrementAndGet();
+        try {
+            return call.get();
+        } finally {
+            toolsInFlight.decrementAndGet();
+            markProgress();
+        }
+    }
+
     public boolean isUnattended() { return unattended; }
+
+    /** The chat this task was asked in, or null: what a Stop of that chat stops. */
+    private volatile String chatSession;
+    public String chatSession() { return chatSession; }
+    public void setChatSession(String sessionId) { this.chatSession = sessionId; }
     public void setUnattended(boolean unattended) { this.unattended = unattended; }
 
+    public TaskOptions options() { return options; }
+    public void setOptions(TaskOptions options) { this.options = options; }
+
+    /**
+     * Whether this task should stop: the stall watchdog stopped it, or the external source the
+     * Stop button and the ops API write to says so.
+     * <p>
+     * Every check inside a step reads this -- the per-step check in {@code LocalExecutor}, the
+     * {@code context::isCancelled} supplier handed to every tool, the {@link #progress} hook of
+     * the task's model calls -- so a stop reaches a running step wherever that step checks, not
+     * only the top of the next one. A skill does not check: it runs until it returns.
+     */
     public boolean isCancelled() {
-        if (cancelled) return true;
+        if (stalled != null) return true;
         java.util.function.BooleanSupplier ext = externalCancel;
         return ext != null && ext.getAsBoolean();
     }
 
-    public void cancel() { this.cancelled = true; }
-
     /**
      * Attach the authoritative cancellation source for this task, normally
-     * {@code () -> cancellationService.isCancelled(userId)}. Set once at task start.
+     * {@code () -> cancellationService.isCancelled(userId, taskId, startTimeMs)}. Set once at task
+     * start.
      */
     public void setExternalCancel(java.util.function.BooleanSupplier supplier) { this.externalCancel = supplier; }
+
+    /**
+     * Attach what counts the tokens of a model call's attempt that ended without a reply --
+     * stopped part-way, or cut by a timeout, a dropped connection or an error event -- which the
+     * call's hook is told of ({@link com.ownclaw.llm.LlmProgress#billed}). Set once at task start,
+     * to the loop's own accounting, so they are counted as a reply's tokens are.
+     */
+    public void setBilledWithoutReply(java.util.function.Consumer<com.ownclaw.llm.LlmResponse.Usage> account) {
+        this.billedWithoutReply = account;
+    }
+
+    /**
+     * The stall watchdog's stop, with the facts it stopped on: from here {@link #isCancelled()}
+     * is true, and the task ends STALLED saying them. The watchdog stops no task while a model
+     * call of it is under way ({@link #msSinceLastProgress}), but one can begin as it stops the
+     * task: that call is ended too ({@link #interruptCall}), or at once when it hands over its
+     * cancel ({@link #progress}). The first facts are kept.
+     */
+    public void stall(String facts) {
+        if (stalled == null) stalled = facts;
+        interruptCall();
+    }
+
+    /**
+     * End the model call this task is waiting on, if it is waiting on one. A stop is otherwise
+     * heard on the next event of the reply ({@link #progress}), and a call that sends nothing --
+     * Ollama loading the model and reading the prompt, a cloud call before its first event, a
+     * call waiting minutes to try again after an overload -- has no next event: it ran until its
+     * read timeout, most of an hour for Ollama, or to the end of its wait.
+     */
+    public void interruptCall() {
+        Runnable cancel = callInFlight;
+        if (cancel != null) cancel.run();
+    }
+
+    /** What the stall watchdog stopped this task on, or null when it has not. */
+    public String stalled() { return stalled; }
+
+    /**
+     * The hook for every model call made on this task's behalf ({@code withProgress}): each event
+     * of the streamed reply is progress, and the time a call is under way is not counted as
+     * silence at all ({@link #msSinceLastProgress}), so the stall watchdog never takes a call
+     * that is still reading or answering for a stalled task; its end is progress too. Once the
+     * task has been stopped, the next event ends the call by throwing
+     * {@code TaskCancelledException}, instead of the stop waiting minutes for it. While the call
+     * runs its cancel is kept here, so a stop ends it before any event too
+     * ({@link #interruptCall}); one stopped before the call was under way ends it at once. What
+     * an attempt that ended without a reply was billed for is counted
+     * ({@link #setBilledWithoutReply}).
+     */
+    public com.ownclaw.llm.LlmProgress progress() {
+        return new com.ownclaw.llm.LlmProgress() {
+            @Override
+            public void onProgress() {
+                markProgress();
+                if (isCancelled()) throw new com.ownclaw.core.TaskCancellationService.TaskCancelledException(taskId);
+            }
+
+            @Override
+            public void calling(Runnable cancel) {
+                // Marked before the call is let go, so the watchdog never reads the call gone
+                // and the clock from before it.
+                if (cancel == null) markProgress();
+                callInFlight = cancel;
+                if (cancel != null && isCancelled()) cancel.run();
+            }
+
+            @Override
+            public void billed(com.ownclaw.llm.LlmResponse.Usage usage) {
+                billedWithoutReply.accept(usage);
+            }
+        };
+    }
+
+    /** The step of the loop the task is on, from 1; 0 before its first. See {@link #setStep}. */
+    private volatile int step;
+
+    public int step() { return step; }
+
+    /** Set by the loop as each step begins: the step a model call is made for ({@link #call}). */
+    public void setStep(int step) { this.step = step; }
+
+    /**
+     * What a model call is for, as the owner reads it: "step 6", or "step 6, " and {@code what};
+     * before the loop's first step, {@code what} alone, or "a model call" when there is none.
+     */
+    public String atStep(String what) {
+        if (step == 0) return what == null ? "a model call" : what;
+        return "step " + step + (what == null ? "" : ", " + what);
+    }
+
+    /** The model call of this task under way, or null. See {@link #call}. */
+    private volatile LiveCall liveCall;
+
+    /** Told when each model call of this task begins and ends. See {@link #setCallWatch}. */
+    private volatile LiveCall.Watch callWatch = LiveCall.Watch.NONE;
+
+    /**
+     * Attach what is told when a model call of this task begins, and run when it ends -- the loop's,
+     * which shows the owner the call's live state while it runs. Set once at task start; a context
+     * made without the loop tells nobody.
+     */
+    public void setCallWatch(LiveCall.Watch watch) {
+        this.callWatch = watch == null ? LiveCall.Watch.NONE : watch;
+    }
+
+    /**
+     * A model call of this task, about to be made: its hook, which carries this task's own
+     * ({@link #progress}) and keeps the call's live state ({@link LiveCall}). From here until it is
+     * closed it is the task's call under way ({@link #liveCall}), and the watch is told of it.
+     * Close it when the call has returned or failed.
+     *
+     * @param local   whether the call goes to the local model
+     * @param purpose what it is for, as the owner reads it: "step 6", "step 6, delegation turn 1"
+     */
+    public LiveCall call(com.ownclaw.llm.LlmProvider provider, boolean local, String purpose) {
+        LiveCall call = new LiveCall(this, progress(), provider, local, purpose);
+        liveCall = call;
+        call.whenEnded(callWatch.started(call));
+        return call;
+    }
+
+    /** The model call of this task under way -- made with {@link #call} and not yet closed -- or null. */
+    public LiveCall liveCall() { return liveCall; }
+
+    /** {@code call} has ended, and is no longer the task's call under way. */
+    void callEnded(LiveCall call) {
+        if (liveCall == call) liveCall = null;
+    }
 
     public String conversationSummary() { return conversationSummary; }
     public void setConversationSummary(String summary) { this.conversationSummary = summary; }
@@ -170,15 +365,207 @@ public class AgentContext {
     public void setOfferedTools(java.util.Set<String> names) { this.offeredTools = names; }
 
     public List<String> credentialKeys() { return credentialKeys; }
-    public void setCredentialKeys(List<String> keys) { this.credentialKeys = keys != null ? keys : List.of(); }
+    /**
+     * The names the vault holds, as the prompts name them -- those made of letters, digits, '_',
+     * '.' and '-'. One stored before /cred set checked names can be a value typed where the name
+     * goes, "SMTP_PASS=HUNTER2", "P@SSW0RD!", and every prompt carried it to the cloud model. A
+     * name of an older spelling that is only a name -- "ROUTER-PASS" -- stays: a skill reads it.
+     */
+    public void setCredentialKeys(List<String> keys) {
+        this.credentialKeys = keys == null ? List.of()
+                : keys.stream().filter(k -> k.matches("[A-Za-z][A-Za-z0-9_.-]*")).toList();
+    }
+
+    /** The owner's most used skills, best first: some of the tools the local model starts with. */
+    private volatile List<String> usualTools = List.of();
+
+    public List<String> usualTools() { return usualTools; }
+    public void setUsualTools(List<String> names) { this.usualTools = names != null ? names : List.of(); }
+
+    /**
+     * Skills this task's model was offered beyond its usual ones, and when: seeded on its first
+     * step, then added to -- find_tools's matches, a skill it creates. Each addition is a TOOLS
+     * message after the steps there were when it was made ({@code ThinkingEngine}), so what the
+     * model has read stays as it was. Null until seeded.
+     *
+     * @param afterSteps how many steps the trajectory held when the tools were added
+     */
+    public record ToolsAdded(int afterSteps, List<String> names) {}
+
+    private List<ToolsAdded> toolsAdded;
+
+    /** Every addition, in order; null until the task's tools were seeded. */
+    public synchronized List<ToolsAdded> toolsAdded() {
+        return toolsAdded == null ? null : List.copyOf(toolsAdded);
+    }
+
+    /** The task's first tools, offered before the step about to be asked for. */
+    public synchronized void seedTaskTools(java.util.Collection<String> names) {
+        add(names, trajectory.size());
+    }
+
+    /** Tools the step being taken found or made, offered after it: from the next step. */
+    public synchronized void addTaskTools(java.util.Collection<String> names) {
+        add(names, trajectory.size() + 1);
+    }
+
+    /** The names not offered before, as one addition. */
+    private void add(java.util.Collection<String> names, int afterSteps) {
+        if (toolsAdded == null) toolsAdded = new java.util.ArrayList<>();
+        var known = new java.util.HashSet<String>();
+        toolsAdded.forEach(a -> known.addAll(a.names()));
+        List<String> fresh = names.stream().distinct().filter(n -> !known.contains(n)).toList();
+        if (!fresh.isEmpty() || toolsAdded.isEmpty()) toolsAdded.add(new ToolsAdded(afterSteps, fresh));
+    }
+
+    /** See {@link #orchestratedFirst}; null before the task's first native cloud step. */
+    private Boolean orchestratedFirst;
+    /** See {@link #skillsOfferedAfter}. */
+    private Integer skillsOfferedAfter;
+
+    /**
+     * A native step of the cloud model is about to be asked ({@code ThinkingEngine}), and whether
+     * it orchestrates only -- is given no skill to run -- or is given skills. The first such step
+     * decides the task's {@link #orchestratedFirst}; the first that is given skills, its
+     * {@link #skillsOfferedAfter}.
+     */
+    public synchronized void cloudStep(boolean orchestratesOnly) {
+        if (orchestratedFirst == null) orchestratedFirst = orchestratesOnly;
+        if (!orchestratesOnly && skillsOfferedAfter == null) skillsOfferedAfter = trajectory.size();
+    }
+
+    /**
+     * Whether this task's cloud model was asked to orchestrate only on its first step: then every
+     * skill is deferred in its tools for the whole task, the usual ones too, so that the tools --
+     * the front of the provider's cached prefix -- are the same bytes when a failed delegation
+     * gives it the skills after all.
+     */
+    public synchronized boolean orchestratedFirst() {
+        return Boolean.TRUE.equals(orchestratedFirst);
+    }
+
+    /**
+     * How many steps the trajectory held when this task's cloud model was first given skills to
+     * run -- on its first step, or when a delegation had failed -- or null while it has not been.
+     */
+    public synchronized Integer skillsOfferedAfter() {
+        return skillsOfferedAfter;
+    }
+
+    /**
+     * The credential key prefixes that mark a personal-content source
+     * ({@code ownclaw.privacy.personal-sources}), set from the configuration at task start.
+     */
+    public void setPersonalSources(List<String> prefixes) {
+        this.personalSources = prefixes == null ? List.of() : List.copyOf(prefixes);
+    }
+
+    /**
+     * Whether a skill that needs these credentials reads a personal-content source: one of the
+     * keys starts with a {@link #setPersonalSources} prefix -- IMAP_ and POP3_ by default, which
+     * is reading mail.
+     */
+    public boolean readsPersonalSource(List<String> requiredCredentials) {
+        if (requiredCredentials == null) return false;
+        for (String key : requiredCredentials) {
+            if (key == null) continue;
+            String k = key.toUpperCase(java.util.Locale.ROOT);
+            for (String prefix : personalSources) {
+                if (k.startsWith(prefix.toUpperCase(java.util.Locale.ROOT))) return true;
+            }
+        }
+        return false;
+    }
 
     // ── Token tracking ──
 
-    public void addLocalTokens(int tokens) { this.localTokens += tokens; }
-    public void addCloudTokens(int tokens) { this.cloudTokens += tokens; }
-    public int localTokens() { return localTokens; }
-    public int cloudTokens() { return cloudTokens; }
-    public int totalTokens() { return localTokens + cloudTokens; }
+    // Synchronized: the local model's summaries of private results are counted from their own
+    // thread (TaskChat), beside the task's.
+
+    /**
+     * Count local tokens on the task -- unless its ending has been written ({@link #closeCounters}):
+     * then they are not counted here, and the caller records them apart.
+     *
+     * @return whether they were counted
+     */
+    public synchronized boolean addLocalTokens(int tokens) {
+        if (countersClosed) return false;
+        this.localTokens += tokens;
+        return true;
+    }
+    /** Count what a cloud reply was billed for, each kind of token apart. */
+    public synchronized void addCloudTokens(com.ownclaw.llm.LlmResponse reply) {
+        cloudInputTokens += reply.promptTokens();
+        cloudOutputTokens += reply.completionTokens();
+        cloudCacheReadTokens += reply.cacheReadTokens();
+        cloudCacheWriteTokens += reply.cacheCreationTokens();
+    }
+
+    public synchronized int localTokens() { return localTokens; }
+
+    /**
+     * Every cloud token billed, the four kinds together: what the task's records, its ending and
+     * the budget count. A cache read costs a tenth of a new input token, so this is no measure of
+     * cost: {@link #cloudUse} is.
+     */
+    public synchronized int cloudTokens() {
+        return cloudInputTokens + cloudOutputTokens + cloudCacheReadTokens + cloudCacheWriteTokens;
+    }
+
+    /**
+     * The cloud's tokens kind by kind and what they cost, under the names the task page's totals
+     * use (promptTokens is the new input, the cache's tokens apart), for the page to show live.
+     */
+    public synchronized Map<String, Object> cloudUse() {
+        var use = new java.util.LinkedHashMap<String, Object>();
+        use.put("promptTokens", cloudInputTokens);
+        use.put("completionTokens", cloudOutputTokens);
+        use.put("cacheReadTokens", cloudCacheReadTokens);
+        use.put("cacheWriteTokens", cloudCacheWriteTokens);
+        use.put("costUsd", cloudCostUsd);
+        return use;
+    }
+
+    /**
+     * The task is ending: from now on its counters stay as its ending reads and records them. A
+     * summary of a private result whose reply came back just as the task ended is billed after
+     * it (TaskChat), and its tokens are then not added here ({@link #addLocalTokens}).
+     */
+    public synchronized void closeCounters() { countersClosed = true; }
+
+    /** What a cloud call made for this task cost, in USD, at the rates ModelPricing knows. */
+    public synchronized void addCloudCost(double usd) { this.cloudCostUsd += usd; }
+    /** What this task's cloud calls have cost so far, in USD; a progress message's header shows it. */
+    public synchronized double cloudCostUsd() { return cloudCostUsd; }
+
+    // ── Progress ──
+
+    /** The chat this task reports its progress in; {@link TaskChat#NONE} when it has none. */
+    public TaskChat chat() { return chat; }
+    public void setChat(TaskChat chat) { this.chat = chat == null ? TaskChat.NONE : chat; }
+
+    /** What the owner sends in this task's chat while it runs; null when nobody can write to it. */
+    private volatile com.ownclaw.core.Inbox inbox;
+
+    public com.ownclaw.core.Inbox inbox() { return inbox; }
+    public void setInbox(com.ownclaw.core.Inbox inbox) { this.inbox = inbox; }
+
+    /**
+     * What the model is told of the tool calls its last reply made beyond the one a step runs,
+     * or null: the loop sets it after the step is decided and adds it to the observation the
+     * step records ({@code AgentLoop.recordAndEmitObservation}), once.
+     */
+    void setCallsNotRun(String note) { this.callsNotRun = note; }
+
+    /** Whether there is a {@link #setCallsNotRun} note still to be taken. */
+    boolean hasCallsNotRun() { return callsNotRun != null; }
+
+    /** {@link #setCallsNotRun}'s note, taken: null after the first time. */
+    String takeCallsNotRun() {
+        String note = callsNotRun;
+        callsNotRun = null;
+        return note;
+    }
 
     // ── File attachments ──
 
@@ -214,6 +601,23 @@ public class AgentContext {
         return files.stream().map(f -> String.valueOf(f.written().get("fileId"))).toList();
     }
 
+    /**
+     * What a skill run for this task is handed, the loop's call and a delegation's alike: the
+     * stop to poll, the task's files, and where its progress reports go. Each report is progress
+     * for the stall watchdog ({@link #markProgress}) and then shown, as {@code shown} shows it.
+     * One rule for both paths: a report counted on one of them only let the watchdog stop a scan
+     * the owner watched report its progress for ten minutes, and tell him nothing had moved.
+     */
+    public com.ownclaw.agent.tools.ToolExecutionContext toolContext(
+            com.ownclaw.sandbox.SandboxManager.ProgressCallback shown) {
+        return new com.ownclaw.agent.tools.ToolExecutionContext(userId, taskId, null, this::isCancelled,
+                (message, percent) -> {
+                    markProgress();
+                    shown.onProgress(message, percent);
+                },
+                attachmentIds());
+    }
+
     // ── artifacts ──
 
     /**
@@ -238,18 +642,37 @@ public class AgentContext {
     /**
      * The label for a result about to be recorded — one place, for both paths.
      * <p>
-     * From the call's own facts ({@link Artifact#labelFor}); then, inside a delegation whose local
-     * model has read private data ({@code tainted}), PRIVATE regardless, because anything it
-     * typed from then on can carry what it read. Such a result is not indexed for the canary, and
-     * neither is one that is PRIVATE only because it pulled in such a result: its bytes are the
-     * same public page one hop on, and indexing them is what made the cloud's own later fetch of
-     * that page trip the canary. In a task holding a file every result is PRIVATE and, unless it
-     * needed credentials, unindexed -- so the cloud sees each as a handle, a kind and a size.
+     * From the call's own facts ({@link Artifact#labelFor}: a personal-content source, a PRIVATE
+     * result pulled in); then, inside a delegation whose local model has read private data
+     * ({@code tainted}), PRIVATE regardless, because anything it typed from then on can carry
+     * what it read. Such a result is not indexed for the canary, and neither is one that is
+     * PRIVATE only because it pulled in such a result: its bytes are the same public page one hop
+     * on, and indexing them is what made the cloud's own later fetch of that page trip the
+     * canary. In a task holding a file every result is PRIVATE and unindexed -- so the cloud sees
+     * each as a handle, a kind and a size.
+     * <p>
+     * Last, the bytes themselves: a result its own facts call PUBLIC whose {@code output} repeats
+     * a PRIVATE one ({@link #firstLeakIn}) is PRIVATE -- "repeats {{N}}" -- and unindexed, like
+     * every result that is PRIVATE only because of what it carries from another: the run it
+     * repeats is {{N}}'s, and {{N}} is indexed. It is the question the gateway asks of each part
+     * it scans, asked here first. Shown to the cloud, the result would have been refused at the
+     * door on the next step and the task would have ended there; labelled, the cloud reads a
+     * description of it and the task goes on.
+     * <p>
+     * A run is 32 characters, and some runs are nobody's in particular: a Python traceback opens
+     * with "Traceback (most recent call last)", which is one window, and web pages share their
+     * standard head. After a skill that reads a personal source has failed with a traceback, or
+     * returned a page, a public result carrying the same boilerplate repeats it, and is withheld
+     * whole: the cloud
+     * is told that the public skill failed but not why, and cannot repair it from the error. The
+     * same collision used to end the task at the door.
+     *
+     * @param output the result's text, as it will be recorded
      */
     public Artifact.Decision decide(List<String> requiredCredentials, List<Artifact> used,
-                                    boolean tainted) {
-        Artifact.Decision own = Artifact.labelFor(requiredCredentials, used);
-        boolean credentials = requiredCredentials != null && !requiredCredentials.isEmpty();
+                                    boolean tainted, String output) {
+        boolean personal = readsPersonalSource(requiredCredentials);
+        Artifact.Decision own = Artifact.labelFor(personal, used);
         if (own.label() == com.ownclaw.privacy.Label.PUBLIC) {
             if (tainted) {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
@@ -262,14 +685,20 @@ public class AgentContext {
                 return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
                         List.of(givenTheFiles()), false);
             }
+            com.ownclaw.privacy.PrivateIndex.Hit repeated = firstLeakIn(output);
+            if (repeated != null) {
+                return new Artifact.Decision(com.ownclaw.privacy.Label.PRIVATE,
+                        List.of("repeats {{" + repeated.handle() + "}}"), false);
+            }
             return own;
         }
-        // Not indexed on a file task, credentials or not: text read out of a PDF is nothing the
-        // canary holds, so indexing it guards nothing -- and an indexed result's descriptor shows
-        // its JSON key names and booleans, which for a statement parser are the statement. Every
-        // skill is handed the file, a credentialed one too, so its keys can be the file's data.
-        // References still resolve; the cloud forwards the whole {{N}} instead of a field.
-        boolean unindexed = !files.isEmpty() || (!credentials && used != null
+        // Not indexed on a file task, a personal source's result or not: an indexed result's
+        // descriptor shows its JSON key names and booleans, which for a statement parser are the
+        // statement. Every skill is handed the file, a mail reader too, so its keys can be the
+        // file's data. References still resolve; the cloud forwards the whole {{N}} instead of a
+        // field. (What the local model writes after reading such a result is checked against it
+        // all the same: LocalExecutor.recordAnswer.)
+        boolean unindexed = !files.isEmpty() || (!personal && used != null
                 && used.stream().filter(Artifact::isPrivate).noneMatch(Artifact::indexed));
         return unindexed ? new Artifact.Decision(own.label(), own.why(), false) : own;
     }
@@ -293,6 +722,70 @@ public class AgentContext {
 
     public void markLocalTierReadPrivate() {
         localTierReadPrivate = true;
+    }
+
+    /**
+     * Why the rest of this task runs on the local model -- the cloud model could not be reached
+     * ({@code AgentLoop}) -- or null while it does not. Every model call of the task chooses
+     * through {@link LlmRouter#selectProvider}, which reads it. The next task tries the cloud again.
+     */
+    private volatile String onLocalBecause;
+
+    public boolean onLocal() {
+        return onLocalBecause != null;
+    }
+
+    public String onLocalBecause() {
+        return onLocalBecause;
+    }
+
+    public void goLocal(String because) {
+        onLocalBecause = because;
+    }
+
+    /**
+     * Cloud calls of this task in a row whose connection failed. The first is asked again on the
+     * cloud -- a connection that broke off once is often back -- and the second moves the task to
+     * the local model ({@code AgentLoop}); a cloud reply sets it back to none.
+     */
+    private volatile int cloudConnectionFailures;
+
+    public int countCloudConnectionFailure() {
+        return ++cloudConnectionFailures;
+    }
+
+    public void cloudAnswered() {
+        cloudConnectionFailures = 0;
+    }
+
+    /**
+     * How many steps of this task the provider has declined as reasoning extraction. After the
+     * first the model is asked for no words beside its calls ({@code ThinkingEngine}): the
+     * progress update it is asked for is the likely cause. That is asked at the end of the
+     * conversation, so the request is the one the provider has cached up to there. After the
+     * second it is no longer shown the words it wrote beside its earlier calls either, the other
+     * likely cause -- which rewrites the steps it is shown, so the provider writes them all to its
+     * cache again. A third ends the task ({@code AgentLoop}).
+     */
+    private volatile int declinedAsReasoning;
+
+    /** Whether the provider has declined a step of this task as reasoning extraction. */
+    public boolean declinedAsReasoning() {
+        return declinedAsReasoning > 0;
+    }
+
+    /** Whether the model is no longer shown the words it wrote beside its earlier calls. */
+    public boolean earlierWordsWithheld() {
+        return declinedAsReasoning > 1;
+    }
+
+    /** How many steps of this task the provider has declined as reasoning extraction. */
+    public int timesDeclinedAsReasoning() {
+        return declinedAsReasoning;
+    }
+
+    public synchronized void markDeclinedAsReasoning() {
+        declinedAsReasoning++;
     }
 
     /**
@@ -330,58 +823,225 @@ public class AgentContext {
                 : java.util.Optional.of(artifacts.get(artifacts.size() - 1));
     }
 
-    public com.ownclaw.privacy.PrivateIndex privateIndex() { return privateIndex; }
+    /** See {@link #markShown}. */
+    private final java.util.Set<Integer> shown = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    public Map<String, String> secretValues() { return secretValues; }
+    /**
+     * The task's answer or question shows this result in full: the one it placed, and each local
+     * answer it carries for the owner ({@code AgentLoop.answerFor}). The ending of a task waiting
+     * for an answer then lists it as shown above instead of repeating it.
+     */
+    public void markShown(Artifact a) { shown.add(a.n()); }
+
+    /** Whether the task's answer or question shows this result in full. See {@link #markShown}. */
+    public boolean isShown(Artifact a) { return shown.contains(a.n()); }
+
+    /**
+     * The secret vault values this task's text is scrubbed of: those the vault holds now
+     * ({@link com.ownclaw.privacy.VaultSecrets}), and every one decrypted as it started -- a
+     * password stored with /cred set while the task runs reaches its skills at once, and is
+     * scrubbed from what it says from then on; the one it replaced still is, and so is one
+     * deleted while it runs, for the task's earlier results hold them and are read again for
+     * every model call.
+     */
+    public Map<String, String> secretValues() {
+        Map<String, String> now = com.ownclaw.privacy.VaultSecrets.of(userId);
+        if (now.isEmpty() || now.equals(secretValues)) return secretValues;
+        if (secretValues.isEmpty()) return now;
+        return Map.copyOf(com.ownclaw.privacy.VaultSecrets.withRetired(now, secretValues, true));
+    }
     public void setSecretValues(Map<String, String> values) {
         this.secretValues = values == null ? Map.of() : Map.copyOf(values);
     }
 
     /**
-     * Whether a canary hit is material the cloud was already given, and may go.
+     * The first run of an indexed PRIVATE artifact in a result that {@link Excuses} does not
+     * excuse, or null -- what the gateway would refuse to send. One question, over one index
+     * and one set of excuses: {@link #decide} asks it of every result before it is labelled, and
+     * the gateway of each part it scans, with what {@link #egress} hands it.
+     * <p>
+     * The door sees the result in its frame ({@link AgentTrajectory.Turn#observationText}: a line
+     * naming the tool and how it went, then the output, then whatever follows it). The line
+     * breaks around the output are whitespace: the label scans the result with a space at each
+     * end ({@code PrivateIndex.firstLeakInResult}) and the scan strips whitespace from what it
+     * asks about, so the label and the door see the same windows of the result and excuse them
+     * alike. What can still set them apart is a coincidence at the output's two edges: a window
+     * that takes in a visible character of the frame (the ')' ending the line before the output,
+     * the first character of whatever follows it) is refused at the door if a private result has
+     * that character in that place too, though the label passed the result -- a collision, like
+     * any other the door refuses. And the door reads what the privacy filter left of the result:
+     * a run that holds an identifier or a secret is not in what it sends, so the door can pass a
+     * short repeat the label withholds -- the label errs on the private side, never the other.
+     *
+     * @param output the result's text, as it will be recorded
+     */
+    public com.ownclaw.privacy.PrivateIndex.Hit firstLeakIn(String output) {
+        return privateIndex.firstLeakInResult(output, new Excuses());
+    }
+
+    /**
+     * {@link #firstLeakIn}, asked of {@code output} against the PRIVATE results among
+     * {@code sources}, indexed for the canary or not: the first run of one of them that
+     * {@link Excuses} does not excuse, or null. What the local model writes after reading private
+     * data goes to the cloud only when this finds nothing in it ({@code LocalExecutor.recordAnswer}),
+     * and what it read includes results the canary does not index -- the text a skill read out of
+     * a PDF the owner sent.
+     * <p>
+     * A run here is also a word of a source shaped like a credential -- {@link #credentialShaped}
+     * -- that the output repeats: "the wifi password is Kolibri-2291" is shorter than a window
+     * and no whole value of the mail it came from, and is the one thing the owner named that
+     * must not leave.
+     */
+    public com.ownclaw.privacy.PrivateIndex.Hit firstRunOf(List<Artifact> sources, String output) {
+        var index = new com.ownclaw.privacy.PrivateIndex();
+        var words = new HashMap<String, Integer>();
+        for (Artifact a : sources) {
+            if (!a.isPrivate()) continue;
+            index.addPrivate(a.n(), a.output());
+            for (String w : credentialShaped(a.output())) words.putIfAbsent(w, a.n());
+        }
+        var hit = index.firstLeakInResult(output, new Excuses());
+        if (hit != null) return hit;
+        for (String w : credentialShaped(output)) {
+            Integer handle = words.get(w);
+            if (handle != null) {
+                return new com.ownclaw.privacy.PrivateIndex.Hit(handle,
+                        com.ownclaw.privacy.PrivateIndex.normalise(output).indexOf(w), w.length());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The words of {@code text} shaped like a credential, lowercased: split at blanks, quotes and
+     * the punctuation that delimits a value, without the punctuation at their ends, of
+     * {@link com.ownclaw.privacy.PrivateIndex#MIN_SHORT} characters or more, with letters and
+     * digits both -- Kolibri-2291, not "password" or 48,213.07.
+     */
+    static java.util.Set<String> credentialShaped(String text) {
+        var out = new java.util.HashSet<String>();
+        if (text == null) return out;
+        for (String raw : text.split("[\\s\"'`,;=()\\[\\]{}<>]+")) {
+            int a = 0, b = raw.length();
+            while (a < b && !Character.isLetterOrDigit(raw.charAt(a))) a++;
+            while (b > a && !Character.isLetterOrDigit(raw.charAt(b - 1))) b--;
+            String w = raw.substring(a, b);
+            if (w.length() >= com.ownclaw.privacy.PrivateIndex.MIN_SHORT
+                    && w.chars().anyMatch(Character::isLetter) && w.chars().anyMatch(Character::isDigit)) {
+                out.add(w.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return out;
+    }
+
+    /** See {@link #givenEarlier}. */
+    private final List<String> fromEarlierTasks = new java.util.ArrayList<>();
+
+    /**
+     * Text an earlier task gave the cloud, which this task is handing it again: the past tasks
+     * memory_manage recall returns -- a task's message and its response, the cloud's copy and
+     * never the owner's private one -- and a skill's recorded PUBLIC failures, in the request for
+     * its repair. A source of {@link Excuses} like the message: a past answer or a past
+     * public traceback that shares a run with a private result of this task was the cloud's to
+     * read before this task began. "Traceback (most recent call last" is a window of every Python
+     * traceback, so once a skill whose result is private had failed with one, recalling a task
+     * that had failed so too ended the task at the next request, and the repair of a skill whose
+     * recorded failures held one was refused.
+     */
+    public synchronized void givenEarlier(String text) {
+        if (text != null && !text.isEmpty()) fromEarlierTasks.add(text);
+    }
+
+    /** See {@link #fromTheOwner}. */
+    private final List<String> fromTheOwner = new java.util.ArrayList<>();
+
+    /**
+     * A message the owner sent while the task worked, which the task has read: his own words, a
+     * source of {@link Excuses} like the task's message. Quoting a private result in it is his to
+     * do, as it is in the message that started the task.
+     */
+    public synchronized void fromTheOwner(String text) {
+        if (text != null && !text.isEmpty()) fromTheOwner.add(text);
+    }
+
+    /**
+     * Whether a stretch of normalised text the canary matched is material the cloud was already
+     * given, and may go: true when one source below holds the whole of it. The label asks it of a
+     * result ({@link #firstLeakIn}) and the gateway of each part it scans ({@link #egress}).
      * <p>
      * Four sources count. What the task started with — the message, the conversation summary,
-     * the preferences, the recalled memories. The output of every PUBLIC artifact recorded
-     * BEFORE the private one that hit; the order matters there. What the CLOUD itself wrote —
-     * its own tool-call arguments and reasoning, which the Anthropic renderer replays verbatim
-     * as assistant turns: a skill that echoes an argument it was given would otherwise make the
-     * next prompt unsendable. And the SOURCE of the skill that produced the hit artifact: a
-     * Python traceback quotes the line that threw, so a credentialed skill's failure would
-     * otherwise make its own repair prompt — the loop this project exists for — impossible. A public artifact recorded after a
-     * private one can be that private content laundered — a skill that echoes what it was given,
-     * a summary the local model wrote — and whitelisting it would let the leak through as
+     * the preferences — with what the owner sent it while it worked ({@link #fromTheOwner}), and
+     * what earlier tasks gave the cloud that this one hands it again ({@link #givenEarlier}). The
+     * output of every PUBLIC artifact recorded BEFORE the private
+     * one that hit; the order matters there. What the CLOUD itself wrote —
+     * its own tool-call arguments and reasoning, as typed (its placeholders put back by the
+     * gateway), where they reach a part the gateway
+     * scans: a result that echoes an argument it was given (which would otherwise make the next
+     * prompt unsendable), the code generator's request, the correction after a reply that could
+     * not be parsed, the OpenAI history. Its own turns, which the Anthropic renderer replays as
+     * JSON, are assistant parts and are not scanned at all. And the SOURCE of the skill that
+     * produced the hit artifact: a Python traceback quotes the line that threw, so the failure of
+     * a skill whose result is private -- one that reads mail -- would otherwise make its own
+     * repair prompt — the loop this project exists for — impossible. A public artifact recorded
+     * after a private one can be that private content laundered — a skill that echoes what it was
+     * given, a summary the local model wrote — and whitelisting it would let the leak through as
      * "already public". The smtp confirmation that quotes the public digest it just sent is the
      * case the order exists to allow; a public result quoting a private one is the case it
-     * exists to refuse. Computed on demand: hits are rare.
+     * exists to refuse.
+     * <p>
+     * A scan asks once per stretch, not once per window ({@code PrivateIndex.firstLeakIn}), and
+     * reads each source normalised once for all the stretches it asks about: each is normalised
+     * the first time it is needed and kept after that. An Excuses is made per label and per
+     * request to the cloud, so a source costs one normalisation per request, not one per window.
+     * Kept by identity, since nothing recorded changes while a request is made; what is recorded
+     * later is read when it is first met. Normalising every source again for every window made
+     * labelling a quoted public digest quadratic in its length.
      */
-    public synchronized boolean isAllowedLeak(int hitHandle, String normalisedWindow) {
-        if (normalisedWindow == null || normalisedWindow.isEmpty()) return false;
-        Function<String, String> n = com.ownclaw.privacy.PrivateIndex::normalise;
-        for (String given : new String[] {originalMessage, conversationSummary, userPreferences,
-                String.valueOf(metadata.get("relevantMemories"))}) {
-            if (given != null && n.apply(given).contains(normalisedWindow)) return true;
+    private final class Excuses implements java.util.function.BiPredicate<Integer, String> {
+        private final Map<Object, String> normalised = new java.util.IdentityHashMap<>();
+        private final Map<String, String> skillSources = new HashMap<>();
+
+        private boolean holds(Object source, String stretch) {
+            if (source == null) return false;
+            return normalised.computeIfAbsent(source,
+                    s -> com.ownclaw.privacy.PrivateIndex.normalise(String.valueOf(s)))
+                    .contains(stretch);
         }
-        for (Artifact a : artifacts) {
-            if (a.n() >= hitHandle) break;
-            if (!a.isPrivate() && n.apply(a.output()).contains(normalisedWindow)) return true;
-        }
-        for (var turn : trajectory.turns()) {
-            var action = turn.action();
-            if (action == null) continue;
-            if (action.reasoning() != null && n.apply(action.reasoning()).contains(normalisedWindow)) {
-                return true;
+
+        @Override
+        public boolean test(Integer hitHandle, String stretch) {
+            if (stretch == null || stretch.isEmpty()) return false;
+            synchronized (AgentContext.this) {
+                for (Object given : new Object[] {originalMessage, conversationSummary,
+                        userPreferences}) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (String given : fromEarlierTasks) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (String given : fromTheOwner) {
+                    if (holds(given, stretch)) return true;
+                }
+                for (Artifact a : artifacts) {
+                    if (a.n() >= hitHandle) break;
+                    if (!a.isPrivate() && holds(a.output(), stretch)) return true;
+                }
+                for (var turn : trajectory.turns()) {
+                    var action = turn.action();
+                    if (action == null) continue;
+                    if (holds(action.reasoning(), stretch)) return true;
+                    for (Object v : action.params().values()) {
+                        if (holds(v, stretch)) return true;
+                    }
+                }
+                Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
+                        ? artifacts.get(hitHandle - 1) : null;
+                return hit != null && skillSources.computeIfAbsent(hit.tool(), tool -> {
+                    String source = skillSource.apply(tool);
+                    return source == null ? "" : com.ownclaw.privacy.PrivateIndex.normalise(source);
+                }).contains(stretch);
             }
-            for (Object v : action.params().values()) {
-                if (v != null && n.apply(String.valueOf(v)).contains(normalisedWindow)) return true;
-            }
         }
-        Artifact hit = hitHandle >= 1 && hitHandle <= artifacts.size()
-                ? artifacts.get(hitHandle - 1) : null;
-        if (hit != null) {
-            String source = skillSource.apply(hit.tool());
-            if (source != null && n.apply(source).contains(normalisedWindow)) return true;
-        }
-        return false;
     }
 
     /**
@@ -392,9 +1052,17 @@ public class AgentContext {
         this.skillSource = reader == null ? n -> null : reader;
     }
 
-    /** What a cloud call made on behalf of this task carries to the door. */
+    /**
+     * What a cloud call made on behalf of this task carries to the door: its excuses are read
+     * once for every part of the call.
+     */
     public com.ownclaw.llm.EgressContext egress(String purpose) {
         return new com.ownclaw.llm.EgressContext(userId, taskId, purpose, privateIndex,
-                secretValues, this::isAllowedLeak);
+                secretValues(), new Excuses(), this::toolOf);
+    }
+
+    /** The tool that produced result {@code n}, or null when there is no such result. */
+    private synchronized String toolOf(int n) {
+        return n >= 1 && n <= artifacts.size() ? artifacts.get(n - 1).tool() : null;
     }
 }

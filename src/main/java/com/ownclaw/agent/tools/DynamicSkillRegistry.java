@@ -74,17 +74,39 @@ public class DynamicSkillRegistry {
             return;
         }
 
-        try (Stream<Path> dirs = Files.list(generatedDir)) {
-            dirs.filter(Files::isDirectory)
-                .forEach(this::loadAndRegister);
-        } catch (IOException e) {
-            log.error("Failed to scan generated skills directory: {}", e.getMessage());
-        }
-
+        scan(generatedDir, new java.util.HashSet<>());
         log.info("Loaded {} dynamic skill(s)", dynamicSkills.size());
     }
 
-    private void loadAndRegister(Path skillDir) {
+    /** Load and register each skill in the directory; one a task writes or runs now is left as it is, named in {@code busy}. */
+    private void scan(Path generatedDir, java.util.Set<String> busy) {
+        try (Stream<Path> dirs = Files.list(generatedDir)) {
+            dirs.filter(Files::isDirectory)
+                .forEach(dir -> loadAndRegister(dir, busy));
+        } catch (IOException e) {
+            log.error("Failed to scan generated skills directory: {}", e.getMessage());
+        }
+    }
+
+    private void loadAndRegister(Path skillDir, java.util.Set<String> busy) {
+        // Held to write while it is read, registered or quarantined: a skill_create writing it now,
+        // or a run of it, is not read half written or moved from under it -- it is left as it is
+        // registered, for the next reload.
+        String name = skillDir.getFileName().toString();
+        var reading = SkillLocks.of(name).writeLock();
+        if (!reading.tryLock()) {
+            busy.add(name);
+            log.info("Not reloading skill '{}': a task is writing or running it.", name);
+            return;
+        }
+        try {
+            loadAndRegisterHeld(skillDir);
+        } finally {
+            reading.unlock();
+        }
+    }
+
+    private void loadAndRegisterHeld(Path skillDir) {
         try {
             DynamicSkill skill = loadSkill(skillDir);
             if (skill != null) {
@@ -138,8 +160,7 @@ public class DynamicSkillRegistry {
      * @return where it went, or empty if the skill was unknown or could not be moved
      */
     public Optional<Path> retire(String name, String reason) {
-        DynamicSkill skill = dynamicSkills.get(name);
-        if (skill == null) {
+        if (dynamicSkills.get(name) == null) {
             log.warn("Cannot retire '{}': no such dynamic skill", name);
             return Optional.empty();
         }
@@ -148,6 +169,25 @@ public class DynamicSkillRegistry {
         // that directory for the whole run -- which for a slow skill is minutes. The failure
         // would not be clean: the user gets a Python error about a path that existed a moment
         // ago. Retirement is never urgent, so the right answer is to skip and try next time.
+        // Held to write while it moves, taken only if nothing runs it -- any instance of it, the
+        // one registered before a skill_create among them, which its own count did not see.
+        var moving = SkillLocks.of(name).writeLock();
+        if (!moving.tryLock()) {
+            log.info("Not retiring '{}': it is running. It will be reconsidered on the next pass.", name);
+            return Optional.empty();
+        }
+        try {
+            // Looked up again under the lock: a skill_create that finished meanwhile registered
+            // another, whose directory is the one that would be moved.
+            DynamicSkill skill = dynamicSkills.get(name);
+            if (skill == null) return Optional.empty();
+            return retireHeld(name, skill, reason);
+        } finally {
+            moving.unlock();
+        }
+    }
+
+    private Optional<Path> retireHeld(String name, DynamicSkill skill, String reason) {
         int running = skill.inFlight();
         if (running > 0) {
             log.info("Not retiring '{}': {} invocation(s) still running. It will be reconsidered "
@@ -351,7 +391,7 @@ public class DynamicSkillRegistry {
         var names = new ArrayList<String>();
         collectNames(declared, names);
         for (String name : names) {
-            if (!CredentialVault.validName(name)) throw new IllegalArgumentException(CredentialVault.nameRefusal(name));
+            if (!CredentialVault.validName(name)) throw new IllegalArgumentException(CredentialVault.NAME_RULE);
         }
         return List.copyOf(names);
     }
@@ -446,12 +486,20 @@ public class DynamicSkillRegistry {
         return dynamicSkills.containsKey(name);
     }
 
-    /** Unregister all dynamic skills and re-scan the generated directory. */
+    /**
+     * Re-scan the generated directory: each skill found is registered over the one loaded before,
+     * and one no longer there is unregistered after. Unregistering them all first left every
+     * other task, running beside the reload, finding no such tool.
+     */
     public void reload() {
-        for (String name : new ArrayList<>(dynamicSkills.keySet())) {
-            unregister(name);
+        var before = new java.util.HashMap<>(dynamicSkills);
+        var busy = new java.util.HashSet<String>();
+        Path generatedDir = Path.of(config.getSkills().getGeneratedPath());
+        if (Files.isDirectory(generatedDir)) scan(generatedDir, busy);
+        for (var e : before.entrySet()) {
+            if (!busy.contains(e.getKey()) && dynamicSkills.get(e.getKey()) == e.getValue()) unregister(e.getKey());
         }
-        init();
+        log.info("Reloaded {} dynamic skill(s)", dynamicSkills.size());
     }
 
     private String getString(Map<String, Object> map, String key) {

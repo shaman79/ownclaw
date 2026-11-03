@@ -1,0 +1,71 @@
+package com.ownclaw.llm;
+
+import java.util.concurrent.TimeUnit;
+
+/**
+ * For tests outside this package: the real Ollama provider, over a server that lists its model
+ * and describes it, and sends nothing to {@code /api/chat} until the call is cancelled -- a
+ * model still loading -- or, made with a silence and answers, until that silence is over, and
+ * then answers each chat request in turn, as Ollama does once it has loaded the model and read
+ * the prompt. Nothing touches the network.
+ */
+public final class SilentOllama {
+
+    private final FakeHttp http = new FakeHttp()
+            .json("/api/tags", 200, "{\"models\":[{\"name\":\"" + OllamaStreamingTest.MODEL + "\"}]}")
+            .json(OllamaStreamingTest.SHOW, 200, OllamaStreamingTest.show("qwen35moe", 262_144));
+    private final LlmProvider provider = OllamaStreamingTest.provider(OllamaStreamingTest.config(), http);
+
+    /** Silent until the call is cancelled. */
+    public SilentOllama() {
+        http.silent(OllamaStreamingTest.CHAT);
+    }
+
+    /**
+     * Silent for {@code silentMs} on every chat request, then answering with the next of
+     * {@code answers}; the last one repeats.
+     */
+    public SilentOllama(long silentMs, String... answers) {
+        http.slow(OllamaStreamingTest.CHAT, silentMs);
+        for (String a : answers) http.on(OllamaStreamingTest.CHAT, 200, "application/x-ndjson", a);
+    }
+
+    /** A whole reply whose text is {@code content}, streamed as Ollama streams one. */
+    public static String says(String content) {
+        return OllamaStreamingTest.line(content, null) + OllamaStreamingTest.last("stop", 30, 8);
+    }
+
+    /**
+     * A whole reply that reasons first, one line of the stream for each of {@code thinking} as a
+     * thinking model's reasoning streams, and then says {@code content}.
+     */
+    public static String reasons(java.util.List<String> thinking, String content) {
+        var sb = new StringBuilder();
+        for (String piece : thinking) sb.append(OllamaStreamingTest.line("", piece));
+        return sb + says(content);
+    }
+
+    /** Whether every reply body handed out has been closed, however its call ended. */
+    public boolean closedEveryReply() {
+        return http.opened.get() == http.closed.get();
+    }
+
+    public LlmProvider provider() {
+        return provider;
+    }
+
+    /** How many chat requests were made. */
+    public int chats() {
+        return http.to(OllamaStreamingTest.CHAT).size();
+    }
+
+    /** The bodies of the chat requests, oldest first. */
+    public java.util.List<String> bodies() {
+        return http.to(OllamaStreamingTest.CHAT).stream().map(FakeHttp.Sent::body).toList();
+    }
+
+    /** Wait until a chat request is under way -- sent, and answered with nothing. */
+    public void awaitCall() throws InterruptedException {
+        if (!http.silenced.await(10, TimeUnit.SECONDS)) throw new AssertionError("no chat request was made");
+    }
+}

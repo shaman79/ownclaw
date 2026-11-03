@@ -13,7 +13,7 @@ import com.ownclaw.llm.LlmMessage;
 import com.ownclaw.llm.LlmProvider;
 import com.ownclaw.llm.LlmRequestConfig;
 import com.ownclaw.llm.LlmResponse;
-import com.ownclaw.privacy.Label;
+import com.ownclaw.llm.Replies;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -59,16 +59,16 @@ class PrivateObservationRenderingTest {
     }
 
     private static ThinkingEngine engine(ToolRegistry registry) {
-        return new ThinkingEngine(registry, new ToolSelector(registry), new OwnClawConfig(), null);
+        return new ThinkingEngine(registry, new OwnClawConfig(), null);
     }
 
     /** A task with one result recorded exactly as executeTool records it. */
     private static AgentContext taskWith(String tool, List<String> credentials, String output) {
         var ctx = new AgentContext("u1", "t1", "Summarise my mailbox and email me the result.");
         ctx.setUnattended(true);
-        var decision = Artifact.labelFor(credentials, List.of());
+        var decision = Artifact.labelFor(!credentials.isEmpty(), List.of());
         var a = ctx.addArtifact(tool, Map.of(), Map.of(), output, true, decision);
-        var obs = Artifact.asObservation(a, ToolResult.success(output, Map.of("k", "v")), 10);
+        var obs = Artifact.asObservation(a, ToolResult.success(output), 10);
         ctx.trajectory().record(new AgentAction(tool, Map.of(), "fetching"), obs);
         return ctx;
     }
@@ -76,17 +76,17 @@ class PrivateObservationRenderingTest {
     private static List<String> allText(ThinkingEngine engine, AgentContext ctx) {
         var out = new ArrayList<String>();
         for (String provider : List.of("anthropic", "openai")) {
-            for (LlmMessage m : engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false))) {
+            for (LlmMessage m : engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false))) {
                 out.add(m.content());
             }
         }
-        out.add(ctx.trajectory().toPromptSummary());
+        out.add(ctx.trajectory().toPromptSummary(true));
         return out;
     }
 
     private static CloudGateway gateway(List<EgressLedger.Row> rows) {
         LlmProvider fake = new LlmProvider() {
-            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) { return new LlmResponse("ok", 1, 1); }
+            public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) { return Replies.of("ok", 1, 1); }
             public boolean isAvailable() { return true; }
             public boolean supportsTools() { return true; }
             public String name() { return "anthropic"; }
@@ -115,14 +115,14 @@ class PrivateObservationRenderingTest {
         }
         assertTrue(texts.stream().anyMatch(t -> t.contains("{{1}} imap_fetch")),
                 "and the descriptor IS there, so the cloud knows the result exists");
-        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (credentials (1))")));
+        assertTrue(texts.stream().anyMatch(t -> t.contains("PRIVATE (personal source)")));
 
         // Independent: the real door, with the task's own index, sends every message.
         var rows = new ArrayList<EgressLedger.Row>();
         var gw = gateway(rows);
         for (String provider : List.of("anthropic", "openai")) {
-            var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false));
-            assertDoesNotThrow(() -> gw.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))),
+            var messages = engine.buildMessages(ctx, provider, new ThinkingEngine.StepMode(true, false, false));
+            assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))),
                     provider + ": the gateway found private bytes the renderer test did not");
         }
         assertTrue(rows.stream().allMatch(r -> r.decision() == EgressLedger.Decision.SENT));
@@ -142,8 +142,8 @@ class PrivateObservationRenderingTest {
                 "public content goes to the cloud exactly as today");
         var rows = new ArrayList<EgressLedger.Row>();
         var gw = gateway(rows);
-        var messages = engine(registry).buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false));
-        assertDoesNotThrow(() -> gw.chat(messages, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+        var messages = engine(registry).buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(true, false, false));
+        assertDoesNotThrow(() -> gw.chat(messages, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
     }
 
     @Test
@@ -156,7 +156,7 @@ class PrivateObservationRenderingTest {
         var leaking = List.of(LlmMessage.system("S"), LlmMessage.user("Mailbox: " + secret.substring(500, 900)));
 
         var ex = assertThrows(EgressRefused.class,
-                () -> gw.chat(leaking, LlmRequestConfig.DEFAULT.withEgress(ctx.egress("think"))));
+                () -> gw.chat(leaking, new LlmRequestConfig(null, null, false).withEgress(ctx.egress("think"))));
         assertEquals(1, ex.handle(), "{{1}} is the artifact whose bytes were found");
     }
 }

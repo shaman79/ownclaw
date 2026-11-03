@@ -56,7 +56,7 @@ class SkillManagerHelperScriptTest {
     private Manager manager(SandboxManager sandbox, PythonEnvironmentService env) {
         var tools = new ToolRegistry(List.of());
         var dynamic = new DynamicSkillRegistry(cfg, tools, sandbox, null, env, null, null);
-        return new Manager(new SkillManager(dynamic, tools, cfg, sandbox, env, null), tools, dynamic);
+        return new Manager(new SkillManager(dynamic, tools, cfg, sandbox, env, null, null), tools, dynamic);
     }
 
     private static Map<String, Object> skill(String name, String code) {
@@ -152,8 +152,8 @@ class SkillManagerHelperScriptTest {
         Path envDir = Files.createDirectories(root.resolve("_envs/greet_user"));
         var env = new PythonEnvironmentService(cfg, JailTestKit.off()) {
             @Override
-            public PythonResolution resolveExecution(Path skillDir, String skillName) {
-                return new PythonResolution("python3", Map.of(), envDir);
+            public PythonResolution resolveExecution(Path skillDir, String skillName, java.util.function.BooleanSupplier stopped, Runnable waiting) {
+                return new PythonResolution("python3", Map.of(), envDir, null);
             }
         };
         var sandbox = new Recording(new SandboxResult(0, "", "", 1, false));

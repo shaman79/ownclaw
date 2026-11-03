@@ -48,10 +48,10 @@ class LivePathGuardsTest {
         int end = s.indexOf("\n    private ", start + 10);
         String body = end > start ? s.substring(start, end) : s.substring(start);
 
-        int resolve = body.indexOf("References.resolve(action.params(), context.artifacts())");
+        int resolve = body.indexOf("References.resolveInText(action.params(), context.artifacts())");
         int refuse = body.indexOf("if (!refs.ok())");
         int run = body.indexOf("tool.execute(");
-        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false)");
+        int label = body.indexOf("context.decide(tool.requiredCredentials(), refs.used(), false,");
         assertTrue(resolve > 0, "executeTool no longer resolves through References");
         assertTrue(refuse > resolve && refuse < run, "a refused reference must stop the call before it runs");
         String refusal = body.substring(refuse, body.indexOf("\n        }\n", refuse));
@@ -61,6 +61,8 @@ class LivePathGuardsTest {
         assertTrue(body.substring(refuse, run).contains("resolved = refs.params()"),
                 "the call runs on the resolver's substituted arguments");
         assertTrue(label > run, "the label must come from the resolver's record, not a re-parse");
+        assertTrue(body.substring(label, body.indexOf(";", label)).contains("result.output()"),
+                "and from what the tool returned, which may repeat a private result");
         assertFalse(body.contains("resolved = LocalExecutor"), "a second resolver is back");
     }
 
@@ -117,17 +119,6 @@ class LivePathGuardsTest {
                         + "there swallows an earlier artifact's attribution:\n" + body);
     }
 
-    @Test
-    @DisplayName("the canary normalises each part once, not once per hit")
-    void theCanaryIsNotQuadratic() throws IOException {
-        // Behaviourally identical, which is why reverting it left the suite green -- the cost is
-        // the only difference: 7.8 seconds measured on one 130 KB part, on every step.
-        String s = read("com.ownclaw.llm.CloudGateway");
-        assertTrue(s.contains("firstHitInNormalised(normalised, from)"),
-                "the per-hit loop must reuse the part's normalised text");
-        assertFalse(s.contains("firstHitIn(part.text(), from)"));
-    }
-
     /** One branch of runLoop: from its opening line to the next top-level {@code if (action.}. */
     private static String runLoopBranch(String s, String opening) {
         int loop = s.indexOf("private AgentResult runLoop(");
@@ -171,37 +162,31 @@ class LivePathGuardsTest {
     }
 
     @Test
-    @DisplayName("Telegram saves the two texts apart and is sent the owner's")
-    void saveSitesKeepTheTwoTexts() throws IOException {
-        // Only Telegram: no test runs TelegramBotService, while the web chat and the scheduler are
-        // driven by PrivateAnswerInTheWebChatTest and ScheduledPrivateAnswerTest. The row's content
-        // feeds every later prompt, the compressor and search, so it must be the safe text.
+    @DisplayName("a new chat's title is not logged: a link's chat is titled by an alert, which names hosts and paths")
+    void aNewChatsTitleIsNotLogged() throws IOException {
+        String chats = read("com.ownclaw.interfaces.web.ChatHistoryController");
+        String created = call(chats, "log.info(\"New chat session created");
+        assertFalse(created.contains("title"), created);
+    }
+
+    @Test
+    @DisplayName("Telegram is sent the owner's text, in his own chat alone")
+    void telegramIsSentTheOwnersText() throws IOException {
+        // What is sent, pinned here; what is saved is driven: the web chat's by
+        // PrivateAnswerInTheWebChatTest, the scheduler's by ScheduledPrivateAnswerTest and
+        // Telegram's by TelegramDeliveryTest, which reads the row it saves.
         String telegram = read("com.ownclaw.interfaces.telegram.TelegramBotService");
-        assertEquals("conversationService.saveMessage(userId, currentSessionId, \"assistant\", "
-                        + "result.response(), java.util.List.of(), result.taskId(), result.ownerText())",
-                call(telegram, "conversationService.saveMessage(userId, currentSessionId, \"assistant\","));
         // Telegram is the owner's own channel and he decided it gets private answers in full;
-        // what it stores for later turns is still the safe text (asserted above).
-        assertEquals("sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response())",
+        // what it stores for later turns is still the safe text (TelegramDeliveryTest).
+        assertEquals("sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response(), result.choices())",
                 call(telegram, "sendMessage(chatId, chatId == telegramUserId"),
                 "his private chat is sent his answer; a group he asked from gets the safe text");
         assertTrue(telegram.contains("new StringBuilder(telegramText(msg))"),
                 "a delivered result is sent through telegramText, which reads the owner's text");
         assertTrue(telegram.contains("if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id)))"),
                 "results go only to the owner's own, still-linked chat");
-        assertTrue(telegram.contains("for (String part : telegramParts(text, TELEGRAM_MAX_CHARS))"),
+        assertTrue(telegram.contains("List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);"),
                 "a long answer is sent in parts instead of being refused whole");
-    }
-
-    @Test
-    @DisplayName("every way a task ends passes through the local-answer fallback")
-    void everyExitGivesTheLocalAnswer() throws IOException {
-        // withLocalAnswers is driven in AnswerForTest; no test runs executeFull to its end, so
-        // this pins the one line that applies it to whatever runLoop returned.
-        assertTrue(read("com.ownclaw.agent.AgentLoop")
-                        .contains("result = withLocalAnswers(runLoop(context), context).withTaskId(taskId);"),
-                "executeFull applies the fallback to every result");
-
     }
 
     @Test

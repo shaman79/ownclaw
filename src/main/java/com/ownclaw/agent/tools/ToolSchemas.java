@@ -126,6 +126,20 @@ public final class ToolSchemas {
     public static List<ToolSpec> build(List<ToolSpec> specialActions,
                                        Collection<Tool> tools,
                                        List<String> availableCredentials) {
+        return inOrder(specialActions, tools == null ? List.of() : tools.stream()
+                .filter(t -> t != null && t.name() != null)
+                .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
+                .toList(), availableCredentials);
+    }
+
+    /**
+     * As {@link #build}, with the tools in the order given: the local model's tools for a task it
+     * runs itself, appended to as it finds more ({@code ThinkingEngine}), so the part of the
+     * prompt it has already read normally stays the same.
+     */
+    public static List<ToolSpec> inOrder(List<ToolSpec> specialActions,
+                                         List<Tool> tools,
+                                         List<String> availableCredentials) {
         var out = new ArrayList<ToolSpec>();
         Set<String> taken = new LinkedHashSet<>();
         if (specialActions != null) {
@@ -133,10 +147,12 @@ public final class ToolSchemas {
                 if (taken.add(spec.name())) out.add(spec);
             }
         }
+        // The loop runs find_tools itself wherever it is offered, so a skill of that name could
+        // never run: offered to the cloud, it would only ever be intercepted.
+        taken.add(com.ownclaw.agent.AgentAction.FIND_TOOLS);
         if (tools != null) {
             tools.stream()
                     .filter(t -> t != null && t.name() != null)
-                    .sorted((a, b) -> a.name().compareToIgnoreCase(b.name()))
                     .forEach(t -> {
                         if (!isApiSafeName(t.name())) {
                             log.warn("Skipping tool '{}': the name is not acceptable to the "

@@ -1,7 +1,10 @@
 package com.ownclaw.agent.tools;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import com.ownclaw.sandbox.ContainerSandbox;
 import com.ownclaw.sandbox.SandboxManager;
 import com.ownclaw.sandbox.SandboxResult;
@@ -93,16 +96,16 @@ public class DynamicSkill implements Tool {
     /**
      * How many invocations of this skill are running right now.
      * <p>
-     * Read before retiring or deleting a skill. Retirement moves the skill's directory, and a
-     * running invocation is reading {@code skill.py}, its virtualenv and its own {@code _runner_}
-     * harness out of that directory the whole time it executes -- some of them for minutes.
-     * Moving it mid-run does not fail cleanly: the interpreter is already started, so what the
-     * user gets is a Python error about a path that existed a moment ago.
+     * Read before retiring a skill. Retirement moves the skill's directory, and a running
+     * invocation is reading {@code skill.py}, its virtualenv and its own {@code _runner_} harness
+     * out of that directory the whole time it executes -- some of them for minutes. Moving it
+     * mid-run does not fail cleanly: the interpreter is already started, so what the user gets is
+     * a Python error about a path that existed a moment ago.
      */
     private final java.util.concurrent.atomic.AtomicInteger inFlight =
             new java.util.concurrent.atomic.AtomicInteger();
 
-    /** Invocations currently executing. Zero means the directory is safe to move or delete. */
+    /** Invocations currently executing. Zero means the directory is safe to move. */
     public int inFlight() {
         return inFlight.get();
     }
@@ -185,14 +188,19 @@ public class DynamicSkill implements Tool {
      * is, as it always was; the jail bounds what such a module can do.
      */
     public static final String SKILL_LOADER = String.join("\n",
-        "import sys, os, io, json, builtins, traceback, inspect, importlib.util",
+        "import sys, os, json, builtins, traceback, inspect, importlib.util",
         "_skill_dir = os.path.dirname(os.path.abspath(__file__))",
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
-        "# The message is emitted as a JSON line on the real stdout and",
-        "# intercepted by the sandbox — it never reaches the final output.",
+        "# The message is emitted as a JSON line on stdout, before the result line,",
+        "# and intercepted by the sandbox when the caller listens for it.",
         "_real_stdout = sys.__stdout__",
+        "# What the skill prints reaches stdout a line at a time, as it prints it.",
+        "try:",
+        "    _real_stdout.reconfigure(line_buffering=True)",
+        "except Exception:",
+        "    pass",
         "",
         "def report_progress(message, percent=None):",
         "    \"\"\"Report progress for a long-running task.",
@@ -225,10 +233,11 @@ public class DynamicSkill implements Tool {
      * The key a skill's credentials travel under in the JSON on the runner's stdin. The runner
      * takes them out of the parameters and puts them into its own environment before skill.py is
      * loaded, so the skill reads them from {@code os.environ}, as it always has, its subprocesses
-     * inherit them, and they are never in the params it is given. They are never in the
-     * environment of the process that starts the runner, either: bubblewrap, or the container
-     * runtime's CLI, neither of them jailed, where a name the dynamic loader or the runtime
-     * reads -- LD_PRELOAD, DOCKER_HOST -- would act on that process itself.
+     * inherit them, and they are never in the params it is given. They are never on the command
+     * line or in the environment of a process the service starts, either: handed to the container
+     * runtime as {@code -e NAME=VALUE}, every value -- a password, a whole SSH private key -- was
+     * in the host's process list, readable by every account on the machine, for as long as the
+     * container ran.
      */
     static final String CREDENTIALS = "_credentials";
 
@@ -240,18 +249,33 @@ public class DynamicSkill implements Tool {
      *   <li>Reads JSON parameters from stdin, and moves the {@link #CREDENTIALS} among them into
      *       its own environment</li>
      *   <li>Imports skill.py and calls its {@code run(params)} function</li>
-     *   <li>Prints the returned dict as JSON to stdout</li>
+     *   <li>Prints the returned dict as JSON to stdout, as the last line</li>
      *   <li>Catches and reports any exception as a structured failure</li>
      * </ol>
      *
      * <p>This decouples the LLM's authoring convention ({@code def run(params): return ...})
      * from the process-level stdin/stdout contract.
      *
+     * <p>What the skill prints goes to stdout as it prints it, a line at a time, before the
+     * result line ({@link #parseOutput}): on every path -- a result, an exception, sys.exit, a
+     * hang the sandbox ends -- and counted as output by the sandbox's stall check, which ends a
+     * run only after no output for its timeout. The prints were once held back and added to the
+     * result's {@code output} on success alone: a skill that printed and then raised, or called
+     * sys.exit, lost them, and one that printed and returned a dict or a number as its output had
+     * that output broken by the addition -- a failure, for a send that had gone.
+     *
      * <p>Skills can call {@code report_progress(message, percent=None)} ({@link #SKILL_LOADER}) to
      * emit structured progress updates for long-running tasks.  These are intercepted
-     * by the sandbox and forwarded to the user's chat in real time.
+     * by the sandbox and forwarded to the user's chat in real time -- when the caller
+     * gave a progress callback; otherwise they stay in stdout, before the result line
+     * ({@link #parseOutput}).
      */
     private static final String RUNNER_HARNESS = SKILL_LOADER + String.join("\n",
+        "",
+        "def _result(result):",
+        "    \"\"\"The result: the last line, on a line of its own whatever was printed before it.\"\"\"",
+        "    _real_stdout.write('\\n' + json.dumps(result, default=str, ensure_ascii=False) + '\\n')",
+        "    _real_stdout.flush()",
         "",
         "def _dispatch_run(run_fn, params):",
         "    \"\"\"Smart parameter dispatch: supports both def run(params) and def run(key=val) styles.\"\"\"",
@@ -294,51 +318,71 @@ public class DynamicSkill implements Tool {
         "# forkserver -- the default from Python 3.14 -- imports this script again, as __mp_main__.",
         "if __name__ == '__main__':",
         "    try:",
-        "        params = json.loads(sys.stdin.read())",
-        "        os.environ.update(params.pop('" + CREDENTIALS + "'))",
-        "        _capture = io.StringIO()",
-        "        sys.stdout = _capture",
+        "        params = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}",
+        "        os.environ.update(params.pop('" + CREDENTIALS + "', None) or {})",
         "        mod = _load_skill()",
         "        if not hasattr(mod, 'run'):",
-        "            sys.stdout = _real_stdout",
-        "            print(json.dumps({'success': False, 'output': 'skill.py does not define a run(params) function'}))",
+        "            _result({'success': False, 'output': 'skill.py does not define a run(params) function'})",
         "            sys.exit(0)",
         "        result = _dispatch_run(mod.run, params)",
-        "        sys.stdout = _real_stdout",
-        "        captured = _capture.getvalue()",
         "        if not isinstance(result, dict):",
         "            result = {'output': str(result) if result is not None else ''}",
         "        if 'success' not in result:",
         "            result['success'] = True",
-        "        if captured and captured.strip():",
-        "            result.setdefault('output', '')",
-        "            if result['output']:",
-        "                result['output'] += '\\n[skill stdout: ' + captured.strip() + ']'",
-        "            else:",
-        "                result['output'] = captured.strip()",
-        "        print(json.dumps(result, default=str, ensure_ascii=False))",
+        "        _result(result)",
         "    except Exception as e:",
-        "        sys.stdout = sys.__stdout__",
-        "        print(json.dumps({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'}, ensure_ascii=False))",
+        "        _result({'success': False, 'output': f'Skill error: {e}\\n{traceback.format_exc()}'})",
         ""
     );
 
     @Override
     public ToolResult execute(Map<String, Object> params, ToolExecutionContext context) {
+        // Read-held for the run: a skill_create, delete or retirement of it waits for the run.
+        // One under way is waited for in turn, said to the task as its progress.
+        var running = SkillLocks.of(name).readLock();
+        var progress = context == null ? null : context.progressCallback();
+        if (!SkillLocks.take(running, stoppedOf(context), () -> {
+            if (progress != null) progress.onProgress("Waiting: skill '" + name + "' is being changed by another task", null);
+        })) {
+            return ToolResult.failure("Stopped while skill '" + name + "' was being changed: it did not run.");
+        }
+        try {
+            return run(params, context);
+        } finally {
+            running.unlock();
+        }
+    }
+
+    /** Whether the task running this has been stopped: what ends its waits for other tasks. */
+    private static java.util.function.BooleanSupplier stoppedOf(ToolExecutionContext context) {
+        return context == null || context.cancelled() == null ? () -> false : context.cancelled();
+    }
+
+    /** Said to the task while another task sets up this skill's environment: its progress meanwhile. */
+    private Runnable settingUp(ToolExecutionContext context) {
+        var progress = context == null ? null : context.progressCallback();
+        return () -> {
+            if (progress != null) {
+                progress.onProgress("Waiting: another task is setting up the environment of skill '" + name + "'", null);
+            }
+        };
+    }
+
+    private ToolResult run(Map<String, Object> params, ToolExecutionContext context) {
         Path scriptPath = skillDir.resolve("skill.py");
         if (!Files.exists(scriptPath)) {
             return ToolResult.failure("Skill script not found: " + scriptPath);
         }
         // Here, before the container is chosen: a run in docker or podman never passes the jail,
         // so while it refuses every launch it would be the one way around it.
-        Optional<String> refused = sandbox.unavailable();
+        Optional<String> refused = sandbox == null ? Optional.empty() : sandbox.unavailable();
         if (refused.isPresent()) return ToolResult.failure(refused.get());
 
         Path runnerScript = null;
         inFlight.incrementAndGet();
         try {
             // Resolve Python (creates venv + installs requirements if needed)
-            var resolution = pythonEnv.resolveExecution(skillDir, name);
+            var resolution = pythonEnv.resolveExecution(skillDir, name, stoppedOf(context), settingUp(context));
 
             // Write the runner harness under a name of its own, so concurrent runs of the same
             // skill do not collide and nothing left in the directory can be written through.
@@ -378,6 +422,14 @@ public class DynamicSkill implements Tool {
             // CREDENTIALS) -- always set, so a parameter of that name from the caller never
             // reaches the runner's environment.
             Map<String, String> creds = Map.of();
+            for (String key : requiredCredentials) {
+                if (!CredentialVault.forSkills(key)) {
+                    log.warn("Skill '{}' declares {}, which is never handed to a skill; not run", name, key);
+                    return ToolResult.failure("The credential " + key + " is never handed to a skill: it "
+                            + "signs the links that open the owner's chat as verified, and a skill that could "
+                            + "read it could sign any message. Remove it from this skill's credentials.");
+                }
+            }
             if (!requiredCredentials.isEmpty() && credentialVault != null && context.userId() != null) {
                 log.info("Skill '{}': requesting credentials {} for user='{}'",
                         name, requiredCredentials, context.userId());
@@ -407,6 +459,11 @@ public class DynamicSkill implements Tool {
             effectiveParams.put(CREDENTIALS, creds);
             String inputJson = mapper.writeValueAsString(effectiveParams);
 
+            // The skill's environment: its venv on PATH, or its target on PYTHONPATH. The UTF-8
+            // encoding every run gets is set where every launch's environment is made
+            // (SkillJail.applyEnvironment), on the host and in a container alike.
+            Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
+
             // Run the skill: choose container or direct process execution.
             // Skills with system_packages run in a Docker/Podman container so packages
             // can be installed without sudo. Falls back to direct execution if no
@@ -421,7 +478,7 @@ public class DynamicSkill implements Tool {
                 // Container execution: build image with system packages + pip deps, run inside
                 String pipReqs = readRequirements();
                 containerImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
-                        context.progressCallback());
+                        context.progressCallback(), stoppedOf(context));
                 usedContainer = true;
                 result = containerSandbox.execute(
                         containerImageTag, "python3", runnerScript, skillDir,
@@ -436,66 +493,46 @@ public class DynamicSkill implements Tool {
                 // Direct process execution (original path)
                 result = sandbox.execute(
                         resolution.python(), runnerScript, skillDir,
-                        inputJson, resolution.extraEnv(), timeoutSec,
-                        context.progressCallback(), readOnlyFor(resolution, handed));
+                        inputJson, envVars, timeoutSec,
+                        context.progressCallback(), readOnlyFor(resolution, handed), context.userId());
             }
 
-            if (result.timedOut()) {
-                return ToolResult.failure("Skill '" + name + "' stalled (no output for " + timeoutSec + "s).");
-            }
+            ToolResult toolResult = interpret(result);
 
-            if (result.isSuccess()) {
-                ToolResult toolResult = parseOutput(result.stdout(), result.stderr());
-
-                // Self-heal: ModuleNotFoundError → install missing package → retry once
-                if (!toolResult.success()) {
-                    String missingModule = extractMissingModule(toolResult.output());
-                    if (missingModule != null) {
-                        String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
-                        log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
-                                name, pkg, missingModule);
-
-                        boolean installed = pythonEnv.installPackages(skillDir, name, List.of(pkg));
-                        if (installed) {
-                            SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                    runnerScript, skillDir, inputJson, timeoutSec, extraVolumes,
-                                    handed);
-                            if (retry != null && !retry.timedOut() && retry.isSuccess()) {
-                                log.info("Self-heal succeeded for skill '{}'", name);
-                                return parseOutput(retry.stdout(), retry.stderr());
-                            }
-                        }
+            // Self-heal: ModuleNotFoundError → install missing package → retry once. What the
+            // retry returns is the answer, failure included: the package is in by then, and the
+            // error it hits next is the one that matters. A package that cannot be installed
+            // fails with pip's own account of why, beside the error that asked for it.
+            String missingModule = toolResult.success() || result.timedOut()
+                    ? null : extractMissingModule(toolResult.output());
+            if (missingModule != null) {
+                String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
+                log.warn("SELF-HEAL: skill '{}' missing module '{}' → installing pip package '{}'",
+                        name, missingModule, pkg);
+                try {
+                    pythonEnv.installPackages(skillDir, name, List.of(pkg), stoppedOf(context), settingUp(context));
+                    SandboxResult retry = retrySelfHeal(stoppedOf(context), usedContainer, containerImageTag,
+                            runnerScript, skillDir, inputJson, envVars, timeoutSec, extraVolumes, handed,
+                            context.userId());
+                    if (retry != null) {
+                        toolResult = interpret(retry);
+                        log.info("Self-heal retry of skill '{}': {}", name,
+                                toolResult.success() ? "succeeded" : "failed");
                     }
+                } catch (IOException notInstalled) {
+                    toolResult = failedWith(toolResult, "installing " + pkg + " failed",
+                            notInstalled.getMessage());
                 }
-
-                return toolResult;
-            } else {
-                String error = result.stderr().isBlank()
-                        ? "Exit code: " + result.exitCode()
-                        : result.stderr();
-
-                // Self-heal stderr-based ModuleNotFoundError too
-                String missingModule = extractMissingModule(error);
-                if (missingModule != null) {
-                    String pkg = MODULE_TO_PACKAGE.getOrDefault(missingModule, missingModule);
-                    log.info("Self-healing skill '{}' (stderr): installing '{}' for module '{}'",
-                            name, pkg, missingModule);
-                    if (pythonEnv.installPackages(skillDir, name, List.of(pkg))) {
-                        SandboxResult retry = retrySelfHeal(usedContainer, containerImageTag,
-                                runnerScript, skillDir, inputJson, timeoutSec, extraVolumes,
-                                handed);
-                        if (retry != null && !retry.timedOut() && retry.isSuccess()) {
-                            log.info("Self-heal (stderr) succeeded for skill '{}'", name);
-                            return parseOutput(retry.stdout(), retry.stderr());
-                        }
-                    }
-                }
-
-                return ToolResult.failure(error);
             }
+            // Why the skill's own requirements are not installed, when they are not: the run
+            // went on without them, and its error names only the module it then missed -- a
+            // wrong package name, a wheel that needs a system library and an index out of reach
+            // all read "No module named" there, and only pip says which.
+            return failedWith(toolResult, "requirements not installed", resolution.installError());
         } catch (Exception e) {
-            log.error("Dynamic skill '{}' execution failed: {}", name, e.getMessage());
-            return ToolResult.failure("Execution error: " + e.getMessage());
+            String message = String.valueOf(e.getMessage());
+            log.error("Dynamic skill '{}' execution failed: {}", name, firstLineOf(message));
+            return ToolResult.failure("Execution error: " + message);
         } finally {
             inFlight.decrementAndGet();
             // Clean up the temp runner script
@@ -577,33 +614,70 @@ public class DynamicSkill implements Tool {
      * Container-based skills retry inside the container; direct skills retry via the process
      * sandbox, with the same handed files as the first run and the environment as it is now.
      */
-    private SandboxResult retrySelfHeal(boolean usedContainer, String containerImageTag,
+    private SandboxResult retrySelfHeal(java.util.function.BooleanSupplier stopped, boolean usedContainer,
+                                         String containerImageTag,
                                          Path runnerScript, Path skillDir, String inputJson,
-                                         int timeoutSec, Map<String, String> extraVolumes,
-                                         List<Path> handed) {
+                                         Map<String, String> envVars, int timeoutSec,
+                                         Map<String, String> extraVolumes, List<Path> handed,
+                                         String tmpOwner) {
         try {
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
                 String pipReqs = readRequirements();
-                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage, null);
+                String healedImageTag = containerSandbox.ensureImage(systemPackages, pipReqs, skillDir, containerImage,
+                        null, stopped);
                 return containerSandbox.execute(
                         healedImageTag, "python3", runnerScript, skillDir,
                         inputJson, timeoutSec, null, extraVolumes);
             } else {
                 // Direct process execution
-                var healedResolution = pythonEnv.resolveExecution(skillDir, name);
                 // The heal may have just created the environment, so it is read again rather
                 // than taken from the first run; the handed files are the first run's own, and
                 // the credentials come with the input, as on the first run.
+                var healedResolution = pythonEnv.resolveExecution(skillDir, name, stopped, () -> {});
+                Map<String, String> healedEnv = new HashMap<>(healedResolution.extraEnv());
+                healedEnv.putAll(envVars.entrySet().stream()
+                        .filter(e -> !healedEnv.containsKey(e.getKey()))
+                        .collect(java.util.stream.Collectors.toMap(
+                                Map.Entry::getKey, Map.Entry::getValue)));
                 return sandbox.execute(
                         healedResolution.python(), runnerScript, skillDir,
-                        inputJson, healedResolution.extraEnv(), timeoutSec, null,
-                        readOnlyFor(healedResolution, handed));
+                        inputJson, healedEnv, timeoutSec, null, readOnlyFor(healedResolution, handed),
+                        tmpOwner);
             }
         } catch (Exception e) {
-            log.error("Self-heal retry failed for skill '{}': {}", name, e.getMessage());
+            log.error("Self-heal retry failed for skill '{}': {}", name,
+                    firstLineOf(String.valueOf(e.getMessage())));
             return null;
         }
+    }
+
+    /**
+     * An exception's message for the log: its first line and its size. A failed image build's
+     * message carries every base image's whole build log -- the skill's result is where that
+     * goes, not the log the ops API serves.
+     */
+    private static String firstLineOf(String message) {
+        String first = message.lines().findFirst().orElse("");
+        return first + " (" + message.length() + " chars)";
+    }
+
+    /**
+     * What a run of the skill returned: a stall with what it wrote before going quiet, a crash
+     * with its stderr and whatever reached stdout, or the harness's result ({@link #parseOutput}).
+     */
+    private ToolResult interpret(SandboxResult result) {
+        if (result.timedOut()) {
+            // What it wrote before it went quiet is the only evidence of where it hung.
+            return ToolResult.failure("Skill '" + name + "' stalled (no output for "
+                    + timeoutSec + "s)." + printed("stdout", result.stdout())
+                    + printed("stderr", result.stderr()));
+        }
+        if (result.isSuccess()) return parseOutput(result.stdout(), result.stderr());
+        // A crash can leave stdout as well as stderr: a subprocess writes to it directly.
+        return ToolResult.failure((result.stderr().isBlank()
+                ? "Exit code: " + result.exitCode()
+                : result.stderr()) + printed("stdout", result.stdout()));
     }
 
     /**
@@ -615,21 +689,29 @@ public class DynamicSkill implements Tool {
             + "while it runs; fail and say what you need";
 
     /** Whether a skill's result is a need_input request: its "type" says so. */
-    private static boolean asksForInput(Map<String, Object> result) {
-        return "need_input".equals(result.get("type"));
+    private static boolean asksForInput(ObjectNode result) {
+        JsonNode type = result.get("type");
+        return type != null && type.isTextual() && "need_input".equals(type.asText());
     }
 
     /**
-     * Parse the runner's stdout into a ToolResult, host and container run alike. The runner
-     * prints the result last, as one JSON object on a line of its own
-     * ({"success": true, "output": "text", "data": {}}), so that line is read first: what a
-     * subprocess of the skill wrote to the same stdout before it -- a JSON line among it -- is
-     * never taken for the result. Only when the last line is not a JSON object is the whole of
-     * stdout read, from its first value; output that is neither fails. A result whose "type" is
-     * need_input fails, saying it is not supported ({@link #NEED_INPUT_UNSUPPORTED}).
+     * Parse the Python script's stdout into a ToolResult.
+     * <p>
+     * The runner harness prints the skill's result last, as one line of JSON:
+     * {@code {"success": true, "output": "text"}} and whatever else the skill returned. All of
+     * that is the output: {@code output} alone when nothing else it returned holds anything -- as
+     * text, or as JSON when it is not a string -- and otherwise the whole object as printed, so
+     * that no key is dropped and an {@code "ok": false} stays where Artifact.succeeded reads it.
+     * When the skill returned nothing, what was printed before that line is the output.
+     * Nothing else the process wrote is dropped either ({@link #withStream}): stdout printed before
+     * that line -- by the skill's own print(), by a subprocess, or a progress report nobody
+     * intercepted -- and stderr, whether the skill succeeded or not: a failure is exactly when its
+     * warnings are the evidence. Output whose last line is not a JSON object is shown whole, as a
+     * failure. A result whose "type" is need_input fails, saying it is not supported
+     * ({@link #NEED_INPUT_UNSUPPORTED}).
      *
      * @param stdout the script's standard output
-     * @param stderr the script's standard error (included in failure messages for diagnostics)
+     * @param stderr the script's standard error
      */
     private ToolResult parseOutput(String stdout, String stderr) {
         if (stdout == null || stdout.isBlank()) {
@@ -640,12 +722,14 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
-        String text = lastNonEmptyLine(stdout);
-        Map<String, Object> parsed = jsonObject(text);
-        if (parsed == null) {
-            text = stdout.strip();
-            parsed = jsonObject(text);
-        }
+        // Read from the end: the harness's line is the last one. An earlier line can be a JSON
+        // object too -- a progress report, what curl printed -- and reading from the top took it
+        // for the result and lost the result.
+        String text = stdout.strip();
+        int cut = text.lastIndexOf('\n');
+        String line = text.substring(cut + 1).strip();
+        String before = cut < 0 ? "" : text.substring(0, cut).strip();
+        ObjectNode parsed = ToolResult.jsonObject(line);
         if (parsed == null) {
             // Non-JSON output from the runner harness means something went wrong.
             // Treat as failure so the agent gets a signal to investigate.
@@ -653,22 +737,41 @@ public class DynamicSkill implements Tool {
                     ? " stderr: " + stderr.strip() : "";
             return ToolResult.failure(
                     "Tool produced non-JSON output (possible runner error): "
-                    + truncateStr(stdout.strip(), 500) + detail
+                    + text + detail
                     + " Use skill_create with the SAME name '" + name + "' to fix.");
         }
 
         if (asksForInput(parsed)) return ToolResult.failure(NEED_INPUT_UNSUPPORTED);
-        boolean success = Boolean.TRUE.equals(parsed.get("success"));
-        String output = parsed.containsKey("output") ? String.valueOf(parsed.get("output")) : text;
+        boolean success = BooleanNode.TRUE.equals(parsed.get("success"));
+        JsonNode returned = parsed.get("output");
+        // Everything the skill returned. Taking "output" alone dropped every other key -- a
+        // message id, a data list, and an "ok": false beside it, so a failed send read as a
+        // success. A key that holds nothing (a data dict left empty) does not make the object
+        // the output.
+        boolean onlyOutput = parsed.properties().stream()
+                .allMatch(e -> "output".equals(e.getKey()) || "success".equals(e.getKey())
+                        || holdsNothing(e.getValue()));
+        // A skill that returned nothing and printed: what it printed is its output, as printed.
+        // That is how a skill that print()s its result instead of returning it answers -- JSON
+        // printed so stays JSON for the descriptor, the field references and an "ok": false.
+        boolean printedIt = onlyOutput && (returned == null || holdsNothing(returned))
+                && !before.isEmpty();
+        String output = printedIt ? before
+                : !onlyOutput || returned == null ? line
+                : returned.isTextual() ? returned.asText() : returned.toString();
 
         // Safety net: if output starts with ERROR: but success was True (LLM code bug), flip to failure
-        if (success && output != null && output.startsWith("ERROR:")) {
+        String said = printedIt ? before
+                : returned != null && returned.isTextual() ? returned.asText() : null;
+        if (success && said != null && said.startsWith("ERROR:")) {
             log.warn("Skill output starts with 'ERROR:' but success=true — treating as failure");
             success = false;
         }
 
+        if (!printedIt) output = withStream(output, "skill stdout", before);
+
         // Treat empty output content as failure even if success=true
-        if (success && (output == null || output.isBlank() || "null".equals(output))) {
+        if (success && (output.isBlank() || "null".equals(output))) {
             String hint = (stderr != null && !stderr.isBlank())
                     ? " stderr: " + stderr.strip()
                     : "";
@@ -678,44 +781,48 @@ public class DynamicSkill implements Tool {
                     + " Use skill_create with the SAME name '" + name + "' to fix it.");
         }
 
-        @SuppressWarnings("unchecked")
-        Map<String, Object> data = parsed.containsKey("data") && parsed.get("data") instanceof Map
-                ? (Map<String, Object>) parsed.get("data")
-                : Map.of();
-
-        // Append stderr as a warning if present on a successful result
-        if (success && stderr != null && !stderr.isBlank()) {
-            output = output + "\n[stderr warning: " + stderr.strip() + "]";
-        }
-
-        return success ? ToolResult.success(output, data) : ToolResult.failure(output, data);
+        output = withStream(output, "stderr", stderr);
+        return success ? ToolResult.success(output) : ToolResult.failure(output);
     }
 
-    /** {@code text} read as a JSON object, from its first value; null when it is not one. */
-    private static Map<String, Object> jsonObject(String text) {
-        if (text == null || !text.startsWith("{")) return null;
-        try {
-            return mapper.readValue(text, new TypeReference<>() {});
-        } catch (Exception e) {
-            return null;
-        }
+    /** A value with nothing in it: null, "", {} or []. */
+    private static boolean holdsNothing(JsonNode value) {
+        return value.isNull() || value.isTextual() && value.asText().isEmpty()
+                || value.isContainerNode() && value.isEmpty();
     }
 
-    /** Return the last non-empty line in a multi-line string, or null. */
-    private static String lastNonEmptyLine(String text) {
-        if (text == null) return null;
-        String[] lines = text.split("\n");
-        for (int i = lines.length - 1; i >= 0; i--) {
-            String line = lines[i].strip();
-            if (!line.isEmpty()) return line;
-        }
-        return null;
+    /**
+     * {@code output} with {@code text} beside it under {@code label} -- what the process also wrote
+     * to a stream, or why packages it needed are not installed; as it was when the text is blank.
+     * An output that is a JSON object ({@link ToolResult#jsonObject}) gets it as one more key,
+     * before the closing brace of the skill's own text and never one the skill returned itself:
+     * text after the object hid an {@code "ok": false} from Artifact.succeeded and every field
+     * from the descriptor. Any other output gets it as a labelled block after the text.
+     */
+    private static String withStream(String output, String label, String text) {
+        if (text == null || text.isBlank()) return output;
+        ObjectNode object = ToolResult.jsonObject(output);
+        if (object == null) return output + printed(label, text);
+        String key = label;
+        while (object.has(key)) key = "_" + key;
+        String t = output.strip();
+        int close = t.lastIndexOf('}');
+        return t.substring(0, close) + (object.isEmpty() ? "" : ", ") + TextNode.valueOf(key) + ": "
+                + TextNode.valueOf(text.strip()) + "}";
     }
 
-    /** Truncate a string with ellipsis. */
-    private static String truncateStr(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
+    /**
+     * A failed result with {@code text} beside it, as {@link #withStream} puts it; a success, or a
+     * blank text, as it is.
+     */
+    private static ToolResult failedWith(ToolResult result, String label, String text) {
+        return result.success() || text == null || text.isBlank() ? result
+                : ToolResult.failure(withStream(result.output(), label, text));
+    }
+
+    /** {@code text} labelled as what the process wrote to {@code stream}; nothing when blank. */
+    private static String printed(String stream, String text) {
+        return text == null || text.isBlank() ? "" : "\n[" + stream + ": " + text.strip() + "]";
     }
 
     /**

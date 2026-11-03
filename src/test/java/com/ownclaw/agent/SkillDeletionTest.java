@@ -75,7 +75,7 @@ class SkillDeletionTest {
         sandbox = new ProcessSandbox(JailTestKit.off());
         tools = new ToolRegistry(List.of());
         dynamic = new RecordingRegistry(cfg, tools, sandbox, env);
-        manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null);
+        manager = new SkillManager(dynamic, tools, cfg, sandbox, env, null, null);
     }
 
     private static boolean pythonAvailable() {
@@ -96,51 +96,6 @@ class SkillDeletionTest {
         p.put("code", code);
         String result = manager.createSkill(p);
         assertFalse(result.startsWith("ERROR"), result);
-    }
-
-    @Test
-    @DisplayName("a skill with a run in flight is not deleted, and never leaves the registry; once the run ends it is")
-    void aRunningSkillIsNotDeleted() throws Exception {
-        // Runs until told to stop, from its own directory, as a skill writing a cache would.
-        create("slow_skill", """
-                import os, time
-                def run(params):
-                    open('started', 'w').close()
-                    while not os.path.exists('release'):
-                        time.sleep(0.05)
-                    return {'output': 'done'}
-                """);
-        Path dir = generated.resolve("slow_skill");
-        Path envDir = Files.createDirectories(envs.resolve("slow_skill"));
-        DynamicSkill skill = dynamic.getDynamic("slow_skill").orElseThrow();
-        CompletableFuture<ToolResult> run = CompletableFuture.supplyAsync(
-                () -> skill.execute(Map.of(), new ToolExecutionContext("u1", "t1", null, () -> false)));
-        try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (!Files.exists(dir.resolve("started"))) {
-                assertTrue(System.nanoTime() < deadline, "the run never started");
-                Thread.sleep(20);
-            }
-            assertEquals(1, skill.inFlight());
-            dynamic.unregistered.clear();   // creating it unregisters whatever was there before
-
-            String refused = manager.deleteSkill("slow_skill");
-
-            assertTrue(refused.startsWith("ERROR") && refused.contains("running"), refused);
-            assertTrue(Files.exists(dir.resolve("skill.py")), "the directory of a running skill was deleted");
-            assertTrue(Files.isDirectory(envDir), "the environment of a running skill was deleted");
-            assertTrue(dynamic.isDynamic("slow_skill") && tools.find("slow_skill").isPresent());
-            assertEquals(List.of(), dynamic.unregistered, "a running skill left the registry, if only for a moment");
-        } finally {
-            Files.createFile(dir.resolve("release"));
-        }
-        assertTrue(run.get(30, TimeUnit.SECONDS).success());
-
-        String deleted = manager.deleteSkill("slow_skill");
-        assertFalse(deleted.startsWith("ERROR"), deleted);
-        assertFalse(Files.exists(dir));
-        assertFalse(Files.exists(envDir));
-        assertFalse(dynamic.isDynamic("slow_skill"));
     }
 
     @Test

@@ -94,6 +94,19 @@ public class ContainerSandbox {
         this.config = config;
     }
 
+    /**
+     * With the runtimes given rather than detected, so a test can stand in for docker and
+     * podman ({@code fallback} may be null). A factory, not a second constructor: Spring builds
+     * this bean through its one constructor, and with two it found none it could use and the
+     * application did not start.
+     */
+    static ContainerSandbox withRuntimes(OwnClawConfig config, String runtime, String fallback) {
+        var sandbox = new ContainerSandbox(config);
+        sandbox.containerRuntime = runtime;
+        sandbox.fallbackRuntime = fallback;
+        return sandbox;
+    }
+
     @PostConstruct
     public void init() {
         detectRuntime();
@@ -244,6 +257,19 @@ public class ContainerSandbox {
     public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
                               String preferredImage, SandboxManager.ProgressCallback progressCallback)
             throws IOException, InterruptedException {
+        return ensureImage(systemPackages, pipRequirements, skillDir, preferredImage, progressCallback, () -> false);
+    }
+
+    /**
+     * {@link #ensureImage(List, String, Path, String, SandboxManager.ProgressCallback)} for a task:
+     * a Stop of it ({@code stopped}) ends its wait for an image another task is building.
+     *
+     * @throws IOException when the task was stopped while it waited
+     */
+    public String ensureImage(List<String> systemPackages, String pipRequirements, Path skillDir,
+                              String preferredImage, SandboxManager.ProgressCallback progressCallback,
+                              java.util.function.BooleanSupplier stopped)
+            throws IOException, InterruptedException {
 
         // Build ordered list of base images to try: preferred first, then config default, then fallbacks
         List<String> candidates = buildImageCandidateList(preferredImage);
@@ -254,6 +280,37 @@ public class ContainerSandbox {
         if (builtImages.contains(imageTag)) {
             return imageTag;
         }
+        // One build of an image at a time: a second task asking for the same one -- tasks of
+        // different chats run side by side -- waits for the first's build and finds it built,
+        // instead of building it again beside it for minutes. Said to it as its progress while it
+        // waits, which the stall watchdog counts as such: the build may take minutes.
+        var building = buildLocks.computeIfAbsent(imageTag, t -> new java.util.concurrent.locks.ReentrantLock());
+        if (!com.ownclaw.agent.tools.SkillLocks.take(building, stopped, () -> {
+            if (progressCallback != null) {
+                progressCallback.onProgress("Waiting for the container image another task is building", null);
+            }
+        })) {
+            throw new IOException("Stopped while another task built the container image " + imageTag);
+        }
+        try {
+            if (builtImages.contains(imageTag)) {
+                return imageTag;
+            }
+            return buildImage(candidates, imageTag, systemPackages, pipRequirements, skillDir, progressCallback);
+        } finally {
+            building.unlock();
+        }
+    }
+
+    /** One for each image being asked for, by its tag: see {@link #ensureImage}. */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> buildLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** {@link #ensureImage}, its image's build lock held. */
+    private String buildImage(List<String> candidates, String imageTag, List<String> systemPackages,
+                              String pipRequirements, Path skillDir,
+                              SandboxManager.ProgressCallback progressCallback)
+            throws IOException, InterruptedException {
 
         // Check if the image already exists in the local registry
         if (imageExists(imageTag)) {
@@ -262,8 +319,10 @@ public class ContainerSandbox {
             return imageTag;
         }
 
-        // Try building with each candidate base image in order
-        IOException lastError = null;
+        // Try building with each candidate base image in order. Every candidate's failure is kept,
+        // in order and whole: the preferred image's own error is usually the one that matters,
+        // and keeping only the last candidate's reported a fallback image's instead.
+        var failures = new StringBuilder();
         int candidateIndex = 0;
         for (String baseImage : candidates) {
             candidateIndex++;
@@ -289,11 +348,10 @@ public class ContainerSandbox {
             } catch (IOException e) {
                 log.warn("Base image '{}' failed: {}. Trying next candidate...",
                         baseImage, truncate(e.getMessage(), 200));
-                lastError = e;
+                failures.append("\n\n").append(baseImage).append(": ").append(e.getMessage());
             }
         }
-        throw new IOException("All base image candidates failed. Last error: "
-                + (lastError != null ? lastError.getMessage() : "unknown"));
+        throw new IOException("All base image candidates failed." + failures);
     }
 
     /**
@@ -396,15 +454,15 @@ public class ContainerSandbox {
                 String fallbackError = tryBuildImage(buildRuntime, imageTag, buildCtx, progressCallback);
                 if (fallbackError != null) {
                     throw new IOException("Container image build failed with both runtimes.\n"
-                            + containerRuntime + ": " + truncate(buildError, 1000) + "\n"
-                            + fallbackRuntime + ": " + truncate(fallbackError, 1000));
+                            + containerRuntime + ": " + buildError + "\n"
+                            + fallbackRuntime + ": " + fallbackError);
                 }
                 // Fallback succeeded — switch runtimes for future calls
                 log.info("Fallback runtime '{}' succeeded. Switching primary runtime.", buildRuntime);
                 containerRuntime = buildRuntime;
             } else if (buildError != null) {
                 throw new IOException("Container image build failed (" + buildRuntime + "):\n"
-                        + truncate(buildError, 2000));
+                        + buildError);
             }
 
             log.info("Successfully built container image '{}' with {}", imageTag, containerRuntime);
@@ -412,11 +470,13 @@ public class ContainerSandbox {
             // Validate the built image: verify python3 is actually usable.
             // This catches cases where the base image was pulled from a wrong registry
             // (Podman doesn't default to Docker Hub) or layers are broken.
-            if (!validateImage(imageTag)) {
+            String unusable = validateImage(imageTag);
+            if (unusable != null) {
                 builtImages.remove(imageTag);
                 throw new IOException("Container image '" + imageTag + "' built but python3 is not "
                         + "usable inside it. The base image may have been pulled from a wrong registry. "
-                        + "Check that '" + baseImage + "' is reachable.");
+                        + "Check that '" + baseImage + "' is reachable. 'python3 --version' in it: "
+                        + unusable);
             }
 
         } finally {
@@ -461,30 +521,27 @@ public class ContainerSandbox {
             AtomicLong lastBuildActivity = new AtomicLong(System.currentTimeMillis());
 
             // Read output line-by-line to stream build progress to the user.
-            // Also feeds lastBuildActivity for stall detection. Within the output limit, as a
-            // run's is: the base image is the model's choice, and a build that prints without
-            // end would otherwise take the heap.
-            AtomicBoolean overLimit = new AtomicBoolean(false);
-            StringBuilder outputBuf = new StringBuilder();
-            CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> {
-                try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
-                        ProcessSandbox.limited(p.getInputStream(), p, overLimit), StandardCharsets.UTF_8))) {
+            // Also feeds lastBuildActivity for stall detection. Synchronized, because a stalled
+            // build reports what it had printed while this reader may still be appending.
+            StringBuffer outputBuf = new StringBuffer();
+            CompletableFuture<String> outputFuture = StreamReaders.read(() -> {
+                try (var reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         lastBuildActivity.set(System.currentTimeMillis());
                         outputBuf.append(line).append('\n');
                         if (progressCallback != null) {
-                            // Summarize the line for the UI — strip ANSI codes and truncate
+                            // The line for the UI, whole — ANSI colour codes stripped
                             String clean = line.replaceAll("\\x1B\\[[0-9;]*m", "").trim();
                             if (!clean.isEmpty()) {
-                                progressCallback.onProgress(
-                                        "\uD83D\uDCE6 " + truncate(clean, 120), null);
+                                progressCallback.onProgress("\uD83D\uDCE6 " + clean, null);
                             }
                         }
                     }
                 } catch (IOException ignored) {}
                 return outputBuf.toString();
-            }, ProcessSandbox.OWN_THREAD);
+            });
 
             int buildStallTimeout = config.getSandbox().getStallTimeout();
             boolean finished = ProcessSandbox.waitForWithStallDetection(p, buildStallTimeout, lastBuildActivity);
@@ -494,13 +551,11 @@ public class ContainerSandbox {
                 p.destroyForcibly();
                 try { p.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 outputFuture.cancel(true);
-                return "Build stalled (no output for " + stallSec + "s)";
+                return "Build stalled (no output for " + stallSec + "s). Its output until then:\n"
+                        + outputBuf;
             }
 
             String output = outputFuture.join();
-            if (overLimit.get()) {
-                return "Build output went past the " + (ProcessSandbox.OUTPUT_LIMIT >> 20) + " MB limit";
-            }
 
             if (p.exitValue() != 0) {
                 return "exit " + p.exitValue() + ": " + output;
@@ -517,10 +572,9 @@ public class ContainerSandbox {
     /**
      * Execute a Python script inside a container. The progress lines the skill prints
      * ({@code {"type":"progress","message":"...","percent":N}}) are forwarded through the
-     * callback when there is one, and are never part of stdout. Past
-     * {@link ProcessSandbox#OUTPUT_LIMIT} on either stream the runtime's CLI is killed, as it is
-     * when the run stalls, and the container with it ({@link #kill}). The one runner for this and
-     * a host run: {@link ProcessSandbox#run}.
+     * callback when there is one, and are never part of stdout. When the run stalls the
+     * runtime's CLI is killed, and the container with it ({@link #kill}). The one runner for this
+     * and a host run: {@link ProcessSandbox#run}.
      *
      * @param imageTag         the container image to use (from ensureImage)
      * @param python           python executable (usually "python3" inside the container)
@@ -692,8 +746,11 @@ public class ContainerSandbox {
     /**
      * Validate that a built container image actually has a working python3.
      * Catches broken images early (wrong registry pull, missing layers, etc.)
+     *
+     * @return null when it has, or why not: the check's exit code and whole output, which is the
+     *         actual reason and goes to the skill's result with the rest of the build's evidence
      */
-    private boolean validateImage(String imageTag) {
+    private String validateImage(String imageTag) {
         try {
             Process p = cli(List.of(containerRuntime, "run", "--rm", imageTag, "python3", "--version"))
                     .redirectErrorStream(true)
@@ -701,26 +758,26 @@ public class ContainerSandbox {
             // Drain async so the 30s waitFor timeout is actually reachable.
             // Previous version drained synchronously (blocking until EOF) which
             // made the timeout dead code — a hanging container blocked forever.
-            CompletableFuture<byte[]> outputFuture = CompletableFuture.supplyAsync(
-                    () -> drainStream(p.getInputStream()), ProcessSandbox.OWN_THREAD);
+            CompletableFuture<byte[]> outputFuture = StreamReaders.read(
+                    () -> drainStream(p.getInputStream()));
             boolean finished = p.waitFor(30, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
                 outputFuture.cancel(true);
                 log.warn("Image validation timed out for '{}'", imageTag);
-                return false;
+                return "no answer within 30s";
             }
             String output = new String(outputFuture.join(), StandardCharsets.UTF_8);
             if (p.exitValue() != 0) {
                 log.warn("Image validation failed for '{}': exit={}, output={}",
                         imageTag, p.exitValue(), truncate(output, 500));
-                return false;
+                return "exit " + p.exitValue() + ": " + output;
             }
             log.debug("Image validation passed for '{}': {}", imageTag, output.strip());
-            return true;
+            return null;
         } catch (Exception e) {
             log.warn("Image validation error for '{}': {}", imageTag, e.getMessage());
-            return false;
+            return "error: " + e.getMessage();
         }
     }
 

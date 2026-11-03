@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -63,7 +64,8 @@ import java.util.stream.Stream;
  * runtime directory, where the service user's systemd user manager and session bus would start
  * a process outside the jail when asked. The crash dumps are hidden as well
  * ({@link #HOST_STORES}): one of a process of the service user's is readable by it, and holds
- * that process's memory. A skill's /tmp is its own, and so is /var/tmp -- the same directory.
+ * that process's memory. A skill's /tmp is its account's, shared by that account's skills and
+ * kept between their runs as the service's own /tmp was, and the same directory is its /var/tmp.
  * A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
  * the property that matters -- a skill cannot read the database and post it anywhere -- comes
@@ -94,9 +96,13 @@ import java.util.stream.Stream;
  *   <li>the user namespace maps only the service user's own uid and gid, so its supplementary
  *       groups show as 65534 (nogroup) inside: a skill that looks at its group list concludes
  *       it lacks a group, while access is still decided by the real groups;</li>
- *   <li>a skill's /tmp, and /var/tmp with it, is fresh on every run: what it kept there between
- *       runs -- a last-seen marker, a token cache -- is lost, where unjailed the service's own
- *       /tmp kept it;</li>
+ *   <li>a skill's /tmp, and /var/tmp with it, is one directory for each account
+ *       ({@link #sharedTmp}): what a skill leaves there -- a report another skill of the account
+ *       reads next, a downloaded browser, a backup -- is there for the account's next run, as it
+ *       was in the service's own /tmp, and is gone when OwnClaw restarts, as that was. Another
+ *       account's skills cannot see it. The checks and the venv and pip commands get a fresh one
+ *       for each run instead. A process a run left in the background is gone with its jail, so
+ *       nothing writes there between runs;</li>
  *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
  *   <li>with /run gone, so are the system bus and systemd's own socket: systemctl, timedatectl,
  *       hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail;</li>
@@ -310,32 +316,39 @@ public class SkillJail {
      * What to start, and how. Exactly one of these holds: {@code refusal} is set and nothing may
      * be started; or {@code argv} is the command to start -- wrapped in bubblewrap when
      * {@code jailed}, unchanged otherwise. Close it when the process is gone: that ends what is
-     * left of its jail and removes the run's private /tmp.
+     * left of its jail and removes the run's private /tmp, when it had one of its own.
+     *
+     * @param marker what only this run's bubblewrap carries in its argv, for {@link #jailEnded}:
+     *               the path of its own /tmp, or a random id when its /tmp is the account's
+     * @param tmpDir the run's own /tmp, removed on close; null when there is none to remove
      */
-    public record Launch(List<String> argv, boolean jailed, String refusal, Path tmpDir)
+    public record Launch(List<String> argv, boolean jailed, String refusal, String marker, Path tmpDir)
             implements AutoCloseable {
 
         static Launch direct(List<String> command) {
-            return new Launch(List.copyOf(command), false, null, null);
+            return new Launch(List.copyOf(command), false, null, null, null);
         }
 
         static Launch refused(String reason) {
-            return new Launch(List.of(), false, reason, null);
+            return new Launch(List.of(), false, reason, null, null);
         }
 
         @Override
         public void close() {
-            if (tmpDir == null) return;
-            if (jailEnded(tmpDir.toString())) {
-                deleteTree(tmpDir);
-            } else {
+            if (marker == null) return;
+            if (jailEnded(marker)) {
+                if (tmpDir != null) deleteTree(tmpDir);
+            } else if (tmpDir != null) {
                 log.warn("Not removing {}: a process of its jail is still running", tmpDir);
+            } else {
+                log.warn("A process of jail {} is still running", marker);
             }
         }
     }
 
     /**
-     * Whether every process of the jail whose /tmp is {@code runTmp} is gone, killing what is left
+     * Whether every process of the jail whose argv carries {@code runTmp} -- its own /tmp's path,
+     * or the id its launch was given ({@link Launch#marker}) -- is gone, killing what is left
      * and waiting up to 5 s. bubblewrap returns as soon as the command it started exits, while
      * anything the command left running goes on. Its pid 1 in the jail -- a fork of it, so it
      * carries the same argv, this run's /tmp included -- is killed once bubblewrap is gone
@@ -401,7 +414,23 @@ public class SkillJail {
     @Autowired
     public SkillJail(OwnClawConfig config) {
         this(config.getSandbox().getIsolation(), config.getSandbox().getBwrapPath(),
-                layoutOf(config), config.getSandbox().getExpose(), System::currentTimeMillis);
+                layoutOf(config), withDefaultExposes(config.getSandbox().getExpose(), System.getProperty("user.home")),
+                System::currentTimeMillis);
+    }
+
+    /**
+     * What is exposed read-only without the owner listing it: the browsers Playwright installs,
+     * under {@code ~/.cache/ms-playwright}. In production HOME is the service directory, which
+     * the jail hides, and the lunch-menu skills drive a browser from there; browser builds hold
+     * nothing of the service's. Bound with {@code -try}, so a host without them loses nothing.
+     */
+    static List<String> withDefaultExposes(List<String> owners, String home) {
+        var out = new ArrayList<String>(owners == null ? List.of() : owners);
+        if (home != null && !home.isBlank()) {
+            String browsers = Path.of(home).resolve(".cache/ms-playwright").toAbsolutePath().normalize().toString();
+            if (!out.contains(browsers)) out.add(browsers);
+        }
+        return out;
     }
 
     /**
@@ -439,9 +468,13 @@ public class SkillJail {
         this.startedAt = clock.getAsLong();
     }
 
-    /** Evaluate once at startup, so the log says what the jail will do before the first skill. */
+    /**
+     * Evaluate once at startup, so the log says what the jail will do before the first skill;
+     * and empty the accounts' /tmp directories, as a restart empties the service's own /tmp.
+     */
     @PostConstruct
     public void init() {
+        removeSharedTmp();
         status();
     }
 
@@ -459,13 +492,28 @@ public class SkillJail {
     }
 
     /**
-     * Decide how to start {@code command} for a skill.
+     * Decide how to start {@code command} for a skill, with a fresh /tmp of its own: for the
+     * checks of a skill and the venv and pip commands, whose build trees are nobody's to keep.
      *
      * @param command  the interpreter and its arguments, exactly as they would run unjailed
      * @param workDir  the only host directory the process may write (besides its private /tmp)
      * @param readOnly host paths the process may read, each at its own path
      */
     public Launch prepare(List<String> command, Path workDir, List<Path> readOnly) {
+        return prepare(command, workDir, readOnly, null);
+    }
+
+    /**
+     * Decide how to start {@code command} for a skill: a run of one, whose /tmp is its account's
+     * ({@link #sharedTmp}) when {@code tmpOwner} names the account, and a fresh one of its own
+     * when it is null.
+     *
+     * @param command  the interpreter and its arguments, exactly as they would run unjailed
+     * @param workDir  the only host directory the process may write (besides its /tmp)
+     * @param readOnly host paths the process may read, each at its own path
+     * @param tmpOwner the account whose /tmp the run gets; null for a fresh one
+     */
+    public Launch prepare(List<String> command, Path workDir, List<Path> readOnly, String tmpOwner) {
         Evaluation e = current();
         switch (e.state()) {
             case OFF, INACTIVE -> {
@@ -487,11 +535,20 @@ public class SkillJail {
             List<Path> roots = hiddenRoots(layout);
             Path dir = abs(workDir);
             List<Path> ro = checkBinds(dir, readOnly, layout);
+            if (tmpOwner != null) {
+                // The account's /tmp is every run's of its skills at once, so its path tells no
+                // run's processes apart: each launch carries an id of its own instead.
+                String marker = "ownclaw-run-" + UUID.randomUUID();
+                List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
+                        e.expose(), sharedTmp(tmpOwner), marker, command);
+                isolatedRuns.incrementAndGet();
+                return new Launch(argv, true, null, marker, null);
+            }
             tmp = Files.createTempDirectory("ownclaw-run-");
             List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
                     e.expose(), tmp, command);
             isolatedRuns.incrementAndGet();
-            return new Launch(argv, true, null, tmp);
+            return new Launch(argv, true, null, tmp.toString(), tmp);
         } catch (IOException | RuntimeException ex) {
             // Never a quiet fallback to an unjailed run: this one launch fails, with the reason.
             if (tmp != null) deleteTree(tmp);
@@ -500,6 +557,53 @@ public class SkillJail {
             log.warn("Skill launch refused: {}", why);
             return Launch.refused(why);
         }
+    }
+
+    /**
+     * Where the accounts' /tmp directories are: {@code skills/_tmp}, beside generated/ and _envs/,
+     * inside a root the jail always hides -- not the JVM's temp directory, which is hidden only
+     * when it is /tmp itself, and would otherwise show every account's /tmp to every skill.
+     */
+    Path sharedTmpRoot() {
+        return layout.skillsRoot().resolve("_tmp");
+    }
+
+    /**
+     * An account's /tmp: one directory its skills' runs share, as they shared the service's own
+     * /tmp before there was a jail. A skill that writes a report there for another to read next,
+     * keeps a downloaded browser or a backup there, finds it on the account's next run. Emptied
+     * when the service starts and when it stops, so it is gone when OwnClaw restarts, as the
+     * service's /tmp was. Other accounts' skills do not see it: each run sees its own account's
+     * at /tmp, and the jail hides the directory they are all in. Made here, and checked to be a
+     * directory and no link each time.
+     */
+    synchronized Path sharedTmp(String owner) throws IOException {
+        Path root = sharedTmpRoot();
+        if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(root);
+        Path dir = root.resolve(tmpName(owner));
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir);
+        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("the account's /tmp is not a directory of its own: " + dir);
+        }
+        return dir;
+    }
+
+    /** The account's directory name: its id when that is a plain name, otherwise a hash of it. */
+    static String tmpName(String owner) {
+        if (owner.matches("[A-Za-z0-9_-]{1,64}")) return owner;
+        try {
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(owner.getBytes(StandardCharsets.UTF_8));
+            return "u-" + java.util.HexFormat.of().formatHex(h, 0, 16);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required of every Java platform", e);
+        }
+    }
+
+    /** The accounts' /tmp directories go when the service stops, as its own /tmp does. */
+    @jakarta.annotation.PreDestroy
+    synchronized void removeSharedTmp() {
+        Path root = sharedTmpRoot();
+        if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) deleteTree(root);
     }
 
     /**
@@ -791,9 +895,21 @@ public class SkillJail {
     static List<String> bwrapArgs(String bwrap, List<Path> hiddenRoots, Path resolver, Path workDir,
                                   List<Path> readOnly, List<Bind> expose, Path tmp,
                                   List<String> command) {
+        return bwrapArgs(bwrap, hiddenRoots, resolver, workDir, readOnly, expose, tmp, null, command);
+    }
+
+    /**
+     * {@link #bwrapArgs(String, List, Path, Path, List, List, Path, List)} for a run whose /tmp is
+     * shared: {@code marker}, an id of this launch alone, is set in the jail's environment as
+     * {@code OWNCLAW_JAIL_RUN}, which puts it in bubblewrap's argv for {@link #jailEnded}.
+     */
+    static List<String> bwrapArgs(String bwrap, List<Path> hiddenRoots, Path resolver, Path workDir,
+                                  List<Path> readOnly, List<Bind> expose, Path tmp, String marker,
+                                  List<String> command) {
         var a = new ArrayList<String>();
         a.add(bwrap);
         a.addAll(List.of("--unshare-all", "--share-net", "--die-with-parent", "--new-session"));
+        if (marker != null) a.addAll(List.of("--setenv", "OWNCLAW_JAIL_RUN", marker));
         a.addAll(List.of("--ro-bind", "/", "/"));
         a.addAll(List.of("--dev-bind", "/dev", "/dev"));
         for (Replaced r : REPLACED) {

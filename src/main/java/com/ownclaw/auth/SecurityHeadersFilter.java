@@ -28,16 +28,16 @@ import java.io.IOException;
  */
 public class SecurityHeadersFilter implements Filter {
 
-    private static final String CDN = "https://cdnjs.cloudflare.com";
-
     /**
      * Everything except connect-src, which depends on the request (see {@link #cspFor}).
      */
     private static final String CSP_PREFIX = String.join("; ",
             "default-src 'self'",
             // 'unsafe-inline' is required by the single inline application script - see above.
-            "script-src 'self' 'unsafe-inline' " + CDN,
-            "style-src 'self' 'unsafe-inline' " + CDN,
+            // 'self' only: the markdown library is served by the app (static/vendor), so the
+            // page needs no CDN -- and works with no internet, on the LAN.
+            "script-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data:",
             "font-src 'self' data:");
 

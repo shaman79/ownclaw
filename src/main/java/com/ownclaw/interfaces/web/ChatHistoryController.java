@@ -1,5 +1,7 @@
 package com.ownclaw.interfaces.web;
 
+import com.ownclaw.config.OwnClawConfig;
+import com.ownclaw.conversation.ChatOptions;
 import com.ownclaw.conversation.ConversationService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -21,9 +23,11 @@ public class ChatHistoryController {
     private static final Logger log = LoggerFactory.getLogger(ChatHistoryController.class);
 
     private final ConversationService conversationService;
+    private final OwnClawConfig config;
 
-    public ChatHistoryController(ConversationService conversationService) {
+    public ChatHistoryController(ConversationService conversationService, OwnClawConfig config) {
         this.conversationService = conversationService;
+        this.config = config;
     }
 
     /**
@@ -54,7 +58,8 @@ public class ChatHistoryController {
         String userId = (String) request.getAttribute("userId");
         String title = (body != null && body.containsKey("title")) ? body.get("title") : "New Chat";
         String sessionId = conversationService.createSession(userId, title);
-        log.info("New chat session created: user={}, session={}, title={}", userId, sessionId, title);
+        // Not its title: a chat a link makes is titled by an alert, which names hosts and paths.
+        log.info("New chat session created: user={}, session={}", userId, sessionId);
         return ResponseEntity.ok(Map.of("sessionId", sessionId, "title", title));
     }
 
@@ -66,20 +71,34 @@ public class ChatHistoryController {
     public ResponseEntity<?> switchSession(HttpServletRequest request,
                                            @PathVariable String sessionId) {
         String userId = (String) request.getAttribute("userId");
+        // A chat of the caller's: pointed at another account's, Telegram and pages that follow
+        // the open chat filed this account's messages into that one.
+        if (!conversationService.hasChat(userId, sessionId)) return ResponseEntity.notFound().build();
         conversationService.setActiveSession(userId, sessionId);
         return ResponseEntity.ok(Map.of("sessionId", sessionId));
     }
 
     /**
-     * Get messages for a specific session.
+     * Get messages for a specific session, oldest first: all of them, or a page of them.
      * GET /api/chats/{sessionId}/messages
+     * Query params: limit=N for the newest N, before=<message id> for those before that row;
+     * hasMore says whether the chat has rows earlier than the ones returned. With what the chat
+     * has chosen of the owner's defaults (options) and those defaults (defaults), which the page
+     * shows next to the message box: the chat's choice, or the default it follows.
      */
     @GetMapping("/{sessionId}/messages")
     public ResponseEntity<?> getMessages(HttpServletRequest request,
-                                         @PathVariable String sessionId) {
+                                         @PathVariable String sessionId,
+                                         @RequestParam(required = false) String before,
+                                         @RequestParam(required = false) Integer limit) {
         String userId = (String) request.getAttribute("userId");
-        List<Map<String, Object>> messages = conversationService.getSessionMessages(userId, sessionId);
-        return ResponseEntity.ok(Map.of("messages", messages, "sessionId", sessionId));
+        if (limit != null && limit < 1) {
+            return ResponseEntity.badRequest().body(Map.of("error", "limit must be at least 1"));
+        }
+        var page = conversationService.getSessionMessages(userId, sessionId, before, limit);
+        return ResponseEntity.ok(Map.of("messages", page.messages(), "hasMore", page.hasMore(),
+                "sessionId", sessionId, "options", conversationService.chatOptions(userId, sessionId),
+                "defaults", ChatOptions.defaultsOf(config.getMentor())));
     }
 
     /**

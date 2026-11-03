@@ -3,6 +3,8 @@ package com.ownclaw.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 /**
  * Root configuration mapping to the {@code ownclaw:} prefix in application.yaml.
  * Uses mutable POJOs because Spring Boot property binding requires setters for nested objects.
@@ -26,7 +28,6 @@ public class OwnClawConfig {
     private Observability observability = new Observability();
     private Budgets budgets = new Budgets();
     private Feedback feedback = new Feedback();
-    private PlanCache planCache = new PlanCache();
 
     // --- Nested classes ---
 
@@ -34,8 +35,25 @@ public class OwnClawConfig {
         private String provider = "ollama";
         private String url = "http://localhost:11434";
         private String model = "qwen2.5:14b";
-        private double temperature = 0.3;
-        private int contextWindow = 16384;
+
+        /**
+         * How the local model chooses each next piece of a reply it reasons on first, sent whole
+         * with every such call (OllamaProvider), so neither the model file's defaults nor
+         * Ollama's own decide. The default is the model publisher's recommendation for
+         * Qwen3.6-35B-A3B in thinking mode, general tasks (its model card). The presence penalty
+         * is what keeps the model out of loops: on 2026-10-08 the turn that had hung for two and a
+         * half hours, replayed three times at each setting, looped once at temperature 0.3 with
+         * no penalty and once at 0.6 with none, and never at these values. Ollama on the
+         * production host was checked to honour every one of them that day.
+         */
+        private Sampling thinking = new Sampling(1.0, 0.95, 20, 0.0, 1.5);
+
+        /**
+         * The same for a reply the model gives straight away, without reasoning first (asked for
+         * by the call, or by the thinking effort at low): the publisher's recommendation for
+         * Qwen3.6-35B-A3B in non-thinking mode.
+         */
+        private Sampling answering = new Sampling(0.7, 0.80, 20, 0.0, 1.5);
 
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
@@ -43,10 +61,52 @@ public class OwnClawConfig {
         public void setUrl(String url) { this.url = url; }
         public String getModel() { return model; }
         public void setModel(String model) { this.model = model; }
-        public double getTemperature() { return temperature; }
-        public void setTemperature(double temperature) { this.temperature = temperature; }
-        public int getContextWindow() { return contextWindow; }
-        public void setContextWindow(int contextWindow) { this.contextWindow = contextWindow; }
+        public Sampling getThinking() { return thinking; }
+        public void setThinking(Sampling thinking) { this.thinking = thinking; }
+        public Sampling getAnswering() { return answering; }
+        public void setAnswering(Sampling answering) { this.answering = answering; }
+    }
+
+    /**
+     * How a local model chooses each next piece of its reply, as Ollama's options name them. A
+     * null value is not sent, and the model's own default applies.
+     */
+    public static class Sampling {
+        private Double temperature;
+        private Double topP;
+        private Integer topK;
+        private Double minP;
+        private Double presencePenalty;
+
+        public Sampling() {}
+
+        public Sampling(Double temperature, Double topP, Integer topK, Double minP, Double presencePenalty) {
+            this.temperature = temperature;
+            this.topP = topP;
+            this.topK = topK;
+            this.minP = minP;
+            this.presencePenalty = presencePenalty;
+        }
+
+        /** Put the values set into a request's {@code options}, under Ollama's names. */
+        public void into(com.fasterxml.jackson.databind.node.ObjectNode options) {
+            if (temperature != null) options.put("temperature", temperature);
+            if (topP != null) options.put("top_p", topP);
+            if (topK != null) options.put("top_k", topK);
+            if (minP != null) options.put("min_p", minP);
+            if (presencePenalty != null) options.put("presence_penalty", presencePenalty);
+        }
+
+        public Double getTemperature() { return temperature; }
+        public void setTemperature(Double temperature) { this.temperature = temperature; }
+        public Double getTopP() { return topP; }
+        public void setTopP(Double topP) { this.topP = topP; }
+        public Integer getTopK() { return topK; }
+        public void setTopK(Integer topK) { this.topK = topK; }
+        public Double getMinP() { return minP; }
+        public void setMinP(Double minP) { this.minP = minP; }
+        public Double getPresencePenalty() { return presencePenalty; }
+        public void setPresencePenalty(Double presencePenalty) { this.presencePenalty = presencePenalty; }
     }
 
     public static class Mentor {
@@ -55,23 +115,8 @@ public class OwnClawConfig {
         private String apiKey;
         private String anthropicApiKey;
         private String anthropicModel = "claude-sonnet-4-20250514";
-        private int maxTokensPerTask = 10000;
         private double temperature = 0.4;
 
-        /**
-         * If true, use the local LLM (Ollama) to pre-select the most relevant tools
-         * to include in the cloud prompt. This reduces the large step-0 tool manifest.
-         * Falls back to heuristic selection if local is unavailable or output is invalid.
-         */
-        private boolean localToolSelection = false;
-
-        /** Max number of tools to include with full descriptions in the prompt when local selection is enabled. */
-        private int localToolSelectionMaxTools = 12;
-
-        /** Max number of tool candidates to show the local selector model (compact list) when local selection is enabled. */
-        private int localToolSelectionCandidateLimit = 120;
-
-        /** Cap the number of omitted tool names listed after the manifest ("Also:"). Prevents huge name lists. */
         private boolean nativeTools = true;
 
         /**
@@ -89,13 +134,47 @@ public class OwnClawConfig {
          */
         private boolean localFirstUnattended = true;
 
+        /**
+         * Local only: no cloud model is called, and the task runs on the local model, best
+         * effort. The owner's switch for a cloud or an internet that is not there: the settings
+         * page and /local set it ({@link LocalMode}). The default: a chat can choose otherwise
+         * next to its message box ({@code TaskOptions}). Off, a task whose cloud cannot be reached
+         * moves to the local model by itself ({@code AgentLoop}).
+         */
+        private boolean localOnly = false;
+
+        public boolean isLocalOnly() { return localOnly; }
+
+        /**
+         * Cost over speed, on a chat: the cloud plans and the local model runs every skill, as
+         * on unattended work ({@code ThinkingEngine#stepMode}) -- slower, cheaper. Off, the
+         * cloud runs the skills itself. The middle stop of the owner's time-vs-cost slider,
+         * local only being the last ({@link LocalMode}); the default, as local only is.
+         */
+        private boolean preferCost = true;
+
+        public boolean isPreferCost() { return preferCost; }
+        public void setPreferCost(boolean v) { this.preferCost = v; }
+        public void setLocalOnly(boolean v) { this.localOnly = v; }
+
+        /**
+         * How much the models think before they act: "low", "medium" or "high", the owner's
+         * default on the settings page ({@link ThinkingEffort}), which a chat can override next
+         * to its message box ({@code TaskOptions}). A cloud model that takes an effort is sent
+         * it on every step of a task and on the skill code it writes; at low the local model also
+         * answers without reasoning first, on the same calls when it runs a task itself and on
+         * every turn of a delegation. Medium and high change nothing locally.
+         */
+        private String thinkingEffort = "high";
+
+        public String getThinkingEffort() { return thinkingEffort; }
+        public void setThinkingEffort(String v) { this.thinkingEffort = v; }
+
         public boolean isLocalFirstUnattended() { return localFirstUnattended; }
         public void setLocalFirstUnattended(boolean v) { this.localFirstUnattended = v; }
 
         public boolean isNativeTools() { return nativeTools; }
         public void setNativeTools(boolean v) { this.nativeTools = v; }
-
-        private int toolNamePreviewLimit = 50;
 
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
@@ -107,19 +186,8 @@ public class OwnClawConfig {
         public void setAnthropicApiKey(String anthropicApiKey) { this.anthropicApiKey = anthropicApiKey; }
         public String getAnthropicModel() { return anthropicModel; }
         public void setAnthropicModel(String anthropicModel) { this.anthropicModel = anthropicModel; }
-        public int getMaxTokensPerTask() { return maxTokensPerTask; }
-        public void setMaxTokensPerTask(int maxTokensPerTask) { this.maxTokensPerTask = maxTokensPerTask; }
         public double getTemperature() { return temperature; }
         public void setTemperature(double temperature) { this.temperature = temperature; }
-
-        public boolean isLocalToolSelection() { return localToolSelection; }
-        public void setLocalToolSelection(boolean localToolSelection) { this.localToolSelection = localToolSelection; }
-        public int getLocalToolSelectionMaxTools() { return localToolSelectionMaxTools; }
-        public void setLocalToolSelectionMaxTools(int v) { this.localToolSelectionMaxTools = v; }
-        public int getLocalToolSelectionCandidateLimit() { return localToolSelectionCandidateLimit; }
-        public void setLocalToolSelectionCandidateLimit(int v) { this.localToolSelectionCandidateLimit = v; }
-        public int getToolNamePreviewLimit() { return toolNamePreviewLimit; }
-        public void setToolNamePreviewLimit(int v) { this.toolNamePreviewLimit = v; }
     }
 
     public static class Queue {
@@ -128,8 +196,6 @@ public class OwnClawConfig {
         private int cloudConcurrency = 3;
         private int sandboxConcurrency = 3;
         private int maxQueuedTasks = 50;
-        /** Run background work on its own thread. Off = today's single worker. */
-        private boolean separateBackgroundLane = false;
 
         public int getMaxConcurrentTasks() { return maxConcurrentTasks; }
         public void setMaxConcurrentTasks(int v) { this.maxConcurrentTasks = v; }
@@ -140,27 +206,21 @@ public class OwnClawConfig {
         public int getSandboxConcurrency() { return sandboxConcurrency; }
         public void setSandboxConcurrency(int v) { this.sandboxConcurrency = v; }
         public int getMaxQueuedTasks() { return maxQueuedTasks; }
-        public boolean isSeparateBackgroundLane() { return separateBackgroundLane; }
-        public void setSeparateBackgroundLane(boolean v) { this.separateBackgroundLane = v; }
         public void setMaxQueuedTasks(int v) { this.maxQueuedTasks = v; }
     }
 
     public static class Tasks {
         private int defaultTimeout = 300;
         private int stepTimeout = 60;
-        private int maxPlanSteps = 20;
         private int longRunningThreshold = 120;
         private int stallTimeout = 1200;
         private int heartbeatInterval = 30;
         private int schedulerPollInterval = 30;
-        private int maxScheduledTasksPerUser = 50;
 
         public int getDefaultTimeout() { return defaultTimeout; }
         public void setDefaultTimeout(int v) { this.defaultTimeout = v; }
         public int getStepTimeout() { return stepTimeout; }
         public void setStepTimeout(int v) { this.stepTimeout = v; }
-        public int getMaxPlanSteps() { return maxPlanSteps; }
-        public void setMaxPlanSteps(int v) { this.maxPlanSteps = v; }
         public int getLongRunningThreshold() { return longRunningThreshold; }
         public void setLongRunningThreshold(int v) { this.longRunningThreshold = v; }
         public int getStallTimeout() { return stallTimeout; }
@@ -169,8 +229,6 @@ public class OwnClawConfig {
         public void setHeartbeatInterval(int v) { this.heartbeatInterval = v; }
         public int getSchedulerPollInterval() { return schedulerPollInterval; }
         public void setSchedulerPollInterval(int v) { this.schedulerPollInterval = v; }
-        public int getMaxScheduledTasksPerUser() { return maxScheduledTasksPerUser; }
-        public void setMaxScheduledTasksPerUser(int v) { this.maxScheduledTasksPerUser = v; }
     }
 
     public static class Telegram {
@@ -195,13 +253,22 @@ public class OwnClawConfig {
      * Privacy. One switch, and it is not "off": the canary is ENFORCE or OBSERVE. OBSERVE
      * changes exactly one thing — a canary hit is sent and recorded as OBSERVED_LEAK instead of
      * refused. The gateway being the only door, labels being assigned at source, private
-     * observations rendering as descriptors, secrets being scrubbed and every call writing its
-     * row are not policies and cannot be toggled.
+     * observations rendering as descriptors, the filter removing secrets and replacing
+     * identifiers, and every call writing its row are not policies and cannot be toggled.
+     * <p>
+     * {@code personalSources} says which results hold personal content, and are PRIVATE: those of
+     * a skill whose required credentials include a key starting with one of these prefixes.
      */
     public static class Privacy {
+        /** Reading mail: the default {@code personalSources}. */
+        public static final List<String> DEFAULT_PERSONAL_SOURCES = List.of("IMAP_", "POP3_");
+
         private com.ownclaw.llm.CloudGateway.Mode canary = com.ownclaw.llm.CloudGateway.Mode.ENFORCE;
+        private List<String> personalSources = DEFAULT_PERSONAL_SOURCES;
         public com.ownclaw.llm.CloudGateway.Mode getCanary() { return canary; }
         public void setCanary(com.ownclaw.llm.CloudGateway.Mode v) { this.canary = v; }
+        public List<String> getPersonalSources() { return personalSources; }
+        public void setPersonalSources(List<String> v) { this.personalSources = v == null ? List.of() : List.copyOf(v); }
     }
 
     private Privacy privacy = new Privacy();
@@ -292,12 +359,9 @@ public class OwnClawConfig {
     }
 
     public static class Observability {
-        private int eventLogRetentionDays = 30;
         private boolean chatStatusMessages = true;
         private String statusVerbosity = "concise";
 
-        public int getEventLogRetentionDays() { return eventLogRetentionDays; }
-        public void setEventLogRetentionDays(int v) { this.eventLogRetentionDays = v; }
         public boolean isChatStatusMessages() { return chatStatusMessages; }
         public void setChatStatusMessages(boolean v) { this.chatStatusMessages = v; }
         public String getStatusVerbosity() { return statusVerbosity; }
@@ -319,25 +383,9 @@ public class OwnClawConfig {
 
     public static class Feedback {
         private int maxRounds = 3;
-        private int teachingLogMaxEntries = 30;
 
         public int getMaxRounds() { return maxRounds; }
         public void setMaxRounds(int v) { this.maxRounds = v; }
-        public int getTeachingLogMaxEntries() { return teachingLogMaxEntries; }
-        public void setTeachingLogMaxEntries(int v) { this.teachingLogMaxEntries = v; }
-    }
-
-    public static class PlanCache {
-        private boolean enabled = true;
-        private int maxEntries = 500;
-        private int ttlHours = 168;
-
-        public boolean isEnabled() { return enabled; }
-        public void setEnabled(boolean v) { this.enabled = v; }
-        public int getMaxEntries() { return maxEntries; }
-        public void setMaxEntries(int v) { this.maxEntries = v; }
-        public int getTtlHours() { return ttlHours; }
-        public void setTtlHours(int v) { this.ttlHours = v; }
     }
 
     // --- Root getters/setters ---
@@ -372,6 +420,4 @@ public class OwnClawConfig {
     public void setBudgets(Budgets v) { this.budgets = v; }
     public Feedback getFeedback() { return feedback; }
     public void setFeedback(Feedback v) { this.feedback = v; }
-    public PlanCache getPlanCache() { return planCache; }
-    public void setPlanCache(PlanCache v) { this.planCache = v; }
 }

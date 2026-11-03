@@ -1,5 +1,7 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.privacy.PrivateIndex;
+
 import java.util.regex.Pattern;
 
 /**
@@ -15,10 +17,15 @@ import java.util.regex.Pattern;
  * syntax a model reaches for on its own; a reviewer's probes found the model writing
  * {@code {{$1.body_text}}} unprompted, which is accepted. The old {@code $1} form is not a
  * reference at all any more, and nothing teaches it.
+ * <p>
+ * In a delegation's tool arguments, {@code {{name}}} -- a {@link #NAME}, never a number -- is a
+ * text the cloud handed the delegation by that name ({@link DelegationPlan#texts}), put in by
+ * {@code References#resolveInText}. Everywhere else it is text.
  *
  * @param handle 1-based position in whichever list the reference is resolved against — the
  *               delegation's own results for the local model, the task's for the cloud
- * @param field  the JSON field, or null for the whole output
+ * @param field  the JSON field, or null for the whole output: its name, or {@code #k} for the
+ *               k-th field in key order ({@link #position})
  */
 public record ArtifactRef(int handle, String field) {
 
@@ -46,12 +53,29 @@ public record ArtifactRef(int handle, String field) {
     /** A letter or a digit: what makes the rest of a value text. */
     private static final Pattern WORDY = Pattern.compile("[\\p{L}\\p{N}]");
 
+    /** What follows the opening braces of a well-formed reference to a result. */
+    private static final String RESULT = "\\$?" + SP + "\\d{1,9}" + SP + "(?:\\.[^{}]*)?";
+
     /**
      * A well-formed reference inside prose, for taking one out of a place where it cannot work:
      * a delegation's goal naming results the delegation cannot see.
      */
-    static final Pattern TOKEN = Pattern.compile(
-            "\\{\\{" + SP + "\\$?" + SP + "\\d{1,9}" + SP + "(\\.[^{}]*)?\\}\\}");
+    static final Pattern TOKEN = Pattern.compile("\\{\\{" + SP + RESULT + "\\}\\}");
+
+    /**
+     * The name of a text a delegation is handed ({@link DelegationPlan#texts}): a lowercase letter,
+     * then lowercase letters, digits and underscores. It never begins with a digit, so
+     * {@code {{name}}} is never also a result's handle.
+     */
+    static final Pattern NAME = Pattern.compile("[a-z][a-z0-9_]*");
+
+    /**
+     * A well-formed reference inside text, to a result or, by its name, to a text: what a
+     * delegation's tool arguments are resolved by. Group 1 is the name, for a text; null for a
+     * result, which {@link #parse} reads.
+     */
+    static final Pattern TOKEN_OR_NAME = Pattern.compile(
+            "\\{\\{" + SP + "(?:" + RESULT + "|(" + NAME.pattern() + ")" + SP + ")\\}\\}");
 
     /**
      * The reference that IS the whole value, or null.
@@ -102,6 +126,55 @@ public record ArtifactRef(int handle, String field) {
     /** How the n-th result is named to whoever is reading. */
     public static String handle(int n) {
         return "{{" + n + "}}";
+    }
+
+    /** How the text called {@code name} is written to insert it. */
+    public static String handle(String name) {
+        return "{{" + name + "}}";
+    }
+
+    /**
+     * k for a field written {@code #k} -- {@code {{3.#7}}} is the seventh field of result 3, in
+     * key order -- or null for a field named by its name. Always a position: a key that is itself
+     * spelled {@code #7} is referenced by its own position, which {@link #toField} offers.
+     */
+    public Integer position() {
+        if (field == null || field.length() < 2 || field.length() > MAX_HANDLE_DIGITS + 1
+                || field.charAt(0) != '#') {
+            return null;
+        }
+        for (int i = 1; i < field.length(); i++) {
+            if (field.charAt(i) < '0' || field.charAt(i) > '9') return null;
+        }
+        int k = Integer.parseInt(field.substring(1));
+        return k < 1 ? null : k;
+    }
+
+    /**
+     * The reference to the field {@code name}, the {@code position}-th in key order of result
+     * {@code handle}: by its name when the name is shorter than a canary window and this grammar
+     * reads it back as that same name; otherwise by its position, {@code {{handle.#position}}}.
+     * <p>
+     * A name of a whole window or more is withheld because a key can be data -- an address, a
+     * sentence a skill keyed its output by -- and a window of a PRIVATE result is exactly what
+     * the canary refuses to send, so a descriptor carrying one would leak it and then be refused.
+     * Its length is measured as the canary measures it, after {@link PrivateIndex#normalise},
+     * which can lengthen a name: a dotted capital I lowercases to two characters, a ligature
+     * unfolds into two letters. A shorter name can still complete a window with what the
+     * descriptor prints around it; the descriptor finds those itself ({@code Artifact#withheld}).
+     * A name the grammar would read differently (padded with spaces, holding braces, or spelled
+     * like a position) could never resolve. The position always does, and says nothing.
+     */
+    public static ArtifactRef toField(int handle, String name, int position) {
+        var byName = new ArtifactRef(handle, name);
+        return PrivateIndex.normalise(name).length() < PrivateIndex.WINDOW
+                && byName.equals(parse(byName.toString())) && byName.position() == null
+                ? byName : atPosition(handle, position);
+    }
+
+    /** The reference to the {@code position}-th field of result {@code handle}, in key order. */
+    public static ArtifactRef atPosition(int handle, int position) {
+        return new ArtifactRef(handle, "#" + position);
     }
 
     /** The reference exactly as the model has to write it. */

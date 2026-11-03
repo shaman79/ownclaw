@@ -21,8 +21,12 @@ import java.util.Optional;
  * so nothing here reuses them.
  * <p>
  * What it does not contain, on purpose: the text of any request (never stored), the per-part list
- * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), and
- * any tool's error output beyond the excerpt a failed step's row already carries.
+ * and hashes of a request (noise in a UI, and a hash of a private part can confirm a guess), any
+ * tool's output beyond how a failed step failed, which its row carries (none for a private step),
+ * and the name a file was uploaded with: a row written now holds the file's id instead, and the
+ * page's endpoint looks the name up by it ({@code TaskTraceController}). Rows written before that
+ * still hold the name; nothing here reads it. The same parse is the record of the task that its
+ * ending and later tasks of its chat read ({@code TaskRecord}).
  */
 @Service
 public class TaskTraceService {
@@ -37,6 +41,9 @@ public class TaskTraceService {
                     + "of 8 or more). A paraphrase, or a short value such as a PIN, is not caught.",
             "Private text the cloud already had from elsewhere (your own message, a public "
                     + "result, a tool's description) is not counted as found.",
+            "Secrets and identifiers are found by their shape or by the name they are written "
+                    + "under: a password in prose, a key with no label or a person's name in free "
+                    + "text goes to the cloud model as it is.",
             "The local model's server is assumed to be private; nothing checks that.",
             "What a task saves through a skill -- notes, a file, a sheet -- is not private when a "
                     + "later task reads it back, scheduled runs included. That covers the local "
@@ -89,10 +96,10 @@ public class TaskTraceService {
         var pending = new ArrayList<Map<String, Object>>();
         var decisions = new LinkedHashMap<String, Integer>();
         long bytesOut = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0;
-        int scrubs = 0;
+        int scrubs = 0, identifiers = 0;
         double cost = 0;
         boolean costIsFloor = false;
-        long prevCloud = 0, prevLocal = 0;
+        long prevCloud = 0, prevLocal = 0, localAfterEnd = 0;
         Map<String, Object> outcome = null;
         String request = null;
 
@@ -119,9 +126,10 @@ public class TaskTraceService {
                     cacheRead += d.path("cacheReadTokens").asLong();
                     cacheWrite += d.path("cacheWriteTokens").asLong();
                     scrubs += d.path("scrubs").asInt();
+                    identifiers += d.path("identifiers").asInt();
                     cost += d.path("costUsd").asDouble();
-                    // A failed call is recorded with no tokens and no cost, so a total over it
-                    // is a lower bound.
+                    // A failed call is recorded with at most what its stream had reported when
+                    // it ended, so a total over it is a lower bound.
                     if (isError(c)) costIsFloor = true;
                 }
                 case "step" -> {
@@ -146,6 +154,20 @@ public class TaskTraceService {
                     s.put("step", stepNo);
                     s.put("at", at);
                     s.put("tool", tool);
+                    // skill_create and skill_manage: which skill. Absent on rows from before it was
+                    // recorded.
+                    s.put("skill", d.hasNonNull("skill") ? d.path("skill").asText() : null);
+                    // skill_manage: which action -- read, delete, list, analyze. Absent on rows from
+                    // before it was recorded.
+                    s.put("skillAction", d.hasNonNull("skillAction") ? d.path("skillAction").asText() : null);
+                    // delegate: what the cloud asked the local model to do. Absent on rows from
+                    // before it was recorded, and where the local model wrote the goal itself.
+                    s.put("goal", d.hasNonNull("goal") ? d.path("goal").asText() : null);
+                    // delegate: the texts the cloud handed it by name, whole, in their order. Absent
+                    // where it handed none, and on the same rows as the goal.
+                    s.put("texts", d.path("texts").isObject() ? texts(d.path("texts")) : null);
+                    // delegate: refused before the local model was given anything.
+                    s.put("notStarted", d.path("notStarted").asBoolean(false));
                     s.put("tier", "delegate".equals(tool) ? (localDelta > 0 ? "local" : null) : decidedBy);
                     s.put("decidedBy", decidedBy);
                     s.put("ok", d.path("success").asBoolean(false) && !Boolean.TRUE.equals(reported));
@@ -154,6 +176,9 @@ public class TaskTraceService {
                     s.put("durationMs", d.path("durationMs").asLong());
                     s.put("cloudCalls", recorded ? pending.size() : null);
                     s.put("cloudTokens", pending.isEmpty() ? cloudDelta : billed(pending));
+                    // Kind by kind where the step's calls are recorded, for the page to show: a
+                    // cache read costs a tenth of a new input token.
+                    for (String kind : BILLED) s.put(kind, pending.isEmpty() ? null : sum(pending, kind));
                     s.put("localTokens", localDelta);
                     s.put("costUsd", pending.isEmpty() ? null : costOf(pending));
                     s.put("costIsFloor", pending.stream().anyMatch(TaskTraceService::isError));
@@ -167,6 +192,11 @@ public class TaskTraceService {
                     if (d == null || !d.has("artifact")) continue;
                     artifacts.add(artifact(d.path("artifact").asText(), d));
                     artifactIds.add(id);
+                }
+                // Local tokens billed after the ending was recorded: a summary of a private result
+                // whose reply came back just as the task ended. Part of what the task used.
+                case EventLogService.TOKENS_AFTER_END -> {
+                    if (d != null) localAfterEnd += d.path("localTokens").asLong();
                 }
                 case "task_completed" -> {
                     request = row.get("summary") == null ? null : String.valueOf(row.get("summary"));
@@ -187,10 +217,11 @@ public class TaskTraceService {
 
         // For each artifact: how many later requests left at all, and -- for a PRIVATE result
         // the canary could look for -- how many of those were checked for its text, in how many
-        // it was found, and of those how many went out anyway (the check was only observing) or
-        // failed (whether they reached the provider is not recorded); and how many later
-        // requests were never checked for it. Anything else is shown as not checked, never as
-        // clean.
+        // it was found, and of those how many went out anyway (the check was only observing; a
+        // request that failed after the provider had reported its tokens went out too) or failed
+        // with nothing reported (whether those reached the provider is not recorded); and how
+        // many later requests were never checked for it. Anything else is shown as not checked,
+        // never as clean.
         for (int i = 0; i < artifacts.size(); i++) {
             var a = artifacts.get(i);
             String prefix = a.get("handle") + " in part";
@@ -214,7 +245,7 @@ public class TaskTraceService {
                 checked++;
                 if (named) {
                     hits++;
-                    if ("ERROR".equals(c.get("decision"))) failed++;
+                    if ("ERROR".equals(c.get("decision")) && c.get("promptTokens") == null) failed++;
                     else if (!refused) leaked++;
                 }
             }
@@ -241,9 +272,14 @@ public class TaskTraceService {
         totals.put("cacheReadTokens", cacheRead);
         totals.put("cacheWriteTokens", cacheWrite);
         totals.put("scrubs", scrubs);
+        totals.put("identifiers", identifiers);
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
+
+        if (outcome != null && localAfterEnd > 0) {
+            outcome.put("localTokens", ((Number) outcome.get("localTokens")).longValue() + localAfterEnd);
+        }
 
         var out = new LinkedHashMap<String, Object>();
         out.put("recorded", recorded);
@@ -276,8 +312,13 @@ public class TaskTraceService {
             else if (kind.startsWith("schema:")) toolChars += chars;
             else { msgCount++; msgChars += chars; }
         }
-        // A call that failed has no response, so no tokens and no cost: not recorded, not zero.
-        boolean error = "ERROR".equals(d.path("decision").asText());
+        // A call that failed has no reply. Its row holds what the provider's stream had reported
+        // before it ended -- the input it read, and little of its output, which Anthropic counts
+        // only at the end -- or nothing, when it ended before that or was written before failed
+        // calls were counted: then its tokens and cost are not recorded, not zero.
+        boolean unrecorded = "ERROR".equals(d.path("decision").asText())
+                && d.path("promptTokens").asLong() + d.path("completionTokens").asLong()
+                        + d.path("cacheReadTokens").asLong() + d.path("cacheWriteTokens").asLong() == 0;
         var c = new LinkedHashMap<String, Object>();
         c.put("at", at);
         c.put("step", null);
@@ -285,16 +326,27 @@ public class TaskTraceService {
         c.put("model", d.path("model").asText(null));
         c.put("decision", d.path("decision").asText());
         c.put("bytesOut", d.path("bytesOut").asLong());
-        c.put("promptTokens", error ? null : d.path("promptTokens").asLong());
-        c.put("completionTokens", error ? null : d.path("completionTokens").asLong());
-        c.put("cacheReadTokens", error ? null : d.path("cacheReadTokens").asLong());
-        c.put("cacheWriteTokens", error ? null : d.path("cacheWriteTokens").asLong());
-        c.put("costUsd", error ? null : d.path("costUsd").asDouble());
+        c.put("promptTokens", unrecorded ? null : d.path("promptTokens").asLong());
+        c.put("completionTokens", unrecorded ? null : d.path("completionTokens").asLong());
+        c.put("cacheReadTokens", unrecorded ? null : d.path("cacheReadTokens").asLong());
+        c.put("cacheWriteTokens", unrecorded ? null : d.path("cacheWriteTokens").asLong());
+        c.put("costUsd", unrecorded ? null : d.path("costUsd").asDouble());
         c.put("scrubs", d.path("scrubs").asInt());
+        c.put("identifiers", d.path("identifiers").asInt());
         c.put("refusal", d.hasNonNull("refusal") ? d.path("refusal").asText() : null);
+        // Why the reply ended ("end_turn", "refusal (cyber)", ...). A call with no reply has
+        // none, and neither does a row written before it was recorded.
+        c.put("stopReason", d.hasNonNull("stopReason") ? d.path("stopReason").asText() : null);
         c.put("messages", Map.of("count", msgCount, "chars", msgChars));
         c.put("tools", Map.of("count", toolCount, "chars", toolChars));
         return c;
+    }
+
+    /** A delegation's texts, name to text, in the order the row holds them. */
+    private static Map<String, String> texts(JsonNode texts) {
+        var out = new LinkedHashMap<String, String>();
+        texts.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     private static List<Map<String, Object>> stepArtifacts(JsonNode d) {
@@ -316,20 +368,27 @@ public class TaskTraceService {
         for (JsonNode w : d.path("why")) why.add(w.asText());
         a.put("why", why);
         a.put("indexed", d.has("indexed") ? d.path("indexed").asBoolean() : null);
-        // Only an attachment's row has one: the name the file was uploaded with. This page is
-        // the owner's; the cloud was never told it, so no artifact carries it.
-        a.put("name", d.hasNonNull("name") ? d.path("name").asText() : null);
+        // Only an attachment's row has one: which file it is. Absent on rows from before it was
+        // recorded.
+        a.put("fileId", d.hasNonNull("fileId") ? d.path("fileId").asText() : null);
         return a;
     }
+
+    /** The kinds of token a call is billed for: new input, output, and both cache directions. */
+    private static final List<String> BILLED =
+            List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens");
 
     /** Tokens billed for a group of calls: in, out, and both cache directions. */
     private static long billed(List<Map<String, Object>> group) {
         long t = 0;
-        for (var c : group) {
-            for (String k : List.of("promptTokens", "completionTokens", "cacheReadTokens", "cacheWriteTokens")) {
-                if (c.get(k) instanceof Number n) t += n.longValue();
-            }
-        }
+        for (String kind : BILLED) t += sum(group, kind);
+        return t;
+    }
+
+    /** One kind of token over a group of calls; a call whose tokens are not recorded adds none. */
+    private static long sum(List<Map<String, Object>> group, String kind) {
+        long t = 0;
+        for (var c : group) if (c.get(kind) instanceof Number n) t += n.longValue();
         return t;
     }
 

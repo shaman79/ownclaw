@@ -2,11 +2,12 @@ package com.ownclaw.interfaces.telegram;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ownclaw.agent.TaskChat;
 import com.ownclaw.config.OwnClawConfig;
 import com.ownclaw.config.SetupWizardService;
 import com.ownclaw.conversation.ConversationService;
-import com.ownclaw.core.TaskCancellationService;
 import com.ownclaw.core.TaskQueue;
+import com.ownclaw.core.UserMessage;
 import com.ownclaw.interfaces.CommandHandler;
 import com.ownclaw.observability.ChatStatusEmitter;
 import com.ownclaw.observability.DebugSessionService;
@@ -23,6 +24,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -41,7 +44,6 @@ public class TelegramBotService {
     private final ConversationService conversationService;
     private final SkillInteractionHandler interactionHandler;
     private final CommandHandler commandHandler;
-    private final TaskCancellationService cancellationService;
     private final DebugSessionService debugService;
     private final ObjectMapper mapper;
     private final OkHttpClient httpClient;
@@ -52,9 +54,22 @@ public class TelegramBotService {
 
     /** Maps Telegram chatId → userId for users that have interacted. */
     private final Map<String, Long> userChatIds = new ConcurrentHashMap<>();
+
+    /**
+     * Every message to Telegram is sent from this one thread, in the order it was handed over. A
+     * wait Telegram asks for, or a retry after a failure, holds up the messages behind it and
+     * nothing else. The sends used to run on the thread that asked for them: a status on the
+     * thread of the task that emitted it, a result on the task queue's worker -- which slept out
+     * every retry_after while all agent work, the web chat's included, waited on Telegram.
+     */
+    private final ExecutorService outbox = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "telegram-outbox");
+        t.setDaemon(true);
+        return t;
+    });
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
-    @SuppressWarnings("unused") // setupWizard injected to guarantee applyOverrides() runs first
+    @org.springframework.beans.factory.annotation.Autowired
     public TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
                               UserRepository userRepo,
                               ChatStatusEmitter statusEmitter, ObjectMapper mapper,
@@ -62,9 +77,28 @@ public class TelegramBotService {
                               SkillInteractionHandler interactionHandler,
                               SetupWizardService setupWizard,
                               CommandHandler commandHandler,
-                              TaskCancellationService cancellationService,
                               DebugSessionService debugService,
                               org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        this(ownClawConfig, taskQueue, userRepo, statusEmitter, mapper, conversationService,
+                interactionHandler, setupWizard, commandHandler, debugService, jdbc,
+                new OkHttpClient.Builder()
+                        .connectTimeout(10, TimeUnit.SECONDS)
+                        .readTimeout(35, TimeUnit.SECONDS) // long poll timeout + buffer
+                        .build());
+    }
+
+    /** With the HTTP client given: a test's, which answers for Telegram. */
+    @SuppressWarnings("unused") // setupWizard injected to guarantee applyOverrides() runs first
+    TelegramBotService(OwnClawConfig ownClawConfig, TaskQueue taskQueue,
+                       UserRepository userRepo,
+                       ChatStatusEmitter statusEmitter, ObjectMapper mapper,
+                       ConversationService conversationService,
+                       SkillInteractionHandler interactionHandler,
+                       SetupWizardService setupWizard,
+                       CommandHandler commandHandler,
+                       DebugSessionService debugService,
+                       org.springframework.jdbc.core.JdbcTemplate jdbc,
+                       OkHttpClient httpClient) {
         this.jdbc = jdbc;
         this.config = ownClawConfig.getTelegram();
         this.taskQueue = taskQueue;
@@ -73,13 +107,9 @@ public class TelegramBotService {
         this.conversationService = conversationService;
         this.interactionHandler = interactionHandler;
         this.commandHandler = commandHandler;
-        this.cancellationService = cancellationService;
         this.debugService = debugService;
         this.mapper = mapper;
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(35, TimeUnit.SECONDS) // long poll timeout + buffer
-                .build();
+        this.httpClient = httpClient;
     }
 
     @PostConstruct
@@ -89,7 +119,6 @@ public class TelegramBotService {
             return;
         }
 
-        restoreKnownChats();
         String token = config.getBotToken();
         if (token == null || token.isBlank()) {
             log.warn("Telegram bot token not configured — bot disabled");
@@ -112,6 +141,7 @@ public class TelegramBotService {
         registerBotCommands(token);
 
         running = true;
+        restoreKnownChats();
         pollingThread = new Thread(this::pollLoop, "telegram-poller");
         pollingThread.setDaemon(true);
         pollingThread.start();
@@ -213,8 +243,113 @@ public class TelegramBotService {
         // a group he once wrote from would hand them to everyone in it.
         if (chatId == telegramUserId) rememberChat(userId, chatId);
 
-        // Subscribe to status messages for this user → send to Telegram with stats
+        subscribe(userId);
+
+        // ── /debug — toggle debug mode ──
+        if (text.strip().equalsIgnoreCase("/debug")) {
+            boolean enabled = debugService.toggle(userId);
+            sendMessage(chatId, enabled
+                    ? "\uD83D\uDC1B Debug mode ON — the web chat shows full prompts, raw LLM output, critic verdicts, and tool results."
+                    : "\uD83D\uDC1B Debug mode OFF");
+            return;
+        }
+
+        // A secret command anywhere but on its own -- "/bg /cred set KEY VALUE", "store this:
+        // /cred set KEY VALUE" -- is removed from the chat and goes nowhere: run, queued or
+        // handed to the agent, its secret would have gone on as text.
+        if (CommandHandler.misplacedSecret(text)) {
+            deleteSecret(chatId, message.path("message_id").asLong());
+            sendMessage(chatId, CommandHandler.MISPLACED_SECRET_ANSWER);
+            return;
+        }
+
+        // "/queue <message>" queues its message instead of handing it to the running task, as the
+        // web chat's Queue button does.
+        String queued = CommandHandler.queued(text);
+        if (queued != null) text = queued;
+
+        // Handle slash commands consistently with the Web UI
+        // Blanks first, as the command grammar reads them (CommandHandler.unblanked), as the web
+        // chat does: " /cred set KEY VALUE" was no command, and was saved and run as a task.
+        if (queued == null && CommandHandler.isCommand(text)) {
+            // "/cred set KEY VALUE" stays in the Telegram chat, on every device he is logged in
+            // on, unless it is removed -- asked for first, whatever storing it then does.
+            if (CommandHandler.carriesSecret(text)) deleteSecret(chatId, message.path("message_id").asLong());
+            // Typed here, a command is of no chat of a tab's: Telegram's messages go on in the
+            // account's open chat, which a web tab moves whenever it is written in -- so /cancel
+            // here stops everything, as it always did, not the chat the web used last; /bg answers
+            // in the chat open when it was sent.
+            var cmdResult = commandHandler.handle(userId, text, null);
+            if (cmdResult.isPresent()) {
+                sendMessage(chatId, cmdResult.get());
+                // Session commands: send active session info
+                if (commandHandler.isSessionCommand(CommandHandler.unblanked(text))) {
+                    String sessionId = conversationService.getCurrentSession(userId);
+                    sendMessage(chatId, "\uD83D\uDCC2 Active session: " + sessionId);
+                }
+                return;
+            }
+            // Not a command, and nothing waits for an answer: say so, as the web chat does.
+            // Handed to the agent, a mistyped "/creds set KEY VALUE" went to the cloud and into
+            // the chat history, the chat's title, the events and the episodes.
+            if (!interactionHandler.hasPending(userId)) {
+                sendMessage(chatId, CommandHandler.UNKNOWN_COMMAND);
+                return;
+            }
+        }
+
+        // A question waiting for an answer -- the setup wizard's -- takes this message instead
+        // of a new task.
+        if (queued == null && interactionHandler.hasPending(userId)) {
+            boolean handled = interactionHandler.provideInput(userId, text);
+            if (!handled) {
+                sendMessage(chatId, "No pending input request.");
+            }
+            return;
+        }
+
+        // Persist user message for conversation history
+        String currentSessionId = conversationService.getCurrentSession(userId);
+        conversationService.autoTitleIfNeeded(userId, currentSessionId, text);
+        // The row id: the task reads the chat this row was saved in, up to it, and not the row
+        // itself, which is its own text (ConversationService#contextOf).
+        String currentMessageId =
+                conversationService.saveMessage(userId, currentSessionId, "user", text);
+
+        // To the task running in this chat when it was asked from Telegram too, whose answer comes
+        // here; otherwise a task of its own (TaskQueue#send), whose answer is saved and sent here.
+        // It came from Telegram, so a task of its own shows its progress messages in Telegram too
+        // (forTelegram). Telegram has no choice of time vs cost or thinking effort beside the
+        // message: it runs on what its chat has chosen next to the web chat's message box.
+        var sent = new UserMessage(userId, currentSessionId, currentMessageId, text, List.of(),
+                TaskChat.Channel.TELEGRAM, conversationService.chatOptions(userId, currentSessionId), result -> {
+            // Saved as the web chat saves an answer: the web chat shows it on reload, the private
+            // answer included, and links it to what the task did. Saving is one half of
+            // delivering it, and failing it must not also lose the other: it is still sent.
+            try {
+                conversationService.saveAnswer(userId, currentSessionId, result);
+            } catch (Exception e) {
+                log.warn("Could not save the answer for {}: {}", userId, e.getMessage());
+            }
+            // The owner's own answer, private text included: he decided Telegram gets it in full
+            // -- in his private chat (its id is his own). Asked from a group, the group gets the
+            // safe text. What is stored above for later turns is the safe text either way. A
+            // question comes with the answers it offers, as keys to tap.
+            sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response(), result.choices());
+        });
+        // What became of it, in a line, when there is anything to say.
+        String fate = taskQueue.send(sent, queued != null).line();
+        if (fate != null) sendMessage(chatId, fate);
+    }
+
+    /**
+     * Forward this user's status stream to Telegram -- what is meant for him to read, as
+     * {@link #forTelegram} says -- to the chat remembered for him, resolved at delivery time.
+     * Subscribing again replaces this bot's listener and no other.
+     */
+    private void subscribe(String userId) {
         statusEmitter.subscribe(userId, this, msg -> {
+            if (!running || !forTelegram(msg)) return;
             StringBuilder sb = new StringBuilder(telegramText(msg));
             // Append token/step stats if available
             Map<String, Object> data = msg.data();
@@ -224,11 +359,10 @@ public class TelegramBotService {
                 Object steps = data.get("totalSteps");
                 Object ok = data.get("successCount");
                 if (steps != null || cloud != null) {
-                    sb.append("\n_");
+                    sb.append("\n");
                     if (steps != null) sb.append("Steps ").append(steps).append(" OK ").append(ok != null ? ok : 0).append(" | ");
                     if (cloud != null) sb.append("Cloud ").append(cloud);
                     if (local != null) sb.append(" Local ").append(local);
-                    sb.append("_");
                 }
             }
             // Resolve the chat at DELIVERY time, not from whichever message happened to create
@@ -239,86 +373,27 @@ public class TelegramBotService {
                 sendMessage(target, sb.toString());
             }
         });
-
-        // ── /cancel — stop the running task ──
-        if (text.strip().equalsIgnoreCase("/cancel")) {
-            // Stop with no task named means "whatever is running, stop it".
-            cancellationService.requestAll(userId);
-            interactionHandler.cancelPending(userId);
-            sendMessage(chatId, "⏹ Cancellation requested.");
-            return;
-        }
-
-        // ── /debug — toggle debug mode ──
-        if (text.strip().equalsIgnoreCase("/debug")) {
-            boolean enabled = debugService.toggle(userId);
-            sendMessage(chatId, enabled
-                    ? "\uD83D\uDC1B Debug mode *ON* — you will see full prompts, raw LLM output, critic verdicts, and tool results."
-                    : "\uD83D\uDC1B Debug mode *OFF*");
-            return;
-        }
-
-        // Handle slash commands consistently with the Web UI
-        if (text.startsWith("/")) {
-            var cmdResult = commandHandler.handle(userId, text);
-            if (cmdResult.isPresent()) {
-                sendMessage(chatId, cmdResult.get());
-                // Session commands: send active session info
-                if (commandHandler.isSessionCommand(text)) {
-                    String sessionId = conversationService.getCurrentSession(userId);
-                    sendMessage(chatId, "\uD83D\uDCC2 Active session: *" + sessionId + "*");
-                }
-                return;
-            }
-            // Not a recognized command — fall through to agent
-        }
-
-        // A waiting prompt (the /setup wizard's): route this message to it as the answer
-        // instead of starting a new task.
-        if (interactionHandler.hasPending(userId)) {
-            boolean handled = interactionHandler.provideInput(userId, userId, text);
-            if (!handled) {
-                sendMessage(chatId, "No pending input request.");
-            }
-            return;
-        }
-
-        // Persist user message for conversation history
-        String currentSessionId = conversationService.getCurrentSession(userId);
-        conversationService.autoTitleIfNeeded(userId, currentSessionId, text);
-        // The row id, so the loop can skip exactly the turn it is answering. Without it the
-        // message arrives twice: once as the task, once as the last line of "Recent
-        // conversation" -- the websocket path passes it and Telegram did not.
-        String currentMessageId =
-                conversationService.saveMessage(userId, currentSessionId, "user", text);
-
-        // Submit to task queue — orchestrator handles conversation persistence
-        taskQueue.submit(userId, text, 1, currentMessageId, java.util.List.of()).thenAccept(result -> {
-            // With its task id, so the web chat links this answer to what the task did; and with
-            // the private answer, if there is one, which the web chat shows on reload.
-            conversationService.saveMessage(userId, currentSessionId, "assistant",
-                    result.response(), java.util.List.of(), result.taskId(), result.ownerText());
-            // The owner's own answer, private text included: he decided Telegram gets it in full
-            // -- in his private chat (its id is his own). Asked from a group, the group gets the
-            // safe text. What is stored above for later turns is the safe text either way.
-            sendMessage(chatId, chatId == telegramUserId ? result.shown() : result.response());
-        });
     }
 
     /**
-     * Send to Telegram, falling back to plain text if Markdown will not parse.
-     * <p>
-     * Telegram rejects the whole request with HTTP 400 when the Markdown is malformed, and this
-     * text is agent output: skill names like {@code web_search_bikes} and
-     * {@code summarize_web_content} carry underscores, file paths and code carry asterisks, and
-     * an odd count of either is enough. The old code logged the 400 and returned, so the user
-     * simply never received the answer — the task had succeeded and its result vanished. That is
-     * the worst failure shape available: silent, and indistinguishable from the agent ignoring
-     * you.
-     * <p>
-     * Formatting is a nicety; delivery is not. On a parse failure the same text goes out
-     * unformatted.
+     * Whether a status message is sent to Telegram: what is meant for the owner to read --
+     * results, questions, warnings and failures, and the progress messages of a task that came
+     * from Telegram -- and not the queue, step and progress notices of a running task, nor the
+     * live state of its model calls, nor debug output. Those went out one message each, the
+     * twenty-second heartbeats of a long code
+     * generation and every full prompt of debug mode included; a part Telegram refuses for
+     * coming too fast is now waited for, not dropped, and a flood of them would hold up the
+     * answer queued behind them. A progress message is one per step, written to be read; a
+     * task asked from the web chat shows its own there.
      */
+    static boolean forTelegram(ChatStatusEmitter.StatusMessage msg) {
+        return switch (msg.type()) {
+            case RESULT, NEED_INPUT, WARNING, FAILED -> true;
+            case PROGRESS_MESSAGE -> msg.data() != null && Boolean.TRUE.equals(msg.data().get("telegram"));
+            default -> false;
+        };
+    }
+
     /**
      * Record a user's Telegram chat, in memory and on disk.
      * <p>
@@ -341,8 +416,10 @@ public class TelegramBotService {
     }
 
     /**
-     * Restore known chats at startup so unattended results can be delivered before the user
-     * writes anything.
+     * Restore known chats at startup, each subscribed to its user's status stream, so unattended
+     * results can be delivered before the user writes anything. The subscription used to be made
+     * only when a message arrived, so after every restart -- every deploy -- results reached
+     * Telegram only once he had written to the bot again.
      */
     private void restoreKnownChats() {
         try {
@@ -351,6 +428,7 @@ public class TelegramBotService {
                 String userId = String.valueOf(row.get("key")).substring("telegram.chat.".length());
                 try {
                     userChatIds.put(userId, Long.parseLong(String.valueOf(row.get("value"))));
+                    subscribe(userId);
                 } catch (NumberFormatException ignored) { /* a corrupt row is not worth failing on */ }
             }
             if (!userChatIds.isEmpty()) {
@@ -363,13 +441,15 @@ public class TelegramBotService {
     }
 
     /**
-     * What Telegram is sent for a status message: for a result that carries the owner's private
-     * text, that text -- the owner decided Telegram gets private answers in full; otherwise the
-     * message as it is formatted everywhere.
+     * What Telegram is sent for a status message: for a result or a progress message that carries
+     * the owner's private text, that text -- the owner decided Telegram gets private answers in
+     * full, and a private result's summary is his alone as well; otherwise the message as it is
+     * formatted everywhere.
      */
     public static String telegramText(ChatStatusEmitter.StatusMessage msg) {
-        if (msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT && msg.data() != null
-                && msg.data().get("ownerText") instanceof String owner) {
+        boolean ownersOwn = msg.type() == ChatStatusEmitter.StatusMessage.Type.RESULT
+                || msg.type() == ChatStatusEmitter.StatusMessage.Type.PROGRESS_MESSAGE;
+        if (ownersOwn && msg.data() != null && msg.data().get("ownerText") instanceof String owner) {
             return owner;
         }
         return msg.formatted();
@@ -386,60 +466,232 @@ public class TelegramBotService {
         return chat != null && linkedUser.apply(chat).filter(userId::equals).isPresent();
     }
 
-    /** Telegram refuses a message over 4,096 characters; a long answer goes in parts. */
+    /**
+     * Telegram takes at most 4,096 characters of text in a message, counted once its HTML is
+     * read: the tags are not text, and an escaped character is one. A long answer goes in parts,
+     * cut from the text as it is written; a part's HTML holds no more text than the part.
+     */
     static final int TELEGRAM_MAX_CHARS = 4096;
 
-    /** The text in parts Telegram accepts, split at a line break where one is near the limit. */
+    /**
+     * The text in parts Telegram accepts: each at most {@code max} UTF-16 units, cut after a line
+     * break where one is in the second half of the part, otherwise at the limit -- never between
+     * the two halves of a surrogate pair, which would send half a character in each part. Put
+     * together, the parts are the text exactly: nothing is stripped at a cut.
+     */
     static List<String> telegramParts(String text, int max) {
         var parts = new java.util.ArrayList<String>();
         String rest = text == null ? "" : text;
         while (rest.length() > max) {
-            int cut = rest.lastIndexOf('\n', max);
-            if (cut < max / 2) cut = max;
+            int cut = rest.lastIndexOf('\n', max - 1) + 1;
+            if (cut <= max / 2) {
+                cut = max;
+                if (Character.isHighSurrogate(rest.charAt(cut - 1))) cut--;
+            }
             parts.add(rest.substring(0, cut));
-            rest = rest.substring(cut).stripLeading();
+            rest = rest.substring(cut);
         }
         parts.add(rest);
         return parts;
     }
 
+    /** Hand a text to the outbox, which sends it in turn, in the parts Telegram accepts. */
     private void sendMessage(long chatId, String text) {
-        // One part at a time: a long answer used to be refused whole, and after the plain-text
-        // retry was refused too it was dropped without a word.
-        for (String part : telegramParts(text, TELEGRAM_MAX_CHARS)) {
-            if (!sendMessage(chatId, part, "Markdown")) {
-                log.info("Telegram rejected Markdown for chat {}; resending as plain text.", chatId);
-                sendMessage(chatId, part, null);
+        outbox.execute(() -> deliver(chatId, text));
+    }
+
+    /** What takes a question's keys away; Telegram does nothing with it when none are shown. */
+    static final Map<String, Object> NO_KEYS = Map.of("remove_keyboard", true);
+
+    /**
+     * A task's answer, as {@link #sendMessage(long, String)} sends a text: a question with the
+     * answers it offers as keys under its last part, each sent as the owner's reply when tapped, so
+     * it goes on as one typed. Any other answer takes away, with its first part, the keys a
+     * question before it left under the message box -- hidden once one is tapped, a button away.
+     * Every answer, not one known to follow keys: what is known is gone with a restart, which every
+     * deploy is.
+     */
+    private void sendMessage(long chatId, String text, List<String> choices) {
+        outbox.execute(() -> {
+            if (choices.isEmpty()) deliver(chatId, text, NO_KEYS, null);
+            else deliver(chatId, text, null, keys(choices));
+        });
+    }
+
+    /** The reply_markup of a question's choices: a key for each, one per row, gone once one is tapped. */
+    static Map<String, Object> keys(List<String> choices) {
+        return Map.of("keyboard", choices.stream().map(c -> List.of(Map.of("text", c))).toList(),
+                "one_time_keyboard", true, "resize_keyboard", true);
+    }
+
+    /**
+     * Send a text in the parts Telegram accepts, in order, each until Telegram takes it: in
+     * Telegram's HTML, which {@link TelegramHtml} makes of the Markdown the text is written in.
+     * A part Telegram refuses as a bad request (400), as it refuses HTML it cannot read, is sent
+     * again as it was written, as plain text; and a text the renderer fails on goes as written,
+     * as plain text, every part of it ({@link #html}).
+     * <p>
+     * A part Telegram does not take in the end -- it refused it, kept failing or could not be
+     * reached -- ends the text there, and the owner is told what is missing. The parts after it
+     * used to go out as if nothing were missing: an answer with a hole in the middle, and no word
+     * of it.
+     */
+    private void deliver(long chatId, String text) {
+        deliver(chatId, text, null, null);
+    }
+
+    /**
+     * @param first the reply_markup the first part goes with, or null
+     * @param last  the reply_markup the last part goes with, or null; for a text of one part, it
+     *              goes with that part in place of {@code first}. A part Telegram refuses with its
+     *              markup (400) is sent again without it: a question arrives, to be answered by
+     *              typing.
+     */
+    private void deliver(long chatId, String text, Map<String, Object> first, Map<String, Object> last) {
+        List<String> parts = telegramParts(text, TELEGRAM_MAX_CHARS);
+        List<String> html = html(parts);
+        boolean asHtml = html != null;
+        for (int i = 0; i < parts.size(); i++) {
+            Map<String, Object> with = i == parts.size() - 1 && last != null ? last : i == 0 ? first : null;
+            int status = send(chatId, asHtml ? html.get(i) : parts.get(i), asHtml, with);
+            if (status == 400 && asHtml) {
+                log.warn("Telegram refused part {} of {} for chat {} as HTML (HTTP 400); sending it as written",
+                        i + 1, parts.size(), chatId);
+                status = send(chatId, parts.get(i), false, with);
             }
+            if (status == 400 && with != null) {
+                log.warn("Telegram refused part {} of {} for chat {} with its keys (HTTP 400); sending it without them",
+                        i + 1, parts.size(), chatId);
+                status = send(chatId, parts.get(i), false, null);
+            }
+            if (status / 100 == 2) continue;
+            log.warn("Telegram did not take part {} of {} for chat {}: HTTP {}", i + 1, parts.size(), chatId, status);
+            if (send(chatId, notTaken(i + 1, parts.size(), status), false) / 100 != 2) {
+                log.warn("Telegram did not take the notice of it either");
+            }
+            return;
         }
     }
 
-    /** @return true if Telegram accepted it. */
-    private boolean sendMessage(long chatId, String text, String parseMode) {
+    /**
+     * The parts in Telegram's HTML, or null when {@link TelegramHtml} fails on them: then they
+     * are sent as written. Its patterns can run out of stack on a line nobody foresaw -- a link
+     * whose address has over a thousand bracketed parts -- and the error, thrown on the outbox's
+     * thread before any part went, lost the whole text: no part, no notice, no line in the log.
+     */
+    private static List<String> html(List<String> parts) {
         try {
-            var payload = new java.util.LinkedHashMap<String, Object>();
-            payload.put("chat_id", chatId);
-            payload.put("text", text);
-            if (parseMode != null) payload.put("parse_mode", parseMode);
+            return TelegramHtml.render(parts);
+        } catch (RuntimeException | StackOverflowError e) {
+            log.warn("Telegram HTML could not be made of a text ({}); sending it as written",
+                    e.getClass().getSimpleName());
+            return null;
+        }
+    }
 
+    /** What the owner is told when Telegram did not take part {@code part} (from 1) of {@code of}. */
+    static String notTaken(int part, int of, int status) {
+        String why = status == 0 ? "it could not be reached" : "HTTP " + status;
+        return "\u26a0\ufe0f Telegram did not take "
+                + (of == 1 ? "a message for you (" + why + ")."
+                           : "part " + part + " of " + of + " of a message for you (" + why
+                                   + "), so the parts from there on were not sent.")
+                + " Answers and results are kept in the web chat.";
+    }
+
+    /**
+     * One sendMessage call, in Telegram's HTML when {@code html} is true and as plain text when
+     * it is not; Telegram's HTTP status, as {@link #call} gives it.
+     * <p>
+     * Never in Telegram's Markdown, which this text is not written in: it is the web chat's, where
+     * an underscore inside a word is a letter. Telegram's takes every pair of underscores or
+     * asterisks for italic or bold markers and drops them, so result 1 (smtp_send_email) arrived
+     * as smtpsendemail and a network named Home_Net_5G as HomeNet5G.
+     */
+    private int send(long chatId, String text, boolean html) {
+        return send(chatId, text, html, null);
+    }
+
+    /** @param markup the message's reply_markup, or null for none */
+    private int send(long chatId, String text, boolean html, Map<String, Object> markup) {
+        var payload = new java.util.LinkedHashMap<String, Object>();
+        payload.put("chat_id", chatId);
+        payload.put("text", text);
+        if (html) payload.put("parse_mode", "HTML");
+        if (markup != null) payload.put("reply_markup", markup);
+        return call("sendMessage", payload);
+    }
+
+    /**
+     * Delete the message that holds a secret, in turn with what is sent to the chat -- so before
+     * the command's reply -- and tell the owner if Telegram will not: a bot may delete a message
+     * in a private chat, and in a group only as an admin.
+     */
+    private void deleteSecret(long chatId, long messageId) {
+        outbox.execute(() -> {
+            int status = call("deleteMessage", Map.of("chat_id", chatId, "message_id", messageId));
+            if (status / 100 == 2) return;
+            log.warn("Telegram deleteMessage failed: HTTP {}", status);
+            deliver(chatId, "\u26a0\ufe0f I could not delete your message, and it holds the secret: "
+                    + "delete it yourself.");
+        });
+    }
+
+    /** How often a call is tried that fails on Telegram's side (5xx) or on the way to it. */
+    private static final int TRIES = 3;
+
+    /**
+     * One Bot API call: Telegram's HTTP status, or 0 if Telegram could not be reached.
+     * <p>
+     * A 429 is waited out, for as long as Telegram's {@code retry_after} says, and the call made
+     * again until it is taken. The parts of a long answer go out back to back, and a part
+     * refused for going too fast used to be logged and counted as sent: the answer arrived with
+     * a piece missing. A failure on Telegram's side (5xx) or on the way to it is tried again
+     * after a second, then after two more; a third failure is the answer.
+     */
+    private int call(String method, Map<String, Object> payload) {
+        try {
             Request request = new Request.Builder()
-                    .url(apiUrl("sendMessage"))
+                    .url(apiUrl(method))
                     .post(RequestBody.create(mapper.writeValueAsString(payload),
                             MediaType.get("application/json")))
                     .build();
-
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (response.isSuccessful()) return true;
-                // 400 is the Markdown parse error; anything else is not worth retrying unformatted.
-                if (response.code() != 400) {
-                    log.warn("Telegram sendMessage failed: HTTP {}", response.code());
-                    return true;
+            int failures = 0;
+            while (true) {
+                long waitSeconds;
+                try (Response response = httpClient.newCall(request).execute()) {
+                    int status = response.code();
+                    if (status == 429) waitSeconds = retryAfterSeconds(response);
+                    else if (status >= 500 && ++failures < TRIES) waitSeconds = failures;
+                    else return status;
+                } catch (IOException e) {
+                    if (++failures >= TRIES) {
+                        log.warn("Telegram {} failed: {}", method, e.getMessage());
+                        return 0;
+                    }
+                    waitSeconds = failures;
                 }
-                return false;
+                log.info("Telegram {} did not go through; sending it again in {}s", method, waitSeconds);
+                Thread.sleep(waitSeconds * 1000);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Telegram {} not sent: interrupted while waiting to send it again", method);
+            return 0;
         } catch (Exception e) {
-            log.warn("Failed to send Telegram message: {}", e.getMessage());
-            return true;   // a transport failure is not something plain text will fix
+            log.warn("Telegram {} failed: {}", method, e.getMessage());
+            return 0;
+        }
+    }
+
+    /** How long a 429 asks to wait: its {@code parameters.retry_after}, or a second if it names none. */
+    private long retryAfterSeconds(Response response) {
+        try {
+            ResponseBody body = response.body();
+            return body == null ? 1
+                    : mapper.readTree(body.string()).path("parameters").path("retry_after").asLong(1);
+        } catch (Exception e) {
+            return 1;
         }
     }
 
@@ -453,13 +705,14 @@ public class TelegramBotService {
             var commands = List.of(
                     Map.of("command", "new",     "description", "Start a new chat session"),
                     Map.of("command", "cancel",  "description", "Cancel the running task"),
+                    Map.of("command", "queue",   "description", "Run a message after the running task, not in it"),
                     Map.of("command", "debug",   "description", "Toggle debug mode"),
-                    Map.of("command", "history", "description", "List recent chat sessions"),
+                    Map.of("command", "history", "description", "List your chat sessions"),
                     Map.of("command", "help",    "description", "Show available commands"),
                     Map.of("command", "skills",  "description", "List available tools"),
                     Map.of("command", "status",  "description", "System status"),
                     Map.of("command", "tokens",  "description", "Token budget summary"),
-                    Map.of("command", "log",     "description", "Last 10 events")
+                    Map.of("command", "log",     "description", "Recent events: /log [count|all] [page N]")
             );
             String json = mapper.writeValueAsString(Map.of("commands", commands));
             Request req = new Request.Builder()
