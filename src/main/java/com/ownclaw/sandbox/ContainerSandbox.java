@@ -149,6 +149,7 @@ public class ContainerSandbox {
      * subuid/subgid mapping works (the most common failure mode).
      */
     private boolean isRuntimeUsable(String runtime) {
+        if ("podman".equals(runtime) && podmanCannotRun()) return false;
         if (!isRuntimeInstalled(runtime)) return false;
 
         // For podman, verify rootless setup actually works
@@ -162,7 +163,7 @@ public class ContainerSandbox {
 
         // Determine fallback runtime
         String other = "docker".equals(runtime) ? "podman" : "docker";
-        if (isRuntimeInstalled(other)) {
+        if (!("podman".equals(other) && podmanCannotRun()) && isRuntimeInstalled(other)) {
             // Only set podman as fallback if it's actually usable
             if ("podman".equals(other) && !isPodmanRootlessReady(other)) {
                 fallbackRuntime = null;
@@ -175,16 +176,73 @@ public class ContainerSandbox {
     }
 
     private boolean isRuntimeInstalled(String runtime) {
+        Probe p = probe(List.of(runtime, "version"), 5);
+        return p.exit() != null && p.exit() == 0;
+    }
+
+    /**
+     * Whether rootless Podman cannot work in this process: it runs with no_new_privs
+     * (systemd's NoNewPrivileges), under which Podman's setuid newuidmap gains nothing, so it
+     * cannot map users. Asking it anyway is not only pointless: its version check alone took
+     * 20-30 s to fail there, at every start -- long enough for a deploy's health check to give
+     * up on a build that was fine. Said once.
+     */
+    private boolean podmanCannotRun() {
+        boolean nnp = noNewPrivileges(readSelfStatus());
+        if (nnp && !podmanSkipLogged) {
+            podmanSkipLogged = true;
+            log.info("Container sandbox: not asking podman -- this process runs with NoNewPrivileges, "
+                    + "under which rootless podman cannot map users");
+        }
+        return nnp;
+    }
+
+    private volatile boolean podmanSkipLogged;
+
+    private static String readSelfStatus() {
         try {
-            Process p = cli(List.of(runtime, "version"))
-                    .redirectErrorStream(true)
-                    .start();
-            drainStream(p.getInputStream());
-            boolean finished = p.waitFor(5, TimeUnit.SECONDS);
-            if (!finished) { p.destroyForcibly(); return false; }
-            return p.exitValue() == 0;
-        } catch (Exception e) {
-            return false;
+            return Files.readString(Path.of("/proc/self/status"));
+        } catch (IOException | RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** Whether {@code /proc/self/status} text says the process has no_new_privs set. */
+    static boolean noNewPrivileges(String status) {
+        return status.lines().anyMatch(l -> l.startsWith("NoNewPrivs:") && l.substring("NoNewPrivs:".length()).strip().equals("1"));
+    }
+
+    /** A short runtime command's exit code -- null when it did not end in time -- and what it printed. */
+    record Probe(Integer exit, String output) {}
+
+    /**
+     * Run a short runtime command for detection or a lookup, for at most {@code seconds}: its
+     * output is read beside the wait, not before it, so a command that hangs is killed at the
+     * timeout instead of being waited for to its end.
+     */
+    static Probe probe(List<String> command, int seconds) {
+        try {
+            Process p = cli(command).redirectErrorStream(true).start();
+            p.getOutputStream().close();
+            CompletableFuture<byte[]> out = StreamReaders.read(() -> drainStream(p.getInputStream()));
+            if (!p.waitFor(seconds, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                out.cancel(true);
+                return new Probe(null, "");
+            }
+            String text;
+            try {
+                text = new String(out.get(2, TimeUnit.SECONDS), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                // something it left running holds the output open: what was printed is not needed
+                text = "";
+            }
+            return new Probe(p.exitValue(), text);
+        } catch (IOException e) {
+            return new Probe(-1, String.valueOf(e.getMessage()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new Probe(null, "");
         }
     }
 
@@ -194,25 +252,14 @@ public class ContainerSandbox {
      * lchown errors (e.g. "lchown /etc/gshadow: invalid argument").
      */
     private boolean isPodmanRootlessReady(String podman) {
-        try {
-            // Quick smoke test: ask podman to unshare a trivial command.
-            // This exercises the same user-namespace code path that build uses.
-            Process p = cli(List.of(podman, "unshare", "cat", "/proc/self/uid_map"))
-                    .redirectErrorStream(true)
-                    .start();
-            String output = new String(drainStream(p.getInputStream()), StandardCharsets.UTF_8);
-            boolean finished = p.waitFor(10, TimeUnit.SECONDS);
-            if (!finished) { p.destroyForcibly(); return false; }
-            if (p.exitValue() != 0) {
-                log.debug("Podman rootless check failed (exit {}): {}",
-                        p.exitValue(), truncate(output, 500));
-                return false;
-            }
-            return true;
-        } catch (Exception e) {
-            log.debug("Podman rootless check error: {}", e.getMessage());
+        // Quick smoke test: ask podman to unshare a trivial command.
+        // This exercises the same user-namespace code path that build uses.
+        Probe p = probe(List.of(podman, "unshare", "cat", "/proc/self/uid_map"), 10);
+        if (p.exit() == null || p.exit() != 0) {
+            log.debug("Podman rootless check failed (exit {}): {}", p.exit(), truncate(p.output(), 500));
             return false;
         }
+        return true;
     }
 
     /** Whether a container runtime is available. */
@@ -374,17 +421,8 @@ public class ContainerSandbox {
     }
 
     private boolean imageExists(String imageTag) {
-        try {
-            Process p = cli(List.of(containerRuntime, "image", "inspect", imageTag))
-                    .redirectErrorStream(true)
-                    .start();
-            drainStream(p.getInputStream());
-            boolean finished = p.waitFor(10, TimeUnit.SECONDS);
-            if (!finished) { p.destroyForcibly(); return false; }
-            return p.exitValue() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+        Probe p = probe(List.of(containerRuntime, "image", "inspect", imageTag), 10);
+        return p.exit() != null && p.exit() == 0;
     }
 
     /**

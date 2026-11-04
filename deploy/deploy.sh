@@ -71,7 +71,9 @@ BACKUP_DIR="${DEPLOY_DIR}/backups"
 MAX_BACKUPS=5
 HEALTH_URL="http://localhost:8080/api/health"
 BUSY_URL="http://localhost:8080/api/health/busy"
-HEALTH_TIMEOUT=60
+# A first start after a build is slower than the next (cold caches, the build's JVM still
+# exiting); one that needs more than this is rolled back.
+HEALTH_TIMEOUT=120
 BUSY_WAIT_TIMEOUT=300  # max 5 minutes to wait for task to finish
 RESTART_PENDING_MARKER="${DEPLOY_DIR}/.restart-pending"
 SUDOERS_FILE="/etc/sudoers.d/ownclaw-ownclaw-restart"
@@ -1301,7 +1303,12 @@ rollback() {
     fi
 
     log "Rolling back to: $(basename "$latest_backup")"
-    cp "$latest_backup" "$DEPLOY_DIR/ownclaw.jar"
+    # Swapped in, never written over: the JVM still starting from the failed build reads its
+    # classes from the file as it goes, and a JAR rewritten under it failed that start with
+    # class-loading errors that looked like a fault in the build itself (2026-11-04).
+    local tmp_jar="$DEPLOY_DIR/ownclaw.jar.new"
+    cp "$latest_backup" "$tmp_jar"
+    mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
 
     # Keep the backed-out commit on record (flagged) so --update doesn't redeploy the
     # build we just rolled back from on every cycle. It moves on with the next commit.

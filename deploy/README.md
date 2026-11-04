@@ -177,7 +177,7 @@ The application exposes a health endpoint:
 GET http://localhost:8080/api/health → "ok"
 ```
 
-The deploy script waits up to 60 seconds for this endpoint to respond after a restart.
+The deploy script waits up to 120 seconds for this endpoint to respond after a restart, and rolls back to the previous JAR if it does not.
 
 ---
 
