@@ -363,6 +363,11 @@ With `bubblewrap` installed (`sudo apt install bubblewrap`, then restart the ser
 also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills from it (see
 the README's Execution sandbox). `/api/ops/health` shows whether the jail is on.
 
+Each jailed run holds one user namespace while it runs, and `user.max_user_namespaces` caps how
+many the service's Linux user may hold at once (`sysctl user.max_user_namespaces`). Distributions
+set it in the tens of thousands. A host set to a handful fails the runs beyond it, and the log
+warns at start when the limit is below 16.
+
 The `.env` file has `chmod 600`; on a hardened host (`--harden`) it is `root:ownclaw` `0640`:
 systemd reads it as root to start the service, and the service user can read it but not change
 it. With the skill jail on, skills cannot see it.

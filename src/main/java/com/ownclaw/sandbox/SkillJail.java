@@ -836,8 +836,17 @@ public class SkillJail {
 
     private void logState(Evaluation e) {
         switch (e.state()) {
-            case READY -> log.info("Skill isolation ON ({}): hidden {}, exposed read-only {}",
-                    e.version(), e.roots(), e.expose());
+            case READY -> {
+                log.info("Skill isolation ON ({}): hidden {}, exposed read-only {}",
+                        e.version(), e.roots(), e.expose());
+                long few = fewNamespaces(sysctls(hostRoot));
+                if (few > 0) {
+                    log.warn("This host allows {} user namespaces per Linux user (user.max_user_namespaces), "
+                            + "and each isolated run holds one while it runs: a run beyond them fails to start "
+                            + "(bwrap: Creating new namespace failed ... ENOSPC). The owner can raise it: "
+                            + "sudo sysctl -w user.max_user_namespaces=<n>, kept in /etc/sysctl.d", few);
+                }
+            }
             case INACTIVE -> {
                 if (RESTART_TO_JAIL.equals(e.reason())) {
                     log.warn("Skill isolation INACTIVE until OwnClaw restarts: {}", e.reason());
@@ -935,7 +944,13 @@ public class SkillJail {
                 // Its own words are not enough to call the host unable: the jail's own arguments can
                 // fail it too. Only when a bare jail -- namespaces and the mounts every jail needs,
                 // nothing of ours -- fails as well is it the host.
-                boolean ownFailure = p.exitValue() != 0 && stderr.startsWith("bwrap:");
+                // No free user namespace says nothing about the host either: runs already going
+                // hold them all -- and a jailed skill can make sure they do, to have the next
+                // check call the host unable and the runs after it go unjailed. Unless the limit
+                // is 0: then none is ever free, and that is the host.
+                boolean shortage = namespacesUsedUp(p.exitValue(), stderr)
+                        && !"0".equals(sysctls(hostRoot).get("user.max_user_namespaces"));
+                boolean ownFailure = p.exitValue() != 0 && stderr.startsWith("bwrap:") && !shortage;
                 return new SelfCheck(false, Map.of(), "bubblewrap could not start a jail (exit "
                         + p.exitValue() + "): " + (stderr.isEmpty() ? "no output" : stderr),
                         ownFailure && bareJailFails());
@@ -1509,6 +1524,41 @@ public class SkillJail {
         return null;
     }
 
+    // ────────────────────────────── no free namespace ──────────────────────────────
+
+    /**
+     * Whether bubblewrap ended only because it found no room for the jail's namespaces: its
+     * one line when the clone that makes them fails, before anything of the command exists.
+     * The host's user.max_user_namespaces counts per Linux user, and every jailed run holds one
+     * while it runs.
+     */
+    static boolean namespacesUsedUp(int exitCode, String stderr) {
+        if (exitCode == 0 || stderr == null) return false;
+        String line = stderr.strip();
+        return line.indexOf('\n') < 0
+                && line.startsWith("bwrap: Creating new namespace failed")
+                && (line.contains("ENOSPC") || line.contains("No space left on device"));
+    }
+
+    /** Where the host's /proc/sys is read from for the jail's own decisions: "/" but in a test. */
+    Path hostRoot = Path.of("/");
+
+    /**
+     * Fewer than this many user namespaces per Linux user is worth a word at start: the jail
+     * runs that many skills at once at most, and the task queue runs several side by side.
+     */
+    static final int FEW_NAMESPACES = 16;
+
+    /** The host's user.max_user_namespaces when it is a number below {@link #FEW_NAMESPACES}, else -1. */
+    static long fewNamespaces(Map<String, String> sysctls) {
+        try {
+            long n = Long.parseLong(sysctls.getOrDefault("user.max_user_namespaces", ""));
+            return n > 0 && n < FEW_NAMESPACES ? n : -1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     // ────────────────────────────── operator view ──────────────────────────────
 
     /** The settings that decide whether an unprivileged process may create user namespaces. */
@@ -1666,7 +1716,12 @@ public class SkillJail {
             Path f = root.resolve("proc/sys/" + key.replace('.', '/'));
             String v;
             try {
-                v = Files.readString(f, StandardCharsets.UTF_8).strip();
+                // Not Files.readString: a /proc/sys file says it is empty, and that read takes the
+                // first byte and then asks from offset 1, where the kernel has nothing more --
+                // 87249 read as "8", and a production host's limit read as "3" (November 2026).
+                // A buffered read has the whole value at offset 0.
+                List<String> lines = Files.readAllLines(f, StandardCharsets.UTF_8);
+                v = lines.isEmpty() ? "" : lines.get(0).strip();
             } catch (NoSuchFileException e) {
                 v = "absent";
             } catch (IOException | RuntimeException e) {

@@ -247,6 +247,17 @@ public final class JailTestKit {
         }
     }
 
+    /** What bubblewrap 0.11 says when the Linux user's user namespaces are all in use. */
+    static final String NO_NAMESPACE =
+            "bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)";
+
+    /** A bubblewrap that finds no free user namespace for anything, the self-check's probe included. */
+    static Path noFreeNamespace(Path script) throws IOException {
+        return write(script, "#!/bin/sh\n"
+                + "if [ \"$1\" = --version ]; then echo 'bubblewrap 0.0-test'; exit 0; fi\n"
+                + "echo '" + NO_NAMESPACE + "' >&2; exit 1\n");
+    }
+
     /** A bubblewrap that runs whatever it is given with no isolation at all. */
     static Path passThrough(Path script, Path record) throws IOException {
         return write(script, "#!/bin/sh\n"
