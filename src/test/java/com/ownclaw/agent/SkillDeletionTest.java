@@ -99,32 +99,6 @@ class SkillDeletionTest {
     }
 
     @Test
-    @DisplayName("a run that starts while the skill is being unregistered keeps it: registered again, nothing deleted")
-    void aRunStartingDuringTheDeletionKeepsTheSkill() throws Exception {
-        create("quick_skill", "def run(params):\n    return {'output': 'ok'}\n");
-        DynamicSkill real = dynamic.getDynamic("quick_skill").orElseThrow();
-        // The same skill, whose run starts between the check before it is unregistered and the
-        // one after.
-        DynamicSkill racing = new DynamicSkill(real.name(), real.description(), real.inputSchema(),
-                real.skillDir(), false, false, 30, sandbox, env, List.of(), null, List.of(), null, null, null) {
-            private int asked;
-
-            @Override
-            public int inFlight() {
-                return asked++ == 0 ? 0 : 1;
-            }
-        };
-        dynamic.register(racing);
-
-        String refused = manager.deleteSkill("quick_skill");
-
-        assertTrue(refused.startsWith("ERROR") && refused.contains("running"), refused);
-        assertSame(racing, dynamic.getDynamic("quick_skill").orElseThrow(), "not registered again");
-        assertTrue(tools.find("quick_skill").isPresent());
-        assertTrue(Files.exists(real.skillDir().resolve("skill.py")), "deleted under a run that had started");
-    }
-
-    @Test
     @DisplayName("a directory the delete cannot open is left, and the answer says so instead of \"deleted\"")
     void whatCannotBeRemovedIsSaid() throws Exception {
         create("cache_skill", "def run(params):\n    return {'output': 'ok'}\n");

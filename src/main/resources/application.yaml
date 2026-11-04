@@ -209,9 +209,10 @@ ownclaw:
     # ProtectHome.
     # When jailed, a single launch the jail cannot isolate (a tampered skill directory, a
     # hard link out, a bind reaching protected state, an unreadable directory) is refused.
-    # Without bwrap these still apply: pip and venv get the environment allow-list, the runner
-    # and load-check scripts are created new under random names, and an authored file that is
-    # a link or a hard link is refused, never read or written through.
+    # Without bwrap these still apply: every launch -- a skill's run, pip and venv -- gets the
+    # environment allow-list, the runner and load-check scripts are created new under random
+    # names, and an authored file that is a link or a hard link is refused, never read or
+    # written through.
     # A jailed skill sees the host's files but only its own processes: systemctl, timedatectl,
     # hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it,
     # journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's
@@ -227,12 +228,14 @@ ownclaw:
     bwrap-path: ${OWNCLAW_SANDBOX_BWRAP_PATH:/usr/bin/bwrap}
     # Host paths a jailed skill may still read, read-only, e.g. a HOME dotfile it needs:
     #   OWNCLAW_SANDBOX_EXPOSE=/opt/ownclaw/.ssh,/opt/ownclaw/.config/rclone
-    # ~/.cache/ms-playwright (the browsers Playwright installs) is exposed without being listed.
+    # The browser builds Playwright installs under ~/.cache/ms-playwright are exposed without
+    # being listed (each build directory, not its .links). Every entry is walked when the jail
+    # starts, and one holding a hard link to a file outside it is not exposed.
     # Entries that overlap data/, uploads, .env, skills/, logs/, backups/, repo/, the journal,
     # the crash dumps, docker's socket, the system bus or /run/user are dropped, as are /tmp and
     # /var/tmp as a whole.
     expose: []
-    stall-timeout: 120   # kill process if no output for this many seconds
+    stall-timeout: 120   # a container image build is killed after this many seconds without output; a skill's run uses its SKILL.yaml timeout (default 30)
     python-path: python
     container-runtime: auto    # auto, docker, podman, or none
     container-base-image: python:3.11-slim

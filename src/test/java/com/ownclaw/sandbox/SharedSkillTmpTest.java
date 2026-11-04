@@ -46,7 +46,7 @@ class SharedSkillTmpTest {
 
     @AfterEach
     void cleanUp() {
-        if (jail != null) jail.removeSharedTmp();
+        if (jail != null) jail.clearSharedTmp();
         if (base != null) SkillJail.deleteTree(base);
     }
 
@@ -150,18 +150,71 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("the accounts' /tmp directories go when the service stops, and when it starts")
-    void theyGoWhenTheServiceStopsAndStarts() throws Exception {
+    @DisplayName("the accounts' /tmp directories are the service user's alone, and new in each process")
+    void ownerOnlyAndNewInEachProcess() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
-        assertEquals(m.root().resolve("skills/_tmp/owner1"), tmp, "not in the hidden skills directory");
+        Path epoch = tmp.getParent();
+        assertEquals(m.root().resolve("skills/_tmp"), epoch.getParent(), "not in the hidden skills directory");
+        assertTrue(epoch.getFileName().toString().startsWith("run-"), epoch.toString());
+        for (Path d : List.of(epoch, tmp)) {
+            assertEquals("rwx------", java.nio.file.attribute.PosixFilePermissions.toString(
+                    Files.getPosixFilePermissions(d, java.nio.file.LinkOption.NOFOLLOW_LINKS)), d.toString());
+        }
         Files.writeString(tmp.resolve("left.txt"), "x");
-        jail.removeSharedTmp();
-        assertFalse(Files.exists(tmp.getParent()), "the accounts' /tmp outlived the service");
 
-        Files.writeString(jail.sharedTmp("owner1").resolve("left.txt"), "x");
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
-        assertFalse(Files.exists(tmp.resolve("left.txt")), "a start kept what the last run of the service left");
+        assertFalse(Files.exists(tmp.resolve("left.txt")), "a start kept what the last process left");
+        assertNotEquals(epoch, next.sharedTmp("owner1").getParent(), "the next process reused the directory");
+    }
+
+    @Test
+    @DisplayName("a start removes a directory a run closed, with a hard link to the database in it")
+    void aStartRemovesWhatARunClosed() throws Exception {
+        Path tmp = jail.sharedTmp("owner1");
+        Path closed = Files.createDirectory(tmp.resolve("keep"));
+        Files.createLink(closed.resolve("db"), m.db());
+        Files.setPosixFilePermissions(closed, java.util.Set.of());
+
+        var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+        next.init();
+        try (var left = Files.list(m.root().resolve("skills"))) {
+            assertEquals(List.of(), left.filter(p -> p.getFileName().toString().startsWith("_tmp")).toList(),
+                    "what the last process left is still there");
+        }
+        assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
+    }
+
+    @Test
+    @DisplayName("a hard link out, left where an account's /tmp is, is set aside before a run sees it")
+    void aHardLinkInTheTmpIsSetAside() throws Exception {
+        // What only a process running unjailed beside the jail's first runs could leave.
+        Path tmp = jail.sharedTmp("owner1");
+        Files.writeString(tmp.resolve("ow_perf_1.txt"), "collected");
+        Files.createLink(tmp.resolve("db"), m.db());
+
+        String seen = run(m.otherSkill(), """
+                def read(p):
+                    try:
+                        return open(p).read()
+                    except Exception:
+                        return 'absent'
+                print(read('/tmp/db') + ' ' + read('/tmp/ow_perf_1.txt'))
+                """, "owner1");
+        assertEquals("absent absent", seen, "the run read through the hard link");
+        try (var aside = Files.list(tmp.getParent())) {
+            assertEquals(1, aside.filter(p -> p.getFileName().toString().startsWith(".set-aside-")).count());
+        }
+        assertEquals("canary-db-secret", Files.readString(m.db()));
+    }
+
+    @Test
+    @DisplayName("a run that closes its /tmp does not close it for the next run")
+    void aClosedTmpIsOpenAgain() throws Exception {
+        assertEquals("written", run(m.otherSkill(), WRITE, "owner1"));
+        assertEquals("closed", run(m.skillDir(), "import os\nos.chmod('/tmp', 0)\nprint('closed')\n", "owner1"));
+        // Opened again, with what was in it: not set aside as a directory that cannot be checked.
+        assertEquals("collected state", run(m.skillDir(), READ, "owner1"));
     }
 
     @Test
@@ -174,13 +227,30 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("Playwright's browsers under HOME are exposed read-only without being listed, once")
-    void playwrightBrowsersAreExposedByDefault() {
-        assertEquals(List.of("/opt/ownclaw/.cache/ms-playwright"),
-                SkillJail.withDefaultExposes(List.of(), "/opt/ownclaw"));
-        assertEquals(List.of("/opt/ownclaw/.ssh", "/opt/ownclaw/.cache/ms-playwright"),
-                SkillJail.withDefaultExposes(List.of("/opt/ownclaw/.ssh", "/opt/ownclaw/.cache/ms-playwright"),
-                        "/opt/ownclaw"));
-        assertEquals(List.of(), SkillJail.withDefaultExposes(null, null));
+    @DisplayName("Playwright's browser builds are exposed read-only without being listed; its .links and a build with a hard link out are not")
+    void browserBuildsAreExposed() throws Exception {
+        Path home = m.root();   // HOME is the service directory in production, hidden
+        Path browsers = Files.createDirectories(home.resolve(".cache/ms-playwright"));
+        Path chromium = Files.createDirectories(browsers.resolve("chromium-1243"));
+        Files.writeString(chromium.resolve("INSTALLATION_COMPLETE"), "");
+        Path links = Files.createDirectories(browsers.resolve(".links"));
+        Files.writeString(links.resolve("abc"), "/opt/ownclaw/skills/_envs/other_skill");
+        Path tampered = Files.createDirectories(browsers.resolve("firefox-1"));
+        Files.createLink(tampered.resolve("libfoo.so"), m.db());
+        assertEquals(browsers, SkillJail.browsersOf(home.toString()));
+        assertNull(SkillJail.browsersOf(null));
+        assertEquals(List.of(chromium, tampered), SkillJail.browserBuilds(browsers));
+
+        jail = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis, browsers);
+        assertEquals(SkillJail.State.READY, jail.status().state(), jail.status().reason());
+        assertEquals(List.of(chromium), jail.status().exposed().stream().map(SkillJail.Bind::dest).toList());
+        String seen = run(m.skillDir(), """
+                import os
+                def has(p):
+                    return 'yes' if os.path.exists(p) else 'no'
+                b = '%s'
+                print(has(b + '/chromium-1243/INSTALLATION_COMPLETE') + has(b + '/.links') + has(b + '/firefox-1/libfoo.so'))
+                """.formatted(browsers), "owner1");
+        assertEquals("yesnono", seen);
     }
 }

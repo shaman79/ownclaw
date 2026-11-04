@@ -33,7 +33,8 @@ public interface SandboxManager {
      * @param pythonPath       the interpreter: the system one, or the skill's environment's
      * @param scriptPath       the script to run
      * @param workingDir       the skill's directory; writable, and when the skill is isolated the
-     *                         only writable path besides its private /tmp
+     *                         only writable path besides its /tmp (its account's for a run of
+     *                         it, a fresh one for a check)
      * @param stdinJson        JSON input to pass via stdin; null for none
      * @param envVars          the variables the service sets beside the allow-list and the
      *                         encoding: the skill's environment (PATH or PYTHONPATH). Never a

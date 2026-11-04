@@ -12,7 +12,7 @@ OwnClaw is an autonomous, self-learning AI agent system built around a **dual-LL
 
 - **Cloud LLM (Orchestrator)** — a large cloud LLM (OpenAI or Anthropic, configurable) that **always** drives the main agent loop: reasoning, planning, deciding which tools to call, and evaluating results. The cloud LLM is the "brain" — it sees every message, makes every decision, and owns the Think→Act→Observe loop.
 - **Local LLM (Executor)** — a small local LLM (7-14B via Ollama, e.g. qwen2.5:14b) that executes **delegated multi-step plans**. The cloud LLM can issue a `delegate` action with a structured plan (goal, ordered steps, checkpoints), and the local LLM executes it autonomously in a mini agent loop, returning consolidated results.
-- **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (a bubblewrap jail on Linux, docker/podman for skills with system packages, a plain child process on Windows).
+- **SkillRunner** — the execution engine that runs Python skill scripts in sandboxed environments (a bubblewrap jail on Linux once bubblewrap is installed, docker for skills with system packages, a plain child process on Windows).
 
 The core innovation is the **cloud-as-orchestrator, local-as-executor** pattern: the cloud LLM makes all high-level decisions and can offload routine multi-step work to the local LLM via structured delegation plans. This gives the system cloud-grade reasoning while leveraging local compute for bulk execution. The local LLM is also the fallback: with local only chosen (the owner's default, or a chat's own), with no cloud configured, or when a task's cloud model cannot be reached (no internet, a rejected key, no credit, an outage the retries did not outlast), the local LLM runs the task itself, best effort.
 
@@ -71,7 +71,7 @@ scenario breaks the system's ability to handle all others.
 | **LlmRouter** | Provider selector | Selects the cloud LLM; the local LLM when local-only is on, no cloud is configured, or the task's cloud could not be reached | Java |
 | **LocalExecutor** | Delegation executor | Receives structured `DelegationPlan` from cloud, runs a mini Think→Act→Observe loop using local LLM to execute the steps | Java + Ollama |
 | **ToolRegistry** | Tool dispatcher | Registers all available tools (skills, shell, file ops, etc.), dispatches tool calls from the agent | Java |
-| **SkillRunner** | Skill execution engine | Runs Python skill scripts in a bubblewrap jail (SkillJail), or docker/podman for system packages; manages I/O | Java + Python |
+| **SkillRunner** | Skill execution engine | Runs Python skill scripts in a bubblewrap jail (SkillJail), or docker for system packages; manages I/O | Java + Python |
 | **Cloud LLM** | Orchestrator | Reasons about tasks, decides actions, creates delegation plans, evaluates results | Cloud API (OpenAI, Anthropic) |
 | **Local LLM** | Executor | Executes delegated multi-step plans autonomously, returns consolidated results | Ollama (qwen2.5:14b) |
 
@@ -143,7 +143,7 @@ scenario breaks the system's ability to handle all others.
 │  │             Skill sandbox (SkillJail)             │                  │
 │  │                                                   │                  │
 │  │  Linux:   bubblewrap jail, host read-only         │                  │
-│  │  Packages: docker/podman (system_packages)        │                  │
+│  │  Packages: docker (system_packages)               │                  │
 │  │  Windows: plain child process (dev mode)          │                  │
 │  │                                                   │                  │
 │  │  • Credentials: stdin, then the skill's own env   │                  │
@@ -930,7 +930,7 @@ window, the provider says so and the task ends saying it; nothing is cut beforeh
 
 ### 8.1 Sandbox Architecture
 
-Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups), over journald's store and the crash dumps (`/var/crash`, `/var/lib/apport/coredump`, `/var/lib/systemd/coredump`), and over all of `/run` but the resolver's directory (docker's socket, the system bus, the users' runtime directories); the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` (the same directory at `/var/tmp`) is its account's -- shared by that account's skills and kept between their runs, as the service's own `/tmp` was, and gone when OwnClaw restarts; the checks and venv/pip get a fresh one each time -- `/dev/shm` and `/dev/mqueue` are its own, the PID namespace is new and the network is the host's. So a skill sees the host's files but only its own processes, and systemd's and the host daemons' sockets are gone, except systemd-resolved's own varlink sockets in the resolver's directory: name lookups answer there, and its privileged methods refuse. systemctl, timedatectl, hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it, journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's `SysLogHandler` prints a logging-error traceback to stderr for each record. The network being the host's, everything listening on loopback or on an abstract socket is reachable: CUPS, the service's own HTTP port (as for any client on the LAN), and on a dev host running as the owner, the owner's X11 display (whose `~/.Xauthority` a skill there can read) and a browser's debug port. The kernel session keyring is the JVM's (bubblewrap has no option for a new one): a skill sees its keys and can add its own, which outlive the run. A launch the jail cannot isolate is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) passes its self-check; while bwrap is absent or cannot start a jail at all -- a bwrap that cannot mount the jail's own `/dev/mqueue` cannot start one -- it runs skills unjailed with a warning; a self-check that runs and fails an item, or a jail that has worked in this process and stops starting, refuses every launch; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read, `~/.cache/ms-playwright` (Playwright's browsers) among them unasked; entries that overlap what the jail hides are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
+Every Python process OwnClaw starts on the host for skills -- a skill's run, its syntax and load checks, venv and pip -- goes through `SkillJail`, which wraps it in an unprivileged bubblewrap jail. A jailed process sees the host read-only, with a tmpfs over every directory the service keeps state in (database, `.env`, uploads, other skills, logs, backups), over journald's store and the crash dumps (`/var/crash`, `/var/lib/apport/coredump`, `/var/lib/systemd/coredump`), and over all of `/run` but the resolver's directory (docker's socket, the system bus, the users' runtime directories); the skill's own directory is writable, its authored files and the files the task was handed are read-only, `/tmp` (the same directory at `/var/tmp`) is its account's -- shared by that account's skills and kept between their runs, as the service's own `/tmp` was, and gone when OwnClaw restarts; readable by the service user alone, reset to that and walked for hard links out before each run; the checks and venv/pip get a fresh one each time -- `/dev/shm` and `/dev/mqueue` are its own, the PID namespace is new and the network is the host's. So a skill sees the host's files but only its own processes, and systemd's and the host daemons' sockets are gone, except systemd-resolved's own varlink sockets in the resolver's directory: name lookups answer there, and its privileged methods refuse. systemctl, timedatectl, hostnamectl, loginctl, busctl, resolvectl, nmcli and the docker CLI fail inside it, journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's `SysLogHandler` prints a logging-error traceback to stderr for each record. The network being the host's, everything listening on loopback or on an abstract socket is reachable: CUPS, the service's own HTTP port (as for any client on the LAN), and on a dev host running as the owner, the owner's X11 display (whose `~/.Xauthority` a skill there can read) and a browser's debug port. The kernel session keyring is the JVM's (bubblewrap has no option for a new one): a skill sees its keys and can add its own, which outlive the run. While the jail is working, a launch it cannot isolate (a tampered skill directory, a hard link out, a bind reaching protected state) is refused, never run unjailed. The mode comes from the root-owned `.env` (`OWNCLAW_SANDBOX_ISOLATION`): `auto` (default) jails once `bwrap-path` (default `/usr/bin/bwrap`) passes its self-check; while bwrap is absent or cannot start a jail at all -- a bwrap that cannot mount the jail's own `/dev/mqueue` cannot start one -- it runs skills unjailed with a warning; a self-check that runs and fails an item, or a jail that has worked in this process and stops starting, refuses every launch; `required` refuses every launch while the jail is not working; `off` is for development and Windows. `expose` lists host paths a jailed skill may still read, the browser builds under `~/.cache/ms-playwright` among them unasked; entries that overlap what the jail hides, or hold a hard link to a file outside them, are dropped. A skill with `system_packages` runs in docker/podman instead when one is available (`ContainerSandbox`) -- refused while the jail refuses.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -944,11 +944,11 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 │  │    journal and /run under tmpfs         │  │
 │  │  • Skill dir writable; authored files,  │  │
 │  │    env, handed files read-only          │  │
-│  │  • Private /tmp, own PID namespace      │  │
+│  │  • The account's /tmp, own PID namespace│  │
 │  │  • Network: the host's                  │  │
 │  │  • Killed after N s without output      │  │
 │  │                                         │  │
-│  │  system_packages: docker/podman         │  │
+│  │  system_packages: docker                │  │
 │  │  Windows (dev): unjailed (mode off)     │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
@@ -974,7 +974,7 @@ Every Python process OwnClaw starts on the host for skills -- a skill's run, its
 ### 8.2 Credential Vault
 
 - **Encryption**: AES-256-GCM, per-user encryption key
-- **Key derivation**: PBKDF2 from user's master password (or generated key stored in OS keychain)
+- **Key derivation**: PBKDF2-HMAC-SHA256 (100,000 iterations) from a system master key and a per-user salt. The master key is generated at first start and kept in the database (`system_settings`), so the database is what must stay out of a skill's reach: the jail hides it (§8.1), and the ops API refuses to query `system_settings` and `credential_vault`.
 - **Storage**: Encrypted blob in SQLite
 - **Access**: Skills declare required credentials in SKILL.yaml; a skill receives every vault credential its SKILL.yaml declares. Grants (§8.3) are not enforced
 - **Audit**: Each run that is given credentials is logged: the skill, the user and the key names, never a value
@@ -1057,14 +1057,14 @@ Chat: "⚠️ New skill 'api_check_stocks' (generated by Mentor)
 
 | Threat | Mitigation |
 |--------|-----------|
-| Malicious skill code | SkillJail (bubblewrap): the host read-only, the service's state hidden, only its own directory writable (§8.1) |
-| Credential exfiltration | A skill receives every vault credential its SKILL.yaml declares -- grants (§8.3) are not enforced; the database and .env are hidden from it (§8.1); the network is shared, not filtered |
+| Malicious skill code | SkillJail (bubblewrap), once bubblewrap is installed: the host read-only, the service's state hidden, only its own directory and its account's /tmp writable (§8.1); until then the systemd unit's limits |
+| Credential exfiltration | A skill receives every vault credential its SKILL.yaml declares -- grants (§8.3) are not enforced; with the jail on, the database and .env are hidden from it (§8.1); the network is shared, not filtered |
 | Unauthorized credential access | Not enforced: /grant and /revoke record grants, but nothing checks them before a run (§8.3) |
 | Mentor generating credential-grabbing skills | Not mitigated: a new skill gets every credential it declares, with no warning (§8.3) |
 | Prompt injection via user input | Executor uses structured I/O, not raw string interpolation |
-| Mentor generating harmful skills | Skill validation: static analysis + sandbox test run before activation |
+| Mentor generating harmful skills | A new skill is checked for its syntax and that it imports and defines run(), inside the jail; what it does is not judged. The critic blocks duplicates of existing skills |
 | Token budget exhaustion | Per-user hard limits, automatic cutoff |
-| Multi-user data leakage | SQLite per-user isolation, separate encryption keys |
+| Multi-user data leakage | One SQLite database, rows keyed by account; each account's vault key is derived from one master key with its own salt; each account's skills see only its own /tmp |
 | Skill regression after update | Version rollback, old versions retained |
 
 ### 8.5 What the Cloud Model Is Sent
@@ -1225,7 +1225,7 @@ Severity mapping: user-impacting failures → `ERROR`, transient retries → `WA
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | Skill scripts | Python 3.11+ | Rich library ecosystem |
-| Sandbox (Linux) | bubblewrap (bwrap), through SkillJail; docker/podman for skills with system packages | Unprivileged, widely available |
+| Sandbox (Linux) | bubblewrap (bwrap), through SkillJail; docker for skills with system packages (rootless Podman cannot run under NoNewPrivileges) | Unprivileged, widely available |
 | Sandbox (Windows) | A plain child process (isolation off) | Dev-mode: the environment allow-list only |
 | Shared base env | Single venv with common libs (requests, beautifulsoup4, etc.) | Avoid re-installing common deps |
 | Per-skill env | venv per skill (when skill declares custom deps) | Dependency isolation |
@@ -1316,7 +1316,7 @@ ownclaw/
 │       │   │   ├── SandboxManager.java            # Interface
 │       │   │   ├── SkillJail.java                 # bubblewrap jail around every host Python of a skill
 │       │   │   ├── ProcessSandbox.java            # Runs a skill's Python, through SkillJail
-│       │   │   ├── ContainerSandbox.java          # docker/podman, for skills with system packages
+│       │   │   ├── ContainerSandbox.java          # docker, for skills with system packages
 │       │   │   └── SandboxResult.java             # Execution result model
 │       │   │
 │       │   ├── users/
@@ -1463,7 +1463,7 @@ ownclaw:
     isolation: auto              # auto | required | off -- SkillJail (§8.1); from .env only
     bwrap_path: /usr/bin/bwrap   # absolute; never looked up on PATH
     expose: []                   # host paths a jailed skill may still read
-    stall_timeout: 120           # seconds without output before a skill is killed
+    stall_timeout: 120           # seconds without output before a container image build is killed; a skill's run uses its SKILL.yaml timeout (default 30)
     python_path: /usr/bin/python3
 
   # Skills
@@ -1639,7 +1639,7 @@ Bot:   Shall I retry, or would you like to check your SMTP settings?
 - [x] Credential vault (AES-256-GCM encrypted, per-user keys)
 - [x] Token budget tracking + alerts
 - [x] Skill generation (Mentor creates new skills)
-- [x] Skill validation (static analysis + sandbox test)
+- [x] Skill validation: syntax, and that it imports and defines run(), checked in the jail
 - [x] Skill versioning (numbered dirs, regeneration/repair on failure; no automatic quarantine)
 - [x] More core skills (send_email, browse_web, text_summarize)
 - [x] ~~Conversation compression~~ (removed: a task reads its whole chat)
@@ -1712,7 +1712,7 @@ Testing will be **manual + observability-driven** (no automated test suite initi
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
 | 7-14B model unreliable at structured output | Plans fail, skills mismatch | Constrained output (JSON mode), retry with examples, fallback to Mentor |
-| Skill generation produces buggy code | Failed tasks, security issues | Mandatory sandbox test, static analysis, Mentor review, auto-rollback |
+| Skill generation produces buggy code | Failed tasks, security issues | Syntax and load checks in the jail before a skill is kept, the critic, the previous version restored when a check fails |
 | Token budget exceeded unexpectedly | Unexpected costs | Hard limits per-task and per-day, automatic cutoff, alerts via chat |
 | User data leakage between profiles | Privacy violation | Per-user encryption, isolated SQLite queries, audit logs |
 | Ollama not available / model too large | System non-functional | Health check on startup, graceful degradation, model recommendations |

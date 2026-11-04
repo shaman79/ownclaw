@@ -193,8 +193,8 @@ public class DynamicSkill implements Tool {
         "",
         "# --- Progress reporting API for long-running skills ---",
         "# Skills call report_progress('Scanning host 12/255', percent=5)",
-        "# The message is emitted as a JSON line on stdout, before the result line,",
-        "# and intercepted by the sandbox when the caller listens for it.",
+        "# The message is emitted as a JSON line on stdout, before the result line;",
+        "# the sandbox takes it out of stdout and hands it to the caller if it listens.",
         "_real_stdout = sys.__stdout__",
         "# What the skill prints reaches stdout a line at a time, as it prints it.",
         "try:",
@@ -266,9 +266,8 @@ public class DynamicSkill implements Tool {
      *
      * <p>Skills can call {@code report_progress(message, percent=None)} ({@link #SKILL_LOADER}) to
      * emit structured progress updates for long-running tasks.  These are intercepted
-     * by the sandbox and forwarded to the user's chat in real time -- when the caller
-     * gave a progress callback; otherwise they stay in stdout, before the result line
-     * ({@link #parseOutput}).
+     * by the sandbox and forwarded to the user's chat in real time when the caller gave a
+     * progress callback; never part of the stdout the result is read from either way.
      */
     private static final String RUNNER_HARNESS = SKILL_LOADER + String.join("\n",
         "",
@@ -460,8 +459,8 @@ public class DynamicSkill implements Tool {
             String inputJson = mapper.writeValueAsString(effectiveParams);
 
             // The skill's environment: its venv on PATH, or its target on PYTHONPATH. The UTF-8
-            // encoding every run gets is set where every launch's environment is made
-            // (SkillJail.applyEnvironment), on the host and in a container alike.
+            // encoding every host run gets is set where every launch's environment is made
+            // (SkillJail.applyEnvironment); a container's comes from its image (ENV lines).
             Map<String, String> envVars = new HashMap<>(resolution.extraEnv());
 
             // Run the skill: choose container or direct process execution.
@@ -621,6 +620,13 @@ public class DynamicSkill implements Tool {
                                          Map<String, String> extraVolumes, List<Path> handed,
                                          String tmpOwner) {
         try {
+            // Asked again: the jail may have started refusing since the first run, and a run in
+            // docker or podman never passes it.
+            Optional<String> refused = sandbox == null ? Optional.empty() : sandbox.unavailable();
+            if (refused.isPresent()) {
+                log.warn("Self-heal retry of skill '{}' not run: {}", name, refused.get());
+                return null;
+            }
             if (usedContainer && containerSandbox != null && containerSandbox.isAvailable()) {
                 // Rebuild image to pick up newly installed pip packages
                 String pipReqs = readRequirements();
@@ -704,8 +710,7 @@ public class DynamicSkill implements Tool {
      * that no key is dropped and an {@code "ok": false} stays where Artifact.succeeded reads it.
      * When the skill returned nothing, what was printed before that line is the output.
      * Nothing else the process wrote is dropped either ({@link #withStream}): stdout printed before
-     * that line -- by the skill's own print(), by a subprocess, or a progress report nobody
-     * intercepted -- and stderr, whether the skill succeeded or not: a failure is exactly when its
+     * that line -- by the skill's own print() or by a subprocess -- and stderr, whether the skill succeeded or not: a failure is exactly when its
      * warnings are the evidence. Output whose last line is not a JSON object is shown whole, as a
      * failure. A result whose "type" is need_input fails, saying it is not supported
      * ({@link #NEED_INPUT_UNSUPPORTED}).

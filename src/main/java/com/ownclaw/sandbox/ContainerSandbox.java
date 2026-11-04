@@ -17,7 +17,6 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -39,8 +38,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *       anywhere the host can, but not capture -- {@code --cap-drop=NET_RAW} takes the raw and
  *       packet sockets that would read the host's own traffic -- and with no-new-privileges
  *       nothing it runs gains a privilege through a setuid bit or file capabilities</li>
- *   <li>A name of its own, {@code ownclaw-run-<uuid>}, so a run killed for stalling or for its
- *       output is killed in the runtime too: killing the CLI alone leaves the container
+ *   <li>A name of its own, {@code ownclaw-run-<uuid>}, so a run killed for stalling is killed in
+ *       the runtime too: killing the CLI alone leaves the container
  *       running under docker's daemon or podman's conmon</li>
  *   <li>No variable of the service's or of the run: the image sets the encoding, and the
  *       skill's credentials come on stdin with its input, for the runner to put into its own

@@ -55,7 +55,7 @@ Then an **optional features wizard** lets you choose:
 | Feature | Default | Description |
 |---|---|---|
 | Ollama + default model | **Yes** | Installs Ollama, pulls `qwen2.5:14b` |
-| Container runtime | **Yes** | Installs Podman (or Docker fallback) for sandboxed skill execution |
+| Container runtime | **Yes** | Installs Podman (or Docker fallback) for skills that need OS packages. Rootless Podman cannot run under the unit's `NoNewPrivileges`, so with Podman those skills run as host processes; Docker, or no runtime, is what works |
 | Sudoers rule | **Yes** | Allows the `ownclaw` user to restart the service without a password (needed for cron updates) |
 | Cron job | **Yes** | Auto-update every 15 minutes via `deploy.sh --update` |
 | MCP server packages | **Yes** | Pre-installs npm packages for MCP servers + Chromium for Puppeteer |
@@ -226,9 +226,9 @@ SECURITY: this host still allows the service user to reach root:
   Fix with one command, as root:  sudo /opt/ownclaw/repo/deploy/deploy.sh --harden
 ```
 
-`--setup` now calls `--harden` instead of installing the sudoers rules and the user crontab, so
-a fresh install never has the problem. `--install-sudoers` remains only for a host you have
-deliberately not hardened.
+`--setup` runs `--harden` when you choose auto-updates, which removes the sudoers rule `--setup`
+installed earlier, and later updates on a hardened host no longer put it back.
+`--install-sudoers` remains only for a host you have deliberately not hardened.
 
 Verify afterwards:
 
@@ -292,8 +292,9 @@ curl -s -H "X-Ops-Token: $T" http://localhost:8080/api/ops | jq      # lists eve
 
 ### What it will not do
 
-No endpoint returns a credential value, runs arbitrary shell, triggers a deploy or restarts the
-service. Those are what made the old `/api/debug` surface dangerous; `GET /api/debug/credentials`,
+No endpoint returns a credential value, triggers a deploy or restarts the service. `agent/run`
+runs a task the way a chat message does, with that account's skills and credentials, so the token
+is as powerful as the owner's login: keep it as you would the owner's password. Those are what made the old `/api/debug` surface dangerous; `GET /api/debug/credentials`,
 which returned the whole vault in plaintext, was deleted on 2026-09-17.
 
 Configuration values whose key looks secret are replaced with a placeholder. `db/query` refuses
@@ -358,8 +359,12 @@ The systemd service runs with these hardening options:
 - `PrivateTmp=true`
 - Only `/opt/ownclaw/data`, `/opt/ownclaw/skills`, `/opt/ownclaw/logs` and `/opt/ownclaw/backups` are writable.
 
-The `.env` file has `chmod 600`; on a hardened host (`--harden`) it is `root:ownclaw` `0640`, so the
-service reads it and cannot change it.
+With `bubblewrap` installed (`sudo apt install bubblewrap`, then restart the service), every skill
+also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills from it (see
+the README's Execution sandbox). `/api/ops/health` shows whether the jail is on.
+
+The `.env` file has `chmod 600`; on a hardened host (`--harden`) it is `root:root` `0600`: systemd
+reads it as root to start the service, and the service user cannot read it at all.
 
 ---
 

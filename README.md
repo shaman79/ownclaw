@@ -70,7 +70,7 @@ Skills persist across sessions. Over time, the agent accumulates a growing libra
 - **Scheduled tasks** — one-shot and recurring (cron-style) task execution
 - **Whole chat memory** — a task reads the whole chat it came from, every message whole, with a record of what each earlier task did; nothing is summarised or cut to fit
 - **Live status** — every model call of a task is shown while it runs (which model, what for, its reasoning as it arrives), with token counters and the cloud's cost; every chat row says when it was saved; a task page shows each step
-- **Ops API** — read-only diagnostics plus a few safe switches (`/api/ops/*`), for operators and AI assistants; off unless a token is set
+- **Ops API** — diagnostics, a few switches and agent runs (`/api/ops/*`), for operators and AI assistants; off unless a token is set
 
 ## Key differences from OpenClaw
 
@@ -86,7 +86,7 @@ OwnClaw started as a fork of the [OpenClaw](https://github.com/BionicClick/OpenC
 | **Multi-user** | Single-user | Multi-user with isolated profiles, chats and credentials; one shared skill library |
 | **Credential handling** | Config files or hardcoded | Encrypted vault with per-user isolation; values removed from everything a cloud model is sent |
 | **Privacy** | Everything goes to the cloud | Secrets removed and identifiers replaced before any cloud call; uploaded files and mail read only by the local model |
-| **Sandbox** | Basic process execution | Hardened systemd service, containers for OS packages, stall detection |
+| **Sandbox** | Basic process execution | A bubblewrap jail for every skill, a hardened systemd service, stall detection |
 | **Cost control** | None — every action hits the cloud API | Time-vs-cost setting, local delegation, on-demand tool lookup, prompt caching, rate-limit back-off, optional token budgets |
 | **UI** | CLI / basic web | Chat UI with live model calls, per-chat cost and effort, task pages, debug mode, settings panel; Telegram bot |
 
@@ -110,20 +110,29 @@ Each call is recorded with the number of secrets removed and identifiers replace
 - User credentials (API keys, passwords, tokens) are stored in an **AES-256-GCM encrypted vault** backed by SQLite.
 - Credentials are **never passed through LLM prompts**. A skill gets the credentials it declares on its input when it starts — never on a command line — and the runner puts them in its environment.
 - Vault values are removed from logs and traces as well as from cloud requests.
-- Each user's credentials are isolated — users cannot access each other's vault.
+- Each user's credentials are isolated: no command, page or API gives one account another's vault, and with the skill jail on, no skill can read the database they are kept in.
 - The agent can ask the user for a credential in the chat, store it securely, and hand it to skills that declare it.
-- The secret that signs chat links is never handed to any skill.
+- The secret that signs chat links is never handed to any skill, and with the skill jail on, no skill can read it from the database.
 
 ### Execution sandbox
+
+- **Skill jail**: every Python process OwnClaw starts for a skill — its runs, its checks, its venv and pip — runs in an unprivileged bubblewrap jail:
+  - the host is read-only, and the skill sees only its own processes;
+  - OwnClaw's own directory is hidden — the database and the vault's key, `.env`, uploads it was not handed, other skills, logs, backups and the code — and so are the system journal and `/run`;
+  - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs;
+  - the network is the host's, so skills that talk to the LAN, mail servers, Home Assistant or Ollama keep working.
+
+  The jail turns itself on once bubblewrap is installed and passes its self-check (`sudo apt install bubblewrap`, then restart OwnClaw). `/status` and `/api/ops/health` show its state, and `OWNCLAW_SANDBOX_ISOLATION=required` refuses to run any skill without it.
 
 - **Hardened service**: in production OwnClaw runs as a dedicated `ownclaw` system user with no login shell, under systemd with:
   - the whole filesystem read-only, but for OwnClaw's own data, skills, logs and backups
   - home directories hidden, and a private `/tmp`
   - OwnClaw's code, its unit file and `deploy.sh` owned by root, so nothing the service runs can change them
+  - no way to gain privileges: `sudo`, `su` and other setuid programs give it nothing (`NoNewPrivileges`)
 
-  Every skill runs inside these limits.
+  Every skill runs inside these limits, with an allow-listed environment: the service's API keys and tokens are not in it.
 
-- **Containers**: a skill that needs OS packages (nmap, net-tools, …) runs in a Docker/Podman image built for it, with its directory mounted read-only.
+- **Containers**: where Docker is installed, a skill that needs OS packages (nmap, net-tools, …) runs in an image built for it, with no raw sockets, no way to gain privileges, and its code and `SKILL.yaml` mounted read-only. Without a container runtime it runs like any other skill.
 
 - **Critic agent**: before any tool runs, a rule-based critic checks the call — an unknown tool, a missing parameter, the same call repeated, a new skill that duplicates an existing one — and blocks it, and flags actions with side effects such as `shell_exec`.
 
@@ -132,12 +141,12 @@ Each call is recorded with the number of secrets removed and identifiers replace
 ### Accounts and access
 
 - Only the owner creates accounts (`/user add`, or Settings → Accounts) and links Telegram IDs to them.
-- The ops API is disabled unless a token of at least 32 characters is set in the environment; the token is never stored in the database.
+- The ops API is disabled unless a token of at least 32 characters is set in the environment; the token is never stored in the database. It can run a task as any account, so treat it like the owner's password.
 - Chat links can be signed, so a message prepared by an alert shows as verified (see below).
 
 ### Cloud API security
 
-- Cloud LLM API keys are stored as environment variables, never in code or config files checked into source control.
+- Cloud LLM API keys come from the environment (`.env`) or, when entered on the settings page, are kept in the database — never in code or in files checked into source control.
 - Token budgets can cap daily and per-task cloud spending.
 - Prompt caching (Anthropic) reduces redundant token usage across multi-turn conversations.
 
@@ -145,7 +154,7 @@ Each call is recorded with the number of secrets removed and identifiers replace
 
 ### Production deploy (Linux)
 
-A single script handles everything — JDK, Python, Podman, systemd service, and cron-based auto-updates:
+A single script handles everything — JDK, Python, the systemd service and auto-updates:
 
 ```bash
 # Upload deploy.sh to the server, then:
@@ -194,6 +203,8 @@ All settings are in `src/main/resources/application.yaml` and can be overridden 
 | `OWNCLAW_TELEGRAM_ENABLED` | `false` | Turn on the Telegram bot |
 | `TELEGRAM_BOT_TOKEN` | — | The bot's token |
 | `OWNCLAW_OPS_TOKEN` | — | Enables the ops API (at least 32 characters) |
+| `OWNCLAW_SANDBOX_ISOLATION` | `auto` | `auto`: jail skills once bubblewrap works; `required`: never run a skill without the jail; `off`: no jail (development, Windows) |
+| `OWNCLAW_SANDBOX_EXPOSE` | — | Host paths a jailed skill may still read, comma-separated |
 | `OWNCLAW_SERVER_PORT` | `8080` | HTTP server port |
 
 ### Links that open a message in the chat
@@ -222,7 +233,7 @@ https://<host>/#task=<URL-encoded text>[&new=1][&title=<URL-encoded>][&exp=<unix
 - **Frontend**: Vanilla HTML/CSS/JS, WebSocket for real-time updates
 - **Messaging**: web chat, Telegram (Bot HTTP API)
 - **LLM providers**: Anthropic (Claude), OpenAI, Ollama
-- **Skill runs**: Python processes with per-skill venvs; Docker/Podman for skills that need OS packages
+- **Skill runs**: Python processes with per-skill venvs, in a bubblewrap jail; Docker for skills that need OS packages
 - **Build**: Gradle
 
 ## License

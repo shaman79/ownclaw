@@ -421,8 +421,8 @@ public class SkillManager {
     // ────────────────────── Delete ──────────────────────
 
     /**
-     * Delete a skill permanently: its directory and its environments. Refused while a run of it
-     * is in flight.
+     * Delete a skill permanently: its directory and its environments. Waits for the runs of it
+     * under way to end (the write lock), and no run starts while it goes.
      */
     public String deleteSkill(String name) {
         return deleteSkill(name, null, () -> false, () -> {});
@@ -459,17 +459,10 @@ public class SkillManager {
         if (notYours != null) return notYours;
         DynamicSkill skill = skillOpt.get();
 
-        // Never while a run of it is going on: the run can go on writing the directory and its
-        // environment while they are removed, and leave part of them behind. (It cannot turn the
-        // delete on anything outside them: that never follows a link below them -- see
-        // SkillJail.deleteTree.) Checked again once it is unregistered, for a run that started
-        // in between.
-        if (skill.inFlight() > 0) return stillRunning(name);
+        // No run of it is going on: the write lock this holds waited for them, and a run takes
+        // the read lock to start. (Nor could one turn the delete on anything outside the
+        // directory: deleting never follows a link below it -- see SkillJail.deleteTree.)
         dynamicSkillRegistry.unregister(name);
-        if (skill.inFlight() > 0) {
-            dynamicSkillRegistry.register(skill);
-            return stillRunning(name);
-        }
 
         boolean dirGone = SkillJail.deleteTree(skill.skillDir());
         // The environment too. This deleted the code and kept the 7 GB of packages the code had
@@ -486,10 +479,6 @@ public class SkillManager {
                     + "before creating a skill of this name again.";
         }
         return "Skill '" + name + "' has been permanently deleted.";
-    }
-
-    private static String stillRunning(String name) {
-        return "ERROR: Skill '" + name + "' is running right now; it was not deleted. Try again when it has finished.";
     }
 
     // ────────────────────── List / Stats ──────────────────────

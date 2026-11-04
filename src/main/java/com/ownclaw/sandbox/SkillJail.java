@@ -399,6 +399,7 @@ public class SkillJail {
     private final Path bwrap;
     private final Layout layout;
     private final List<String> exposeEntries;
+    private final Path browsers;
     private final LongSupplier clock;
 
     private final AtomicLong isolatedRuns = new AtomicLong();
@@ -414,23 +415,18 @@ public class SkillJail {
     @Autowired
     public SkillJail(OwnClawConfig config) {
         this(config.getSandbox().getIsolation(), config.getSandbox().getBwrapPath(),
-                layoutOf(config), withDefaultExposes(config.getSandbox().getExpose(), System.getProperty("user.home")),
-                System::currentTimeMillis);
+                layoutOf(config), config.getSandbox().getExpose(), System::currentTimeMillis,
+                browsersOf(System.getProperty("user.home")));
     }
 
     /**
-     * What is exposed read-only without the owner listing it: the browsers Playwright installs,
-     * under {@code ~/.cache/ms-playwright}. In production HOME is the service directory, which
-     * the jail hides, and the lunch-menu skills drive a browser from there; browser builds hold
-     * nothing of the service's. Bound with {@code -try}, so a host without them loses nothing.
+     * Where Playwright keeps the browsers it installs: {@code ~/.cache/ms-playwright}; null when
+     * HOME is unknown. In production HOME is the service directory, which the jail hides, and the
+     * lunch-menu skills drive a browser installed there; {@link #browserBuilds} exposes it.
      */
-    static List<String> withDefaultExposes(List<String> owners, String home) {
-        var out = new ArrayList<String>(owners == null ? List.of() : owners);
-        if (home != null && !home.isBlank()) {
-            String browsers = Path.of(home).resolve(".cache/ms-playwright").toAbsolutePath().normalize().toString();
-            if (!out.contains(browsers)) out.add(browsers);
-        }
-        return out;
+    static Path browsersOf(String home) {
+        if (home == null || home.isBlank()) return null;
+        return Path.of(home).resolve(".cache/ms-playwright").toAbsolutePath().normalize();
     }
 
     /**
@@ -440,6 +436,15 @@ public class SkillJail {
      */
     public SkillJail(String isolation, String bwrap, Layout layout, List<String> expose,
                      LongSupplier clock) {
+        this(isolation, bwrap, layout, expose, clock, null);
+    }
+
+    /**
+     * @param browsers Playwright's browser directory, whose builds are exposed read-only without
+     *                 the owner listing them ({@link #browserBuilds}); null for none
+     */
+    SkillJail(String isolation, String bwrap, Layout layout, List<String> expose,
+              LongSupplier clock, Path browsers) {
         String error = null;
         Mode m;
         String value = isolation == null ? "" : isolation.trim().toLowerCase(Locale.ROOT);
@@ -464,17 +469,19 @@ public class SkillJail {
         this.bwrap = binary;
         this.layout = layout;
         this.exposeEntries = expose == null ? List.of() : List.copyOf(expose);
+        this.browsers = browsers;
         this.clock = clock;
         this.startedAt = clock.getAsLong();
     }
 
     /**
      * Evaluate once at startup, so the log says what the jail will do before the first skill;
-     * and empty the accounts' /tmp directories, as a restart empties the service's own /tmp.
+     * and remove what earlier processes left of the accounts' /tmp directories
+     * ({@link #clearSharedTmp}), as a restart empties the service's own /tmp.
      */
     @PostConstruct
     public void init() {
-        removeSharedTmp();
+        clearSharedTmp();
         status();
     }
 
@@ -569,23 +576,80 @@ public class SkillJail {
     }
 
     /**
+     * This process's directory of the accounts' /tmp directories: made, under a random name and
+     * for the service user alone, by the first jailed run that needs one -- so never by anything
+     * that ran before the jail was ready, which could have left a hard link to the database where
+     * a later jailed run would read it. Null until then.
+     */
+    private Path sharedTmpEpoch;
+    private final Object sharedTmpLock = new Object();
+
+    /**
      * An account's /tmp: one directory its skills' runs share, as they shared the service's own
      * /tmp before there was a jail. A skill that writes a report there for another to read next,
-     * keeps a downloaded browser or a backup there, finds it on the account's next run. Emptied
-     * when the service starts and when it stops, so it is gone when OwnClaw restarts, as the
+     * keeps a downloaded browser or a backup there, finds it on the account's next run. It is new
+     * in each process ({@link #sharedTmpEpoch}), so it is gone when OwnClaw restarts, as the
      * service's /tmp was. Other accounts' skills do not see it: each run sees its own account's
-     * at /tmp, and the jail hides the directory they are all in. Made here, and checked to be a
-     * directory and no link each time.
+     * at /tmp, and the jail hides the directory they are all in, which only the service user can
+     * open.
+     * <p>
+     * Checked before each run binds it, as a skill's own directory is ({@link #checkBinds}): set
+     * back to the service user alone -- a run can chmod its own /tmp -- and walked for a file with
+     * a name outside it ({@link #linkedOutside}), which nothing jailed can make. Only a process
+     * that ran unjailed beside the jail's first runs could have; then the directory, with what is
+     * in it, is set aside (and removed at the next start) and the account starts a fresh one. So
+     * is one a run closed below its root: what it holds cannot be checked.
      */
-    synchronized Path sharedTmp(String owner) throws IOException {
-        Path root = sharedTmpRoot();
-        if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(root);
-        Path dir = root.resolve(tmpName(owner));
-        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir);
-        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("the account's /tmp is not a directory of its own: " + dir);
+    Path sharedTmp(String owner) throws IOException {
+        synchronized (sharedTmpLock) {
+            if (sharedTmpEpoch == null || !Files.isDirectory(sharedTmpEpoch, LinkOption.NOFOLLOW_LINKS)) {
+                Path root = sharedTmpRoot();
+                if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(root);
+                if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("the accounts' /tmp root is not a directory of its own: " + root);
+                }
+                ownerOnly(root);
+                sharedTmpEpoch = Files.createTempDirectory(root, "run-", ownerOnlyAttribute());
+            }
+            Path dir = sharedTmpEpoch.resolve(tmpName(owner));
+            if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir, ownerOnlyAttribute());
+            if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("the account's /tmp is not a directory of its own: " + dir);
+            }
+            ownerOnly(dir);
+            String tampered = linkedOutside(dir);
+            if (tampered != null) {
+                Path aside = sharedTmpEpoch.resolve(".set-aside-" + UUID.randomUUID());
+                Files.move(dir, aside, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                log.warn("The /tmp of account {} was set aside as {} ({}); its skills start a fresh one",
+                        tmpName(owner), aside.getFileName(), tampered);
+                Files.createDirectory(dir, ownerOnlyAttribute());
+            }
+            return dir;
         }
-        return dir;
+    }
+
+    /** rwx for the service user alone, for a directory made new; none where there are no POSIX modes. */
+    private static java.nio.file.attribute.FileAttribute<?>[] ownerOnlyAttribute() {
+        if (!java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            return new java.nio.file.attribute.FileAttribute<?>[0];
+        }
+        return new java.nio.file.attribute.FileAttribute<?>[]{
+                java.nio.file.attribute.PosixFilePermissions.asFileAttribute(OWNER_ONLY)};
+    }
+
+    private static final Set<PosixFilePermission> OWNER_ONLY = Set.of(PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
+
+    /**
+     * Set a directory the service made back to rwx for the service user alone, by its path. Only
+     * for one just checked to be a directory and no link, whose name nothing jailed can change:
+     * the accounts' /tmp root, hidden, and an account's /tmp, which a run sees as its own /tmp, a
+     * mount point it cannot rename or replace.
+     */
+    private static void ownerOnly(Path dir) throws IOException {
+        if (!dir.getFileSystem().supportedFileAttributeViews().contains("posix")) return;
+        Files.setPosixFilePermissions(dir, OWNER_ONLY);
     }
 
     /** The account's directory name: its id when that is a plain name, otherwise a hash of it. */
@@ -599,11 +663,71 @@ public class SkillJail {
         }
     }
 
-    /** The accounts' /tmp directories go when the service stops, as its own /tmp does. */
-    @jakarta.annotation.PreDestroy
-    synchronized void removeSharedTmp() {
-        Path root = sharedTmpRoot();
-        if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) deleteTree(root);
+    /**
+     * Remove what earlier processes left of the accounts' /tmp directories. Only at the start,
+     * before any skill runs: then nothing writes them, so each directory can be opened by its
+     * path -- one a run closed (mode 000) included, which {@link #deleteTree} must leave -- without
+     * a swap to fear. The root is renamed aside first, so whatever cannot be removed (a tree
+     * deeper than a path can name) is never bound again; it stays hidden under skills/.
+     */
+    void clearSharedTmp() {
+        synchronized (sharedTmpLock) {
+            sharedTmpEpoch = null;
+            Path root = sharedTmpRoot();
+            Path skills = root.getParent();
+            if (skills == null || !Files.isDirectory(skills, LinkOption.NOFOLLOW_LINKS)) return;
+            if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    Files.move(root, skills.resolve("_tmp-old-" + UUID.randomUUID()),
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException | RuntimeException e) {
+                    log.warn("Could not set the accounts' old /tmp {} aside: {}", root, e.toString());
+                }
+            }
+            try (var old = Files.newDirectoryStream(skills, "_tmp-old-*")) {
+                for (Path p : old) {
+                    if (!wipeUnwritten(p)) log.warn("Could not fully remove {}", p);
+                }
+            } catch (IOException | RuntimeException e) {
+                log.warn("Could not list {} for old /tmp directories: {}", skills, e.toString());
+            }
+        }
+    }
+
+    /**
+     * Delete a tree nothing is writing, by its paths: each directory made rwx for its owner
+     * before it is listed, so one closed by a run is removed too. Never follows a link -- each
+     * name's type is read without following one, and a link is removed, not entered. Returns
+     * whether the tree is gone.
+     */
+    static boolean wipeUnwritten(Path top) {
+        var pending = new ArrayDeque<Path>(List.of(top));
+        var dirs = new ArrayList<Path>();
+        while (!pending.isEmpty()) {
+            Path p = pending.pop();
+            try {
+                var a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (!a.isDirectory()) {
+                    Files.deleteIfExists(p);
+                    continue;
+                }
+                ownerOnly(p);
+                dirs.add(p);
+                try (var entries = Files.list(p)) {
+                    entries.forEach(pending::push);
+                }
+            } catch (IOException | RuntimeException e) {
+                // left, and found below
+            }
+        }
+        for (int i = dirs.size() - 1; i >= 0; i--) {
+            try {
+                Files.deleteIfExists(dirs.get(i));
+            } catch (IOException | RuntimeException e) {
+                // not empty: what was left in it is logged by the caller
+            }
+        }
+        return !Files.exists(top, LinkOption.NOFOLLOW_LINKS);
     }
 
     /**
@@ -668,7 +792,7 @@ public class SkillJail {
         } catch (IllegalStateException ex) {
             return notStarting(ex.getMessage(), sig, now, version, List.of());
         }
-        List<Bind> expose = filterExpose(exposeEntries, layout);
+        List<Bind> expose = exposed();
         SelfCheck check = selfCheck(roots, expose);
         if (!check.completed()) return notStarting(check.reason(), sig, now, version, roots);
         if (check.checks().containsValue(false)) {
@@ -1054,6 +1178,55 @@ public class SkillJail {
         }
         outer.sort(null);
         return List.copyOf(outer);
+    }
+
+    /**
+     * What a jailed run may read besides its own: the owner's list and the browser builds
+     * ({@link #browserBuilds}), each kept out of what the jail hides ({@link #filterExpose}) and
+     * walked for a file with a name outside it ({@link #linkedOutside}) -- a hard link made while
+     * nothing was jailed, to the database say, would show it through the bind as it is now. One
+     * that has one, or cannot be walked, is not exposed, and the log says why. Walked as the jail
+     * is evaluated: in production the directories exposed are read-only to the service, so
+     * nothing can add a link afterwards, and nothing jailed can make one at all.
+     */
+    private List<Bind> exposed() {
+        var entries = new ArrayList<String>(exposeEntries);
+        for (Path build : browserBuilds(browsers)) {
+            if (!entries.contains(build.toString())) entries.add(build.toString());
+        }
+        var out = new ArrayList<Bind>();
+        for (Bind b : filterExpose(entries, layout)) {
+            String why;
+            try {
+                why = Files.exists(b.source(), LinkOption.NOFOLLOW_LINKS) ? linkedOutside(b.source()) : null;
+            } catch (IOException | RuntimeException e) {
+                why = "it could not be walked: " + e;
+            }
+            if (why != null) {
+                log.warn("Not exposing {} to skills: {}", b.dest(), why);
+                continue;
+            }
+            out.add(b);
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * The browser builds in Playwright's directory, each its own entry: every directory in it but
+     * the dotted ones. Not the directory whole: its {@code .links} names the environments of the
+     * skills that installed the browsers -- other skills' names -- and a browser is launched from
+     * its build directory alone. None when the directory is absent, a link, or not given.
+     */
+    static List<Path> browserBuilds(Path dir) {
+        if (dir == null || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) return List.of();
+        try (var entries = Files.list(dir)) {
+            return entries.filter(p -> !p.getFileName().toString().startsWith("."))
+                    .filter(p -> Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS))
+                    .sorted().toList();
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not list {}: {}", dir, e.toString());
+            return List.of();
+        }
     }
 
     /**

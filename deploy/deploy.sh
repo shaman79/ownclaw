@@ -990,7 +990,10 @@ TIMER
     for d in data skills logs backups; do
         [ -d "$DEPLOY_DIR/$d" ] && chown -R ownclaw:ownclaw "$DEPLOY_DIR/$d"
     done
-    [ -f "$DEPLOY_DIR/.env" ] && { chown root:ownclaw "$DEPLOY_DIR/.env"; chmod 0640 "$DEPLOY_DIR/.env"; }
+    # Root's alone: systemd reads it as root to start the service, and the root timer runs the
+    # updates. Readable by the service's group, every skill the service runs unjailed could
+    # read the API keys and tokens straight from the file, past the environment allow-list.
+    [ -f "$DEPLOY_DIR/.env" ] && { chown root:root "$DEPLOY_DIR/.env"; chmod 0600 "$DEPLOY_DIR/.env"; }
     [ -f "$DEPLOY_DIR/ownclaw.jar" ] && chown root:root "$DEPLOY_DIR/ownclaw.jar"
     log "  $REPO_DIR is now root-owned; data/, skills/, logs/ and backups/ stay with ownclaw"
 
@@ -1224,7 +1227,9 @@ deploy_jar() {
 
     # Ensure sudoers rule exists when possible (root deploys, or environments where sudo -n works).
     # If we cannot install it here, restart_service() will still fail with instructions.
-    ensure_sudoers_restart_rule || true
+    # Never on a hardened host: its root timer needs no grant, and --harden removed the grants
+    # on purpose -- putting them back on every update undid it.
+    [ -f "$UPDATE_UNIT" ] || ensure_sudoers_restart_rule || true
 
     # Restart service (only if systemd is running — skip in setup phase)
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -1291,7 +1296,7 @@ rollback() {
         log "${commit:0:8} will not be redeployed automatically — push a fix, or run deploy.sh to force it"
     fi
 
-    ensure_sudoers_restart_rule || true
+    [ -f "$UPDATE_UNIT" ] || ensure_sudoers_restart_rule || true
     if ! restart_service; then
         restart_instructions
         die "Rollback failed (could not restart service)."

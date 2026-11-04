@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Runs a skill's Python as a child process, with stall detection and progress forwarding.
  * Every launch goes through {@link SkillJail#prepare}: when the jail is READY the
  * process runs inside bubblewrap (the host read-only, the service's state hidden, its own
- * directory writable, a private /tmp); when it is inactive or off, unjailed; when it is
+ * directory writable, its account's /tmp or a fresh one); when it is inactive or off, unjailed; when it is
  * refusing, or cannot isolate this one launch, not at all. The environment is the jail's
  * allow-list either way.
  */
