@@ -1225,8 +1225,14 @@ backup_current() {
 deploy_jar() {
     local new_jar="$1"
 
-    # Nothing has been touched yet, so a failure here stops the deploy rather than rolling back.
-    backup_current || die "Could not back up the current JAR (disk full?) -- deploy not started"
+    # A JAR still waiting for its restart never ran, so it is no build to roll back to: the
+    # newest backup stays the last one that did. Nothing has been touched yet, so a failed
+    # backup stops the deploy rather than rolling back.
+    if [ -f "$RESTART_PENDING_MARKER" ]; then
+        log "The JAR on disk was staged but never started -- keeping the last backup that ran"
+    else
+        backup_current || die "Could not back up the current JAR (disk full?) -- deploy not started"
+    fi
 
     # IMPORTANT: do not overwrite the currently-running JAR in-place.
     # The JVM may still read classes/resources lazily from the file; truncating it mid-run
@@ -1236,7 +1242,10 @@ deploy_jar() {
         rm -f "$tmp_jar"
         die "Could not copy the new JAR into place (disk full?) -- the running build is untouched"
     fi
-    mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
+    if ! mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"; then
+        rm -f "$tmp_jar"
+        die "Could not swap the new JAR into place -- the running build is untouched"
+    fi
     log "Deployed new JAR"
 
     # Record it at the swap, not after the restart: from here on the JAR on disk is the
@@ -1305,7 +1314,7 @@ wait_for_health() {
 # === Rollback to previous JAR ===
 rollback() {
     local latest_backup
-    latest_backup=$(ls -1t "$BACKUP_DIR"/ownclaw-*.jar 2>/dev/null | head -1)
+    latest_backup=$(ls -1t "$BACKUP_DIR"/ownclaw-*.jar 2>/dev/null | head -1 || true)
     if [ -z "$latest_backup" ]; then
         die "No backup available for rollback"
     fi
