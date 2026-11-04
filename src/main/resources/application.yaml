@@ -198,7 +198,8 @@ ownclaw:
     #             bwrap is absent or cannot start a jail (one that cannot mount the jail's own
     #             /dev/mqueue cannot), skills run unjailed, with one warning. It refuses every
     #             launch when bwrap runs but the self-check fails, and when the jail was ready
-    #             earlier in this process and cannot start now.
+    #             earlier in this process and cannot start now. Once skills have run unjailed
+    #             in a process, the jail turns on only at the next start.
     #   required  refuse to start a skill when the jail is not working (fail closed)
     #   off       no jail (development, Windows)
     # On a dev host running as your own user, HOME is yours, and the jail does not hide HOME (by
@@ -218,9 +219,9 @@ ownclaw:
     # journalctl exits 0 with no entries, logger exits 0 while nothing is logged, and Python's
     # SysLogHandler prints a logging-error traceback to stderr for each record. The kernel
     # session keyring is shared with the service (bubblewrap cannot give a jail its own).
-    # Install:  sudo apt install bubblewrap, then sudo systemctl restart ownclaw. The jail
-    #           would come up within a minute on its own, but a process an earlier unjailed
-    #           run left running stays outside any jail until the restart ends it.
+    # Install:  sudo apt install bubblewrap, then sudo systemctl restart ownclaw. The jail turns
+    #           on at that restart: in a process where skills have run unjailed it stays off,
+    #           since what they left running would go on outside it, beside it.
     # Switch off: OWNCLAW_SANDBOX_ISOLATION=off in the root-owned .env, then restart. Taking
     # bwrap away once it has worked also needs that restart (or off): until then, auto refuses.
     isolation: ${OWNCLAW_SANDBOX_ISOLATION:auto}

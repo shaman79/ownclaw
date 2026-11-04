@@ -164,13 +164,16 @@ class SharedSkillTmpTest {
 
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
-        assertFalse(Files.exists(tmp.resolve("left.txt")), "a start kept what the last process left");
-        assertNotEquals(epoch, next.sharedTmp("owner1").getParent(), "the next process reused the directory");
+        assertFalse(Files.exists(epoch), "a start left the last process's /tmp directories in use");
+        Path again = next.sharedTmp("owner1");
+        assertNotEquals(epoch, again.getParent(), "the next process reused the directory");
+        assertFalse(Files.exists(again.resolve("left.txt")), "the next process sees what the last one left");
+        awaitNoOldTmp();
     }
 
     @Test
-    @DisplayName("a start removes a directory a run closed, with a hard link to the database in it")
-    void aStartRemovesWhatARunClosed() throws Exception {
+    @DisplayName("a start puts what a run closed out of use at once, a hard link to the database in it, and never binds it again")
+    void aStartPutsAClosedDirectoryOutOfUse() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
         Path closed = Files.createDirectory(tmp.resolve("keep"));
         Files.createLink(closed.resolve("db"), m.db());
@@ -178,34 +181,37 @@ class SharedSkillTmpTest {
 
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
-        try (var left = Files.list(m.root().resolve("skills"))) {
-            assertEquals(List.of(), left.filter(p -> p.getFileName().toString().startsWith("_tmp")).toList(),
-                    "what the last process left is still there");
-        }
+        jail = next;
+        assertEquals("absent", run(m.otherSkill(), """
+                import os
+                print('present' if os.path.exists('/tmp/keep') else 'absent')
+                """, "owner1"));
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
+        // What a run closed stays, hidden under skills/ -- the delete never opens it by its path --
+        // so the test opens it again for its own clean-up.
+        Thread.sleep(500);
+        try (var left = Files.list(m.root().resolve("skills"))) {
+            for (Path old : left.filter(p -> p.getFileName().toString().startsWith("_tmp-old-")).toList()) {
+                Path keep = old.resolve(tmp.getParent().getFileName()).resolve("owner1").resolve("keep");
+                assertTrue(Files.isDirectory(keep, java.nio.file.LinkOption.NOFOLLOW_LINKS), "not left as it was: " + keep);
+                Files.setPosixFilePermissions(keep, java.util.Set.of(
+                        java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                        java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                        java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE));
+            }
+        }
     }
 
-    @Test
-    @DisplayName("a hard link out, left where an account's /tmp is, is set aside before a run sees it")
-    void aHardLinkInTheTmpIsSetAside() throws Exception {
-        // What only a process running unjailed beside the jail's first runs could leave.
-        Path tmp = jail.sharedTmp("owner1");
-        Files.writeString(tmp.resolve("ow_perf_1.txt"), "collected");
-        Files.createLink(tmp.resolve("db"), m.db());
-
-        String seen = run(m.otherSkill(), """
-                def read(p):
-                    try:
-                        return open(p).read()
-                    except Exception:
-                        return 'absent'
-                print(read('/tmp/db') + ' ' + read('/tmp/ow_perf_1.txt'))
-                """, "owner1");
-        assertEquals("absent absent", seen, "the run read through the hard link");
-        try (var aside = Files.list(tmp.getParent())) {
-            assertEquals(1, aside.filter(p -> p.getFileName().toString().startsWith(".set-aside-")).count());
+    /** The old /tmp directories go in the background: wait until they have. */
+    private void awaitNoOldTmp() throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (true) {
+            try (var left = Files.list(m.root().resolve("skills"))) {
+                if (left.noneMatch(p -> p.getFileName().toString().startsWith("_tmp-old-"))) return;
+            }
+            assertTrue(System.currentTimeMillis() < deadline, "the old /tmp directories were not removed");
+            Thread.sleep(50);
         }
-        assertEquals("canary-db-secret", Files.readString(m.db()));
     }
 
     @Test

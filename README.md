@@ -130,7 +130,7 @@ Each call is recorded with the number of secrets removed and identifiers replace
   - OwnClaw's code, its unit file and `deploy.sh` owned by root, so nothing the service runs can change them
   - no way to gain privileges: `sudo`, `su` and other setuid programs give it nothing (`NoNewPrivileges`)
 
-  Every skill runs inside these limits, with an allow-listed environment: the service's API keys and tokens are not in it.
+  Every skill runs inside these limits. Its environment holds only an allow-listed set of variables, not the service's API keys or tokens; with the skill jail on, it cannot see the service's process or files either.
 
 - **Containers**: where Docker is installed, a skill that needs OS packages (nmap, net-tools, …) runs in an image built for it, with no raw sockets, no way to gain privileges, and its code and `SKILL.yaml` mounted read-only. Without a container runtime it runs like any other skill.
 

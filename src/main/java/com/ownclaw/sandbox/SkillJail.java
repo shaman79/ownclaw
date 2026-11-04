@@ -122,7 +122,8 @@ import java.util.stream.Stream;
  *   <li>{@code auto} (default) -- jail every launch when bubblewrap is installed and passes its
  *       self-check. While bubblewrap is absent or cannot start a jail, skills run unjailed, with
  *       one warning -- unless the jail was ready earlier in this process: then that refuses
- *       every launch, as a self-check that runs but fails always does.</li>
+ *       every launch, as a self-check that runs but fails always does. Once a launch has run
+ *       unjailed, the jail stays off until the next start ({@link #RESTART_TO_JAIL}).</li>
  *   <li>{@code required} -- if the jail is not working, refuse the launch. Fail closed.</li>
  *   <li>{@code off} -- development and Windows.</li>
  * </ul>
@@ -577,9 +578,11 @@ public class SkillJail {
 
     /**
      * This process's directory of the accounts' /tmp directories: made, under a random name and
-     * for the service user alone, by the first jailed run that needs one -- so never by anything
-     * that ran before the jail was ready, which could have left a hard link to the database where
-     * a later jailed run would read it. Null until then.
+     * for the service user alone, by the first jailed run that needs one. Nothing unjailed runs
+     * beside it: under auto the jail turns on only in a process where no launch has run unjailed
+     * ({@link #RESTART_TO_JAIL}), and from then on none does; required never runs one; off binds
+     * none. So nothing can have put a hard link to the database in it -- nothing inside a jail can
+     * make one -- and an earlier process's are never bound again. Null until then.
      */
     private Path sharedTmpEpoch;
     private final Object sharedTmpLock = new Object();
@@ -593,12 +596,10 @@ public class SkillJail {
      * at /tmp, and the jail hides the directory they are all in, which only the service user can
      * open.
      * <p>
-     * Checked before each run binds it, as a skill's own directory is ({@link #checkBinds}): set
-     * back to the service user alone -- a run can chmod its own /tmp -- and walked for a file with
-     * a name outside it ({@link #linkedOutside}), which nothing jailed can make. Only a process
-     * that ran unjailed beside the jail's first runs could have; then the directory, with what is
-     * in it, is set aside (and removed at the next start) and the account starts a fresh one. So
-     * is one a run closed below its root: what it holds cannot be checked.
+     * Set back to the service user alone before each run binds it: a run can chmod its own /tmp.
+     * It is not walked for hard links, as a skill's own directory is ({@link #checkBinds}): that
+     * walk is for what a skill left while it ran unjailed, and nothing ever ran unjailed beside
+     * this directory ({@link #sharedTmpEpoch}).
      */
     Path sharedTmp(String owner) throws IOException {
         synchronized (sharedTmpLock) {
@@ -617,14 +618,6 @@ public class SkillJail {
                 throw new IOException("the account's /tmp is not a directory of its own: " + dir);
             }
             ownerOnly(dir);
-            String tampered = linkedOutside(dir);
-            if (tampered != null) {
-                Path aside = sharedTmpEpoch.resolve(".set-aside-" + UUID.randomUUID());
-                Files.move(dir, aside, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-                log.warn("The /tmp of account {} was set aside as {} ({}); its skills start a fresh one",
-                        tmpName(owner), aside.getFileName(), tampered);
-                Files.createDirectory(dir, ownerOnlyAttribute());
-            }
             return dir;
         }
     }
@@ -664,18 +657,23 @@ public class SkillJail {
     }
 
     /**
-     * Remove what earlier processes left of the accounts' /tmp directories. Only at the start,
-     * before any skill runs: then nothing writes them, so each directory can be opened by its
-     * path -- one a run closed (mode 000) included, which {@link #deleteTree} must leave -- without
-     * a swap to fear. The root is renamed aside first, so whatever cannot be removed (a tree
-     * deeper than a path can name) is never bound again; it stays hidden under skills/.
+     * Put what earlier processes left of the accounts' /tmp directories out of use, and remove it
+     * in the background. At the start, so it is gone when OwnClaw restarts, as the service's /tmp
+     * was. The root is renamed aside first, at once: whatever is in it is never bound again, so
+     * removing it is only tidying, on a thread of its own -- a tree of millions of files must not
+     * hold up the start (and fail the deploy's health check). It is removed by
+     * {@link #deleteTree}, which never follows a link even with something writing the tree: so a
+     * directory a run closed (mode 000) stays, hidden under skills/ and never bound; the log says
+     * what was left.
      */
     void clearSharedTmp() {
+        Path skills;
         synchronized (sharedTmpLock) {
             sharedTmpEpoch = null;
             Path root = sharedTmpRoot();
-            Path skills = root.getParent();
-            if (skills == null || !Files.isDirectory(skills, LinkOption.NOFOLLOW_LINKS)) return;
+            skills = root.getParent();
+            // Followed if it is a link: a skills/ elsewhere is the owner's layout (see refuseLink).
+            if (skills == null || !Files.isDirectory(skills)) return;
             if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
                 try {
                     Files.move(root, skills.resolve("_tmp-old-" + UUID.randomUUID()),
@@ -684,50 +682,19 @@ public class SkillJail {
                     log.warn("Could not set the accounts' old /tmp {} aside: {}", root, e.toString());
                 }
             }
-            try (var old = Files.newDirectoryStream(skills, "_tmp-old-*")) {
-                for (Path p : old) {
-                    if (!wipeUnwritten(p)) log.warn("Could not fully remove {}", p);
-                }
-            } catch (IOException | RuntimeException e) {
-                log.warn("Could not list {} for old /tmp directories: {}", skills, e.toString());
-            }
         }
-    }
-
-    /**
-     * Delete a tree nothing is writing, by its paths: each directory made rwx for its owner
-     * before it is listed, so one closed by a run is removed too. Never follows a link -- each
-     * name's type is read without following one, and a link is removed, not entered. Returns
-     * whether the tree is gone.
-     */
-    static boolean wipeUnwritten(Path top) {
-        var pending = new ArrayDeque<Path>(List.of(top));
-        var dirs = new ArrayList<Path>();
-        while (!pending.isEmpty()) {
-            Path p = pending.pop();
-            try {
-                var a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                if (!a.isDirectory()) {
-                    Files.deleteIfExists(p);
-                    continue;
-                }
-                ownerOnly(p);
-                dirs.add(p);
-                try (var entries = Files.list(p)) {
-                    entries.forEach(pending::push);
-                }
-            } catch (IOException | RuntimeException e) {
-                // left, and found below
-            }
+        List<Path> old;
+        try (var entries = Files.newDirectoryStream(skills, "_tmp-old-*")) {
+            old = new ArrayList<>();
+            entries.forEach(old::add);
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not list {} for old /tmp directories: {}", skills, e.toString());
+            return;
         }
-        for (int i = dirs.size() - 1; i >= 0; i--) {
-            try {
-                Files.deleteIfExists(dirs.get(i));
-            } catch (IOException | RuntimeException e) {
-                // not empty: what was left in it is logged by the caller
-            }
-        }
-        return !Files.exists(top, LinkOption.NOFOLLOW_LINKS);
+        if (old.isEmpty()) return;
+        Thread.ofVirtual().name("ownclaw-old-tmp").start(() -> {
+            for (Path p : old) deleteTree(p);
+        });
     }
 
     /**
@@ -803,6 +770,14 @@ public class SkillJail {
             return new Evaluation(State.REFUSING, check.reason(), sig, now, version, roots, expose,
                     check.checks());
         }
+        if (mode == Mode.AUTO && readySince == 0 && directRuns.get() > 0) {
+            // It works now, but skills have run unjailed in this process, and what they left
+            // running -- a daemon, a process in another task's run -- would go on outside the jail,
+            // beside it: able to put a hard link to the database where a jailed run reads. The
+            // restart ends all of it (systemd stops the service's whole process group).
+            return new Evaluation(State.INACTIVE, RESTART_TO_JAIL, sig, now, version, roots, expose,
+                    check.checks());
+        }
         return new Evaluation(State.READY, null, sig, now, version, roots, expose, check.checks());
     }
 
@@ -813,6 +788,10 @@ public class SkillJail {
      * later launch outside it. Taking bubblewrap away on purpose then takes a restart or
      * {@code off}.
      */
+    /** Why auto stays INACTIVE once bubblewrap works, until the restart. */
+    static final String RESTART_TO_JAIL = "bubblewrap works now, but skills have already run unjailed in this "
+            + "process; restart OwnClaw to turn the jail on (sudo systemctl restart ownclaw)";
+
     private Evaluation notStarting(String reason, Signature sig, long now, String version,
                                    List<Path> roots) {
         State s = mode == Mode.AUTO && readySince == 0 ? State.INACTIVE : State.REFUSING;

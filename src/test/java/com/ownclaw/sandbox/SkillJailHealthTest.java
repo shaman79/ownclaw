@@ -248,7 +248,8 @@ class SkillJailHealthTest {
     void onThenBrokenRefuses() throws Exception {
         Files.createFile(flag);
         var jail = jail("auto", switchable());
-        jail.prepare(CMD, m.skillDir(), List.of()).close();   // before it was ever on: unjailed
+        // Nothing launched yet: in a process where something ran unjailed it would wait for the
+        // restart instead (SkillJailModeTest).
         assertEquals(SkillJail.State.INACTIVE, jail.status().state());
 
         Files.delete(flag);
@@ -270,7 +271,7 @@ class SkillJailHealthTest {
         Files.delete(flag);
         assertEquals(SkillJail.State.READY, jail.recheck().state());
         var runs = map(health(jail), "runs");
-        assertEquals(1L, runs.get("direct"), "only the launch from before the jail was ever on ran unjailed");
+        assertEquals(0L, runs.get("direct"), "something ran unjailed");
         assertEquals(1L, runs.get("refused"));
         assertEquals(firstReady, runs.get("readySince"), "counted from the first time it was on");
     }

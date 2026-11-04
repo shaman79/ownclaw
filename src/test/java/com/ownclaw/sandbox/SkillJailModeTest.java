@@ -188,6 +188,29 @@ class SkillJailModeTest {
     }
 
     @Test
+    @DisplayName("once a launch has run unjailed, bubblewrap working turns the jail on only at the next start")
+    void afterAnUnjailedRunTheJailWaitsForTheRestart() throws Exception {
+        Files.createFile(flag);
+        Path bwrap = switchable();
+        var jail = jail("auto", bwrap);
+        assertEquals(SkillJail.State.INACTIVE, jail.status().state());
+        try (var launch = jail.prepare(List.of("python3", "-c", "pass"), m.skillDir(), List.of())) {
+            assertFalse(launch.jailed(), "an inactive jail wrapped the launch");
+        }
+
+        Files.delete(flag);
+        now.addAndGet(SkillJail.RECHECK_MS);
+        var s = jail.status();
+        assertEquals(SkillJail.State.INACTIVE, s.state(), "turned on beside what ran unjailed");
+        assertEquals(SkillJail.RESTART_TO_JAIL, s.reason());
+        try (var launch = jail.prepare(List.of("python3", "-c", "pass"), m.skillDir(), List.of(), "owner1")) {
+            assertFalse(launch.jailed());
+        }
+
+        assertEquals(SkillJail.State.READY, jail("auto", bwrap).status().state(), "the restart did not turn it on");
+    }
+
+    @Test
     @DisplayName("bubblewrap appearing is noticed at once, without waiting for the minute")
     void binaryAppears() throws Exception {
         Path bwrap = tmp.resolve("bin/bwrap");
