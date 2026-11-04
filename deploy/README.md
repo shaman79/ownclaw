@@ -44,7 +44,7 @@ by the systemd service and cron-based auto-updates.
 This will:
 - Create `ownclaw` system user
 - Install JDK 21 (Adoptium Temurin)
-- Install git, python3, python3-venv, python3-pip if missing
+- Install git, python3, python3-venv, python3-pip and bubblewrap if missing (every later update installs any of them that goes missing; see [Required packages](#required-packages))
 - Clone the repository
 - Build the JAR
 - Install the systemd service (`ownclaw.service`)
@@ -121,6 +121,31 @@ This checks for new commits on `main` every 15 minutes. If changes are found, it
 - **No `.deployed-commit` yet** (server set up before this record existed) — the first `--update` rebuilds and deploys once to establish it.
 
 `deploy.sh --test-cron` prints the recorded commit and the attempt counter.
+
+### Required packages
+
+Every update that runs as root (the `--harden` timer, or a manual `sudo deploy.sh`) installs the
+distribution packages the service needs whenever one is missing: `git`, `python3`,
+`python3-venv`, `python3-pip` and `bubblewrap` (`REQUIRED_PACKAGES` at the top of `deploy.sh`).
+A package added to that list reaches the server with the next update, with no manual step. The
+install runs unattended: no prompts, changed config files kept, and a wait for
+unattended-upgrades to release the package lock. A failed install is logged with apt's output
+and tried again after 6 hours (`/opt/ownclaw/.packages-retry-after`). An update that cannot
+install (it runs as `ownclaw`, or the host has no apt) logs what to install instead. A missing
+package never stops a deploy.
+
+`bubblewrap` is the skill jail. The jail turns on only in a process that has not yet run a skill
+unjailed, so after installing bubblewrap the update restarts the service once it is idle. It
+then reads the state the jail logged at that start:
+
+- **ON**: done, and every skill now runs jailed.
+- **INACTIVE**: this host cannot start a jail. Skills run unjailed as before, and the log says why.
+- **REFUSING every skill, or a start that fails its health check**: bubblewrap is removed again so
+  skills keep running as they did, and it stays out until you delete `/opt/ownclaw/.bubblewrap-held`
+  (the file holds the reason). The removal never takes another package with it. If it would, it
+  stops and logs that it needs a person.
+
+Once the jail has been on, the updater never removes bubblewrap.
 
 ---
 
@@ -359,9 +384,11 @@ The systemd service runs with these hardening options:
 - `PrivateTmp=true`
 - Only `/opt/ownclaw/data`, `/opt/ownclaw/skills`, `/opt/ownclaw/logs` and `/opt/ownclaw/backups` are writable.
 
-With `bubblewrap` installed (`sudo apt install bubblewrap`, then restart the service), every skill
-also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills from it (see
-the README's Execution sandbox). `/api/ops/health` shows whether the jail is on.
+Every skill also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills
+from it (see the README's Execution sandbox). The jail is bubblewrap, which the updater installs
+and restarts the service onto by itself ([Required packages](#required-packages)); on a host whose
+updates do not run as root, run `sudo apt install bubblewrap`, then restart the service.
+`/api/ops/health` shows whether the jail is on.
 
 Each jailed run holds one user namespace while it runs, and `user.max_user_namespaces` caps how
 many the service's Linux user may hold at once (`sysctl user.max_user_namespaces`). Distributions

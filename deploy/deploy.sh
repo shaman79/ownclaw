@@ -5,8 +5,10 @@
 # Usage:
 #   ./deploy.sh              # Full deploy (first time or force)
 #   ./deploy.sh --update     # Only deploy if there are new commits (for cron)
+#                            #   As root it also installs whichever REQUIRED_PACKAGES are missing
+#                            #   (bubblewrap among them) and restarts onto the skill jail.
 #   ./deploy.sh --setup      # First-time server setup (run once, as root)
-#                            #   Installs: JDK 21, Python 3 + venv, Node.js 20, Docker/Podman, git,
+#                            #   Installs: JDK 21, Python 3 + venv, bubblewrap, Node.js 20, Docker/Podman, git,
 #                            #   systemd service, sudoers rule, builds JAR, pre-provisions skill venvs + MCP servers.
 #   ./deploy.sh --harden     # Remove the service user's path to root (run once, as root):
 #                            #   root-owns the repo, replaces the ownclaw crontab with a
@@ -86,6 +88,14 @@ UPDATE_TIMER="/etc/systemd/system/ownclaw-update.timer"
 DEPLOYED_COMMIT_FILE="${DEPLOY_DIR}/.deployed-commit"
 DEPLOY_ATTEMPTS_FILE="${DEPLOY_DIR}/.deploy-attempts"  # "<commit> <attempts>"
 MAX_DEPLOY_ATTEMPTS=3  # --update stops retrying a commit after this many failed tries
+# Distribution packages the service needs while it runs. --setup installs them, and every update
+# run as root installs whichever is missing, so a package added here reaches the server by itself.
+# bubblewrap is the skill jail (SkillJail): without it, skills run unjailed.
+REQUIRED_PACKAGES="git python3 python3-venv python3-pip bubblewrap"
+PACKAGES_RETRY_FILE="${DEPLOY_DIR}/.packages-retry-after"  # epoch: a failed install waits until then
+PACKAGES_RETRY_SECONDS=21600                                # 6 h
+JAIL_RESTART_MARKER="${DEPLOY_DIR}/.restart-for-jail"      # bubblewrap installed under the running service
+JAIL_HOLD_FILE="${DEPLOY_DIR}/.bubblewrap-held"             # the jail's first start failed: not reinstalled
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -292,6 +302,165 @@ After fixing, re-run:
 EOF
 }
 
+# === Required packages ===
+package_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"
+}
+
+# apt-get for a run nobody watches: no prompts, no service restarts of its own (needrestart), a
+# changed config file kept as it is, and a wait for unattended-upgrades instead of failing on its
+# lock. What a failed call printed goes to the log, whole.
+apt_unattended() {
+    local out rc=0
+    out=$(DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get -q -y \
+            -o DPkg::Lock::Timeout=600 \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+            "$@" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || log "  apt-get $* failed (exit $rc): $out"
+    return "$rc"
+}
+
+# Install what REQUIRED_PACKAGES names and the host lacks. Root and apt only; anywhere else it says
+# what to install. Never fails the run: a deploy goes on without a package, as it did before.
+# bubblewrap installed under a running service leaves JAIL_RESTART_MARKER for restart_onto_jail.
+ensure_packages() {
+    local missing=() failed=() p
+    for p in $REQUIRED_PACKAGES; do
+        package_installed "$p" && continue
+        if [ "$p" = bubblewrap ] && [ -f "$JAIL_HOLD_FILE" ]; then
+            log "bubblewrap is held back ($(cat "$JAIL_HOLD_FILE" 2>/dev/null)) -- delete $JAIL_HOLD_FILE to install it again"
+            continue
+        fi
+        missing+=("$p")
+    done
+    [ "${#missing[@]}" -eq 0 ] && return 0
+
+    if [ "$(id -u)" -ne 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+        log "WARN: missing packages: ${missing[*]} -- install them as root (sudo apt-get install ${missing[*]});"
+        log "      only an update that runs as root on a Debian-family host (--harden) installs them itself"
+        return 0
+    fi
+
+    local now retry_after
+    now=$(date +%s)
+    retry_after=$(cat "$PACKAGES_RETRY_FILE" 2>/dev/null || true)
+    case "$retry_after" in ''|*[!0-9]*) retry_after=0 ;; esac
+    if [ "$now" -lt "$retry_after" ]; then
+        log "Missing packages: ${missing[*]} -- the last install failed; next try after $(date -d "@$retry_after" '+%Y-%m-%d %H:%M')"
+        return 0
+    fi
+
+    log "Installing missing packages: ${missing[*]}"
+    apt_unattended update || log "  WARN: apt-get update failed -- installing from the package lists already here"
+    for p in "${missing[@]}"; do
+        if apt_unattended install --no-install-recommends "$p" && package_installed "$p"; then
+            log "  Installed $p"
+            if [ "$p" = bubblewrap ] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+                touch "$JAIL_RESTART_MARKER" \
+                    || log "  WARN: could not write $JAIL_RESTART_MARKER -- restart $SERVICE_NAME to turn the jail on"
+            fi
+        else
+            failed+=("$p")
+        fi
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        write_state_file "$PACKAGES_RETRY_FILE" "$((now + PACKAGES_RETRY_SECONDS))" || true
+        log "WARN: could not install: ${failed[*]} -- next try in $((PACKAGES_RETRY_SECONDS / 3600)) h"
+    else
+        rm -f "$PACKAGES_RETRY_FILE"
+    fi
+    return 0
+}
+
+# The jail state the running service started with: "ON|INACTIVE|REFUSING|OFF <the line>", or nothing
+# when its journal does not have it. The line is the one SkillJail logs on the main thread while the
+# service starts, before any task runs -- so nothing a task or a skill puts in the log stands in for
+# it -- and it carries the process's own PID.
+jail_state_now() {
+    local pid line i re
+    pid=$(systemctl show -p MainPID --value "$SERVICE_NAME" 2>/dev/null || true)
+    case "$pid" in ''|0|*[!0-9]*) return 0 ;; esac
+    re="^[^ ]+ +(INFO|WARN|ERROR) +${pid} --- (\[[^]]*\] )*\[ *main\] com\.ownclaw\.sandbox\.SkillJail +: Skill isolation (ON|INACTIVE|REFUSING|is off)"
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        line=$(journalctl --no-pager -o cat "_SYSTEMD_UNIT=${SERVICE_NAME}.service" "_PID=$pid" 2>/dev/null \
+                 | grep -E -m 1 "$re" || true)
+        case "$line" in
+            *"Skill isolation ON"*)       echo "ON $line"; return 0 ;;
+            *"Skill isolation REFUSING"*) echo "REFUSING $line"; return 0 ;;
+            *"Skill isolation INACTIVE"*) echo "INACTIVE $line"; return 0 ;;
+            *"Skill isolation is off"*)   echo "OFF $line"; return 0 ;;
+        esac
+        sleep 1
+    done
+}
+
+# bubblewrap was installed under a running service. In auto mode the jail turns on only in a
+# process that has run no skill unjailed (SkillJail.RESTART_TO_JAIL), so the service restarts onto
+# it, once idle, and the start is checked. A start that fails, or a jail that refuses every skill,
+# takes bubblewrap out again: the service runs as it did before, and bubblewrap is held back.
+restart_onto_jail() {
+    [ -f "$JAIL_RESTART_MARKER" ] || return 0
+    if ! package_installed bubblewrap || ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        rm -f "$JAIL_RESTART_MARKER"  # nothing to restart onto, or its next start is onto it anyway
+        return 0
+    fi
+    # A restart now would start the staged JAR too, and a failure would be put down to bubblewrap.
+    if [ -f "$RESTART_PENDING_MARKER" ]; then
+        log "bubblewrap is installed; the restart onto the jail waits until the staged JAR has started"
+        return 0
+    fi
+    if ! wait_for_idle; then
+        log "bubblewrap is installed; the restart onto the jail waits for the next cycle"
+        return 0
+    fi
+    log "Restarting $SERVICE_NAME to turn the skill jail on (bubblewrap installed)..."
+    if ! restart_service; then
+        log "WARN: could not restart $SERVICE_NAME -- trying again next cycle"
+        return 0
+    fi
+    rm -f "$JAIL_RESTART_MARKER"
+
+    local state reason
+    if ! wait_for_health; then
+        reason="the service did not come up healthy with it"
+    else
+        state=$(jail_state_now)
+        case "$state" in
+            ON*)       log "Skill jail is ON: ${state#ON }"; return 0 ;;
+            INACTIVE*) log "WARN: bubblewrap is installed but cannot start a jail here, so skills run unjailed as before: ${state#INACTIVE }"
+                       return 0 ;;
+            OFF*)      log "Skill isolation is off in .env (OWNCLAW_SANDBOX_ISOLATION=off); bubblewrap stays installed for when it is on"
+                       return 0 ;;
+            REFUSING*) reason="the jail refused every skill at its first start: ${state#REFUSING }" ;;
+            *)         log "WARN: the service is healthy, but its journal does not say whether the jail is on -- check /status"
+                       return 0 ;;
+        esac
+    fi
+
+    log "ERROR: $reason -- removing bubblewrap again, so skills run as they did before"
+    write_state_file "$JAIL_HOLD_FILE" "$(date '+%Y-%m-%d %H:%M') $reason" \
+        || log "WARN: could not write $JAIL_HOLD_FILE -- the next update installs bubblewrap again"
+    # bubblewrap alone: a package installed since that needs it would go with it.
+    local removes
+    removes=$(apt-get -s remove bubblewrap 2>/dev/null | grep '^Remv ' || true)
+    if [ "$(printf '%s\n' "$removes" | grep -c '^Remv ' || true)" -ne 1 ] \
+            || ! printf '%s\n' "$removes" | grep -q '^Remv bubblewrap '; then
+        log "ERROR: removing bubblewrap would also remove other packages, so it stays -- manual intervention needed:"
+        log "  ${removes:-apt-get -s remove bubblewrap found nothing to remove}"
+        return 0
+    fi
+    if ! apt_unattended remove bubblewrap; then
+        log "ERROR: could not remove bubblewrap -- manual intervention needed (journalctl -u $SERVICE_NAME)"
+        return 0
+    fi
+    if restart_service && wait_for_health; then
+        log "Running as before, skills unjailed; bubblewrap stays out until $JAIL_HOLD_FILE is deleted"
+    else
+        log "ERROR: the service is not healthy without bubblewrap either -- manual intervention needed (journalctl -u $SERVICE_NAME)"
+    fi
+    return 0
+}
+
 # === Configure rootless Podman for the ownclaw user ===
 # Rootless Podman needs subuid/subgid entries for user namespace mapping.
 # Without these, 'podman build' fails with: lchown /etc/gshadow: invalid argument
@@ -396,6 +565,10 @@ do_setup() {
         log "Installing python3-pip..."
         apt-get update -qq && apt-get install -y -qq python3-pip
     fi
+
+    # The rest of what the service needs from the distribution (bubblewrap among them); every
+    # update keeps the same list installed.
+    ensure_packages
 
     # Install Node.js 20 LTS if missing (needed for MCP stdio servers)
     if ! command -v node &>/dev/null || ! node --version 2>/dev/null | grep -qE '^v(18|20|21|22|23|24)'; then
@@ -1432,6 +1605,10 @@ main() {
 
             local pull_rc=0
             pull_latest || pull_rc=$?
+            # After the pull, so a package the new commit lists is in before its build starts;
+            # whatever the pull's outcome, so a missing package never waits for a new commit.
+            ensure_packages
+            restart_onto_jail
             if [ "$pull_rc" -eq 0 ]; then
                 if register_deploy_attempt "$(git -C "$REPO_DIR" rev-parse HEAD)"; then
                     local jar
@@ -1526,6 +1703,8 @@ main() {
             # Full deploy (no change check)
             log "=== Full Deploy ==="
             pull_latest || true
+            ensure_packages
+            restart_onto_jail
             local jar
             jar=$(build_jar)
             deploy_jar "$jar" || { log "Deploy failed, attempting rollback"; rollback; }
