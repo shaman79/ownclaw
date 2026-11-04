@@ -216,7 +216,7 @@ class SharedSkillTmpTest {
     @Test
     @DisplayName("an account id that is not a plain name gets a hashed directory, never a path")
     void anOddAccountIdIsHashed() throws Exception {
-        assertEquals("418c3eab", SkillJail.tmpName("418c3eab"));
+        assertEquals("5e1d7a20", SkillJail.tmpName("5e1d7a20"));
         String odd = SkillJail.tmpName("../../etc");
         assertTrue(odd.matches("u-[0-9a-f]{32}"), odd);
         assertEquals(jail.sharedTmp("../../etc").getParent(), jail.sharedTmp("owner1").getParent());
