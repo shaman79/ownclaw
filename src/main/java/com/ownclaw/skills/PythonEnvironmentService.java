@@ -168,11 +168,34 @@ public class PythonEnvironmentService {
         // would fail, and the failures would read as "no Python here" -- a false diagnosis.
         var down = jail.unavailable();
         if (down.isPresent()) {
-            log.warn("Python checks skipped, the skill jail refuses every launch: {}. They run at the next start.",
+            checksPending = true;
+            log.warn("Python checks put off, the skill jail refuses every launch: {}. They run as soon as it lets them.",
                     down.get());
             return;
         }
+        runChecks();
+    }
 
+    /**
+     * The start's Python checks, put off while the jail refused every launch -- the jail refuses
+     * at a start whose self-check could not run, and turns on a minute later. Without them the
+     * configured python-path stands, which on a host with python3 alone ("python" is the default)
+     * failed every skill until the next restart.
+     */
+    private volatile boolean checksPending;
+
+    /** Run the start's checks now, if they were put off and the jail lets launches through. */
+    private void runPendingChecks() {
+        if (!checksPending) return;
+        synchronized (this) {
+            if (!checksPending || jail.unavailable().isPresent()) return;
+            checksPending = false;
+            log.info("The skill jail lets launches through now: running the Python checks put off at the start");
+            runChecks();
+        }
+    }
+
+    private void runChecks() {
         // Auto-detect a working Python if the configured one doesn't work
         if (!isPythonAvailable(systemPython)) {
             log.warn("Configured python-path '{}' is not available, searching for alternatives...", systemPython);
@@ -241,6 +264,7 @@ public class PythonEnvironmentService {
 
     /** @return the current resolved Python command */
     public String getSystemPython() {
+        runPendingChecks();
         return systemPython;
     }
 
@@ -436,6 +460,7 @@ public class PythonEnvironmentService {
      */
     public PythonResolution resolveExecution(Path skillDir, String skillName,
                                              java.util.function.BooleanSupplier stopped, Runnable waiting) {
+        runPendingChecks();
         var lock = envLock(skillName);
         if (!com.ownclaw.agent.tools.SkillLocks.take(lock, stopped, waiting)) {
             throw new IllegalStateException(stoppedWaiting(skillName));
@@ -585,6 +610,7 @@ public class PythonEnvironmentService {
     /** {@link #installPackages(Path, String, List)} for a task, waiting as {@link #resolveExecution(Path, String, java.util.function.BooleanSupplier, Runnable)} does. */
     public void installPackages(Path skillDir, String skillName, List<String> packages,
                                 java.util.function.BooleanSupplier stopped, Runnable waiting) throws IOException {
+        runPendingChecks();
         if (packages != null) {
             for (String pkg : packages) {
                 if (!isPlainName(pkg)) {

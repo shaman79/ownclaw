@@ -41,14 +41,15 @@ class ProcessLaunchInventoryTest {
     // What each file may pass to `new ProcessBuilder(...)`, whitespace collapsed.
     //  - ProcessSandbox, PythonEnvironmentService: every Python a skill or pip runs -- only the argv
     //    SkillJail.prepare returned, which is the command itself only when the jail is inactive.
-    //  - SkillJail: bubblewrap itself -- its version, and the self-check probe built by bwrapArgs.
+    //  - SkillJail: bubblewrap itself -- its version, the self-check probe built by bwrapArgs, and a
+    //    bare jail (`/bin/sh -c true`) that tells a host that cannot jail from a failed probe.
     //  - SetupWizardService: `<python> --version`, to find an interpreter; it runs nothing else.
     //  - ContainerSandbox: the container runtime (docker/podman), only through its one factory,
     //    which gives it the allow-listed environment; what it runs is in the container.
     private static final Map<String, List<String>> ALLOWED = Map.of(
             "com/ownclaw/sandbox/ProcessSandbox.java", List.of("launch.argv()"),
             "com/ownclaw/skills/PythonEnvironmentService.java", List.of("launch.argv()"),
-            "com/ownclaw/sandbox/SkillJail.java", List.of("bwrap.toString(), \"--version\"", "argv"),
+            "com/ownclaw/sandbox/SkillJail.java", List.of("bwrap.toString(), \"--version\"", "argv", "bare"),
             "com/ownclaw/config/SetupWizardService.java", List.of("cmd, \"--version\"", "pythonCmd, \"--version\""),
             "com/ownclaw/sandbox/ContainerSandbox.java", List.of("cmd"));
 

@@ -239,6 +239,71 @@ class SkillJailModeTest {
     }
 
     @Test
+    @DisplayName("Python is found once a jail that refused at the start lets launches through")
+    void pythonIsFoundOnceTheJailLetsLaunchesThrough() throws Exception {
+        Path working = switchable();
+        Path stuck = tmp.resolve("check-cannot-run");
+        Files.createFile(stuck);
+        Path bwrap = guarded(working, stuck);
+        var jail = jail("auto", bwrap);
+        assertEquals(SkillJail.State.REFUSING, jail.status().state());
+
+        var cfg = new com.ownclaw.config.OwnClawConfig();
+        cfg.getSkills().setGeneratedPath(m.generated().toString());
+        cfg.getDatabase().setPath(m.db().toString());
+        cfg.getSandbox().setPythonPath("no-such-python-here");
+        var env = new com.ownclaw.skills.PythonEnvironmentService(cfg, jail);
+        env.init();
+
+        Files.delete(stuck);
+        now.addAndGet(SkillJail.RECHECK_MS);
+        assertEquals(SkillJail.State.READY, jail.status().state());
+        assertNotEquals("no-such-python-here", env.getSystemPython(), "the put-off checks never ran");
+    }
+
+    @Test
+    @DisplayName("bubblewrap failing on the jail's own arguments while a bare jail starts is refused, not run unjailed")
+    void aFailureOfOurArgumentsIsNotTheHost() throws Exception {
+        // As with an expose entry bubblewrap cannot reach: it fails in its own words, yet the
+        // host can jail. Only a bare jail failing too would say the host cannot.
+        Path bwrap = Files.writeString(Files.createDirectories(tmp.resolve("bin")).resolve("bwrap-picky"), "#!/bin/sh\n"
+                + "if [ \"$1\" = --version ]; then echo 'bubblewrap 0.0-test'; exit 0; fi\n"
+                + "for a in \"$@\"; do [ \"$a\" = " + SkillJail.PROBE_NAME + " ] && "
+                + "{ echo 'bwrap: Cannot find source path /root/x: Permission denied' >&2; exit 1; }; done\n"
+                + "exit 0\n");
+        Files.setPosixFilePermissions(bwrap, PosixFilePermissions.fromString("rwx------"));
+        var s = jail("auto", bwrap).status();
+        assertEquals(SkillJail.State.REFUSING, s.state(), s.reason());
+    }
+
+    @Test
+    @DisplayName("an expose entry the service cannot reach is left out, and the jail comes up")
+    void anUnreachableExposeIsLeftOut() throws Exception {
+        Path closed = Files.createDirectories(tmp.resolve("closed"));
+        Files.createDirectories(closed.resolve("inside"));
+        Files.setPosixFilePermissions(closed, java.util.Set.of());
+        try {
+            var jail = new SkillJail("auto", switchable().toString(), m.layout(),
+                    List.of(closed.resolve("inside").toString()), now::get);
+            var s = jail.status();
+            assertEquals(SkillJail.State.READY, s.state(), s.reason());
+            assertEquals(List.of(), s.exposed());
+        } finally {
+            Files.setPosixFilePermissions(closed, PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    /** A bubblewrap whose check cannot run while {@code stuck} exists -- it says nothing -- and otherwise {@code working}. */
+    private Path guarded(Path working, Path stuck) throws IOException {
+        Path bwrap = Files.writeString(tmp.resolve("bin/bwrap-guarded"), "#!/bin/sh\n"
+                + "if [ \"$1\" = --version ]; then echo 'bubblewrap 0.0-test'; exit 0; fi\n"
+                + "if [ -e '" + stuck + "' ]; then exit 1; fi\n"
+                + "exec '" + working + "' \"$@\"\n");
+        Files.setPosixFilePermissions(bwrap, PosixFilePermissions.fromString("rwx------"));
+        return bwrap;
+    }
+
+    @Test
     @DisplayName("bubblewrap appearing is noticed at once, without waiting for the minute")
     void binaryAppears() throws Exception {
         Path bwrap = tmp.resolve("bin/bwrap");

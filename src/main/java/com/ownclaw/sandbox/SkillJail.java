@@ -826,10 +826,12 @@ public class SkillJail {
 
     private String refusal(Evaluation e) {
         if (mode == Mode.REQUIRED) return "isolation required but unavailable: " + e.reason();
-        // auto refuses a self-check that ran and failed, or a jail that was on and cannot start now
-        return e.checks().isEmpty()
+        // auto refuses a self-check that ran and failed, a jail that was on and cannot start now,
+        // and a self-check that could not run while bubblewrap is there
+        if (!e.checks().isEmpty()) return "skill isolation is installed but failed its self-check: " + e.reason();
+        return readySince != 0
                 ? "skill isolation was on and cannot start a jail now: " + e.reason()
-                : "skill isolation is installed but failed its self-check: " + e.reason();
+                : "skill isolation cannot be checked now, so no skill runs until it can: " + e.reason();
     }
 
     private void logState(Evaluation e) {
@@ -930,9 +932,13 @@ public class SkillJail {
             if (!lines.contains("probe=done")) {
                 // bubblewrap could not build the jail at all -- typically user namespaces are
                 // blocked. Its own words are the most useful diagnosis there is, so keep them.
+                // Its own words are not enough to call the host unable: the jail's own arguments can
+                // fail it too. Only when a bare jail -- namespaces and the mounts every jail needs,
+                // nothing of ours -- fails as well is it the host.
+                boolean ownFailure = p.exitValue() != 0 && stderr.startsWith("bwrap:");
                 return new SelfCheck(false, Map.of(), "bubblewrap could not start a jail (exit "
                         + p.exitValue() + "): " + (stderr.isEmpty() ? "no output" : stderr),
-                        p.exitValue() != 0 && stderr.startsWith("bwrap:"));
+                        ownFailure && bareJailFails());
             }
 
             List<String> visible = lines.stream().filter(l -> l.startsWith("visible="))
@@ -965,13 +971,47 @@ public class SkillJail {
             }
             return new SelfCheck(true, java.util.Collections.unmodifiableMap(checks), reason);
         } catch (IOException e) {
-            return new SelfCheck(false, Map.of(), "bubblewrap self-check could not run: " + e.getMessage());
+            // Without the probe's random names, so a recheck that fails the same way says the same.
+            String why = String.valueOf(e.getMessage());
+            if (probeDir != null) why = why.replace(probeDir.toString(), "<probe directory>");
+            if (work != null) why = why.replace(work.toString(), "<check directory>");
+            why = why.replaceAll("(\\.jail-probe-|ownclaw-jail-probe-|ownclaw-jail-check-)\\d+", "$1*");
+            return new SelfCheck(false, Map.of(), "bubblewrap self-check could not run: "
+                    + e.getClass().getSimpleName() + ": " + why);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return new SelfCheck(false, Map.of(), "bubblewrap self-check was interrupted");
         } finally {
             if (probeDir != null) deleteTree(probeDir);
             if (work != null) deleteTree(work);
+        }
+    }
+
+    /**
+     * Whether bubblewrap, asked for a jail with nothing of the service's in it -- new namespaces,
+     * the host read-only, /dev, the jail's own message queues and /proc -- ran to its end and
+     * failed: then the host cannot jail. When it starts one, a self-check that bubblewrap failed
+     * failed on the jail's own arguments; when it cannot be run or does not finish, nothing is
+     * known. Neither is "cannot jail here", and neither may run a skill unjailed.
+     */
+    private boolean bareJailFails() {
+        List<String> bare = List.of(bwrap.toString(), "--unshare-all", "--share-net", "--die-with-parent",
+                "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--mqueue", "/dev/mqueue",
+                "--proc", "/proc", "--", "/bin/sh", "-c", "true");
+        try {
+            Process p = new ProcessBuilder(bare)
+                    .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+            p.getOutputStream().close();
+            if (!p.waitFor(SELF_CHECK_SECONDS, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() != 0;
+        } catch (IOException e) {
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -1210,9 +1250,15 @@ public class SkillJail {
         for (Bind b : filterExpose(entries, layout)) {
             String why;
             try {
-                why = Files.exists(b.source(), LinkOption.NOFOLLOW_LINKS) ? linkedOutside(b.source()) : null;
+                // Absent is fine -- bound with -try, so skipped -- but one that cannot be reached
+                // (under ProtectHome's /home or /root, say) would make bubblewrap itself fail
+                // to start every jail, and that must not read as "no jail can start here".
+                Files.readAttributes(b.source(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                why = linkedOutside(b.source());
+            } catch (NoSuchFileException absent) {
+                why = null;
             } catch (IOException | RuntimeException e) {
-                why = "it could not be walked: " + e;
+                why = "it cannot be reached or walked: " + e;
             }
             if (why != null) {
                 log.warn("Not exposing {} to skills: {}", b.dest(), why);

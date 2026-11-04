@@ -1364,6 +1364,12 @@ main() {
             if [ "$(id -u)" -ne 0 ]; then
                 die "Must be run as root: sudo $REPO_DIR/deploy/deploy.sh --install-sudoers"
             fi
+            # It hands the repo back to the service user and grants it root commands: on a
+            # hardened host that is exactly what --harden took away, and the next update removes
+            # the grant again anyway.
+            if is_hardened_host; then
+                die "This host is hardened (--harden): its updates run as root and need no sudoers rule. Not installing one."
+            fi
             ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
             # Also fix repo ownership while we have root access
             chown -R ownclaw:ownclaw "$REPO_DIR" 2>/dev/null || true
