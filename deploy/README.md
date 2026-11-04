@@ -144,8 +144,9 @@ unjailed, so after installing it the update makes sure the service starts once m
 is the deploy's own restart when the same update deployed a new build; otherwise the update
 restarts the service once it is idle. The update then logs the state the jail started in: ON;
 INACTIVE, when this host cannot start a jail and skills still run unjailed; or REFUSING, when
-the jail failed its self-check and no skill runs until the cause is fixed (`/api/ops/health`
-says why). bubblewrap stays installed in every case: whether skills may run around a jail that
+the jail did not pass its self-check and no skill runs until it does (`/api/ops/health` says
+why). A passing recheck can clear a temporary cause, such as a full disk, within a minute;
+anything else needs a fix. bubblewrap stays installed in every case: whether skills may run around a jail that
 fails its self-check is the jail's decision, and it refuses.
 
 ---
@@ -385,8 +386,9 @@ The systemd service runs with these hardening options:
 - `PrivateTmp=true`
 - Only `/opt/ownclaw/data`, `/opt/ownclaw/skills`, `/opt/ownclaw/logs` and `/opt/ownclaw/backups` are writable.
 
-With `bubblewrap` installed, every skill also runs in its own jail, which hides OwnClaw's data,
-`.env`, logs and other skills from it (see the README's Execution sandbox). The updater installs
+With `bubblewrap` installed and its self-check passed (`/api/ops/health` shows the jail ON),
+every skill also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills
+from it (see the README's Execution sandbox). The updater installs
 bubblewrap and restarts the service onto it by itself ([Required packages](#required-packages)).
 On a host whose updates do not run as root, run `sudo apt install bubblewrap`, then restart the
 service. `/api/ops/health` shows whether the jail is on.

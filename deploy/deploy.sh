@@ -367,6 +367,16 @@ ensure_packages() {
     return 0
 }
 
+# A plain restart, without restart_service's install of the repo's unit file: the JAR running may be
+# older than the checkout (a commit that never built), and must not start under a newer unit.
+restart_unit_only() {
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl restart "$SERVICE_NAME"
+        return
+    fi
+    command -v sudo >/dev/null 2>&1 && sudo -n systemctl restart "$SERVICE_NAME" 2>/dev/null
+}
+
 # Which start of the service is running: systemd's InvocationID, new at every start. Empty when
 # systemd does not say (older than 232), or the service is not running.
 service_invocation() {
@@ -425,10 +435,14 @@ restart_onto_jail() {
             return 0
         fi
         log "Restarting $SERVICE_NAME to turn the skill jail on (bubblewrap installed)..."
-        restart_service || true
+        restart_unit_only || true
         after=$(service_invocation)
         if [ -n "$before" ] && [ "$after" = "$before" ]; then
-            log "WARN: $SERVICE_NAME did not restart -- trying again next cycle"
+            if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+                log "WARN: $SERVICE_NAME did not restart -- trying again next cycle"
+            else
+                log "ERROR: $SERVICE_NAME stopped and did not start again: systemctl status $SERVICE_NAME"
+            fi
             return 0
         fi
     fi
@@ -442,7 +456,8 @@ restart_onto_jail() {
     case "$state" in
         ON*)       log "Skill jail is ON: ${state#ON }" ;;
         INACTIVE*) log "WARN: bubblewrap is installed but cannot start a jail here, so skills still run unjailed: ${state#INACTIVE }" ;;
-        REFUSING*) log "ERROR: the skill jail refuses every skill launch until its cause is fixed -- /api/ops/health says why: ${state#REFUSING }" ;;
+        REFUSING*) log "ERROR: the skill jail refuses every skill launch until its self-check passes (it looks again each minute;"
+                   log "       /api/ops/health says why): ${state#REFUSING }" ;;
         OFF*)      log "Skill isolation is off in .env (OWNCLAW_SANDBOX_ISOLATION=off); bubblewrap stays installed for when it is on" ;;
         *)         log "WARN: the service is healthy, but its journal does not say whether the jail is on -- check /status" ;;
     esac
