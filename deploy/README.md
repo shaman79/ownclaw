@@ -127,25 +127,26 @@ This checks for new commits on `main` every 15 minutes. If changes are found, it
 Every update that runs as root (the `--harden` timer, or a manual `sudo deploy.sh`) installs the
 distribution packages the service needs whenever one is missing: `git`, `python3`,
 `python3-venv`, `python3-pip` and `bubblewrap` (`REQUIRED_PACKAGES` at the top of `deploy.sh`).
-A package added to that list reaches the server with the next update, with no manual step. The
-install runs unattended: no prompts, changed config files kept, and a wait for
-unattended-upgrades to release the package lock. A failed install is logged with apt's output
-and tried again after 6 hours (`/opt/ownclaw/.packages-retry-after`). An update that cannot
-install (it runs as `ownclaw`, or the host has no apt) logs what to install instead. A missing
-package never stops a deploy.
+A package added to that list reaches the server with the next update, with no manual step.
+
+The install runs unattended:
+- no prompts, and changed config files are kept;
+- it waits for unattended-upgrades to release the dpkg lock;
+- it refuses an install that would remove another package.
+
+If `apt-get update` fails, the install goes on from the package lists already on the host. A
+failed install is logged with apt's output and tried again after 6 hours
+(`/opt/ownclaw/.packages-retry-after`). An update that cannot install (it runs as `ownclaw`, or
+the host has no apt) logs what to install instead. A missing package never stops a deploy.
 
 `bubblewrap` is the skill jail. The jail turns on only in a process that has not yet run a skill
-unjailed, so after installing bubblewrap the update restarts the service once it is idle. It
-then reads the state the jail logged at that start:
-
-- **ON**: done, and every skill now runs jailed.
-- **INACTIVE**: this host cannot start a jail. Skills run unjailed as before, and the log says why.
-- **REFUSING every skill, or a start that fails its health check**: bubblewrap is removed again so
-  skills keep running as they did, and it stays out until you delete `/opt/ownclaw/.bubblewrap-held`
-  (the file holds the reason). The removal never takes another package with it. If it would, it
-  stops and logs that it needs a person.
-
-Once the jail has been on, the updater never removes bubblewrap.
+unjailed, so after installing it the update makes sure the service starts once more. That start
+is the deploy's own restart when the same update deployed a new build; otherwise the update
+restarts the service once it is idle. The update then logs the state the jail started in: ON;
+INACTIVE, when this host cannot start a jail and skills still run unjailed; or REFUSING, when
+the jail failed its self-check and no skill runs until the cause is fixed (`/api/ops/health`
+says why). bubblewrap stays installed in every case: whether skills may run around a jail that
+fails its self-check is the jail's decision, and it refuses.
 
 ---
 
@@ -384,11 +385,11 @@ The systemd service runs with these hardening options:
 - `PrivateTmp=true`
 - Only `/opt/ownclaw/data`, `/opt/ownclaw/skills`, `/opt/ownclaw/logs` and `/opt/ownclaw/backups` are writable.
 
-Every skill also runs in its own jail, which hides OwnClaw's data, `.env`, logs and other skills
-from it (see the README's Execution sandbox). The jail is bubblewrap, which the updater installs
-and restarts the service onto by itself ([Required packages](#required-packages)); on a host whose
-updates do not run as root, run `sudo apt install bubblewrap`, then restart the service.
-`/api/ops/health` shows whether the jail is on.
+With `bubblewrap` installed, every skill also runs in its own jail, which hides OwnClaw's data,
+`.env`, logs and other skills from it (see the README's Execution sandbox). The updater installs
+bubblewrap and restarts the service onto it by itself ([Required packages](#required-packages)).
+On a host whose updates do not run as root, run `sudo apt install bubblewrap`, then restart the
+service. `/api/ops/health` shows whether the jail is on.
 
 Each jailed run holds one user namespace while it runs, and `user.max_user_namespaces` caps how
 many the service's Linux user may hold at once (`sysctl user.max_user_namespaces`). Distributions

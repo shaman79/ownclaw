@@ -122,7 +122,7 @@ Each call is recorded with the number of secrets removed and identifiers replace
   - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs;
   - the network is the host's, so skills that talk to the LAN, mail servers, Home Assistant or Ollama keep working.
 
-  The jail turns itself on once bubblewrap is installed and passes its self-check. The update timer installs bubblewrap, restarts OwnClaw onto the jail and checks that it came up. On a server that is not hardened, run `sudo apt install bubblewrap`, then restart OwnClaw. `/status` and `/api/ops/health` show its state, and `OWNCLAW_SANDBOX_ISOLATION=required` refuses to run any skill without it.
+  The jail turns itself on once bubblewrap is installed and passes its self-check. The update timer installs bubblewrap, restarts OwnClaw onto the jail and logs the state it came up in. On a server that is not hardened, run `sudo apt install bubblewrap`, then restart OwnClaw. `/status` and `/api/ops/health` show its state, and `OWNCLAW_SANDBOX_ISOLATION=required` refuses to run any skill without it.
 
 - **Hardened service**: in production OwnClaw runs as a dedicated `ownclaw` system user with no login shell, under systemd with:
   - the whole filesystem read-only, but for OwnClaw's own data, skills, logs and backups

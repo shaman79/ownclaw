@@ -94,8 +94,7 @@ MAX_DEPLOY_ATTEMPTS=3  # --update stops retrying a commit after this many failed
 REQUIRED_PACKAGES="git python3 python3-venv python3-pip bubblewrap"
 PACKAGES_RETRY_FILE="${DEPLOY_DIR}/.packages-retry-after"  # epoch: a failed install waits until then
 PACKAGES_RETRY_SECONDS=21600                                # 6 h
-JAIL_RESTART_MARKER="${DEPLOY_DIR}/.restart-for-jail"      # bubblewrap installed under the running service
-JAIL_HOLD_FILE="${DEPLOY_DIR}/.bubblewrap-held"             # the jail's first start failed: not reinstalled
+JAIL_RESTART_MARKER="${DEPLOY_DIR}/.restart-for-jail"      # the service start bubblewrap was installed under
 
 # === Helpers ===
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -308,8 +307,8 @@ package_installed() {
 }
 
 # apt-get for a run nobody watches: no prompts, no service restarts of its own (needrestart), a
-# changed config file kept as it is, and a wait for unattended-upgrades instead of failing on its
-# lock. What a failed call printed goes to the log, whole.
+# changed config file kept as it is, and an install that waits for unattended-upgrades to release
+# the dpkg lock instead of failing on it. What a failed call printed goes to the log, whole.
 apt_unattended() {
     local out rc=0
     out=$(DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get -q -y \
@@ -326,12 +325,7 @@ apt_unattended() {
 ensure_packages() {
     local missing=() failed=() p
     for p in $REQUIRED_PACKAGES; do
-        package_installed "$p" && continue
-        if [ "$p" = bubblewrap ] && [ -f "$JAIL_HOLD_FILE" ]; then
-            log "bubblewrap is held back ($(cat "$JAIL_HOLD_FILE" 2>/dev/null)) -- delete $JAIL_HOLD_FILE to install it again"
-            continue
-        fi
-        missing+=("$p")
+        package_installed "$p" || missing+=("$p")
     done
     [ "${#missing[@]}" -eq 0 ] && return 0
 
@@ -353,10 +347,11 @@ ensure_packages() {
     log "Installing missing packages: ${missing[*]}"
     apt_unattended update || log "  WARN: apt-get update failed -- installing from the package lists already here"
     for p in "${missing[@]}"; do
-        if apt_unattended install --no-install-recommends "$p" && package_installed "$p"; then
+        # --no-remove: an install that would take another package out fails instead.
+        if apt_unattended install --no-install-recommends --no-remove "$p" && package_installed "$p"; then
             log "  Installed $p"
             if [ "$p" = bubblewrap ] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-                touch "$JAIL_RESTART_MARKER" \
+                write_state_file "$JAIL_RESTART_MARKER" "$(service_invocation)" \
                     || log "  WARN: could not write $JAIL_RESTART_MARKER -- restart $SERVICE_NAME to turn the jail on"
             fi
         else
@@ -372,92 +367,85 @@ ensure_packages() {
     return 0
 }
 
-# The jail state the running service started with: "ON|INACTIVE|REFUSING|OFF <the line>", or nothing
-# when its journal does not have it. The line is the one SkillJail logs on the main thread while the
-# service starts, before any task runs -- so nothing a task or a skill puts in the log stands in for
-# it -- and it carries the process's own PID.
+# Which start of the service is running: systemd's InvocationID, new at every start. Empty when
+# systemd does not say (older than 232), or the service is not running.
+service_invocation() {
+    systemctl show -p InvocationID --value "$SERVICE_NAME" 2>/dev/null || true
+}
+
+# The jail state this start of the service began with, for the log: "ON|INACTIVE|REFUSING|OFF <line>",
+# or nothing when its journal does not have it. The line is the one SkillJail logs on the main thread
+# while the service starts, read from this start's own entries. Nothing is decided on it.
 jail_state_now() {
-    local pid line i re
+    local pid inv line i re
+    local -a match
     pid=$(systemctl show -p MainPID --value "$SERVICE_NAME" 2>/dev/null || true)
     case "$pid" in ''|0|*[!0-9]*) return 0 ;; esac
+    inv=$(service_invocation)
+    if [ -n "$inv" ]; then match=("_SYSTEMD_INVOCATION_ID=$inv" "_PID=$pid")
+    else match=("_SYSTEMD_UNIT=${SERVICE_NAME}.service" "_PID=$pid"); fi
     re="^[^ ]+ +(INFO|WARN|ERROR) +${pid} --- (\[[^]]*\] )*\[ *main\] com\.ownclaw\.sandbox\.SkillJail +: Skill isolation (ON|INACTIVE|REFUSING|is off)"
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        line=$(journalctl --no-pager -o cat "_SYSTEMD_UNIT=${SERVICE_NAME}.service" "_PID=$pid" 2>/dev/null \
-                 | grep -E -m 1 "$re" || true)
-        case "$line" in
-            *"Skill isolation ON"*)       echo "ON $line"; return 0 ;;
-            *"Skill isolation REFUSING"*) echo "REFUSING $line"; return 0 ;;
-            *"Skill isolation INACTIVE"*) echo "INACTIVE $line"; return 0 ;;
-            *"Skill isolation is off"*)   echo "OFF $line"; return 0 ;;
-        esac
+        line=$(journalctl --no-pager -b -o cat "${match[@]}" 2>/dev/null | grep -E -m 1 "$re" || true)
+        if [[ "$line" =~ $re ]]; then
+            case "${BASH_REMATCH[3]}" in
+                ON)       echo "ON $line" ;;
+                INACTIVE) echo "INACTIVE $line" ;;
+                REFUSING) echo "REFUSING $line" ;;
+                *)        echo "OFF $line" ;;
+            esac
+            return 0
+        fi
         sleep 1
     done
 }
 
-# bubblewrap was installed under a running service. In auto mode the jail turns on only in a
-# process that has run no skill unjailed (SkillJail.RESTART_TO_JAIL), so the service restarts onto
-# it, once idle, and the start is checked. A start that fails, or a jail that refuses every skill,
-# takes bubblewrap out again: the service runs as it did before, and bubblewrap is held back.
+# bubblewrap was installed under a running service. In auto mode the jail turns on only in a process
+# that has run no skill unjailed (SkillJail.RESTART_TO_JAIL), so the service needs one start since the
+# install: the deploy's own restart when this cycle had one, otherwise a restart here, once idle. Then
+# the jail's state is logged. bubblewrap stays either way: a jail that refuses is SkillJail's decision
+# (it never runs skills around a jail that fails its self-check), and not the updater's to override.
 restart_onto_jail() {
     [ -f "$JAIL_RESTART_MARKER" ] || return 0
     if ! package_installed bubblewrap || ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         rm -f "$JAIL_RESTART_MARKER"  # nothing to restart onto, or its next start is onto it anyway
         return 0
     fi
-    # A restart now would start the staged JAR too, and a failure would be put down to bubblewrap.
+    # The staged JAR's restart comes first, with its own health check and rollback.
     if [ -f "$RESTART_PENDING_MARKER" ]; then
         log "bubblewrap is installed; the restart onto the jail waits until the staged JAR has started"
         return 0
     fi
-    if ! wait_for_idle; then
-        log "bubblewrap is installed; the restart onto the jail waits for the next cycle"
-        return 0
-    fi
-    log "Restarting $SERVICE_NAME to turn the skill jail on (bubblewrap installed)..."
-    if ! restart_service; then
-        log "WARN: could not restart $SERVICE_NAME -- trying again next cycle"
-        return 0
+    local installed_under before after state
+    installed_under=$(cat "$JAIL_RESTART_MARKER" 2>/dev/null || true)
+    before=$(service_invocation)
+    if [ -z "$installed_under" ] || [ -z "$before" ] || [ "$before" = "$installed_under" ]; then
+        if ! wait_for_idle; then
+            log "bubblewrap is installed; the restart onto the jail waits for the next cycle"
+            return 0
+        fi
+        log "Restarting $SERVICE_NAME to turn the skill jail on (bubblewrap installed)..."
+        restart_service || true
+        after=$(service_invocation)
+        if [ -n "$before" ] && [ "$after" = "$before" ]; then
+            log "WARN: $SERVICE_NAME did not restart -- trying again next cycle"
+            return 0
+        fi
     fi
     rm -f "$JAIL_RESTART_MARKER"
-
-    local state reason
     if ! wait_for_health; then
-        reason="the service did not come up healthy with it"
-    else
-        state=$(jail_state_now)
-        case "$state" in
-            ON*)       log "Skill jail is ON: ${state#ON }"; return 0 ;;
-            INACTIVE*) log "WARN: bubblewrap is installed but cannot start a jail here, so skills run unjailed as before: ${state#INACTIVE }"
-                       return 0 ;;
-            OFF*)      log "Skill isolation is off in .env (OWNCLAW_SANDBOX_ISOLATION=off); bubblewrap stays installed for when it is on"
-                       return 0 ;;
-            REFUSING*) reason="the jail refused every skill at its first start: ${state#REFUSING }" ;;
-            *)         log "WARN: the service is healthy, but its journal does not say whether the jail is on -- check /status"
-                       return 0 ;;
-        esac
-    fi
-
-    log "ERROR: $reason -- removing bubblewrap again, so skills run as they did before"
-    write_state_file "$JAIL_HOLD_FILE" "$(date '+%Y-%m-%d %H:%M') $reason" \
-        || log "WARN: could not write $JAIL_HOLD_FILE -- the next update installs bubblewrap again"
-    # bubblewrap alone: a package installed since that needs it would go with it.
-    local removes
-    removes=$(apt-get -s remove bubblewrap 2>/dev/null | grep '^Remv ' || true)
-    if [ "$(printf '%s\n' "$removes" | grep -c '^Remv ' || true)" -ne 1 ] \
-            || ! printf '%s\n' "$removes" | grep -q '^Remv bubblewrap '; then
-        log "ERROR: removing bubblewrap would also remove other packages, so it stays -- manual intervention needed:"
-        log "  ${removes:-apt-get -s remove bubblewrap found nothing to remove}"
+        log "ERROR: $SERVICE_NAME is not healthy after its restart onto the jail. bubblewrap does not stop a"
+        log "       start (SkillJail only logs and refuses), so the cause is elsewhere: journalctl -u $SERVICE_NAME"
         return 0
     fi
-    if ! apt_unattended remove bubblewrap; then
-        log "ERROR: could not remove bubblewrap -- manual intervention needed (journalctl -u $SERVICE_NAME)"
-        return 0
-    fi
-    if restart_service && wait_for_health; then
-        log "Running as before, skills unjailed; bubblewrap stays out until $JAIL_HOLD_FILE is deleted"
-    else
-        log "ERROR: the service is not healthy without bubblewrap either -- manual intervention needed (journalctl -u $SERVICE_NAME)"
-    fi
+    state=$(jail_state_now)
+    case "$state" in
+        ON*)       log "Skill jail is ON: ${state#ON }" ;;
+        INACTIVE*) log "WARN: bubblewrap is installed but cannot start a jail here, so skills still run unjailed: ${state#INACTIVE }" ;;
+        REFUSING*) log "ERROR: the skill jail refuses every skill launch until its cause is fixed -- /api/ops/health says why: ${state#REFUSING }" ;;
+        OFF*)      log "Skill isolation is off in .env (OWNCLAW_SANDBOX_ISOLATION=off); bubblewrap stays installed for when it is on" ;;
+        *)         log "WARN: the service is healthy, but its journal does not say whether the jail is on -- check /status" ;;
+    esac
     return 0
 }
 
@@ -1608,7 +1596,6 @@ main() {
             # After the pull, so a package the new commit lists is in before its build starts;
             # whatever the pull's outcome, so a missing package never waits for a new commit.
             ensure_packages
-            restart_onto_jail
             if [ "$pull_rc" -eq 0 ]; then
                 if register_deploy_attempt "$(git -C "$REPO_DIR" rev-parse HEAD)"; then
                     local jar
@@ -1625,6 +1612,8 @@ main() {
             else
                 log "--- Update check failed (rc=$pull_rc) — will retry next cycle ---"
             fi
+            # Last, so a deploy's restart in this cycle is the restart onto the jail.
+            restart_onto_jail
             ;;
         --test-cron)
             # Diagnostic mode: verifies the cron environment can run deployments
@@ -1704,10 +1693,10 @@ main() {
             log "=== Full Deploy ==="
             pull_latest || true
             ensure_packages
-            restart_onto_jail
             local jar
             jar=$(build_jar)
             deploy_jar "$jar" || { log "Deploy failed, attempting rollback"; rollback; }
+            restart_onto_jail
             log "=== Deploy Complete ==="
             ;;
     esac
