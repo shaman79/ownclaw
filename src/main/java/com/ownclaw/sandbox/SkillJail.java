@@ -123,7 +123,10 @@ import java.util.stream.Stream;
  *       self-check. While bubblewrap is absent or cannot start a jail, skills run unjailed, with
  *       one warning -- unless the jail was ready earlier in this process: then that refuses
  *       every launch, as a self-check that runs but fails always does. Once a launch has run
- *       unjailed, the jail stays off until the next start ({@link #RESTART_TO_JAIL}).</li>
+ *       unjailed, the jail stays off until the next start ({@link #RESTART_TO_JAIL}). A
+ *       self-check that cannot run at all while bubblewrap is there -- no disk space for it, a
+ *       timeout -- refuses every launch and looks again each minute: a jailed skill can fill a
+ *       disk, and that must not make the next start unjailed.</li>
  *   <li>{@code required} -- if the jail is not working, refuse the launch. Fail closed.</li>
  *   <li>{@code off} -- development and Windows.</li>
  * </ul>
@@ -393,7 +396,19 @@ public class SkillJail {
                               String version, List<Path> roots, List<Bind> expose,
                               Map<String, Boolean> checks) {}
 
-    private record SelfCheck(boolean completed, Map<String, Boolean> checks, String reason) {}
+    /**
+     * @param bwrapFailed bubblewrap ran to its end and said, in its own words, that it cannot
+     *                    start a jail here -- the only failure to complete that auto may take for
+     *                    "not yet" and run unjailed. One that could not run at all (no space for
+     *                    its directory, a timeout, an interrupt) says nothing about the host: a
+     *                    full disk is something a jailed skill can bring about, and it must not
+     *                    buy the next start an unjailed run.
+     */
+    private record SelfCheck(boolean completed, Map<String, Boolean> checks, String reason, boolean bwrapFailed) {
+        SelfCheck(boolean completed, Map<String, Boolean> checks, String reason) {
+            this(completed, checks, reason, false);
+        }
+    }
 
     private final Mode mode;
     private final String configError;
@@ -522,10 +537,15 @@ public class SkillJail {
      * @param tmpOwner the account whose /tmp the run gets; null for a fresh one
      */
     public Launch prepare(List<String> command, Path workDir, List<Path> readOnly, String tmpOwner) {
-        Evaluation e = current();
+        Evaluation e;
+        // Read and counted under the evaluation's lock: an evaluation on another thread must not
+        // turn the jail on between this launch being found unjailed and its being counted.
+        synchronized (this) {
+            e = current();
+            if (e.state() == State.OFF || e.state() == State.INACTIVE) directRuns.incrementAndGet();
+        }
         switch (e.state()) {
             case OFF, INACTIVE -> {
-                directRuns.incrementAndGet();
                 return Launch.direct(command);
             }
             case REFUSING -> {
@@ -662,9 +682,10 @@ public class SkillJail {
      * was. The root is renamed aside first, at once: whatever is in it is never bound again, so
      * removing it is only tidying, on a thread of its own -- a tree of millions of files must not
      * hold up the start (and fail the deploy's health check). It is removed by
-     * {@link #deleteTree}, which never follows a link even with something writing the tree: so a
-     * directory a run closed (mode 000) stays, hidden under skills/ and never bound; the log says
-     * what was left.
+     * {@link #deleteUnwrittenTree}, which never follows a link and opens again a directory a run
+     * closed (mode 000): a full disk a jailed skill left must not outlive the restart. Only a tree
+     * more than {@link #DELETE_DEPTH} directories deep is left, hidden under skills/ and never
+     * bound; the log says what.
      */
     void clearSharedTmp() {
         Path skills;
@@ -693,7 +714,7 @@ public class SkillJail {
         }
         if (old.isEmpty()) return;
         Thread.ofVirtual().name("ownclaw-old-tmp").start(() -> {
-            for (Path p : old) deleteTree(p);
+            for (Path p : old) deleteUnwrittenTree(p);
         });
     }
 
@@ -761,7 +782,12 @@ public class SkillJail {
         }
         List<Bind> expose = exposed();
         SelfCheck check = selfCheck(roots, expose);
-        if (!check.completed()) return notStarting(check.reason(), sig, now, version, roots);
+        if (!check.completed()) {
+            if (check.bwrapFailed()) return notStarting(check.reason(), sig, now, version, roots);
+            // bubblewrap is there and could not be checked: refused, and looked at again in a
+            // minute -- never run unjailed on that.
+            return new Evaluation(State.REFUSING, check.reason(), sig, now, version, roots, List.of(), Map.of());
+        }
         if (check.checks().containsValue(false)) {
             // bubblewrap ran and an item failed. Every item is required, the functional ones (a
             // writable working directory, a readable /etc, the shared network) as much as the
@@ -789,8 +815,8 @@ public class SkillJail {
      * {@code off}.
      */
     /** Why auto stays INACTIVE once bubblewrap works, until the restart. */
-    static final String RESTART_TO_JAIL = "bubblewrap works now, but skills have already run unjailed in this "
-            + "process; restart OwnClaw to turn the jail on (sudo systemctl restart ownclaw)";
+    static final String RESTART_TO_JAIL = "bubblewrap works now, but this process started without it and has run "
+            + "skills unjailed; restart OwnClaw to turn the jail on (sudo systemctl restart ownclaw)";
 
     private Evaluation notStarting(String reason, Signature sig, long now, String version,
                                    List<Path> roots) {
@@ -810,8 +836,14 @@ public class SkillJail {
         switch (e.state()) {
             case READY -> log.info("Skill isolation ON ({}): hidden {}, exposed read-only {}",
                     e.version(), e.roots(), e.expose());
-            case INACTIVE -> log.warn("Skill isolation INACTIVE, skills run unjailed until bubblewrap "
-                    + "can start a jail: {}", e.reason());
+            case INACTIVE -> {
+                if (RESTART_TO_JAIL.equals(e.reason())) {
+                    log.warn("Skill isolation INACTIVE until OwnClaw restarts: {}", e.reason());
+                } else {
+                    log.warn("Skill isolation INACTIVE, skills run unjailed until bubblewrap "
+                            + "can start a jail: {}", e.reason());
+                }
+            }
             case REFUSING -> log.error("Skill isolation REFUSING every skill launch: {}", e.reason());
             case OFF -> log.info("Skill isolation is off (ownclaw.sandbox.isolation=off)");
         }
@@ -899,7 +931,8 @@ public class SkillJail {
                 // bubblewrap could not build the jail at all -- typically user namespaces are
                 // blocked. Its own words are the most useful diagnosis there is, so keep them.
                 return new SelfCheck(false, Map.of(), "bubblewrap could not start a jail (exit "
-                        + p.exitValue() + "): " + (stderr.isEmpty() ? "no output" : stderr));
+                        + p.exitValue() + "): " + (stderr.isEmpty() ? "no output" : stderr),
+                        p.exitValue() != 0 && stderr.startsWith("bwrap:"));
             }
 
             List<String> visible = lines.stream().filter(l -> l.startsWith("visible="))
@@ -1549,6 +1582,8 @@ public class SkillJail {
                     : "none: isolation is on. To refuse skills whenever it is not (fail closed), add "
                       + "OWNCLAW_SANDBOX_ISOLATION=required to .env and restart.";
         }
+        if (RESTART_TO_JAIL.equals(s.reason())) return "sudo systemctl restart ownclaw: bubblewrap works, and "
+                + "the jail turns on at the next start";
         // Then a restart: it ends whatever an earlier unjailed run left running outside any jail.
         String install = present ? null : "sudo apt install bubblewrap, then sudo systemctl restart ownclaw";
         // A probe that ran to the end proves the namespaces were created, whatever the settings
@@ -1737,12 +1772,29 @@ public class SkillJail {
      * no jail either -- each entry is removed by its path, as a root of its own.
      */
     public static boolean deleteTree(Path root) {
+        return deleteTree(root, false);
+    }
+
+    /**
+     * {@link #deleteTree(Path)} for a tree nothing can be writing -- an earlier process's accounts'
+     * /tmp, renamed aside at the start, which no jail binds -- that also removes a directory a run
+     * closed (mode 000 or 0300): one that cannot be opened is checked, through its parent, to be
+     * a directory, made u+rwx by its path -- which follows a link, so only where no writer can
+     * swap one in -- and opened again through its parent, never following a link. A full disk a
+     * skill left so must not outlive the restart.
+     */
+    static boolean deleteUnwrittenTree(Path root) {
+        return deleteTree(root, true);
+    }
+
+    private static boolean deleteTree(Path root, boolean reopenClosed) {
         try {
             if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
                 openForOwner(Files.getFileAttributeView(root, PosixFileAttributeView.class));
+                if (reopenClosed && !Files.isReadable(root)) Files.setPosixFilePermissions(root, OWNER_ONLY);
                 try (var dir = Files.newDirectoryStream(root)) {
                     if (dir instanceof SecureDirectoryStream<Path> secure) {
-                        empty(secure, 1);
+                        empty(secure, 1, reopenClosed);
                     } else {
                         for (Path entry : dir) deleteTree(entry);
                     }
@@ -1758,7 +1810,7 @@ public class SkillJail {
     }
 
     /** Remove what is in the open directory {@code dir}, {@code depth} levels below the root. */
-    private static void empty(SecureDirectoryStream<Path> dir, int depth) {
+    private static void empty(SecureDirectoryStream<Path> dir, int depth, boolean reopenClosed) {
         for (Path entry : dir) {
             Path name = entry.getFileName();
             try {
@@ -1776,17 +1828,37 @@ public class SkillJail {
                 try {
                     sub = dir.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS);
                 } catch (IOException e) {
-                    log.warn("Not removing {}: it cannot be opened (unreadable, or no longer the "
-                            + "directory it was) ({})", entry, e.toString());
-                    continue;
+                    sub = reopenClosed ? reopened(dir, name, entry) : null;
+                    if (sub == null) {
+                        log.warn("Not removing {}: it cannot be opened (unreadable, or no longer the "
+                                + "directory it was) ({})", entry, e.toString());
+                        continue;
+                    }
                 }
-                try (sub) {
-                    empty(sub, depth + 1);
+                try (SecureDirectoryStream<Path> opened = sub) {
+                    empty(opened, depth + 1, reopenClosed);
                 }
                 dir.deleteDirectory(name);
             } catch (IOException | RuntimeException e) {
                 // gone meanwhile, or not empty: deleteTree reports what is left
             }
+        }
+    }
+
+    /**
+     * A closed directory of a tree nothing writes, opened again: checked through its parent to be
+     * a directory, made u+rwx by its path, and opened through its parent without following a
+     * link; null when it still cannot be.
+     */
+    private static SecureDirectoryStream<Path> reopened(SecureDirectoryStream<Path> parent, Path name, Path path) {
+        try {
+            var a = parent.getFileAttributeView(name, java.nio.file.attribute.BasicFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes();
+            if (!a.isDirectory()) return null;
+            Files.setPosixFilePermissions(path, OWNER_ONLY);
+            return parent.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS);
+        } catch (IOException | RuntimeException e) {
+            return null;
         }
     }
 

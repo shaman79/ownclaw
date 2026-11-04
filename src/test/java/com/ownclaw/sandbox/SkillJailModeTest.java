@@ -211,6 +211,34 @@ class SkillJailModeTest {
     }
 
     @Test
+    @DisplayName("a self-check that cannot run while bubblewrap is there refuses, runs nothing unjailed, and the jail comes up when it can")
+    void aSelfCheckThatCannotRunRefuses() throws Exception {
+        // As when a jailed skill filled the disk: bubblewrap is there, and the check cannot be
+        // made -- it says nothing of its own. Not "bubblewrap cannot start a jail here".
+        Path working = switchable();
+        Path stuck = tmp.resolve("check-cannot-run");
+        Files.createFile(stuck);
+        Path bwrap = Files.writeString(tmp.resolve("bin/bwrap-guarded"), "#!/bin/sh\n"
+                + "if [ \"$1\" = --version ]; then echo 'bubblewrap 0.0-test'; exit 0; fi\n"
+                + "if [ -e '" + stuck + "' ]; then exit 1; fi\n"
+                + "exec '" + working + "' \"$@\"\n");
+        Files.setPosixFilePermissions(bwrap, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+
+        var jail = jail("auto", bwrap);
+        var s = jail.status();
+        assertEquals(SkillJail.State.REFUSING, s.state(), s.reason());
+        try (var launch = jail.prepare(CMD, m.skillDir(), List.of())) {
+            assertNotNull(launch.refusal(), "a launch ran while the jail could not be checked");
+        }
+
+        Files.delete(stuck);
+        now.addAndGet(SkillJail.RECHECK_MS);
+        s = jail.status();
+        assertEquals(SkillJail.State.READY, s.state(), "not up once it could be checked: " + s.reason());
+        assertEquals(0L, s.directRuns(), "something ran unjailed");
+    }
+
+    @Test
     @DisplayName("bubblewrap appearing is noticed at once, without waiting for the minute")
     void binaryAppears() throws Exception {
         Path bwrap = tmp.resolve("bin/bwrap");

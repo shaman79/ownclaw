@@ -99,6 +99,19 @@ is_hardened_host() {
     [ -f "$UPDATE_UNIT" ] || [ "$(stat -c %U "$REPO_DIR" 2>/dev/null)" = root ]
 }
 
+# The restart grants only where they are wanted. On a hardened host none: its root timer needs
+# none, and updates before this one put back what --harden removed -- taken away again here.
+sudoers_for_this_host() {
+    if is_hardened_host; then
+        if [ -f "$SUDOERS_FILE" ] && [ "$(id -u)" -eq 0 ]; then
+            rm -f "$SUDOERS_FILE"
+            log "Removed $SUDOERS_FILE: a hardened host's updates run as root and need no grant"
+        fi
+        return 0
+    fi
+    ensure_sudoers_restart_rule || true
+}
+
 ensure_sudoers_restart_rule() {
     # Installs a minimal sudoers rule that allows the service user to restart OwnClaw
     # without a password. This is required for cron-based --update runs.
@@ -1232,7 +1245,7 @@ deploy_jar() {
     # If we cannot install it here, restart_service() will still fail with instructions.
     # Never on a hardened host: its root timer needs no grant, and --harden removed the grants
     # on purpose -- putting them back on every update undid it.
-    is_hardened_host || ensure_sudoers_restart_rule || true
+    sudoers_for_this_host
 
     # Restart service (only if systemd is running — skip in setup phase)
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -1299,7 +1312,7 @@ rollback() {
         log "${commit:0:8} will not be redeployed automatically — push a fix, or run deploy.sh to force it"
     fi
 
-    is_hardened_host || ensure_sudoers_restart_rule || true
+    sudoers_for_this_host
     if ! restart_service; then
         restart_instructions
         die "Rollback failed (could not restart service)."

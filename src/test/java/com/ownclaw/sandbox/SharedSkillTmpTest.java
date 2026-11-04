@@ -172,7 +172,7 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("a start puts what a run closed out of use at once, a hard link to the database in it, and never binds it again")
+    @DisplayName("a start puts what a run closed out of use at once, a hard link to the database in it, and removes it")
     void aStartPutsAClosedDirectoryOutOfUse() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
         Path closed = Files.createDirectory(tmp.resolve("keep"));
@@ -186,20 +186,10 @@ class SharedSkillTmpTest {
                 import os
                 print('present' if os.path.exists('/tmp/keep') else 'absent')
                 """, "owner1"));
+        // Removed, closed or not: a full disk a skill left must not outlive the restart.
+        awaitNoOldTmp();
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
-        // What a run closed stays, hidden under skills/ -- the delete never opens it by its path --
-        // so the test opens it again for its own clean-up.
-        Thread.sleep(500);
-        try (var left = Files.list(m.root().resolve("skills"))) {
-            for (Path old : left.filter(p -> p.getFileName().toString().startsWith("_tmp-old-")).toList()) {
-                Path keep = old.resolve(tmp.getParent().getFileName()).resolve("owner1").resolve("keep");
-                assertTrue(Files.isDirectory(keep, java.nio.file.LinkOption.NOFOLLOW_LINKS), "not left as it was: " + keep);
-                Files.setPosixFilePermissions(keep, java.util.Set.of(
-                        java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                        java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-                        java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE));
-            }
-        }
+        assertEquals(1, SkillJail.nlink(m.db()), "the hard link to the database is still there");
     }
 
     /** The old /tmp directories go in the background: wait until they have. */
