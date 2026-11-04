@@ -1205,7 +1205,11 @@ backup_current() {
     mkdir -p "$BACKUP_DIR"
     local ts
     ts=$(date '+%Y%m%d-%H%M%S')
-    cp "$current" "$BACKUP_DIR/ownclaw-${ts}.jar"
+    # A backup that did not complete must not be there for a rollback to pick as the newest.
+    if ! cp "$current" "$BACKUP_DIR/ownclaw-${ts}.jar"; then
+        rm -f "$BACKUP_DIR/ownclaw-${ts}.jar"
+        return 1
+    fi
     log "Backed up current JAR to ownclaw-${ts}.jar"
 
     # Prune old backups
@@ -1221,13 +1225,17 @@ backup_current() {
 deploy_jar() {
     local new_jar="$1"
 
-    backup_current
+    # Nothing has been touched yet, so a failure here stops the deploy rather than rolling back.
+    backup_current || die "Could not back up the current JAR (disk full?) -- deploy not started"
 
     # IMPORTANT: do not overwrite the currently-running JAR in-place.
     # The JVM may still read classes/resources lazily from the file; truncating it mid-run
     # can cause runtime NoClassDefFoundError / ClassNotFoundException.
     local tmp_jar="$DEPLOY_DIR/ownclaw.jar.new"
-    cp "$new_jar" "$tmp_jar"
+    if ! cp "$new_jar" "$tmp_jar"; then
+        rm -f "$tmp_jar"
+        die "Could not copy the new JAR into place (disk full?) -- the running build is untouched"
+    fi
     mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
     log "Deployed new JAR"
 
@@ -1307,7 +1315,10 @@ rollback() {
     # classes from the file as it goes, and a JAR rewritten under it failed that start with
     # class-loading errors that looked like a fault in the build itself (2026-11-04).
     local tmp_jar="$DEPLOY_DIR/ownclaw.jar.new"
-    cp "$latest_backup" "$tmp_jar"
+    if ! cp "$latest_backup" "$tmp_jar"; then
+        rm -f "$tmp_jar"
+        die "Rollback failed (could not copy $(basename "$latest_backup")) -- manual intervention needed"
+    fi
     mv -f "$tmp_jar" "$DEPLOY_DIR/ownclaw.jar"
 
     # Keep the backed-out commit on record (flagged) so --update doesn't redeploy the
@@ -1396,8 +1407,12 @@ main() {
                     sync_service_file || true
                     if restart_service; then
                         rm -f "$RESTART_PENDING_MARKER"
-                        wait_for_health
-                        log "Pending restart completed successfully"
+                        if wait_for_health; then
+                            log "Pending restart completed successfully"
+                        else
+                            log "The staged build did not come up -- rolling back"
+                            rollback
+                        fi
                     else
                         log "Pending restart failed (permissions?) — will retry next cycle"
                     fi

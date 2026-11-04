@@ -226,6 +226,8 @@ public class ContainerSandbox {
             p.getOutputStream().close();
             CompletableFuture<byte[]> out = StreamReaders.read(() -> drainStream(p.getInputStream()));
             if (!p.waitFor(seconds, TimeUnit.SECONDS)) {
+                // what it started first: once it is gone they are no longer its descendants
+                p.descendants().forEach(ProcessHandle::destroyForcibly);
                 p.destroyForcibly();
                 out.cancel(true);
                 return new Probe(null, "");
@@ -238,7 +240,8 @@ public class ContainerSandbox {
                 text = "";
             }
             return new Probe(p.exitValue(), text);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // any failure to ask answers "not there", as the checks did before they had timeouts
             return new Probe(-1, String.valueOf(e.getMessage()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

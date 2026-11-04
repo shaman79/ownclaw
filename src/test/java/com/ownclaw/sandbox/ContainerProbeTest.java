@@ -39,6 +39,20 @@ class ContainerProbeTest {
     }
 
     @Test
+    @DisplayName("what a hanging command started is killed with it")
+    void aHangingCommandsChildrenAreKilledToo() throws Exception {
+        Path pidFile = tmp.resolve("child.pid");
+        Path rt = runtime("sleep 30 & echo $! > '" + pidFile + "'; wait");
+        var p = ContainerSandbox.probe(List.of(rt.toString(), "version"), 2);
+        assertNull(p.exit());
+        long pid = Long.parseLong(Files.readString(pidFile).strip());
+        var child = ProcessHandle.of(pid);
+        long deadline = System.nanoTime() + 3_000_000_000L;
+        while (child.map(ProcessHandle::isAlive).orElse(false) && System.nanoTime() < deadline) Thread.sleep(50);
+        assertFalse(child.map(ProcessHandle::isAlive).orElse(false), "the child of a timed-out probe is still running");
+    }
+
+    @Test
     @DisplayName("a command that ends while something it started holds its output open still answers at once")
     void aLingeringChildDoesNotHoldTheAnswer() throws Exception {
         Path rt = runtime("echo ok; (sleep 30 &) ; exit 0");
