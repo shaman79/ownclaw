@@ -55,6 +55,46 @@ class ContextFitTest {
     }
 
     @Test
+    @DisplayName("the chat folds too: a pasted log among its messages by size, then its oldest messages to a line; the newest two never")
+    void chatPlan() {
+        var chat = new java.util.ArrayList<String>();
+        for (int i = 0; i < 40; i++) chat.add((i % 2 == 0 ? "USER: question " : "ASSISTANT: answer ") + i + " " + "x".repeat(3_000) + "\n");
+        chat.set(5, "USER: here is the log\n" + "203.0.113.7 GET / 200\n".repeat(2_400));   // 52,800 characters
+        long request = 210_000;
+        // Under 157,500: the log by size, then the oldest message to a line.
+        var plan = ContextFit.plan(List.of(), Map.of(), chat, Map.of(), request, null, 0, ContextFitTest::cut);
+        assertEquals(java.util.Set.of(5, 0), plan.chat().keySet(), "the log, then the oldest: " + plan.chat().keySet());
+        assertFalse(plan.chat().get(5).line());
+        assertTrue(plan.chat().get(5).shown().startsWith("[Message 6 of 40 of this chat is 52,822 characters: "), plan.chat().get(5).shown());
+        assertTrue(plan.chat().get(0).line());
+        assertTrue(plan.chat().get(0).shown().startsWith("[Message 1 of 40, 3,018 characters, folded to a line; read_result "
+                + "with message=1 reads it whole] USER: question 0 " + "x".repeat(83) + "…"), plan.chat().get(0).shown());
+        assertEquals(List.of("2 messages of this chat (55,840 characters)"), plan.labels());
+        // A long chat with nothing large: everything but the newest two to a line, when it must.
+        var all = ContextFit.plan(List.of(), Map.of(), chat, Map.of(), 2_000_000, 10, 0, ContextFitTest::cut);
+        assertEquals(38, all.chat().size());
+        assertFalse(all.chat().containsKey(38) || all.chat().containsKey(39), "the newest two are kept whole");
+        // Mutation: keep no newest messages -> 40 folded; fold the chat by size only -> nothing for the many short ones.
+    }
+
+    @Test
+    @DisplayName("the chat as the prompt shows it is the chat itself, byte for byte, until a message of it folds")
+    void chatShown() {
+        var ctx = new AgentContext("u1", "t1", "go");
+        var chat = List.of("USER: hi\n", "ASSISTANT: hello\n[OwnClaw's record of task 1234abcd]\n", "USER: and now?\n",
+                "USER: the router says password=hunter2abc99 now\n");
+        ctx.setConversationSummary("### The conversation so far\n" + String.join("", chat).strip());
+        ctx.setConversation(chat);
+        assertSame(ctx.conversationSummary(), ctx.conversationShown());
+        assertEquals("ERROR: this chat has no message 5; its messages before this task are 1 to 4.",
+                AgentLoop.readResult(Map.of("message", 5), ctx));
+        String read = AgentLoop.readResult(Map.of("message", 4, "from", 36), ctx);
+        assertFalse(read.contains("hunter2") || read.contains("abc99"), "a chat message is cut with its secrets removed: " + read);
+        assertEquals("Message 2 of this chat, characters 0-53 of 53:\n" + chat.get(1),
+                AgentLoop.readResult(Map.of("message", 2), ctx));
+    }
+
+    @Test
     @DisplayName("a folded result shows its tool line, its first 2,000 characters, its size and how to read the rest")
     void shown() {
         // An emoji -- two chars -- across the 2,000th char: the preview ends after it, never inside.
@@ -108,10 +148,10 @@ class ContextFitTest {
     void readResultArguments() {
         var ctx = new AgentContext("u1", "t1", "go");
         ctx.trajectory().record(new AgentAction("ping", Map.of(), ""), AgentObservation.success("ping", "pong", Map.of(), 1));
-        assertTrue(AgentLoop.readResult(Map.of(), ctx).startsWith("ERROR: 'step' is required"));
+        assertTrue(AgentLoop.readResult(Map.of(), ctx).startsWith("ERROR: 'step' or 'message' is required"));
         assertEquals("ERROR: this task has no step 2; its steps so far are 1 to 1.", AgentLoop.readResult(Map.of("step", 2), ctx));
-        assertTrue(AgentLoop.readResult(Map.of("step", "one"), ctx).startsWith("ERROR: step, from and length are whole numbers"));
-        assertTrue(AgentLoop.readResult(Map.of("step", 1.5), ctx).startsWith("ERROR: step, from and length are whole numbers"));
+        assertTrue(AgentLoop.readResult(Map.of("step", "one"), ctx).startsWith("ERROR: step, message, from and length are whole numbers"));
+        assertTrue(AgentLoop.readResult(Map.of("step", 1.5), ctx).startsWith("ERROR: step, message, from and length are whole numbers"));
         assertEquals("Step 1's result, characters 1-3 of 4:\non\n[… characters 3-4 follow: read_result step=1 from=3]",
                 AgentLoop.readResult(Map.of("step", 1.0, "from", " 1 ", "length", "2"), ctx));
         ctx.trajectory().record(new AgentAction("uci_show", Map.of(), ""),

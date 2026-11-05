@@ -327,6 +327,36 @@ public class AgentContext {
     public String conversationSummary() { return conversationSummary; }
     public void setConversationSummary(String summary) { this.conversationSummary = summary; }
 
+    /** The chat's messages as {@link #conversationSummary} writes them, each with its record and files. */
+    private List<String> conversation = List.of();
+
+    /** Each chat message the task folded to fit a model's window, as it is shown now, by its index. */
+    private final Map<Integer, ContextFit.ChatFold> chatFolded = new HashMap<>();
+
+    public synchronized void setConversation(List<String> messages) {
+        conversation = List.copyOf(messages);
+    }
+
+    /** The chat's messages, whole, in order. */
+    public synchronized List<String> conversation() {
+        return conversation;
+    }
+
+    /**
+     * The chat as the prompt shows it under Prior Context: {@link #conversationSummary} itself,
+     * the same bytes, until a message of it is folded ({@link #fitToWindow}); then each folded
+     * message as it was folded, the rest whole.
+     */
+    public synchronized String conversationShown() {
+        if (chatFolded.isEmpty() || conversation.isEmpty()) return conversationSummary;
+        var sb = new StringBuilder();
+        for (int i = 0; i < conversation.size(); i++) {
+            ContextFit.ChatFold f = chatFolded.get(i);
+            sb.append(f != null ? f.shown() : conversation.get(i));
+        }
+        return "### The conversation so far\n" + sb.toString().strip();
+    }
+
     public String userPreferences() { return userPreferences; }
     public void setUserPreferences(String prefs) { this.userPreferences = prefs; }
 
@@ -880,14 +910,25 @@ public class AgentContext {
      * @param window the model's window in tokens, as the provider named it; null when it did not
      */
     public synchronized List<Integer> fitToWindow(Integer window) {
-        var plan = ContextFit.plan(trajectory.turns(), folded, lastRequestChars, window, fitRounds, this::readable);
-        if (plan.isEmpty()) return List.of();
+        return fit(window).steps();
+    }
+
+    /**
+     * {@link #fitToWindow}, the chat's messages among what folds: the task's results and the
+     * chat's longest messages first, by size, then the chat's oldest messages, each to a line
+     * ({@link ContextFit#planChat}). Returns what was folded; nothing when nothing is left to fold.
+     */
+    public synchronized ContextFit.Folded fit(Integer window) {
+        var plan = ContextFit.plan(trajectory.turns(), folded, conversation, chatFolded, lastRequestChars,
+                window, fitRounds, this::readable);
+        if (plan.isEmpty()) return plan;
         fitBudget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN)
                 : ContextFit.target(lastRequestChars, null, fitRounds);
         fitModel = lastModel;
         fitRounds++;
-        folded.putAll(plan);
-        return List.copyOf(plan.keySet());
+        for (int i : plan.steps()) folded.put(i, plan.stepFolds().get(i));
+        chatFolded.putAll(plan.chat());
+        return plan;
     }
 
     /**

@@ -520,7 +520,11 @@ public class AgentLoop {
         if (context.isUnattended() || currentMessageId == null) return;
         try {
             StringBuilder sb = new StringBuilder();
+            // Each message as it is written into the prompt, with its record and its files: what
+            // folds, one message at a time, when the request does not fit (ContextFit).
+            var entries = new ArrayList<String>();
             for (Map<String, Object> row : conversationService.contextOf(userId, currentMessageId)) {
+                int from = sb.length();
                 String role = (String) row.get("role");
                 String content = (String) row.get("content");
                 sb.append(role.toUpperCase()).append(": ")
@@ -539,11 +543,13 @@ public class AgentLoop {
                       .append(att.get("size_bytes")).append(" bytes). It is private and not ")
                       .append("available to this task; the user can attach it again.]\n");
                 }
+                entries.add(sb.substring(from));
             }
 
             String conversationContext = sb.toString().strip();
             if (!conversationContext.isEmpty()) {
                 context.setConversationSummary("### The conversation so far\n" + conversationContext);
+                context.setConversation(entries);
                 log.debug("Loaded conversation context for user {}: {} chars",
                         userId, conversationContext.length());
             }
@@ -843,17 +849,11 @@ public class AgentLoop {
                 // A reply cut off at the window was billed for every token it got.
                 // Not when the reply filled the window (ContextFit#replyFilledIt).
                 if (cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW && !ContextFit.replyFilledIt(cut)) {
-                    List<Integer> folded = context.fitToWindow(cut.tokens());
+                    ContextFit.Folded folded = context.fit(cut.tokens());
                     if (!folded.isEmpty()) {
                         account(context, local, provider, cut.reply());
                         context.markProgress(); // the model answered, if only to say it was too long
-                        var which = new ArrayList<String>();
-                        for (int i : folded) {
-                            var turn = context.trajectory().turns().get(i);
-                            String out = turn.observation().output();
-                            which.add(turn.action().tool() + " (" + String.format(Locale.ROOT, "%,d",
-                                    out == null ? 0 : out.length()) + " characters)");
-                        }
+                        List<String> which = folded.labels();
                         log.warn("Task {} step {}: the conversation did not fit {}'s context window ({}); "
                                         + "folded the results of {} and asking again", context.taskId(),
                                 step + 1, local ? "the local model" : provider.name(), cut.getMessage(), which);
@@ -1791,19 +1791,34 @@ public class AgentLoop {
      */
     static String readResult(Map<String, Object> params, AgentContext context) {
         Long step;
+        Long message;
         Long from;
         Long length;
         try {
             step = wholeNumber(params.get("step"));
+            message = wholeNumber(params.get("message"));
             from = wholeNumber(params.get("from"));
             length = wholeNumber(params.get("length"));
         } catch (NumberFormatException notANumber) {
-            return "ERROR: step, from and length are whole numbers: " + notANumber.getMessage();
+            return "ERROR: step, message, from and length are whole numbers: " + notANumber.getMessage();
+        }
+        Object find = params.get("find");
+        if (message != null && step == null) {
+            // A message of the chat, as Prior Context writes it, whole: its record and files too.
+            List<String> chat = context.conversation();
+            if (message < 1 || message > chat.size()) {
+                return "ERROR: this chat has no message " + message + (chat.isEmpty() ? " before this task."
+                        : "; its messages before this task are 1 to " + chat.size() + ".");
+            }
+            int n = message.intValue();
+            return ContextFit.read(new ContextFit.Named("message " + n + " of this chat", "message=" + n),
+                    context.readable(chat.get(n - 1)), from, length,
+                    find == null ? null : String.valueOf(find), context.readChunk());
         }
         var turns = context.trajectory().turns();
         if (step == null) {
-            return "ERROR: 'step' is required: the number of the step whose result to read, as a "
-                    + "folded result names it.";
+            return "ERROR: 'step' or 'message' is required: the number of the step whose result to read, or of "
+                    + "the chat's message, as the folded text names it.";
         }
         if (step < 1 || step > turns.size()) {
             return "ERROR: this task has no step " + step + (turns.isEmpty() ? " yet." : "; its steps so far are 1 to "
@@ -1812,7 +1827,6 @@ public class AgentLoop {
         var turn = turns.get((int) (step - 1));
         String output = turn.observation() == null ? null : turn.observation().output();
         if (output == null || output.isEmpty()) return "Step " + step + " has no result to read.";
-        Object find = params.get("find");
         return ContextFit.read(step.intValue(), context.readable(output), from, length,
                 find == null ? null : String.valueOf(find), context.readChunk());
     }

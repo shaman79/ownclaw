@@ -65,7 +65,7 @@ Skills persist across sessions. Over time, the agent accumulates a growing libra
 - **Talking to a running task** — a message sent in a chat while its task runs goes to that task, read before its next step. **Queue** (`/queue`) runs it as a task of its own instead. **Stop** ends the chat's work; `/cancel all` ends everything.
 - **Questions with choices** — when the agent asks something, the answers are buttons to click (keys in Telegram).
 - **Episodic memory** — every finished task is kept whole; when the agent asks, it gets a list of the ones that match and opens those it needs
-- **Results longer than the model can read** — folded, never dropped: the model sees a result's beginning and reads the rest in parts, so a task, or a delegation to the local model, goes on when its results outgrow the context window
+- **Results and chats longer than the model can read** — folded, never dropped: the model sees a result's beginning, or an old chat message as one line, and reads the rest when it needs it, so a task, a long chat, or a delegation to the local model goes on when it outgrows the context window
 - **Remembered facts** — what you ask it to remember, kept per user
 - **Credential vault** — AES-256-GCM encrypted storage for API keys and passwords
 - **Scheduled tasks** — one-shot and recurring (cron-style) task execution

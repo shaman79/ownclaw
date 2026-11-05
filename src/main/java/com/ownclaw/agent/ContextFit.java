@@ -74,7 +74,8 @@ final class ContextFit {
 
     /**
      * The results to fold so that a request of {@code requestChars} fits, each with what it is
-     * shown as. Empty when there is nothing left to fold.
+     * shown as. Empty when there is nothing left to fold. The task's own steps only: the chat's
+     * messages are {@link #plan(List, Map, List, Map, long, Integer, int, java.util.function.Function)}'s.
      *
      * @param turns        the task's steps, in order
      * @param folded       the steps already folded, by index
@@ -86,26 +87,145 @@ final class ContextFit {
     static Map<Integer, Fold> plan(List<AgentTrajectory.Turn> turns, Map<Integer, Fold> folded,
                                    long requestChars, Integer window, int round,
                                    java.util.function.Function<String, Redactor.Cuttable> readable) {
+        return plan(turns, folded, List.of(), Map.of(), requestChars, window, round, readable).stepFolds();
+    }
+
+    /**
+     * How a chat message is shown once folded: to its first characters, or to a line.
+     *
+     * @param shown the message as the prompt shows it, its line break at the end
+     * @param line  folded to a line, which nothing folds further
+     */
+    record ChatFold(String shown, boolean line) {}
+
+    /**
+     * What one round folded.
+     *
+     * @param steps     the steps folded, by index from 0, largest first
+     * @param stepFolds what each is shown as
+     * @param chat      the chat messages folded, by index from 0, as each is shown now
+     * @param labels    each fold as the owner is told it: "memory_manage (613,878 characters)"
+     */
+    record Folded(List<Integer> steps, Map<Integer, Fold> stepFolds, Map<Integer, ChatFold> chat,
+                  List<String> labels) {
+        boolean isEmpty() {
+            return steps.isEmpty() && chat.isEmpty();
+        }
+    }
+
+    /** The chat's newest messages that never fold to a line: the turn the task answers. */
+    static final int NEWEST_KEPT = 2;
+
+    /**
+     * The results and chat messages to fold so that a request of {@code requestChars} fits.
+     * First, by size, the largest of the task's results and the chat's messages, each to its
+     * first {@link #PREVIEW} characters, the older first among equals -- a pasted log among the
+     * chat's messages goes before a short result. Then, while it still does not fit, the chat's
+     * messages from the oldest, each to one line: its number, its size and how it began, read
+     * whole with read_result message=n -- a chat long for having many messages has none large
+     * enough to fold by size. The newest {@link #NEWEST_KEPT} are never folded to a line.
+     */
+    static Folded plan(List<AgentTrajectory.Turn> turns, Map<Integer, Fold> folded,
+                       List<String> chat, Map<Integer, ChatFold> chatFolded,
+                       long requestChars, Integer window, int round,
+                       java.util.function.Function<String, Redactor.Cuttable> readable) {
         long target = target(requestChars, window, round);
-        record Candidate(int index, int length) {}
+        // Each that can fold by size: a step (index >= 0) or a chat message (-1 - index), in the
+        // order it was written -- the chat before the task -- so that the stable sort keeps the
+        // older first among equals.
+        record Candidate(int key, int length) {}
         var candidates = new ArrayList<Candidate>();
+        for (int i = 0; i < chat.size(); i++) {
+            if (!chatFolded.containsKey(i) && chat.get(i).length() > FOLDABLE) {
+                candidates.add(new Candidate(-1 - i, chat.get(i).length()));
+            }
+        }
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
             if (turn.byTheLoop() || folded.containsKey(i) || turn.observation() == null) continue;
             String output = turn.observation().output();
             if (output != null && output.length() > FOLDABLE) candidates.add(new Candidate(i, output.length()));
         }
-        // The largest first, the older first among equals: the sort is stable.
         candidates.sort(Comparator.comparingInt(Candidate::length).reversed());
-        var out = new LinkedHashMap<Integer, Fold>();
+        var steps = new ArrayList<Integer>();
+        var stepFolds = new LinkedHashMap<Integer, Fold>();
+        var chatNow = new LinkedHashMap<Integer, ChatFold>();
+        var labels = new ArrayList<String>();
         long size = requestChars;
+        long chatChars = 0;
+        int chatCount = 0;
         for (var c : candidates) {
             if (size <= target) break;
-            var turn = turns.get(c.index());
-            out.put(c.index(), new Fold(shown(turn, c.index() + 1, readable.apply(turn.observation().output()))));
-            size -= c.length() - PREVIEW;
+            if (c.key() >= 0) {
+                var turn = turns.get(c.key());
+                Fold f = new Fold(shown(turn, c.key() + 1, readable.apply(turn.observation().output())));
+                steps.add(c.key());
+                stepFolds.put(c.key(), f);
+                labels.add(turn.action().tool() + " (" + count(c.length()) + " characters)");
+                size -= c.length() - f.shown().length();
+            } else {
+                int i = -1 - c.key();
+                ChatFold f = new ChatFold(shownMessage(i + 1, chat.size(), readable.apply(chat.get(i))), false);
+                chatNow.put(i, f);
+                chatChars += c.length();
+                chatCount++;
+                size -= c.length() - f.shown().length();
+            }
         }
-        return out;
+        // Then the chat's oldest messages, each to a line.
+        for (int i = 0; i < chat.size() - NEWEST_KEPT && size > target; i++) {
+            ChatFold was = chatNow.containsKey(i) ? chatNow.get(i) : chatFolded.get(i);
+            if (was != null && was.line()) continue;
+            String message = chat.get(i);
+            ChatFold f = new ChatFold(messageLine(i + 1, chat.size(), readable.apply(message)), true);
+            long shownBefore = was != null ? was.shown().length() : message.length();
+            if (f.shown().length() >= shownBefore) continue;
+            if (!chatNow.containsKey(i)) {
+                chatChars += message.length();
+                chatCount++;
+            }
+            chatNow.put(i, f);
+            size -= shownBefore - f.shown().length();
+        }
+        if (chatCount > 0) {
+            labels.add(chatCount + (chatCount == 1 ? " message" : " messages") + " of this chat ("
+                    + count(chatChars) + " characters)");
+        }
+        return new Folded(List.copyOf(steps), stepFolds, chatNow, List.copyOf(labels));
+    }
+
+    /** A chat message folded to its first characters, a line break after it, as every message has. */
+    static String shownMessage(int n, int of, Redactor.Cuttable readable) {
+        String text = readable.text();
+        int cut = Math.min(text.length(),
+                text.offsetByCodePoints(0, Math.min(PREVIEW, text.codePointCount(0, text.length()))));
+        cut = readable.to(cut);
+        return "[Message " + n + " of " + of + " of this chat is " + count(text.length()) + " characters: too long "
+                + "to show whole with the rest of this task in the model's context window, so it is folded and only "
+                + "its first " + count(cut) + " are below. read_result with message=" + n + " reads any part of it.]\n"
+                + text.substring(0, cut).stripTrailing() + "\n[… folded: characters " + count(cut) + "-"
+                + count(text.length()) + " of message " + n + "]\n";
+    }
+
+    /** How much of a message's first line a chat message folded to a line shows. */
+    static final int LINE = 100;
+
+    /** A chat message folded to a line: its number, its size and how it began. */
+    static String messageLine(int n, int of, Redactor.Cuttable readable) {
+        String text = readable.text();
+        // Its first line that is not blank, cut as every part is: never through an identifier.
+        int start = 0;
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) start++;
+        int lineEnd = text.indexOf('\n', start);
+        if (lineEnd < 0) lineEnd = text.length();
+        String line = text.substring(start, lineEnd);
+        String first = line.strip();
+        if (line.codePointCount(0, line.length()) > LINE) {
+            int end = Math.min(lineEnd, readable.to(start + line.offsetByCodePoints(0, LINE)));
+            first = text.substring(start, end).strip() + (end < lineEnd ? "…" : "");
+        }
+        return "[Message " + n + " of " + of + ", " + count(text.length()) + " characters, folded to a line; "
+                + "read_result with message=" + n + " reads it whole] " + first + "\n";
     }
 
     /**

@@ -884,9 +884,10 @@ conversation: status lines, command replies and wizard prompts are not part of i
 earlier message is written in words, because the task numbers its own results from 1. A private
 answer is read as the note that it exists, never its text, and a file as a description, never its
 name or its bytes. Nothing is summarised or dropped to fit a window. A request longer than the
-model's context window folds the task's largest results, and the step is asked again (§7.3); a
-request still too long once no result is left to fold ends the task with the provider's plain
-message that it is. The chat itself is never folded. Scheduled and `/bg` runs read no chat.
+model's context window folds the task's largest results and the chat's longest messages, then the
+chat's oldest messages to a line each, and the step is asked again (§7.3); a request still too long
+once nothing is left to fold ends the task with the provider's plain message that it is. Scheduled
+and `/bg` runs read no chat.
 
 ### 7.2 Conversation Storage
 
@@ -930,11 +931,14 @@ with its secrets removed, never through a secret, an identifier or one of the ow
 so no piece of one reaches the gateway in a form it no longer recognises. A delegation's
 conversation with the local model folds the same way, its results and its reads of them; its
 `read_result` names its results by number and reads them as they are, since nothing of that
-conversation goes to the cloud. A folded
-result stays folded, and the step is asked again. The task ends saying the prompt is too long only
-once nothing is left to fold: the chat so far, the task's message, what the model wrote, the tools
-offered, and the results the cloud hands a delegation in its instructions, are never folded. A
-reply that filled the window from a request well inside it folds nothing.
+conversation goes to the cloud. The chat a
+task reads folds too: a message of it longer than 4,000 characters by size, among the results, and
+then, while the prompt still does not fit, its messages from the oldest, each to one line -- its
+number, its size and how it began -- but for the newest two; `read_result` with `message` reads one
+whole. A folded result or message stays folded, and the step is asked again. The task ends saying
+the prompt is too long only once nothing is left to fold: the task's message, what the model wrote,
+the tools offered, and the results the cloud hands a delegation in its instructions, are never
+folded. A reply that filled the window from a request well inside it folds nothing.
 
 ---
 

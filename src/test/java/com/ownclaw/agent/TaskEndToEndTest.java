@@ -569,6 +569,40 @@ class TaskEndToEndTest {
     }
 
     @Test
+    @DisplayName("a chat too long for the window folds its oldest messages to a line, and read_result reads one whole")
+    void aLongChatFolds(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        String session = session(rig);
+        for (int i = 0; i < 8; i++) {
+            rig.cloud.think.add(respond("answer " + i + ": " + "the router log said nothing new. ".repeat(100)));
+            rig.turn(session, i == 0 ? "FIRST QUESTION: which router reboots at night?" : "question " + i);
+        }
+        int before = rig.cloud.calls("think").size();
+        rig.cloud.think.add(tooLongForTheWindow());
+        rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("message", 2)));
+        rig.cloud.think.add(respond("You first asked which router reboots at night."));
+        AgentResult r = rig.turn(session, "what did I ask first?");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        String refused = sentTo(rig, before);
+        assertTrue(refused.contains("USER: FIRST QUESTION: which router reboots at night?\n"), "whole, before it folded");
+        String again = sentTo(rig, before + 1);
+        assertTrue(again.contains("[Message 2 of 16, 3,511 characters, folded to a line; read_result with message=2 "
+                + "reads it whole] ASSISTANT: answer 0: the router log said nothing new."), again);
+        assertTrue(again.contains("USER: FIRST QUESTION: which router reboots at night?\n")
+                && !again.contains("[Message 1 of 16"), "a message shorter than its line is never folded to one");
+        assertTrue(again.contains("USER: question 7\n"), "the newest messages whole");
+        String read = lastPart(rig, before + 2);
+        assertTrue(read.startsWith("[read_result] OK") && read.contains("Message 2 of this chat, characters 0-3,511 of 3,511:\n"
+                + "ASSISTANT: answer 0: the router log said nothing new."), read);
+        assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
+                .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so the results of ")
+                        || c.startsWith("📦 The task no longer fit the cloud model's context window, so the result of ")),
+                "the owner is told");
+        // Mutation: fold only the task's results -> nothing to fold, and the task ends on the window.
+    }
+
+    @Test
     @DisplayName("once nothing is left to fold, an ending on the context window says to carry on in a new chat")
     void aChatTooLongForTheModelSaysToStartANewOne(@TempDir Path tmp) throws Exception {
         // Two results that fold, one round each; a third refusal finds nothing left to fold.

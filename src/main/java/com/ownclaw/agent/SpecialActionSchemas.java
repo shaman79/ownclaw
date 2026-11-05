@@ -180,14 +180,16 @@ public final class SpecialActionSchemas {
                                     + "{{name}} in a tool call.")))),
 
             spec(AgentAction.READ_RESULT,
-                    "Read part of an earlier step's result, or find text in it. A result too long "
-                            + "to show whole with the rest of the task in the model's context window "
-                            + "is folded: you see its beginning, and a note naming its step and how "
-                            + "much fits at a time. Nothing of it was dropped: read the part you need, "
-                            + "or find where something is first.",
+                    "Read part of an earlier step's result or of a message of this chat, or find text "
+                            + "in it. A result or a message too long to show whole with the rest of the "
+                            + "task in the model's context window is folded: you see its beginning, or "
+                            + "one line of it, and a note naming its step or its message. Nothing of it "
+                            + "was dropped: read the part you need, or find where something is first.",
                     params(
-                            "step", ToolParam.required("integer", "The step whose result to read, as "
+                            "step", ToolParam.optional("integer", "The step whose result to read, as "
                                     + "its folded result names it."),
+                            "message", ToolParam.optional("integer", "Instead of a step: the message of "
+                                    + "this chat to read, as its folded text names it."),
                             "from", ToolParam.optional("integer", "The character offset to read "
                                     + "from; 0 when left out."),
                             "length", ToolParam.optional("integer", "How many characters to read; "

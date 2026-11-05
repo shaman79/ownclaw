@@ -912,8 +912,8 @@ public class ThinkingEngine {
         sb.append("memory_manage(action=store|list|delete|recall, [key], [content], [query], [open])\n");
         sb.append("  recall with query: lists every past task whose record matches it, most relevant first, by id\n");
         sb.append("  recall with open: the past tasks with those ids (comma-separated), each in full\n");
-        sb.append("read_result(step, [from], [length], [find])\n");
-        sb.append("  part of a step's result folded to fit the context window, or every place 'find' occurs in it\n\n");
+        sb.append("read_result(step | message, [from], [length], [find])\n");
+        sb.append("  part of a step's result, or of a message of this chat, folded to fit the context window, or every place 'find' occurs in it\n\n");
 
         sb.append("schedule_manage:\n");
         sb.append("  action=schedule_once|schedule_recurring|list|cancel|pause|resume\n");
@@ -1006,9 +1006,10 @@ public class ThinkingEngine {
         var sb = new StringBuilder();
 
         // Conversation summary for context
-        if (context.conversationSummary() != null && !context.conversationSummary().isBlank()) {
+        String chat = context.conversationShown();
+        if (chat != null && !chat.isBlank()) {
             sb.append("## Prior Context\n");
-            sb.append(context.conversationSummary()).append("\n\n");
+            sb.append(chat).append("\n\n");
         }
 
         sb.append("## Task\n");
