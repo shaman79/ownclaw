@@ -536,7 +536,7 @@ class TaskEndToEndTest {
             rig.cloud.think.add(call("read_access_log", Map.of("day", "2")));
             rig.cloud.think.add(tooLongForTheWindow());
             rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("step", 1, "find", "/ADMIN")));
-            rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("step", "1", "from", "57,000", "length", 1_000)));
+            rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("step", "1", "from", "56,992", "length", 1_000)));
             rig.cloud.think.add(respond("203.0.113.7"));
             AgentResult r = rig.turn(session(rig), "which IP hits my site most?");
 
@@ -556,12 +556,12 @@ class TaskEndToEndTest {
                     provider + ": " + found);
             assertTrue(found.contains("\n@" + (log.indexOf("/admin")) + ": 198.51.100.23 GET /admin 403"), provider + ": " + found);
             String read = sentTo(rig, 5);
-            assertTrue(read.contains("Step 1's result, characters 57,000-57,629 of 57,629:\n" + log.substring(57_000)),
+            assertTrue(read.contains("Step 1's result, characters 56,992-57,629 of 57,629:\n" + log.substring(56_992)),
                     provider + ": " + read);
             assertTrue(sentTo(rig, 5).contains("[Step 1's result is 57,629 characters"), provider + ": still folded");
             assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
                     .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so the "
-                            + "result of step 1 (57,629 characters) is folded")), provider + ": the owner is told");
+                            + "result of read_access_log (57,629 characters) is folded")), provider + ": the owner is told");
         }
         // Mutations: end on the first CONTEXT_WINDOW (the old way) -> 3 calls, ended; fold the
         // smallest first -> step 2 folded and the request still too long; render the history
@@ -788,6 +788,8 @@ class TaskEndToEndTest {
     void recallIsAskedFor(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         var memory = new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc);
+        // Another user's first, so no id is the place its task is listed in.
+        for (int i = 0; i < 5; i++) memory.storeEpisode("u9", "zzzz000" + i, "Task: router audit " + i, true, List.of());
         String longAudit = "Response: " + "the audit found port 22 open. ".repeat(100);
         memory.storeEpisode("u1", "aaaa0001", "Task: router audit\n" + longAudit, true, List.of());
         memory.storeEpisode("u1", "aaaa0002", "Task: lunch menu", true, List.of());
@@ -831,15 +833,28 @@ class TaskEndToEndTest {
         memory.storeFact("u1", "lunch", "vegetarian");
         String theirs = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = 'bbbb0001'", String.class);
         String fact = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE memory_type = 'fact'", String.class);
+        memory.storeEpisode("u1", "aaaa0001", "Task: router audit", true, List.of());
         rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", List.of(theirs, fact))));
         rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", "the audit")));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", "1 (router audit, 2026-09-29)")));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", List.of(), "query", "router")));
         rig.cloud.think.add(respond("ok"));
         rig.turn(session(rig), "open that audit");
         String observed = sentTo(rig, 1);
         assertTrue(observed.contains("ERROR: no past task of yours has the ids " + theirs + ", " + fact + "."), observed);
         assertFalse(observed.contains("someone else's"), observed);
-        assertTrue(sentTo(rig, 2).contains("ERROR: open takes the ids of past tasks"), sentTo(rig, 2));
-        // Mutation: drop user_id from the query -> the other user's audit is opened.
+        assertTrue(lastPart(rig, 2).contains("ERROR: open takes the ids of past tasks"), lastPart(rig, 2));
+        assertTrue(lastPart(rig, 3).contains("ERROR: open takes the ids of past tasks, as a recall lists them -- "
+                + "open=\"12, 15\" -- and nothing else: \"(router\" is not an id"), "nothing opened: " + lastPart(rig, 3));
+        assertTrue(lastPart(rig, 4).contains("1 past task matches 'router'"), "an empty open is no open: " + lastPart(rig, 4));
+        // Mutations: drop user_id from the query -> the other user's audit is opened; read open
+        // for its digits -> 2026, 09 and 29 opened too.
+    }
+
+    /** The last user part of a think call: the result of the step before it. */
+    static String lastPart(LoopRig rig, int thinkCall) {
+        var parts = userParts(rig.cloud.calls("think").get(thinkCall));
+        return parts.get(parts.size() - 1);
     }
 
     @Test
@@ -1011,6 +1026,27 @@ class TaskEndToEndTest {
             assertTrue(sentTo(rig, 2).contains("TimeoutError: timed out"), order + "the past task, whole");
             assertFalse(sentTo(rig, 2).contains("AUTHENTICATIONFAILED"), order + "the private traceback stays here");
         }
+    }
+
+    @Test
+    @DisplayName("a recall's list beside a private traceback is sent: how a past task began was the cloud's before")
+    void aRecalledListIsNotALeak(@TempDir Path tmp) throws Exception {
+        Tool imap = tool("imap_fetch", List.of("IMAP_PASS"), p -> "Skill error: login refused\n"
+                + "Traceback (most recent call last):\n  File \"/skills/imap_fetch/skill.py\", line 22, in run\n"
+                + "imaplib.IMAP4.error: [AUTHENTICATIONFAILED] Invalid credentials for petr@example.org");
+        var rig = new LoopRig(tmp, List.of(imap));
+        rig.config.getPrivacy().setPersonalSources(List.of("IMAP_"));
+        new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "0ld7a5k1",
+                "Task: Traceback (most recent call last): what does that mean in my lunch skill?\nSteps: 1",
+                true, List.of());
+        rig.cloud.think.add(call("imap_fetch", Map.of()));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "traceback")));
+        rig.cloud.think.add(respond("The mail fetch failed."));
+        AgentResult r = rig.turn(session(rig), "fetch my new mail");
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertTrue(sentTo(rig, 2).contains(" chars · Traceback (most recent call last): what does that mean"), sentTo(rig, 2));
+        assertFalse(sentTo(rig, 2).contains("AUTHENTICATIONFAILED"), "the private traceback stays here");
+        // Mutation: drop givenEarlier for the list -> the request is refused as a leak.
     }
 
     @Test

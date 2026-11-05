@@ -226,22 +226,20 @@ public final class TaskChat {
     }
 
     /**
-     * The task's conversation did not fit the model's context window, and these steps' results
-     * are folded from now on ({@link ContextFit}): said, because the model reads them in parts
-     * after this, and the owner should not wonder why it reads its own results again.
+     * The task's conversation did not fit the model's context window, and these results are folded
+     * from now on ({@link ContextFit}): said, because the model reads them in parts after this, and
+     * the owner should not wonder why it reads its own results again. Named by tool and size, not
+     * by step: the step rows count only the model's steps.
      *
-     * @param steps each folded step, from 1, to its result's size in characters
-     * @param model which model's window: "the local model's", "anthropic's"
+     * @param results each folded result: its tool and size, "memory_manage (613,878 characters)"
+     * @param model   which model's window: "the local model's", "the cloud model's"
      */
-    void folded(java.util.Map<Integer, Integer> steps, String model) {
-        if (sessionId == null || steps.isEmpty()) return;
-        var which = new java.util.ArrayList<String>();
-        steps.forEach((step, chars) -> which.add(step + " (" + String.format(java.util.Locale.ROOT, "%,d", chars)
-                + " characters)"));
-        String list = which.size() == 1 ? which.getFirst()
-                : String.join(", ", which.subList(0, which.size() - 1)) + " and " + which.getLast();
-        note("📦 The task no longer fit " + model + " context window, so the result" + (which.size() == 1
-                ? " of step " + list + " is" : "s of steps " + list + " are")
+    void folded(java.util.List<String> results, String model) {
+        if (sessionId == null || results.isEmpty()) return;
+        String list = results.size() == 1 ? results.getFirst()
+                : String.join(", ", results.subList(0, results.size() - 1)) + " and " + results.getLast();
+        note("📦 The task no longer fit " + model + " context window, so the result" + (results.size() == 1
+                ? " of " + list + " is" : "s of " + list + " are")
                 + " folded: the model sees the beginning and reads the rest in parts when it needs it. "
                 + "Nothing was dropped.");
     }

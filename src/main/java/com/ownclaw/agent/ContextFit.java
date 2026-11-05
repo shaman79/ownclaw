@@ -1,5 +1,7 @@
 package com.ownclaw.agent;
 
+import com.ownclaw.privacy.Redactor;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -32,7 +34,14 @@ import java.util.regex.Pattern;
  * round makes the request smaller. A request that still does not fit folds more on the next
  * round, until nothing is left to fold: then the task ends as it did before. A folded result
  * stays folded for the rest of the task, so the conversation is the same bytes from one step to
- * the next and the provider's cache keeps working.
+ * the next and the provider's cache keeps working. The rounds count again from the first after a
+ * request that fits: a later overflow is a new one.
+ * <p>
+ * What is shown of a folded result, and every part read_result returns, is cut from the result
+ * with its secrets removed ({@link Redactor#cuttable}), never from the bytes as they are: the
+ * gateway removes a secret it recognises, and a part cut through one -- the value after
+ * "password=" without its key, a vault value without its first letter -- is no longer one it
+ * recognises. A cut never falls inside an identifier either.
  */
 final class ContextFit {
 
@@ -57,12 +66,11 @@ final class ContextFit {
     static final int FOLDABLE = 2 * PREVIEW;
 
     /**
-     * What a folded result is shown as, and how much of it the model was told to read at a time.
+     * What a folded result is shown as from now on.
      *
-     * @param shown the step's result as the prompts show it from now on
-     * @param chunk characters that fit at a time when it was folded, read_result's default length
+     * @param shown the step's result as the prompts show it
      */
-    record Fold(String shown, long chunk) {}
+    record Fold(String shown) {}
 
     /**
      * The results to fold so that a request of {@code requestChars} fits, each with what it is
@@ -72,10 +80,12 @@ final class ContextFit {
      * @param folded       the steps already folded, by index
      * @param requestChars the characters of the request that did not fit
      * @param window       the model's window in tokens, or null when the provider did not say
-     * @param round        how many rounds of folding this task has had before this one
+     * @param round        how many rounds of folding this overflow has had before this one
+     * @param readable     a result as it may be cut ({@link Redactor#cuttable})
      */
     static Map<Integer, Fold> plan(List<AgentTrajectory.Turn> turns, Map<Integer, Fold> folded,
-                                   long requestChars, Integer window, int round) {
+                                   long requestChars, Integer window, int round,
+                                   java.util.function.Function<String, Redactor.Cuttable> readable) {
         long target = target(requestChars, window, round);
         record Candidate(int index, int length) {}
         var candidates = new ArrayList<Candidate>();
@@ -87,22 +97,26 @@ final class ContextFit {
         }
         // The largest first, the older first among equals: the sort is stable.
         candidates.sort(Comparator.comparingInt(Candidate::length).reversed());
-        var chosen = new ArrayList<Candidate>();
+        var out = new LinkedHashMap<Integer, Fold>();
         long size = requestChars;
         for (var c : candidates) {
             if (size <= target) break;
-            chosen.add(c);
+            var turn = turns.get(c.index());
+            out.put(c.index(), new Fold(shown(turn, c.index() + 1, readable.apply(turn.observation().output()))));
             size -= c.length() - PREVIEW;
         }
-        // What is left of the target once these are folded is what a read can take: half of
-        // it, so that two reads in a row still fit. Never less than a preview's worth.
-        long chunk = Math.max(PREVIEW, (target - size) / 2);
-        var out = new LinkedHashMap<Integer, Fold>();
-        for (var c : chosen) {
-            var turn = turns.get(c.index());
-            out.put(c.index(), new Fold(shown(turn, c.index() + 1, chunk), chunk));
-        }
         return out;
+    }
+
+    /**
+     * Whether the reply filled the window, not the request: one of less than half the window was
+     * read whole, and the reply ran on until the window was full -- a local generation with no
+     * output limit. Folding the request then makes room for a reply that runs on again, each
+     * round a whole window of generation, so the task ends as before.
+     */
+    static boolean replyFilledIt(com.ownclaw.llm.OutputTruncated cut) {
+        return cut.reply() != null && cut.tokens() != null
+                && cut.reply().billedInputTokens() > 0 && cut.reply().billedInputTokens() < cut.tokens() / 2;
     }
 
     /** The size a round aims under, in characters. */
@@ -114,24 +128,35 @@ final class ContextFit {
     }
 
     /**
+     * How much of a result to read when the model does not say: half the room the last request
+     * left under {@code budget}, the characters that fit by the last overflow; never less than
+     * a foldable result, so that what is read can be folded in its turn.
+     */
+    static long chunk(long budget, long lastRequestChars) {
+        return Math.max(FOLDABLE, (budget - lastRequestChars) / 2);
+    }
+
+    /**
      * A folded step's result as the prompts show it: the line naming the tool, how it went and
      * how long it took, as for any result; then what it is folded to.
      */
-    static String shown(AgentTrajectory.Turn turn, int step, long chunk) {
-        String output = turn.observation().output();
-        int cut = output.offsetByCodePoints(0, Math.min(PREVIEW, output.codePointCount(0, output.length())));
+    static String shown(AgentTrajectory.Turn turn, int step, Redactor.Cuttable readable) {
+        String text = readable.text();
+        int cut = Math.min(text.length(),
+                text.offsetByCodePoints(0, Math.min(PREVIEW, text.codePointCount(0, text.length()))));
+        cut = readable.to(cut);
         var sb = new StringBuilder();
         sb.append('[').append(turn.action().tool()).append("] ")
           .append(turn.observation().success() ? "OK" : "FAILED")
           .append(" (").append(turn.observation().durationMs()).append("ms)\n");
-        sb.append("[Step ").append(step).append("'s result is ").append(count(output.length()))
+        sb.append("[Step ").append(step).append("'s result is ").append(count(text.length()))
           .append(" characters: too long to show whole with the rest of this task in the model's context ")
           .append("window, so it is folded and only its first ").append(count(cut)).append(" are below. ")
           .append("Nothing was dropped: read_result with step=").append(step)
-          .append(" reads any part of it -- from, a character offset, and length; about ").append(count(chunk))
-          .append(" characters fit at a time now -- and with find, every place a text occurs in it.]\n");
-        sb.append(output, 0, cut);
-        sb.append("\n[… folded: characters ").append(count(cut)).append('-').append(count(output.length()))
+          .append(" reads any part of it -- from, a character offset, and length, as much as fits when ")
+          .append("left out -- and with find, every place a text occurs in it.]\n");
+        sb.append(text, 0, cut);
+        sb.append("\n[… folded: characters ").append(count(cut)).append('-').append(count(text.length()))
           .append(" of step ").append(step).append("'s result]");
         return sb.toString();
     }
@@ -140,59 +165,133 @@ final class ContextFit {
     static final int AROUND = 300;
 
     /**
-     * read_result: part of step {@code step}'s result, or every place {@code find} occurs in it.
+     * read_result: part of step {@code step}'s result, or every place {@code find} occurs in it --
+     * of the result as it may be cut, secrets removed ({@link Redactor#cuttable}).
      *
-     * @param output  the step's result, whole
-     * @param from    the character offset to read from; null for the start
-     * @param length  how many characters to read; null for {@code chunk}
-     * @param find    a text to look for, case aside; null or blank to read instead
-     * @param chunk   what fits at a time, as the fold said; 0 or less for the rest of the result
+     * @param readable the step's result, as it may be cut
+     * @param from     the character offset to read from; null for the start
+     * @param length   how many characters to read; null for {@code chunk}
+     * @param find     a text to look for, case aside; null or blank to read instead
+     * @param chunk    what fits at a time now; 0 or less for the rest of the result
      */
-    static String read(int step, String output, Long from, Long length, String find, long chunk) {
+    static String read(int step, Redactor.Cuttable readable, Long from, Long length, String find, long chunk) {
+        return read(new Named("step " + step + "'s result", "step=" + step), readable, from, length, find, chunk);
+    }
+
+    /**
+     * What read_result reads, as its answers name it.
+     *
+     * @param what "step 6's result", "result {{3}}"
+     * @param args the arguments that name it again: "step=6", "result=3"
+     */
+    record Named(String what, String args) {
+        String capitalised() {
+            return Character.toUpperCase(what.charAt(0)) + what.substring(1);
+        }
+    }
+
+    /** {@link #read(int, Redactor.Cuttable, Long, Long, String, long)}, of what {@code named} names. */
+    static String read(Named named, Redactor.Cuttable readable, Long from, Long length, String find, long chunk) {
+        String output = readable.text();
         int total = output.length();
-        if (find != null && !find.isBlank()) return found(step, output, find);
+        if (find != null && !find.isBlank()) return found(named, readable, find);
         long start = from == null ? 0 : from;
         if (start < 0 || start > total) {
-            return "ERROR: from=" + start + " is outside step " + step + "'s result, which has "
+            return "ERROR: from=" + start + " is outside " + named.what() + ", which has "
                     + count(total) + " characters (offsets 0 to " + total + ").";
         }
         long want = length != null ? length : chunk > 0 ? chunk : total - start;
         if (want <= 0) return "ERROR: length must be a positive number of characters.";
-        int begin = codePointStart(output, (int) start);
-        int end = codePointEnd(output, want >= total - begin ? total : (int) (begin + want));
-        var sb = new StringBuilder("Step ").append(step).append("'s result, characters ")
+        int begin = readable.from(codePointStart(output, (int) start));
+        int end = readable.to(codePointEnd(output, want >= total - begin ? total : (int) (begin + want)));
+        var sb = new StringBuilder(named.capitalised()).append(", characters ")
                 .append(count(begin)).append('-').append(count(end)).append(" of ").append(count(total))
                 .append(":\n").append(output, begin, end);
         if (end < total) {
             sb.append("\n[… characters ").append(count(end)).append('-').append(count(total))
-              .append(" follow: read_result step=").append(step).append(" from=").append(end).append(']');
+              .append(" follow: read_result ").append(named.args()).append(" from=").append(end).append(']');
         }
         return sb.toString();
     }
 
-    /** Every place {@code find} occurs, with the text around it, within its line. */
-    private static String found(int step, String output, String find) {
+    /**
+     * A delegation's result as its conversation shows it once folded: the line its reply opened
+     * with, then its first {@link #PREVIEW} characters and a note. The local model reads the rest
+     * with read_result, and a tool it hands {{n}} is still handed the whole result.
+     *
+     * @param handle the result's handle in the delegation, from 1
+     * @param head   the reply's first line as it was: "Tool result {{3}} [tool] SUCCESS:\n"
+     */
+    static String foldedResult(int handle, String head, Redactor.Cuttable readable) {
+        String text = readable.text();
+        int cut = Math.min(text.length(),
+                text.offsetByCodePoints(0, Math.min(PREVIEW, text.codePointCount(0, text.length()))));
+        cut = readable.to(cut);
+        String h = com.ownclaw.agent.ArtifactRef.handle(handle);
+        return head + "[Result " + h + " is " + count(text.length()) + " characters: too long to show whole with "
+                + "the rest of this work in your context window, so it is folded and only its first " + count(cut)
+                + " are below. Nothing was dropped: read_result with result=" + handle + " reads any part of it -- "
+                + "from, a character offset, and length, as much as fits when left out -- and with find, every "
+                + "place a text occurs in it. A tool you hand " + h + " is still given all of it.]\n"
+                + text.substring(0, cut) + "\n[… folded: characters " + count(cut) + "-" + count(text.length())
+                + " of result " + h + "]";
+    }
+
+    /**
+     * Every place {@code find} occurs, with the text around it within its line: places whose
+     * text meets or overlaps are shown once, together -- each shown on its own, a letter found
+     * on every line of a long one repeated the line once for every time it was found.
+     */
+    private static String found(Named named, Redactor.Cuttable readable, String find) {
+        String output = readable.text();
         Matcher m = Pattern.compile(Pattern.quote(find), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE)
                 .matcher(output);
         var places = new StringBuilder();
         int n = 0;
+        int a = -1;
+        int b = -1;
+        int lineStart = 0;
+        int lineEnd = 0;
+        var at = new ArrayList<Integer>();
         while (m.find()) {
             n++;
-            int lineStart = m.start() == 0 ? 0 : output.lastIndexOf('\n', m.start() - 1) + 1;
-            int lineEnd = output.indexOf('\n', m.end());
-            if (lineEnd < 0) lineEnd = output.length();
-            int a = codePointStart(output, Math.max(lineStart, m.start() - AROUND));
-            int b = codePointEnd(output, Math.min(lineEnd, m.end() + AROUND));
-            places.append("\n@").append(m.start()).append(": ")
-                  .append(a > lineStart ? "…" : "").append(output, a, b).append(b < lineEnd ? "…" : "");
+            int ls = m.start() == 0 ? 0 : output.lastIndexOf('\n', m.start() - 1) + 1;
+            int le = output.indexOf('\n', m.end());
+            if (le < 0) le = output.length();
+            int na = readable.from(codePointStart(output, Math.max(ls, m.start() - AROUND)));
+            int nb = readable.to(codePointEnd(output, Math.min(le, m.end() + AROUND)));
+            if (a >= 0 && na <= b) {
+                b = Math.max(b, nb);
+                lineEnd = Math.max(lineEnd, le);
+                at.add(m.start());
+                continue;
+            }
+            if (a >= 0) place(places, output, a, b, lineStart, lineEnd, at);
+            a = na;
+            b = nb;
+            lineStart = ls;
+            lineEnd = le;
+            at = new ArrayList<>(List.of(m.start()));
         }
+        if (a >= 0) place(places, output, a, b, lineStart, lineEnd, at);
         if (n == 0) {
-            return "\"" + find + "\" does not occur in step " + step + "'s result (" + count(output.length())
+            return "\"" + find + "\" does not occur in " + named.what() + " (" + count(output.length())
                     + " characters, case aside).";
         }
-        return "\"" + find + "\" occurs in " + n + (n == 1 ? " place" : " places") + " in step " + step
-                + "'s result (" + count(output.length()) + " characters, case aside): its offset, then the text "
-                + "around it in its line. read_result with from reads on from any offset." + places;
+        return "\"" + find + "\" occurs in " + count(n) + (n == 1 ? " place" : " places") + " in " + named.what()
+                + " (" + count(output.length()) + " characters, case aside): the offset of each -- of the "
+                + "first and last of places shown together -- then the text around it in its line. read_result "
+                + "with from reads on from any offset." + places;
+    }
+
+    private static void place(StringBuilder places, String output, int a, int b, int lineStart, int lineEnd,
+                              List<Integer> at) {
+        places.append("\n@").append(at.getFirst());
+        if (at.size() > 1) {
+            places.append(" to @").append(at.getLast()).append(" (")
+                  .append(String.format(Locale.ROOT, "%,d", at.size())).append(" places)");
+        }
+        places.append(": ").append(a > lineStart ? "…" : "").append(output, a, b).append(b < lineEnd ? "…" : "");
     }
 
     /** {@code at}, or the start of the character it falls inside when it splits a surrogate pair. */

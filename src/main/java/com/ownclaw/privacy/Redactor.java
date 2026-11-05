@@ -155,6 +155,62 @@ public final class Redactor {
     }
 
     /**
+     * {@code text} with every vault value and every secret the detectors find removed, as
+     * {@link #filter} removes them, and the identifiers left as they are; with where each
+     * identifier lies in what is returned. For a text a model reads in parts -- a result folded
+     * to fit its context window ({@code ContextFit}): a part cut from the text as it was would
+     * hold a piece of a secret that no detector knows for one -- the value after
+     * "password=" without its key, a vault value without its first letter -- and the gateway
+     * would send it. Cut from this, a part holds no secret, and is cut around an identifier,
+     * never through one ({@link Cuttable#from}, {@link Cuttable#to}). The owner's own named
+     * values (the placeholder table) are not looked for: those the gateway replaces wherever
+     * they stand.
+     */
+    public static Cuttable cuttable(String text, Map<String, String> vault) {
+        if (text == null || text.isEmpty()) return new Cuttable(text == null ? "" : text, List.of());
+        String s = scrubVault(text, vault).text();
+        var sb = new StringBuilder(s.length());
+        var ids = new ArrayList<int[]>();
+        int from = 0;
+        for (Finding f : find(s, Map.of())) {
+            sb.append(s, from, f.start());
+            if (f.kind() == null) {
+                sb.append(SECRET_REMOVED);
+            } else {
+                int at = sb.length();
+                sb.append(s, f.start(), f.end());
+                ids.add(new int[] {at, sb.length()});
+            }
+            from = f.end();
+        }
+        return new Cuttable(sb.append(s, from, s.length()).toString(), List.copyOf(ids));
+    }
+
+    /**
+     * A text with its secrets removed ({@link #cuttable}), and the spans of its identifiers, in
+     * order: where a cut may not fall.
+     */
+    public record Cuttable(String text, List<int[]> identifiers) {
+        /** {@code at}, or the start of the identifier it falls inside: where a part may begin. */
+        public int from(int at) {
+            for (int[] id : identifiers) {
+                if (id[0] < at && at < id[1]) return id[0];
+                if (id[0] >= at) break;
+            }
+            return at;
+        }
+
+        /** {@code at}, or the end of the identifier it falls inside: where a part may end. */
+        public int to(int at) {
+            for (int[] id : identifiers) {
+                if (id[0] < at && at < id[1]) return id[1];
+                if (id[0] >= at) break;
+            }
+            return at;
+        }
+    }
+
+    /**
      * {@link #filter} over every string in a JSON-shaped value -- a tool's input schema, a map of
      * arguments -- keys and all other values left as they are.
      */

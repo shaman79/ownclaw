@@ -122,7 +122,8 @@ public final class SpecialActionSchemas {
                             "content", ToolParam.optional("string", "The fact, for store."),
                             "query", ToolParam.optional("string", "What to look for, for recall."),
                             "open", ToolParam.optional("string", "For recall: the ids of past tasks a "
-                                    + "recall listed, comma-separated, to read each in full."))),
+                                    + "recall listed, comma-separated, to read each in full; no "
+                                    + "query is needed then."))),
 
             spec(AgentAction.SCHEDULE_MANAGE,
                     "Schedule work for later, or manage what is already scheduled.",

@@ -272,16 +272,21 @@ public class ThinkingEngine {
 
     /**
      * A request's size in characters, as {@link ContextFit} weighs it: every message, and every
-     * tool offered in full -- its name, description and parameters. A deferred tool is not
-     * counted: the model reads it only from a TOOLS message that offers it, and the providers
-     * that cannot defer one offer only those ({@link com.ownclaw.llm.ToolSpec}).
+     * tool the model reads -- its name, description and parameters: each that is not deferred,
+     * and each deferred one a TOOLS message of the request offers. A deferred tool no TOOLS
+     * message offers is not read. Images and attachments are not counted: the measure errs low,
+     * which costs a round of folding more.
      */
     static long requestChars(List<LlmMessage> messages, List<com.ownclaw.llm.ToolSpec> tools) {
         long n = 0;
-        for (LlmMessage m : messages) n += m.content() == null ? 0 : m.content().length();
+        var offered = new java.util.HashSet<String>();
+        for (LlmMessage m : messages) {
+            n += m.content() == null ? 0 : m.content().length();
+            offered.addAll(m.addedTools());
+        }
         if (tools != null) {
             for (var t : tools) {
-                if (t.deferred()) continue;
+                if (t.deferred() && !offered.contains(t.name())) continue;
                 n += t.name().length() + (t.description() == null ? 0 : t.description().length())
                         + String.valueOf(t.inputSchema()).length();
             }

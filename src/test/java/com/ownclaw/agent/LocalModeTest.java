@@ -87,6 +87,52 @@ class LocalModeTest {
     }
 
     @Test
+    @DisplayName("2026-11-04: a cloud refusal, then a request too long for the local model folds the largest result and goes on")
+    void theRefusalThenTheWindow(@TempDir Path tmp) throws Exception {
+        String recalled = "Task: router audit\nResponse: port 22 open on 192.0.2.1\n".repeat(12_000);
+        var local = localModel();
+        var rig = new LoopRig(tmp, List.of(tool("old_tasks", List.of(), p -> recalled)), 600, local);
+        rig.cloud.think.add(call("old_tasks", Map.of()));
+        rig.cloud.think.add(refused());
+        // Read 200,000 tokens and wrote 30,000 before the window filled: the request was the cause.
+        local.think.add(c -> {
+            throw new com.ownclaw.llm.OutputTruncated("ollama", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
+                    262_144, Replies.of("", 200_000, 30_000, 0, 0, "length"));
+        });
+        local.think.add(call(AgentAction.READ_RESULT, Map.of("step", 1, "find", "router audit", "length", 100)));
+        local.think.add(respond("done locally"));
+
+        AgentResult r = rig.turn(session(rig), "what did the router audits find?");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertEquals(3, local.calls("think").size(), "the refused step, the fold, the read, the answer");
+        String folded = all(local.calls("think").get(1));
+        assertFalse(folded.contains(recalled), "folded on the local model too");
+        assertTrue(folded.contains("[Step 1] ") && folded.contains("[Step 1's result is "), "in the history it reads");
+        var completed = new com.fasterxml.jackson.databind.ObjectMapper().readTree(rig.jdbc.queryForObject(
+                "SELECT details FROM events WHERE event_type = 'task_completed' AND task_id = ?", String.class, r.taskId()));
+        assertTrue(completed.get("localTokens").asInt() >= 230_000, "the reply cut at the window was billed: " + completed);
+        // Mutation: end on CONTEXT_WINDOW (the old way) -> the task ends after the first local call.
+    }
+
+    @Test
+    @DisplayName("a reply that filled the window from a request well inside it folds nothing: the task ends as before")
+    void aRunawayReplyEnds(@TempDir Path tmp) throws Exception {
+        var local = localModel();
+        var rig = new LoopRig(tmp, List.of(tool("old_tasks", List.of(), p -> "x".repeat(50_000))), 600, local);
+        rig.cloud.think.add(call("old_tasks", Map.of()));
+        rig.cloud.think.add(refused());
+        local.think.add(c -> {
+            throw new com.ownclaw.llm.OutputTruncated("ollama", com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW,
+                    262_144, Replies.of("", 20_000, 242_144, 0, 0, "length"));
+        });
+        AgentResult r = rig.turn(session(rig), "summarise the old tasks");
+        assertEquals(AgentResult.TerminationReason.CONTEXT_WINDOW, r.terminationReason(), r.response());
+        assertEquals(1, local.calls("think").size(), "not asked again");
+        // Mutation: fold whatever the cut -> the script has no second local reply.
+    }
+
+    @Test
     @DisplayName("a cloud refusal with no local model to fall back to ends the task, saying the cloud declined")
     void aRefusalWithoutLocalStops(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of(NOOP));   // the default local model is unavailable

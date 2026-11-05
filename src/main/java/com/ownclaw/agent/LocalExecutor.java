@@ -274,9 +274,10 @@ public class LocalExecutor {
         // and not indexed; see AgentContext.decide.
         List<Artifact> mine = new ArrayList<>();
         // The whole conversation, every turn of it, every result in full: nothing is dropped to
-        // make room. A delegation that outgrows the model's context window gets a plain error
-        // saying so (Ollama is asked never to drop messages itself), and fails like any other --
-        // the cloud takes the work back.
+        // make room. A turn that outgrows the model's context window gets a plain error saying so
+        // (Ollama is asked never to drop messages itself); the largest results are then folded
+        // and the turn asked again (Fit), and only when nothing is left to fold does the
+        // delegation fail like any other -- the cloud takes the work back.
         List<LlmMessage> messages = new ArrayList<>();
 
         // System prompt with plan and tools
@@ -321,6 +322,9 @@ public class LocalExecutor {
         // Turns in a row that ran nothing: no tool ran in them -- the reply was empty, held no tool
         // call, or every call it held was refused.
         int nothingInARow = 0;
+        // Fitting the conversation to the model's window (Fit): this delegation's results fold
+        // as the task's do, read back with read_result.
+        var fit = new Fit();
         for (int turn = 1; ; turn++) {
             if (parentContext.isCancelled()) {
                 // Partial work is not worthless: it is the only record of what the local model
@@ -341,6 +345,25 @@ public class LocalExecutor {
                 if (parentContext.isCancelled()) {
                     return partial("Task cancelled during delegation.", mine);
                 }
+                // Longer than the window: the largest results fold and the turn is asked again, as
+                // the task's own steps do (AgentLoop) -- for as long as a result is left to fold.
+                if (e instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
+                        && !ContextFit.replyFilledIt(cut)) {
+                    List<String> folded = fit.fold(messages, mine, specs, cut.tokens());
+                    if (!folded.isEmpty()) {
+                        log.warn("Delegation turn {}: the conversation did not fit the local model's context "
+                                + "window ({}); folded {} and asking again", turn, cut.getMessage(), folded);
+                        parentContext.chat().folded(folded, "the local model's");
+                        parentContext.markProgress();
+                        if (nativeTools && !fit.offered) {
+                            specs = new ArrayList<>(specs);
+                            specs.add(READ_RESULT);
+                            request = request.withTools(specs);
+                            fit.offered = true;
+                        }
+                        continue;
+                    }
+                }
                 // A reply that had become a loop was ended: the delegation fails, as it does on any
                 // failed call, and its work goes back to the model that delegated it -- the cloud's,
                 // unless the task runs on the local model. The owner is told so in the chat.
@@ -349,8 +372,8 @@ public class LocalExecutor {
                             parentContext.options().localOnly() || parentContext.onLocal()
                                     ? "the delegation has failed" : "the cloud model takes over");
                 }
-                // A delegation that outgrew the local model's context window fails with
-                // OutputTruncated, whose message names the window and its size.
+                // A delegation that outgrew the local model's context window with nothing left to
+                // fold fails with OutputTruncated, whose message names the window and its size.
                 String msg = String.valueOf(e.getMessage());
                 // After a private read the error can quote it -- a tool-call parse error echoes
                 // the model's raw output -- so then neither the cloud nor the log gets the
@@ -465,6 +488,7 @@ public class LocalExecutor {
             int before = mine.size();
             var replies = new ArrayList<String>();
             int didNotRun = 0;
+            boolean read = false;
             for (int i = 0; i < actions.size(); i++) {
                 // Stop is looked at before every call, not only before every model call: pressed
                 // while one call of the turn runs, it stops the ones after it -- the send after
@@ -483,11 +507,18 @@ public class LocalExecutor {
                             + "results after it would not have had the numbers you counted on "
                             + "when you wrote them. Make this call again if it is still needed, "
                             + "numbering from the results you have now.";
+                } else if (Fit.READ.equals(action.tool)) {
+                    // A read of a result is no result: nothing is numbered after it, and it ran.
+                    reply = fit.read(action.params, mine, messages, specs);
+                    read = true;
                 } else {
                     int had = mine.size();
                     reply = act(action, parentContext, mine, given, nativeTools, plan, turn, words);
                     if (mine.size() == had) didNotRun = i + 1;
-                    else words = null;   // said once, above the call that ran
+                    else {
+                        words = null;   // said once, above the call that ran
+                        fit.replied(mine.size(), reply);
+                    }
                 }
                 String name = action.done ? "done" : action.tool;
                 replies.add(actions.size() == 1 ? reply : "[call " + (i + 1) + " of "
@@ -496,7 +527,7 @@ public class LocalExecutor {
             }
             // A turn in which no tool ran -- each of its calls was no call, or was refused -- ran
             // nothing, as an empty one did, whatever it named.
-            if (mine.size() == before) {
+            if (mine.size() == before && !read) {
                 // Which calls the turn held, by name only (a refusal's text can quote what was read):
                 // without it, three turns that ran nothing could not be told apart afterwards.
                 log.warn("Delegation turn {} ran nothing: {}", turn, actions.stream()
@@ -522,6 +553,125 @@ public class LocalExecutor {
             }
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(told));
+            fit.told(before, mine.size(), messages.size() - 1);
+        }
+    }
+
+    /** read_result as a delegation's local model is offered it, once a result of it has folded. */
+    static final ToolSpec READ_RESULT = new ToolSpec(Fit.READ,
+            "Read part of one of your results, or find text in it. A result too long to show whole "
+                    + "with the rest of this work in your context window is folded: you see its "
+                    + "beginning and a note. Nothing of it was dropped: read the part you need, or find "
+                    + "where something is first.",
+            ToolSchemas.toJsonSchema(Map.of(
+                    "result", ToolParam.required("integer", "The result's number: 3 for {{3}}."),
+                    "from", ToolParam.optional("integer", "The character offset to read from; 0 when left out."),
+                    "length", ToolParam.optional("integer", "How many characters to read; what fits when left out."),
+                    "find", ToolParam.optional("string", "A text to look for instead of reading, case aside: "
+                            + "every place it occurs, with its offset and the text around it."))));
+
+    /**
+     * A delegation's conversation fitted to the local model's window ({@link ContextFit}), as the
+     * task's own steps are: when the model refuses a turn as longer than its window, the largest of
+     * the delegation's results are folded -- each reply that carried one shows the line it opened
+     * with, its first characters and a note -- and the turn is asked again, until nothing is left
+     * to fold. A folded result stays folded. read_result reads any part of one; a tool handed
+     * {{n}} is still handed all of it. The results the cloud handed the delegation are in its
+     * instructions, and are not folded.
+     * <p>
+     * The local model reads its results as they are -- nothing of a delegation's conversation goes
+     * to the cloud -- so a read is cut from the result itself, never through a character.
+     */
+    static final class Fit {
+        static final String READ = "read_result";
+
+        /** Each result's reply as it was told, by its handle in the delegation. */
+        private final Map<Integer, String> replies = new HashMap<>();
+        /** The message each result's reply is in, by its handle. */
+        private final Map<Integer, Integer> at = new HashMap<>();
+        private final java.util.Set<Integer> folded = new java.util.HashSet<>();
+        /** Rounds of this overflow; none again once a turn's request fits ({@link #told}). */
+        private int rounds;
+        /** The characters that fit, by the last overflow; 0 before any. */
+        private long budget;
+        /** Whether read_result has been added to the tools offered natively. */
+        boolean offered;
+
+        void replied(int handle, String reply) {
+            replies.put(handle, reply);
+        }
+
+        /** A turn's reply was told in message {@code index}: its results, {@code from}+1 to {@code to}, are there. */
+        void told(int from, int to, int index) {
+            for (int h = from + 1; h <= to; h++) at.put(h, index);
+            rounds = 0;   // the turn's request fitted
+        }
+
+        /**
+         * Fold the largest results until the conversation fits ({@link ContextFit#target}); returns
+         * each folded, by its handle and size, none when nothing is left to fold.
+         */
+        List<String> fold(List<LlmMessage> messages, List<Artifact> mine, List<ToolSpec> specs, Integer window) {
+            long size = ThinkingEngine.requestChars(messages, specs);
+            long target = ContextFit.target(size, window, rounds);
+            var candidates = new ArrayList<Integer>();
+            for (int h : at.keySet()) {
+                if (!folded.contains(h) && h <= mine.size() && replies.containsKey(h)
+                        && mine.get(h - 1).output().length() > ContextFit.FOLDABLE) {
+                    candidates.add(h);
+                }
+            }
+            // The largest first, the older among equals.
+            candidates.sort(java.util.Comparator.<Integer>comparingInt(h -> mine.get(h - 1).output().length())
+                    .reversed().thenComparing(java.util.Comparator.naturalOrder()));
+            var out = new ArrayList<String>();
+            for (int h : candidates) {
+                if (size <= target) break;
+                String output = mine.get(h - 1).output();
+                String reply = replies.get(h);
+                int index = at.get(h);
+                String content = messages.get(index).content();
+                int pos = content.indexOf(reply);
+                if (!reply.endsWith(output) || pos < 0) continue;
+                String head = reply.substring(0, reply.length() - output.length());
+                String shown = ContextFit.foldedResult(h, head, new com.ownclaw.privacy.Redactor.Cuttable(output, List.of()));
+                messages.set(index, LlmMessage.user(content.substring(0, pos) + shown + content.substring(pos + reply.length())));
+                replies.put(h, shown);
+                folded.add(h);
+                size -= output.length() - ContextFit.PREVIEW;
+                out.add(mine.get(h - 1).tool() + " (" + String.format(java.util.Locale.ROOT, "%,d", output.length())
+                        + " characters)");
+            }
+            if (!out.isEmpty()) {
+                budget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN) : target;
+                rounds++;
+            }
+            return out;
+        }
+
+        /** read_result in a delegation: part of one of its results, by its handle. */
+        String read(Map<String, Object> params, List<Artifact> mine, List<LlmMessage> messages, List<ToolSpec> specs) {
+            Long handle;
+            Long from;
+            Long length;
+            try {
+                handle = AgentLoop.wholeNumber(params.get("result"));
+                from = AgentLoop.wholeNumber(params.get("from"));
+                length = AgentLoop.wholeNumber(params.get("length"));
+            } catch (NumberFormatException notANumber) {
+                return "ERROR: result, from and length are whole numbers: " + notANumber.getMessage();
+            }
+            if (handle == null) return "ERROR: 'result' is required: the number of the result to read, 3 for {{3}}.";
+            if (handle < 1 || handle > mine.size()) {
+                return "ERROR: there is no result " + handle + (mine.isEmpty() ? " yet." : "; your results are 1 to "
+                        + mine.size() + ".");
+            }
+            Object find = params.get("find");
+            long chunk = budget <= 0 ? 0 : ContextFit.chunk(budget, ThinkingEngine.requestChars(messages, specs));
+            int h = handle.intValue();
+            return ContextFit.read(new ContextFit.Named("result " + ArtifactRef.handle(h), "result=" + h),
+                    new com.ownclaw.privacy.Redactor.Cuttable(mine.get(h - 1).output(), List.of()), from, length,
+                    find == null ? null : String.valueOf(find), chunk);
         }
     }
 

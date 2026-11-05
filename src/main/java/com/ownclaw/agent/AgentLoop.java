@@ -837,21 +837,23 @@ public class AgentLoop {
                 // Longer than the model's window: the largest results are folded and the same
                 // step asked again (ContextFit), for as long as there is a result left to fold.
                 // A reply cut off at the window was billed for every token it got.
-                if (cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW) {
+                // Not when the reply filled the window (ContextFit#replyFilledIt).
+                if (cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW && !ContextFit.replyFilledIt(cut)) {
                     List<Integer> folded = context.fitToWindow(cut.tokens());
                     if (!folded.isEmpty()) {
                         account(context, local, provider, cut.reply());
                         context.markProgress(); // the model answered, if only to say it was too long
-                        var sizes = new LinkedHashMap<Integer, Integer>();
-                        for (int s : folded) {
-                            String out = context.trajectory().turns().get(s - 1).observation().output();
-                            sizes.put(s, out == null ? 0 : out.length());
+                        var which = new ArrayList<String>();
+                        for (int i : folded) {
+                            var turn = context.trajectory().turns().get(i);
+                            String out = turn.observation().output();
+                            which.add(turn.action().tool() + " (" + String.format(Locale.ROOT, "%,d",
+                                    out == null ? 0 : out.length()) + " characters)");
                         }
                         log.warn("Task {} step {}: the conversation did not fit {}'s context window ({}); "
-                                        + "folded the results of steps {} and asking again", context.taskId(),
-                                step + 1, local ? "the local model" : provider.name(),
-                                cut.getMessage(), sizes);
-                        context.chat().folded(sizes, local ? "the local model's" : "the cloud model's");
+                                        + "folded the results of {} and asking again", context.taskId(),
+                                step + 1, local ? "the local model" : provider.name(), cut.getMessage(), which);
+                        context.chat().folded(which, local ? "the local model's" : "the cloud model's");
                         step--; // the same step, asked again
                         continue;
                     }
@@ -869,6 +871,7 @@ public class AgentLoop {
                 return noAnswer(context, local, provider, noReply.reply(), noReply);
             }
             context.markProgress(); // LLM responded — task is alive
+            context.fitted();
             if (!local && thinkResult.reply() != null) context.cloudAnswered();
             AgentAction action = thinkResult.action();
             int billed = account(context, local, provider, thinkResult.reply());
@@ -1778,8 +1781,9 @@ public class AgentLoop {
     /**
      * read_result: part of an earlier step's result, or every place a text occurs in it
      * ({@link ContextFit#read}). What the model reads is that step's result as it was recorded
-     * -- for a PRIVATE result, the description it was recorded as -- so it is told nothing it was
-     * not shown before the result was folded.
+     * -- for a PRIVATE result, the description it was recorded as -- with its secrets removed
+     * before it is cut ({@link AgentContext#readable}), so it is told nothing it was not shown
+     * before the result was folded, and no cut can split a secret the gateway would remove.
      */
     static String readResult(Map<String, Object> params, AgentContext context) {
         Long step;
@@ -1805,8 +1809,8 @@ public class AgentLoop {
         String output = turn.observation() == null ? null : turn.observation().output();
         if (output == null || output.isEmpty()) return "Step " + step + " has no result to read.";
         Object find = params.get("find");
-        long chunk = context.foldOf((int) (step - 1)).map(ContextFit.Fold::chunk).orElse(0L);
-        return ContextFit.read(step.intValue(), output, from, length, find == null ? null : String.valueOf(find), chunk);
+        return ContextFit.read(step.intValue(), context.readable(output), from, length,
+                find == null ? null : String.valueOf(find), context.readChunk());
     }
 
     /** A whole number as a model writes one -- 60000, "60000", "60,000" -- or null when it wrote none. */
@@ -1837,7 +1841,7 @@ public class AgentLoop {
         String content = params.get("content") != null ? params.get("content").toString().strip() : null;
 
         return switch (action) {
-            case "recall" -> params.get("open") != null && !String.valueOf(params.get("open")).isBlank()
+            case "recall" -> asksToOpen(params.get("open"))
                     ? openEpisodes(context, params.get("open"))
                     : recall(context, params.get("query") == null ? null : params.get("query").toString());
             case "list" -> {
@@ -1943,16 +1947,28 @@ public class AgentLoop {
         return listed;
     }
 
+    /** Whether a recall names past tasks to open: anything in open but blanks and an empty list. */
+    static boolean asksToOpen(Object open) {
+        if (open == null) return false;
+        if (open instanceof java.util.Collection<?> many) return many.stream().anyMatch(AgentLoop::asksToOpen);
+        return !String.valueOf(open).isBlank();
+    }
+
     /**
      * memory_manage action=recall with open: the past tasks a recall listed, by their ids, each
-     * whole, in the order asked. An id that is none of this user's past tasks is named.
+     * whole, in the order asked, each once. An id that is none of this user's past tasks is
+     * named. Ids are comma- or space-separated whole numbers, each perhaps written "id 12" or
+     * "#12"; anything else in open refuses the call, naming it. Read for its digits instead, "12
+     * (router audit, 2026-09-29)" opened past tasks 9 and 29 as well, whole: the very thing a
+     * recall lists first to avoid.
      */
     private String openEpisodes(AgentContext context, Object open) {
-        var ids = new ArrayList<String>();
-        for (Object item : open instanceof java.util.Collection<?> many ? many : List.of(open)) {
-            for (String token : String.valueOf(item).split("[^0-9]+")) {
-                if (!token.isEmpty() && !ids.contains(token)) ids.add(token);
-            }
+        List<String> ids;
+        try {
+            ids = openIds(open);
+        } catch (IllegalArgumentException notAnId) {
+            return "ERROR: open takes the ids of past tasks, as a recall lists them -- open=\"12, 15\" -- "
+                    + "and nothing else: " + notAnId.getMessage();
         }
         if (ids.isEmpty()) {
             return "ERROR: open takes the ids of past tasks, as a recall lists them -- open=\"12, 15\".";
@@ -1985,14 +2001,52 @@ public class AgentLoop {
         return past;
     }
 
+    /** A token of open: an id, perhaps written "id 12", "id12" or "#12". */
+    private static final java.util.regex.Pattern OPEN_ID =
+            java.util.regex.Pattern.compile("(?i)(?:id|#)?\\s*0*(\\d{1,18})");
+
     /**
-     * How a past task's request began, on one line, for a recall's list: its first line, with
-     * the "Task: " every episode opens with taken off, to {@link #BEGINNING} characters. The task
-     * itself opens whole.
+     * The ids open names, in order, each once, as the numbers they are ("04" is 4). A token that
+     * is not one throws, naming it.
+     */
+    static List<String> openIds(Object open) {
+        var out = new java.util.LinkedHashSet<String>();
+        for (Object item : open instanceof java.util.Collection<?> many ? many : List.of(open)) {
+            if (item == null) continue;
+            if (item instanceof Number n) {
+                double d = n.doubleValue();
+                if (d != Math.rint(d) || d < 0) throw new IllegalArgumentException("\"" + item + "\" is not an id");
+                out.add(Long.toString(n.longValue()));
+                continue;
+            }
+            // "id 12" is one token: the word and its number are joined first.
+            String text = String.valueOf(item).replaceAll("(?i)(\\bid|#)\\s+(?=\\d)", "$1");
+            for (String token : text.split("[,;\\s]+")) {
+                if (token.isEmpty()) continue;
+                var m = OPEN_ID.matcher(token);
+                if (!m.matches()) throw new IllegalArgumentException("\"" + token + "\" is not an id");
+                String digits = m.group(1).replaceFirst("^0+(?=\\d)", "");
+                out.add(digits);
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * How a past task's request began, on one line, for a recall's list: its first line that is
+     * not blank once the "Task: " every episode opens with is taken off, to {@link #BEGINNING}
+     * characters. The task itself opens whole.
      */
     static String beginning(String episode) {
-        String first = episode.lines().findFirst().orElse("").strip();
-        if (first.startsWith("Task:")) first = first.substring("Task:".length()).strip();
+        String first = "";
+        for (String line : (Iterable<String>) episode.lines()::iterator) {
+            String l = line.strip();
+            if (first.isEmpty() && l.startsWith("Task:")) l = l.substring("Task:".length()).strip();
+            if (!l.isEmpty()) {
+                first = l;
+                break;
+            }
+        }
         if (first.codePointCount(0, first.length()) <= BEGINNING) return first;
         return first.substring(0, first.offsetByCodePoints(0, BEGINNING)).stripTrailing() + "…";
     }

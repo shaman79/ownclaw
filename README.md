@@ -65,7 +65,7 @@ Skills persist across sessions. Over time, the agent accumulates a growing libra
 - **Talking to a running task** — a message sent in a chat while its task runs goes to that task, read before its next step. **Queue** (`/queue`) runs it as a task of its own instead. **Stop** ends the chat's work; `/cancel all` ends everything.
 - **Questions with choices** — when the agent asks something, the answers are buttons to click (keys in Telegram).
 - **Episodic memory** — every finished task is kept whole; when the agent asks, it gets a list of the ones that match and opens those it needs
-- **Results longer than the model can read** — folded, never dropped: the model sees a result's beginning and reads the rest in parts, so a task goes on when one result outgrows the context window
+- **Results longer than the model can read** — folded, never dropped: the model sees a result's beginning and reads the rest in parts, so a task, or a delegation to the local model, goes on when its results outgrow the context window
 - **Remembered facts** — what you ask it to remember, kept per user
 - **Credential vault** — AES-256-GCM encrypted storage for API keys and passwords
 - **Scheduled tasks** — one-shot and recurring (cron-style) task execution
@@ -120,7 +120,7 @@ Each call is recorded with the number of secrets removed and identifiers replace
 - **Skill jail**: every Python process OwnClaw starts for a skill — its runs, its checks, its venv and pip — runs in an unprivileged bubblewrap jail:
   - the host is read-only, and the skill sees only its own processes;
   - OwnClaw's own directory is hidden — the database and the vault's key, `.env`, uploads it was not handed, other skills, logs, backups and the code — and so are the system journal and `/run`;
-  - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs and keep across restarts (what none of them has used for a week is removed);
+  - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs and keep across restarts (what none of them has used for a week is removed, and sooner when the disk is nearly full);
   - the network is the host's, so skills that talk to the LAN, mail servers, Home Assistant or Ollama keep working.
 
   The jail turns itself on once bubblewrap is installed and passes its self-check. The update timer installs bubblewrap, restarts OwnClaw onto the jail and logs the state it came up in. On a server that is not hardened, run `sudo apt install bubblewrap`, then restart OwnClaw. `/status` and `/api/ops/health` show its state, and `OWNCLAW_SANDBOX_ISOLATION=required` refuses to run any skill without it.

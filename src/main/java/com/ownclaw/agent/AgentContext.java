@@ -791,11 +791,18 @@ public class AgentContext {
     /** The steps whose results are shown folded ({@link ContextFit}), by their index in the trajectory. */
     private final Map<Integer, ContextFit.Fold> folded = new java.util.HashMap<>();
 
-    /** How many times this task's results have been folded to fit a model's window. */
+    /** How many rounds of folding this overflow has had: none again once a request fits ({@link #fitted}). */
     private int fitRounds;
 
     /** The size of the last request a think call sent, in characters ({@link #requestSize}). */
     private volatile long lastRequestChars;
+
+    /**
+     * The characters that fit, by the last overflow: the window it named, at
+     * {@link ContextFit#CHARS_PER_TOKEN}, or the size its last round aimed under where it named
+     * none. 0 before any.
+     */
+    private long fitBudget;
 
     /**
      * The size of the request a think call is about to send: its messages and the tools it offers
@@ -803,6 +810,11 @@ public class AgentContext {
      */
     public void requestSize(long chars) {
         lastRequestChars = chars;
+    }
+
+    /** A request fitted the model's window: a later overflow starts its rounds again. */
+    public synchronized void fitted() {
+        fitRounds = 0;
     }
 
     /**
@@ -816,24 +828,39 @@ public class AgentContext {
         return f != null ? f.shown() : turn.observationText();
     }
 
-    /** How a step's result was folded, if it was: read_result's default length comes from it. */
-    public synchronized java.util.Optional<ContextFit.Fold> foldOf(int index) {
-        return java.util.Optional.ofNullable(folded.get(index));
+    /**
+     * How much of a result read_result reads when the model does not say: half the room the last
+     * request left in the window ({@link ContextFit#chunk}); 0, the rest of it, before anything was
+     * folded.
+     */
+    public synchronized long readChunk() {
+        return fitBudget <= 0 ? 0 : ContextFit.chunk(fitBudget, lastRequestChars);
+    }
+
+    /**
+     * A result of this task as a model may read it in parts: its secrets and the vault's values
+     * removed ({@link com.ownclaw.privacy.Redactor#cuttable}).
+     */
+    public com.ownclaw.privacy.Redactor.Cuttable readable(String output) {
+        return com.ownclaw.privacy.Redactor.cuttable(output, secretValues());
     }
 
     /**
      * The last request did not fit the model's window: fold the results that make it fit, as far
      * as there are results left to fold ({@link ContextFit#plan}). Returns the steps folded now,
-     * from 1, largest first; none when nothing is left to fold, and the task cannot be made to fit.
+     * by index from 0, largest first; none when nothing is left to fold, and the task cannot be
+     * made to fit.
      *
      * @param window the model's window in tokens, as the provider named it; null when it did not
      */
     public synchronized List<Integer> fitToWindow(Integer window) {
-        var plan = ContextFit.plan(trajectory.turns(), folded, lastRequestChars, window, fitRounds);
+        var plan = ContextFit.plan(trajectory.turns(), folded, lastRequestChars, window, fitRounds, this::readable);
         if (plan.isEmpty()) return List.of();
+        fitBudget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN)
+                : ContextFit.target(lastRequestChars, null, fitRounds);
         fitRounds++;
         folded.putAll(plan);
-        return plan.keySet().stream().map(i -> i + 1).toList();
+        return List.copyOf(plan.keySet());
     }
 
     /**
