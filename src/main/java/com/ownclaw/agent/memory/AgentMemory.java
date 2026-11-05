@@ -49,6 +49,16 @@ public interface AgentMemory {
     record Recall(List<String> words, List<String> skipped, List<MemoryEntry> episodes) {}
 
     /**
+     * The episodes of this user with these ids, whole, in the order asked, each once. An id that
+     * is not one of this user's episodes -- another user's, a fact's, one that does not exist --
+     * is not among them, so the caller can say which were not found.
+     *
+     * @param userId the user whose episodes to open
+     * @param ids    episode ids, as {@link MemoryEntry#id} gives them
+     */
+    List<MemoryEntry> episodes(String userId, List<String> ids);
+
+    /**
      * Store a semantic fact — a distilled piece of knowledge.
      *
      * @param userId the user this fact belongs to

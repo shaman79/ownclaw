@@ -39,6 +39,31 @@ class EpisodeRecallTest {
     }
 
     @Test
+    @DisplayName("episodes open by id: whole, in the order asked, each once, only the user's own episodes")
+    void openById(@TempDir Path tmp) throws Exception {
+        var jdbc = MigratedDatabase.at(tmp.resolve("t.db"));
+        var memory = new SqliteAgentMemory(jdbc);
+        String whole = "Task: router check\nResponse: " + "port 22 was open. ".repeat(400);
+        memory.storeEpisode("u1", "a0000001", "Task: router audit", true, List.of());
+        memory.storeEpisode("u1", "b0000002", whole, false, List.of());
+        memory.storeEpisode("u2", "c0000003", "Task: someone else's", true, List.of());
+        memory.storeFact("u1", "lunch", "vegetarian");
+        java.util.function.Function<String, String> id = task -> jdbc.queryForObject(
+                "SELECT id FROM agent_memory WHERE task_id = ?", String.class, task);
+        String fact = jdbc.queryForObject("SELECT id FROM agent_memory WHERE memory_type = 'fact'", String.class);
+
+        var opened = memory.episodes("u1", List.of(id.apply("b0000002"), id.apply("c0000003"), fact,
+                id.apply("a0000001"), id.apply("b0000002"), "1 OR 1=1", "99999"));
+        assertEquals(List.of(whole, "Task: router audit"),
+                opened.stream().map(AgentMemory.MemoryEntry::content).toList(),
+                "the order asked, once each; another user's episode, a fact, no id and an unknown one are not among them");
+        assertFalse(opened.getFirst().outcome());
+        assertTrue(memory.episodes("u1", List.of()).isEmpty());
+        // Mutations: drop the user_id or memory_type condition -> the other user's episode or the
+        // fact is opened; drop the de-duplication -> the check twice.
+    }
+
+    @Test
     @DisplayName("a word of two letters is looked for as a whole word; the words not looked for are named")
     void shortWordsAndSkippedOnes(@TempDir Path tmp) throws Exception {
         var memory = new SqliteAgentMemory(MigratedDatabase.at(tmp.resolve("t.db")));

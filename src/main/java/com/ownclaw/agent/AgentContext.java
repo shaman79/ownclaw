@@ -788,6 +788,54 @@ public class AgentContext {
         declinedAsReasoning++;
     }
 
+    /** The steps whose results are shown folded ({@link ContextFit}), by their index in the trajectory. */
+    private final Map<Integer, ContextFit.Fold> folded = new java.util.HashMap<>();
+
+    /** How many times this task's results have been folded to fit a model's window. */
+    private int fitRounds;
+
+    /** The size of the last request a think call sent, in characters ({@link #requestSize}). */
+    private volatile long lastRequestChars;
+
+    /**
+     * The size of the request a think call is about to send: its messages and the tools it offers
+     * in full, in characters. What a fold measures the request that did not fit by.
+     */
+    public void requestSize(long chars) {
+        lastRequestChars = chars;
+    }
+
+    /**
+     * A step's result as the think prompts show it: folded, once it has been ({@link #fitToWindow}),
+     * and otherwise whole ({@link AgentTrajectory.Turn#observationText}).
+     *
+     * @param index the step's index in the trajectory, from 0
+     */
+    public synchronized String observationShown(int index, AgentTrajectory.Turn turn) {
+        ContextFit.Fold f = folded.get(index);
+        return f != null ? f.shown() : turn.observationText();
+    }
+
+    /** How a step's result was folded, if it was: read_result's default length comes from it. */
+    public synchronized java.util.Optional<ContextFit.Fold> foldOf(int index) {
+        return java.util.Optional.ofNullable(folded.get(index));
+    }
+
+    /**
+     * The last request did not fit the model's window: fold the results that make it fit, as far
+     * as there are results left to fold ({@link ContextFit#plan}). Returns the steps folded now,
+     * from 1, largest first; none when nothing is left to fold, and the task cannot be made to fit.
+     *
+     * @param window the model's window in tokens, as the provider named it; null when it did not
+     */
+    public synchronized List<Integer> fitToWindow(Integer window) {
+        var plan = ContextFit.plan(trajectory.turns(), folded, lastRequestChars, window, fitRounds);
+        if (plan.isEmpty()) return List.of();
+        fitRounds++;
+        folded.putAll(plan);
+        return plan.keySet().stream().map(i -> i + 1).toList();
+    }
+
     /**
      * Every artifact so far, in handle order — a read-only VIEW, not a copy, so a delegation
      * that records results sees them in the same list it resolves references against.

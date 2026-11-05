@@ -90,6 +90,27 @@ public class SqliteAgentMemory implements AgentMemory {
                 .toList());
     }
 
+    @Override
+    public List<MemoryEntry> episodes(String userId, List<String> ids) {
+        var out = new ArrayList<MemoryEntry>();
+        for (String id : new java.util.LinkedHashSet<>(ids)) {
+            // The column is an integer; anything else is no episode's id.
+            if (id == null || !id.matches("\\d{1,18}")) continue;
+            out.addAll(jdbc.query(
+                    "SELECT id, content, outcome, tags, created_at FROM agent_memory "
+                            + "WHERE user_id = ? AND memory_type = 'episode' AND id = ?",
+                    (rs, rowNum) -> new MemoryEntry(
+                            rs.getString("id"),
+                            rs.getString("content"),
+                            rs.getInt("outcome") == 1,
+                            parseTags(rs.getString("tags")),
+                            createdAt(rs)
+                    ),
+                    userId, Long.parseLong(id)));
+        }
+        return out;
+    }
+
     /**
      * Whether an episode's lowercased text has this word: anywhere for a word of three
      * characters or more -- "audit" finds "audited" -- and as a whole word for one of two, which

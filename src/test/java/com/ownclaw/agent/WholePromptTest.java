@@ -160,7 +160,7 @@ class WholePromptTest {
             assertFalse(prompt.contains("## Past Experience"), "no past task is put into the prompt by itself: " + prompt);
         }
         String text = all(engine.buildMessages(ctx, "anthropic", new ThinkingEngine.StepMode(false, false, false)));
-        assertTrue(text.contains("memory_manage(action=store|list|delete|recall, [key], [content], [query])"), text);
+        assertTrue(text.contains("memory_manage(action=store|list|delete|recall, [key], [content], [query], [open])"), text);
     }
 
     @Test

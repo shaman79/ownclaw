@@ -515,28 +515,84 @@ class TaskEndToEndTest {
                 + "1,000,000-token context window.\n\n"), cut.response());
     }
 
+    /** The provider refuses the request as longer than its window, as Anthropic does with "prompt is too long". */
+    static Reply tooLongForTheWindow() {
+        return c -> {
+            throw new com.ownclaw.llm.OutputTruncated("anthropic",
+                    com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW, 200_000, null);
+        };
+    }
+
     @Test
-    @DisplayName("an ending on the context window says to carry on in a new chat: every message in this one is read with all of it")
+    @DisplayName("a request too long for the window folds the largest result and asks the same step again; read_result reads the rest")
+    void aRequestTooLongIsFolded(@TempDir Path tmp) throws Exception {
+        String log = "203.0.113.7 GET /index.html 200\n".repeat(1_800) + "198.51.100.23 GET /admin 403\n";
+        String small = "198.51.100.9 GET / 200\n".repeat(150);
+        for (String provider : List.of("anthropic", "ollama")) {
+            var rig = new LoopRig(tmp.resolve(provider), List.of(tool("read_access_log", List.of(),
+                    p -> "1".equals(String.valueOf(p.get("day"))) ? log : small)));
+            rig.cloud.name = provider;   // turn by turn, or the steps in one history message
+            rig.cloud.think.add(call("read_access_log", Map.of("day", "1")));
+            rig.cloud.think.add(call("read_access_log", Map.of("day", "2")));
+            rig.cloud.think.add(tooLongForTheWindow());
+            rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("step", 1, "find", "/ADMIN")));
+            rig.cloud.think.add(call(AgentAction.READ_RESULT, Map.of("step", "1", "from", "57,000", "length", 1_000)));
+            rig.cloud.think.add(respond("203.0.113.7"));
+            AgentResult r = rig.turn(session(rig), "which IP hits my site most?");
+
+            assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), provider + ": " + r.response());
+            assertEquals(6, rig.cloud.calls("think").size(), provider);
+            assertTrue(sentTo(rig, 2).contains(log), provider + ": the request that did not fit had it whole");
+            String again = sentTo(rig, 3);
+            assertFalse(again.contains(log), provider + ": folded");
+            assertTrue(again.contains("[Step 1's result is 57,629 characters: too long to show whole with the rest of "
+                    + "this task in the model's context window, so it is folded and only its first 2,000 are below."),
+                    provider + ": " + again);
+            assertTrue(again.contains(log.substring(0, 2_000) + "\n[… folded: characters 2,000-57,629 of step 1's result]"),
+                    provider + ": its beginning, and where the rest is");
+            assertTrue(again.contains(small), provider + ": a short result is not folded");
+            String found = sentTo(rig, 4);
+            assertTrue(found.contains("\"/ADMIN\" occurs in 1 place in step 1's result (57,629 characters, case aside)"),
+                    provider + ": " + found);
+            assertTrue(found.contains("\n@" + (log.indexOf("/admin")) + ": 198.51.100.23 GET /admin 403"), provider + ": " + found);
+            String read = sentTo(rig, 5);
+            assertTrue(read.contains("Step 1's result, characters 57,000-57,629 of 57,629:\n" + log.substring(57_000)),
+                    provider + ": " + read);
+            assertTrue(sentTo(rig, 5).contains("[Step 1's result is 57,629 characters"), provider + ": still folded");
+            assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
+                    .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so the "
+                            + "result of step 1 (57,629 characters) is folded")), provider + ": the owner is told");
+        }
+        // Mutations: end on the first CONTEXT_WINDOW (the old way) -> 3 calls, ended; fold the
+        // smallest first -> step 2 folded and the request still too long; render the history
+        // without observationShown -> the log whole in the fourth request on ollama.
+    }
+
+    @Test
+    @DisplayName("once nothing is left to fold, an ending on the context window says to carry on in a new chat")
     void aChatTooLongForTheModelSaysToStartANewOne(@TempDir Path tmp) throws Exception {
-        // Two public results that fit one at a time and not together: the model refuses the
-        // third call as the provider does a prompt over its window.
+        // Two results that fold, one round each; a third refusal finds nothing left to fold.
         String log = "203.0.113.7 GET /index.html 200\n".repeat(1_800);
         var rig = new LoopRig(tmp, List.of(tool("read_access_log", List.of(), p -> log)));
         rig.cloud.think.add(call("read_access_log", Map.of("day", "1")));
         rig.cloud.think.add(call("read_access_log", Map.of("day", "2")));
-        rig.cloud.think.add(c -> {
-            throw new com.ownclaw.llm.OutputTruncated("anthropic",
-                    com.ownclaw.llm.OutputTruncated.Limit.CONTEXT_WINDOW, 1_000_000, null);
-        });
+        rig.cloud.think.add(tooLongForTheWindow());
+        rig.cloud.think.add(tooLongForTheWindow());
+        rig.cloud.think.add(tooLongForTheWindow());
         AgentResult r = rig.turn(session(rig), "which IP hits my site most?");
 
         assertEquals(AgentResult.TerminationReason.CONTEXT_WINDOW, r.terminationReason(), r.response());
+        assertEquals(5, rig.cloud.calls("think").size(), "asked again after each fold, then ended");
+        String first = sentTo(rig, 3);
+        assertTrue(first.contains("[Step 1's result is ") && first.contains(log), "the older of two equals first: " + first.length());
+        assertTrue(sentTo(rig, 4).contains("[Step 2's result is "), "then the other, the next round");
         assertTrue(r.response().contains("**Next:** A message sent in this chat is read with the whole chat, "
                 + "this ending included, so it is likely to be too long as well: start a new chat (/new) to "
                 + "carry on, and say there what it needs from this one."), r.response());
         assertFalse(r.response().contains("Your next message starts a new task, which reads this message"),
                 "the owner was sent back into the chat that could no longer be read: " + r.response());
-        // Mutation: noAnswer ends every refused think as ERROR -> the generic Next line.
+        // Mutations: noAnswer ends every refused think as ERROR -> the generic Next line; never
+        // stop folding when nothing is left -> the script runs out.
     }
 
     @Test
@@ -728,7 +784,7 @@ class TaskEndToEndTest {
     }
 
     @Test
-    @DisplayName("memory_manage recall gives every past task that matches, whole, most relevant first")
+    @DisplayName("memory_manage recall lists every past task that matches, most relevant first, and opens the ones asked for whole")
     void recallIsAskedFor(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         var memory = new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc);
@@ -737,16 +793,53 @@ class TaskEndToEndTest {
         memory.storeEpisode("u1", "aaaa0002", "Task: lunch menu", true, List.of());
         memory.storeEpisode("u1", "aaaa0003", "Task: audit of the NAS", false, List.of());
         rig.jdbc.update("UPDATE agent_memory SET created_at = '2026-09-29 08:13:32' WHERE task_id = 'aaaa0001'");
+        String audit = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = 'aaaa0001'", String.class);
+        String nas = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = 'aaaa0003'", String.class);
         rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "router audit")));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", audit + ", 9999")));
         rig.cloud.think.add(respond("ok"));
         rig.turn(session(rig), "what did the last audit find?");
-        String observed = String.join("\n", userParts(rig.cloud.calls("think").get(1)));
-        assertTrue(observed.contains("2 past tasks match 'router audit', most relevant first:"), observed);
-        assertTrue(observed.contains(longAudit), "whole: " + observed.length());
-        assertTrue(observed.contains(", 2026-09-29T08:13:32Z ---\nTask: router audit"), "when, in UTC as stored: " + observed);
-        assertTrue(observed.indexOf("Task: router audit") < observed.indexOf("Task: audit of the NAS"),
-                "two words in common before one");
-        assertFalse(observed.contains("lunch menu"), observed);
+
+        String listed = sentTo(rig, 1);
+        assertTrue(listed.contains("2 past tasks match 'router audit', most relevant first:"), listed);
+        String auditLine = "- id " + audit + " · 2026-09-29T08:13:32Z · succeeded · "
+                + String.format(java.util.Locale.ROOT, "%,d", ("Task: router audit\n" + longAudit).length())
+                + " chars · router audit";
+        assertTrue(listed.contains(auditLine), "when, in UTC as stored, and how big: " + listed);
+        assertTrue(listed.contains("- id " + nas + " · "), listed);
+        assertTrue(listed.contains(" · did not succeed · "), listed);
+        assertTrue(listed.indexOf(auditLine) < listed.indexOf("- id " + nas + " · "), "two words in common before one");
+        assertFalse(listed.contains(longAudit), "listed, not handed over whole: " + listed.length());
+        assertFalse(listed.contains("lunch menu"), listed);
+
+        var parts = userParts(rig.cloud.calls("think").get(2));
+        String opened = parts.get(parts.size() - 1);   // the second recall's result
+        assertTrue(opened.contains("--- id " + audit + ", 2026-09-29T08:13:32Z ---\nTask: router audit\n" + longAudit),
+                "whole: " + opened.length());
+        assertTrue(opened.contains("(No past task of yours has the id 9999.)"), opened);
+        assertFalse(opened.contains("audit of the NAS"), "only what was opened");
+        // Mutations: hand every match over whole on recall -> the long audit in the first answer;
+        // open by position instead of id -> the NAS task opened.
+    }
+
+    @Test
+    @DisplayName("recall opens only this user's past tasks, and says so of an id that is none of them")
+    void recallOpensOnlyTheUsersOwn(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of());
+        var memory = new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc);
+        memory.storeEpisode("u2", "bbbb0001", "Task: someone else's router audit", true, List.of());
+        memory.storeFact("u1", "lunch", "vegetarian");
+        String theirs = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = 'bbbb0001'", String.class);
+        String fact = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE memory_type = 'fact'", String.class);
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", List.of(theirs, fact))));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", "the audit")));
+        rig.cloud.think.add(respond("ok"));
+        rig.turn(session(rig), "open that audit");
+        String observed = sentTo(rig, 1);
+        assertTrue(observed.contains("ERROR: no past task of yours has the ids " + theirs + ", " + fact + "."), observed);
+        assertFalse(observed.contains("someone else's"), observed);
+        assertTrue(sentTo(rig, 2).contains("ERROR: open takes the ids of past tasks"), sentTo(rig, 2));
+        // Mutation: drop user_id from the query -> the other user's audit is opened.
     }
 
     @Test
@@ -849,11 +942,14 @@ class TaskEndToEndTest {
     void recalledHandlesAreWords(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());
         new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "aaaa0001",
-                "Task: router audit\nResponse: see {{2}} and {{3.body_text}}", true, List.of());
+                "Task: router audit of {{1}}\nResponse: see {{2}} and {{3.body_text}}", true, List.of());
+        String id = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = 'aaaa0001'", String.class);
         rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "router")));
+        rig.cloud.think.add(call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", id)));
         rig.cloud.think.add(respond("ok"));
         rig.turn(session(rig), "what did the audit find?");
-        String observed = sentTo(rig, 1);
+        assertTrue(sentTo(rig, 1).contains(" chars · router audit of result 1"), sentTo(rig, 1));
+        String observed = sentTo(rig, 2);
         assertTrue(observed.contains("Response: see result 2 and result 3.body_text"), observed);
         // Mutation: hand the episodes over as stored -> "see {{2}}", this task's second result.
     }
@@ -871,7 +967,7 @@ class TaskEndToEndTest {
         String observed = sentTo(rig, 2);
         assertTrue(observed.contains("1 past task matches 'the AP' (not looked for: the — words and letters nearly "
                 + "every task has), most relevant first:"), observed);
-        assertTrue(observed.contains("Task: reboot the AP in the hall"), observed);
+        assertTrue(observed.contains(" chars · reboot the AP in the hall"), observed);
         assertTrue(observed.contains("ERROR: 'the and' has no word to look for (not looked for: the, and"), observed);
     }
 
@@ -900,7 +996,8 @@ class TaskEndToEndTest {
             var rig = new LoopRig(tmp.resolve(recallFirst ? "recall-first" : "fail-first"), List.of(imap));
             new com.ownclaw.agent.memory.SqliteAgentMemory(rig.jdbc).storeEpisode("u1", "0ld7a5k1", lastWeek,
                     false, List.of("web_fetch"));
-            Reply recall = call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "query", "fetch"));
+            String id = rig.jdbc.queryForObject("SELECT id FROM agent_memory WHERE task_id = '0ld7a5k1'", String.class);
+            Reply recall = call(AgentAction.MEMORY_MANAGE, Map.of("action", "recall", "open", id));
             Reply fetch = call("imap_fetch", Map.of());
             rig.cloud.think.add(recallFirst ? recall : fetch);
             rig.cloud.think.add(recallFirst ? fetch : recall);

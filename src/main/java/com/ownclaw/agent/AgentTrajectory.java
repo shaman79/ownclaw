@@ -162,6 +162,17 @@ public class AgentTrajectory {
      * @param withReasoning as {@link Turn#actionText}
      */
     public String toPromptSummary(boolean withReasoning) {
+        return toPromptSummary(withReasoning, (i, turn) -> turn.observationText());
+    }
+
+    /**
+     * As {@link #toPromptSummary(boolean)}, each step's result as {@code observationOf} gives it:
+     * folded, for one the task folded to fit the model's window ({@link AgentContext#observationShown}).
+     *
+     * @param observationOf a step's index, from 0, and the step, to its result as shown
+     */
+    public String toPromptSummary(boolean withReasoning,
+                                  java.util.function.BiFunction<Integer, Turn, String> observationOf) {
         var sb = new StringBuilder();
         for (int i = 0; i < turns.size(); i++) {
             var turn = turns.get(i);
@@ -171,7 +182,7 @@ public class AgentTrajectory {
                 sb.append(told == null ? "" : told).append("\n\n");
                 continue;
             }
-            sb.append(turn.actionText(withReasoning)).append('\n').append(turn.observationText()).append("\n\n");
+            sb.append(turn.actionText(withReasoning)).append('\n').append(observationOf.apply(i, turn)).append("\n\n");
         }
         return sb.toString();
     }

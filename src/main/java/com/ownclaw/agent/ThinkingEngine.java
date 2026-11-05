@@ -91,6 +91,9 @@ public class ThinkingEngine {
             // not having one.
             context.setOfferedTools(null);
         }
+        // Measured before it is sent: a request too long for the model's window is folded by
+        // this measure (AgentContext#fitToWindow).
+        context.requestSize(requestChars(messages, requestConfig.tools()));
 
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it
@@ -268,6 +271,25 @@ public class ThinkingEngine {
     }
 
     /**
+     * A request's size in characters, as {@link ContextFit} weighs it: every message, and every
+     * tool offered in full -- its name, description and parameters. A deferred tool is not
+     * counted: the model reads it only from a TOOLS message that offers it, and the providers
+     * that cannot defer one offer only those ({@link com.ownclaw.llm.ToolSpec}).
+     */
+    static long requestChars(List<LlmMessage> messages, List<com.ownclaw.llm.ToolSpec> tools) {
+        long n = 0;
+        for (LlmMessage m : messages) n += m.content() == null ? 0 : m.content().length();
+        if (tools != null) {
+            for (var t : tools) {
+                if (t.deferred()) continue;
+                n += t.name().length() + (t.description() == null ? 0 : t.description().length())
+                        + String.valueOf(t.inputSchema()).length();
+            }
+        }
+        return n;
+    }
+
+    /**
      * Package-private: the whole prompt, so a test can assert what the model is actually told.
      * <p>
      * The system prompt is the same static text for every provider, and every provider's last
@@ -304,7 +326,7 @@ public class ThinkingEngine {
                 messages.add(LlmMessage.user(task));
                 withToolsAdded(messages, toolsAdded(context, mode), 0, Integer.MAX_VALUE);
                 messages.add(LlmMessage.user("## History\n"
-                        + trajectory.toPromptSummary(!context.earlierWordsWithheld()) + step));
+                        + trajectory.toPromptSummary(!context.earlierWordsWithheld(), context::observationShown) + step));
             }
         }
 
@@ -339,7 +361,8 @@ public class ThinkingEngine {
     /**
      * The task, then every step in the order it happened: the model's action as an assistant
      * turn, its result as the user turn after it ({@link AgentTrajectory.Turn#observationText})
-     * -- each whole, PRIVATE results as the descriptions they were recorded as.
+     * -- each whole, PRIVATE results as the descriptions they were recorded as, and a result the
+     * task folded to fit the model's window as it was folded ({@link AgentContext#observationShown}).
      * <p>
      * A step the loop took itself ({@link AgentTrajectory.Turn#byTheLoop}) has no assistant turn:
      * the model did not write it. What the model was told about it -- a reply that could not be
@@ -362,7 +385,9 @@ public class ThinkingEngine {
         int next = 0;
         int steps = 0;
         var user = new StringBuilder(buildUserMessage(context)).append(CACHE_BOUNDARY_MARKER);
-        for (var turn : context.trajectory().turns()) {
+        var turns = context.trajectory().turns();
+        for (int i = 0; i < turns.size(); i++) {
+            var turn = turns.get(i);
             if (turn.byTheLoop()) {
                 String told = turn.observation().output();
                 if (told != null && !told.isBlank()) user.append("\n\n").append(told);
@@ -372,7 +397,7 @@ public class ThinkingEngine {
             messages.add(LlmMessage.user(user.toString()));
             next = withToolsAdded(messages, added, next, steps);
             messages.add(LlmMessage.assistant(turn.actionText(!context.earlierWordsWithheld())));
-            user = new StringBuilder(turn.observationText());
+            user = new StringBuilder(context.observationShown(i, turn));
             steps++;
         }
         user.append("\n\n---\n").append(buildDynamicContext(context, mode));
@@ -879,8 +904,11 @@ public class ThinkingEngine {
 
         sb.append("skill_manage(action=read|delete|list|analyze, [name])\n");
         sb.append("credential_manage(action=list|check, [key])\n");
-        sb.append("memory_manage(action=store|list|delete|recall, [key], [content], [query])\n");
-        sb.append("  recall: every past task whose record matches 'query', each in full, most relevant first\n\n");
+        sb.append("memory_manage(action=store|list|delete|recall, [key], [content], [query], [open])\n");
+        sb.append("  recall with query: lists every past task whose record matches it, most relevant first, by id\n");
+        sb.append("  recall with open: the past tasks with those ids (comma-separated), each in full\n");
+        sb.append("read_result(step, [from], [length], [find])\n");
+        sb.append("  part of a step's result folded to fit the context window, or every place 'find' occurs in it\n\n");
 
         sb.append("schedule_manage:\n");
         sb.append("  action=schedule_once|schedule_recurring|list|cancel|pause|resume\n");
@@ -930,7 +958,7 @@ public class ThinkingEngine {
 
         sb.append("## Memory\n");
         sb.append("Facts persist across conversations. 'Remember this' → store immediately.\n");
-        sb.append("Of past tasks you are shown only this chat's, under Prior Context: memory_manage action=recall with a query returns every past task that matches, in full.\n\n");
+        sb.append("Of past tasks you are shown only this chat's, under Prior Context: memory_manage action=recall with a query lists every past task that matches, and with open reads the ones you choose, in full.\n\n");
 
         // Output format. What to write beside a call is the per-step block's (beside).
         sb.append("## Output\n");

@@ -46,6 +46,12 @@ public record AgentAction(
     /** The local model running a task itself searches the skills ({@link ToolFinder}). */
     public static final String FIND_TOOLS = "find_tools";
 
+    /**
+     * Read part of an earlier step's result, or find text in it ({@link ContextFit}): how a result
+     * shown folded, to fit the model's context window, is read whole.
+     */
+    public static final String READ_RESULT = "read_result";
+
     public boolean isResponse() {
         return RESPOND.equals(tool);
     }
@@ -82,11 +88,15 @@ public record AgentAction(
         return FIND_TOOLS.equals(tool);
     }
 
+    public boolean isReadResult() {
+        return READ_RESULT.equals(tool);
+    }
+
     /** Returns true if this action is a built-in special action (not a tool invocation). */
     public boolean isSpecialAction() {
         return isResponse() || isAskUser() || isSkillCreate() || isSkillManage()
                 || isCredentialManage() || isMemoryManage() || isScheduleManage()
-                || isDelegate() || isFindTools();
+                || isDelegate() || isFindTools() || isReadResult();
     }
 
     public String responseText() {

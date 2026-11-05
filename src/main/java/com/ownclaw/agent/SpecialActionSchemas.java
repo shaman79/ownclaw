@@ -112,13 +112,17 @@ public final class SpecialActionSchemas {
             spec(AgentAction.MEMORY_MANAGE,
                     "Store, list or delete facts that should survive this conversation, or recall "
                             + "past tasks. Of past tasks you are shown only this chat's, under Prior "
-                            + "Context: recall returns every past task whose record matches the "
-                            + "query, each in full, the most relevant first.",
+                            + "Context: recall with a query lists every past task whose record matches "
+                            + "it, the most relevant first, each by its id, when it ran, whether it "
+                            + "succeeded, its size and how its request began; recall with open reads "
+                            + "the ones you name, each in full.",
                     params(
                             "action", ToolParam.required("string", "store | list | delete | recall"),
                             "key", ToolParam.optional("string", "Identifier for the fact."),
                             "content", ToolParam.optional("string", "The fact, for store."),
-                            "query", ToolParam.optional("string", "What to look for, for recall."))),
+                            "query", ToolParam.optional("string", "What to look for, for recall."),
+                            "open", ToolParam.optional("string", "For recall: the ids of past tasks a "
+                                    + "recall listed, comma-separated, to read each in full."))),
 
             spec(AgentAction.SCHEDULE_MANAGE,
                     "Schedule work for later, or manage what is already scheduled.",
@@ -172,7 +176,24 @@ public final class SpecialActionSchemas {
                                     + "{\"watchdog_script\": \"#!/bin/sh\\n...\"}. A name is a lowercase "
                                     + "letter, then lowercase letters, digits and underscores. Each "
                                     + "text is inserted exactly where the local model writes its "
-                                    + "{{name}} in a tool call.")))));
+                                    + "{{name}} in a tool call.")))),
+
+            spec(AgentAction.READ_RESULT,
+                    "Read part of an earlier step's result, or find text in it. A result too long "
+                            + "to show whole with the rest of the task in the model's context window "
+                            + "is folded: you see its beginning, and a note naming its step and how "
+                            + "much fits at a time. Nothing of it was dropped: read the part you need, "
+                            + "or find where something is first.",
+                    params(
+                            "step", ToolParam.required("integer", "The step whose result to read, as "
+                                    + "its folded result names it."),
+                            "from", ToolParam.optional("integer", "The character offset to read "
+                                    + "from; 0 when left out."),
+                            "length", ToolParam.optional("integer", "How many characters to read; "
+                                    + "what fits at a time when left out."),
+                            "find", ToolParam.optional("string", "A text to look for instead of "
+                                    + "reading, case aside: every place it occurs, with its offset "
+                                    + "and the text around it."))));
 
     /**
      * The spec with its 'texts' parameter declared an object of strings, which {@link ToolParam}

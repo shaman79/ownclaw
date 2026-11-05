@@ -833,6 +833,30 @@ public class AgentLoop {
                 context.chat().askedAgainQuietly(step + 1, context.earlierWordsWithheld());
                 step--; // the same step, asked again
                 continue;
+            } catch (OutputTruncated cut) {
+                // Longer than the model's window: the largest results are folded and the same
+                // step asked again (ContextFit), for as long as there is a result left to fold.
+                // A reply cut off at the window was billed for every token it got.
+                if (cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW) {
+                    List<Integer> folded = context.fitToWindow(cut.tokens());
+                    if (!folded.isEmpty()) {
+                        account(context, local, provider, cut.reply());
+                        context.markProgress(); // the model answered, if only to say it was too long
+                        var sizes = new LinkedHashMap<Integer, Integer>();
+                        for (int s : folded) {
+                            String out = context.trajectory().turns().get(s - 1).observation().output();
+                            sizes.put(s, out == null ? 0 : out.length());
+                        }
+                        log.warn("Task {} step {}: the conversation did not fit {}'s context window ({}); "
+                                        + "folded the results of steps {} and asking again", context.taskId(),
+                                step + 1, local ? "the local model" : provider.name(),
+                                cut.getMessage(), sizes);
+                        context.chat().folded(sizes, local ? "the local model's" : "the cloud model's");
+                        step--; // the same step, asked again
+                        continue;
+                    }
+                }
+                return noAnswer(context, local, provider, cut.reply(), cut);
             } catch (LlmException noReply) {
                 // What the engine does not ask again (ThinkingEngine): a limit of the model, a
                 // request the provider refused as it stands, a provider that cannot be reached.
@@ -1021,6 +1045,20 @@ public class AgentLoop {
             if (action.isFindTools()) {
                 long startMs = System.currentTimeMillis();
                 String result = findTools(action.params(), context);
+                long durationMs = System.currentTimeMillis() - startMs;
+                AgentObservation obs = result.startsWith("ERROR")
+                        ? AgentObservation.failure(action.tool(), result, durationMs)
+                        : AgentObservation.success(action.tool(), result, Map.of(), durationMs);
+                recordAndEmitObservation(context, action, obs, step + 1);
+                context.markProgress();
+                nothing.steps = 0; // a step that ran
+                continue;
+            }
+
+            // === READ RESULT (special action: a result folded to fit the window, read in parts) ===
+            if (action.isReadResult()) {
+                long startMs = System.currentTimeMillis();
+                String result = readResult(action.params(), context);
                 long durationMs = System.currentTimeMillis() - startMs;
                 AgentObservation obs = result.startsWith("ERROR")
                         ? AgentObservation.failure(action.tool(), result, durationMs)
@@ -1738,6 +1776,57 @@ public class AgentLoop {
     }
 
     /**
+     * read_result: part of an earlier step's result, or every place a text occurs in it
+     * ({@link ContextFit#read}). What the model reads is that step's result as it was recorded
+     * -- for a PRIVATE result, the description it was recorded as -- so it is told nothing it was
+     * not shown before the result was folded.
+     */
+    static String readResult(Map<String, Object> params, AgentContext context) {
+        Long step;
+        Long from;
+        Long length;
+        try {
+            step = wholeNumber(params.get("step"));
+            from = wholeNumber(params.get("from"));
+            length = wholeNumber(params.get("length"));
+        } catch (NumberFormatException notANumber) {
+            return "ERROR: step, from and length are whole numbers: " + notANumber.getMessage();
+        }
+        var turns = context.trajectory().turns();
+        if (step == null) {
+            return "ERROR: 'step' is required: the number of the step whose result to read, as a "
+                    + "folded result names it.";
+        }
+        if (step < 1 || step > turns.size()) {
+            return "ERROR: this task has no step " + step + (turns.isEmpty() ? " yet." : "; its steps so far are 1 to "
+                    + turns.size() + ".");
+        }
+        var turn = turns.get((int) (step - 1));
+        String output = turn.observation() == null ? null : turn.observation().output();
+        if (output == null || output.isEmpty()) return "Step " + step + " has no result to read.";
+        Object find = params.get("find");
+        long chunk = context.foldOf((int) (step - 1)).map(ContextFit.Fold::chunk).orElse(0L);
+        return ContextFit.read(step.intValue(), output, from, length, find == null ? null : String.valueOf(find), chunk);
+    }
+
+    /** A whole number as a model writes one -- 60000, "60000", "60,000" -- or null when it wrote none. */
+    static Long wholeNumber(Object v) {
+        if (v == null) return null;
+        if (v instanceof Number n) {
+            double d = n.doubleValue();
+            if (d != Math.rint(d)) throw new NumberFormatException("not a whole number: " + v);
+            return n.longValue();
+        }
+        String s = String.valueOf(v).strip().replace(",", "").replace("_", "").replace(" ", "");
+        if (s.isEmpty()) return null;
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            throw new NumberFormatException("not a whole number: \"" + v + "\"");
+        }
+    }
+
+    /**
      * Dispatch a memory_manage action to the AgentMemory.
      * Supports: store, list, delete, recall.
      */
@@ -1748,7 +1837,9 @@ public class AgentLoop {
         String content = params.get("content") != null ? params.get("content").toString().strip() : null;
 
         return switch (action) {
-            case "recall" -> recall(context, params.get("query") == null ? null : params.get("query").toString());
+            case "recall" -> params.get("open") != null && !String.valueOf(params.get("open")).isBlank()
+                    ? openEpisodes(context, params.get("open"))
+                    : recall(context, params.get("query") == null ? null : params.get("query").toString());
             case "list" -> {
                 List<AgentMemory.MemoryEntry> facts;
                 try {
@@ -1799,12 +1890,20 @@ public class AgentLoop {
 
     /**
      * memory_manage action=recall: every past task of this user that has a word of the query,
-     * whole, most relevant first. Asked for, where "Past Experience" used to put the three best
-     * keyword matches into every task's prompt unasked -- unrelated tasks from other chats, and
-     * failures filed as [SUCCESS]. The words that were not looked for are named, so "no match" is
-     * never said of a word nobody looked for. Handles in the tasks named another task's results,
-     * so they are written as words. What it returns, earlier tasks gave the cloud, and the task
-     * records it as such ({@link AgentContext#givenEarlier}).
+     * most relevant first, listed -- its id, when it ran, whether it succeeded, its size and how
+     * its request began -- for the model to open the ones it needs ({@link #openEpisodes}).
+     * Asked for, where "Past Experience" used to put the three best keyword matches into every
+     * task's prompt unasked -- unrelated tasks from other chats, and failures filed as [SUCCESS].
+     * <p>
+     * Listed, not handed over whole: on 2026-11-04 a recall for an invoice search returned every
+     * past task sharing a word with it, 613,878 characters -- router audits and port scans among
+     * them. The cloud declined the request that carried them, and the local model it then fell
+     * back to could not read it in its window. Every match is still listed, and each opens whole.
+     * <p>
+     * The words that were not looked for are named, so "no match" is never said of a word nobody
+     * looked for. Handles in the tasks named another task's results, so they are written as
+     * words. What it returns, earlier tasks gave the cloud, and the task records it as such
+     * ({@link AgentContext#givenEarlier}).
      */
     private String recall(AgentContext context, String query) {
         if (query == null || query.isBlank()) {
@@ -1827,17 +1926,79 @@ public class AgentLoop {
         List<AgentMemory.MemoryEntry> found = recalled.episodes();
         if (found.isEmpty()) return "No past task matches '" + query + "'" + skipped + ".";
         var sb = new StringBuilder(found.size() + (found.size() == 1 ? " past task matches '" : " past tasks match '"))
-                .append(query).append("'").append(skipped).append(", most relevant first:");
-        for (int i = 0; i < found.size(); i++) {
-            AgentMemory.MemoryEntry e = found.get(i);
-            sb.append("\n\n--- ").append(i + 1).append(" of ").append(found.size()).append(", ")
+                .append(query).append("'").append(skipped).append(", most relevant first: its id, when it ran, ")
+                .append("whether it succeeded, its size and how its request began. To read ")
+                .append(found.size() == 1 ? "it" : "the ones you need").append(" whole, recall again with ")
+                .append("open set to ").append(found.size() == 1 ? "its id" : "their ids, comma-separated")
+                .append(".");
+        for (AgentMemory.MemoryEntry e : found) {
+            sb.append("\n- id ").append(e.id())
+              .append(" · ").append(java.time.Instant.ofEpochMilli(e.timestamp()))
+              .append(" · ").append(e.outcome() ? "succeeded" : "did not succeed")
+              .append(" · ").append(String.format(Locale.ROOT, "%,d", e.content().length())).append(" chars")
+              .append(" · ").append(beginning(e.content()));
+        }
+        String listed = TaskRecord.inWords(sb.toString());
+        context.givenEarlier(listed);
+        return listed;
+    }
+
+    /**
+     * memory_manage action=recall with open: the past tasks a recall listed, by their ids, each
+     * whole, in the order asked. An id that is none of this user's past tasks is named.
+     */
+    private String openEpisodes(AgentContext context, Object open) {
+        var ids = new ArrayList<String>();
+        for (Object item : open instanceof java.util.Collection<?> many ? many : List.of(open)) {
+            for (String token : String.valueOf(item).split("[^0-9]+")) {
+                if (!token.isEmpty() && !ids.contains(token)) ids.add(token);
+            }
+        }
+        if (ids.isEmpty()) {
+            return "ERROR: open takes the ids of past tasks, as a recall lists them -- open=\"12, 15\".";
+        }
+        List<AgentMemory.MemoryEntry> found;
+        try {
+            found = memory.episodes(context.userId(), ids);
+        } catch (Exception e) {
+            return "ERROR: could not read past tasks: " + e.getMessage();
+        }
+        var missing = new ArrayList<>(ids);
+        found.forEach(e -> missing.remove(e.id()));
+        if (found.isEmpty()) {
+            return "ERROR: no past task of yours has the id" + (ids.size() == 1 ? " " : "s ")
+                    + String.join(", ", ids) + ". Recall with a query to list them.";
+        }
+        var sb = new StringBuilder();
+        for (AgentMemory.MemoryEntry e : found) {
+            if (!sb.isEmpty()) sb.append("\n\n");
+            sb.append("--- id ").append(e.id()).append(", ")
               .append(java.time.Instant.ofEpochMilli(e.timestamp())).append(" ---\n")
               .append(e.content());
+        }
+        if (!missing.isEmpty()) {
+            sb.append("\n\n(No past task of yours has the id").append(missing.size() == 1 ? " " : "s ")
+              .append(String.join(", ", missing)).append(".)");
         }
         String past = TaskRecord.inWords(sb.toString());
         context.givenEarlier(past);
         return past;
     }
+
+    /**
+     * How a past task's request began, on one line, for a recall's list: its first line, with
+     * the "Task: " every episode opens with taken off, to {@link #BEGINNING} characters. The task
+     * itself opens whole.
+     */
+    static String beginning(String episode) {
+        String first = episode.lines().findFirst().orElse("").strip();
+        if (first.startsWith("Task:")) first = first.substring("Task:".length()).strip();
+        if (first.codePointCount(0, first.length()) <= BEGINNING) return first;
+        return first.substring(0, first.offsetByCodePoints(0, BEGINNING)).stripTrailing() + "…";
+    }
+
+    /** How much of a past task's first line a recall's list shows: enough to tell tasks apart. */
+    static final int BEGINNING = 160;
 
     /**
      * Dispatch a schedule_manage action to the ScheduledTaskService.
