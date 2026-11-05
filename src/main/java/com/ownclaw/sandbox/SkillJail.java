@@ -726,50 +726,63 @@ public class SkillJail {
 
     /**
      * What this process does with an account's /tmp kept from an earlier start, before any run
-     * binds it, and with none in flight, so nothing writes it ({@link #uncheckable}). A hard link
-     * out sets the whole of it aside: something unjailed wrote it, and what else it left cannot be
-     * known. An entry at its top that cannot be checked whole -- a directory a run closed, a path
-     * longer than the system takes -- is set aside on its own, and the rest is looked at again:
-     * once refused, such a path refused every launch of the account, at every start.
+     * binds it, and with none in flight, so nothing writes it ({@link #uncheckable}): in one walk,
+     * every entry at its top that cannot be checked whole -- a directory a run closed, a path
+     * longer than the system takes -- and every entry holding a file with a name the walk did not
+     * find in it -- a hard link out, or into an entry that cannot be checked -- is set aside, and
+     * the rest is kept. What is set aside no jail binds, so a link out it held reaches nothing.
+     * Only a /tmp that cannot be listed at all is set aside whole. Once refused, a path too long
+     * refused every launch of the account at every start; and set aside one at a time, with a walk
+     * after each, thousands of closed directories held every account's launches for minutes.
      */
     private void checkKept(Path dir) throws IOException {
-        while (true) {
-            Unchecked u = uncheckable(dir);
-            if (u == null) return;
-            if (u.entry() == null) {
-                log.warn("The account's /tmp {} was kept from an earlier start, and {}: it is set aside "
-                        + "and removed, and the account's skills start with an empty /tmp", dir, u.why());
-                setAside(dir);
-                Files.createDirectory(dir, ownerOnlyAttribute());
-                return;
+        Unchecked u = uncheckable(dir);
+        if (u == null) return;
+        if (u.whole()) {
+            log.warn("The account's /tmp {} was kept from an earlier start, and {}: it is set aside "
+                    + "and removed, and the account's skills start with an empty /tmp", dir, u.why());
+            setAside(dir);
+            Files.createDirectory(dir, ownerOnlyAttribute());
+            return;
+        }
+        log.warn("{} {} of the account's /tmp {} kept from an earlier start {}: set aside and removed",
+                u.entries().size(), u.entries().size() == 1 ? "entry" : "entries", dir, u.why());
+        for (Path entry : u.entries()) {
+            try {
+                setAside(entry);
+            } catch (IOException | RuntimeException e) {
+                // Not kept unchecked: a launch that cannot put it out of use is refused.
+                throw new IOException("an entry of the account's /tmp could not be set aside");
             }
-            log.warn("An entry of the account's /tmp {} kept from an earlier start {}: it is set aside "
-                    + "and removed", dir, u.why());
-            setAside(u.entry());
         }
     }
 
     /**
      * What cannot be kept of an account's /tmp, or null when all of it can.
      *
-     * @param entry the entry at its top that cannot be checked whole; null for all of it
-     * @param why   for the log, never for a model: it can name what a skill wrote
+     * @param whole   all of it: it cannot be listed
+     * @param entries the entries at its top to set aside, otherwise
+     * @param why     for the log, never for a model: it can name what a skill wrote
      */
-    record Unchecked(Path entry, String why) {}
+    record Unchecked(boolean whole, List<Path> entries, String why) {}
 
     /**
      * Walk an account's /tmp as {@link #linkedOutside} walks a bind, file by file and following no
-     * link: a file with a name outside it is all of it; a name that cannot be read, listed or
-     * entered is the entry at its top that holds it.
+     * link, once: an entry at its top holding a name that cannot be read, listed or entered, and
+     * one holding a file with more names than the walk found, are what cannot be kept.
      */
     static Unchecked uncheckable(Path root) throws IOException {
         if (!root.getFileSystem().supportedFileAttributeViews().contains("unix")) return null;
         var namesInside = new HashMap<Object, Integer>();
         var links = new HashMap<Object, Integer>();
+        var tops = new HashMap<Object, java.util.Set<Path>>();
+        var bad = new LinkedHashSet<Path>();
+        boolean linkOut = false;
         record At(Path path, Path top) {}
         var pending = new ArrayDeque<At>(List.of(new At(root, null)));
         while (!pending.isEmpty()) {
             At at = pending.pop();
+            if (at.top() != null && bad.contains(at.top())) continue;
             try {
                 var a = Files.readAttributes(at.path(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
                 if (a.isDirectory()) {
@@ -780,21 +793,26 @@ public class SkillJail {
                         Object key = a.fileKey() != null ? a.fileKey() : at.path();
                         namesInside.merge(key, 1, Integer::sum);
                         links.put(key, names);
+                        tops.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(at.top() == null ? at.path() : at.top());
                     }
                 }
             } catch (NoSuchFileException gone) {
                 if (at.top() == null) throw gone;
             } catch (IOException e) {
-                return new Unchecked(at.top(), at.top() == null ? "cannot be listed or entered"
-                        : "cannot be checked whole (" + e.getClass().getSimpleName() + ")");
+                if (at.top() == null) return new Unchecked(true, List.of(), "it cannot be listed or entered");
+                bad.add(at.top());
             }
         }
         for (var e : links.entrySet()) {
             if (e.getValue() > namesInside.get(e.getKey())) {
-                return new Unchecked(null, "a file in it has another name outside it (a hard link)");
+                bad.addAll(tops.get(e.getKey()));
+                linkOut = true;
             }
         }
-        return null;
+        if (bad.isEmpty()) return null;
+        return new Unchecked(false, List.copyOf(bad), linkOut
+                ? "cannot be checked whole, or hold a file with a name outside them (a hard link)"
+                : "cannot be checked whole");
     }
 
     /** rwx for the service user alone, for a directory made new; none where there are no POSIX modes. */
@@ -920,6 +938,10 @@ public class SkillJail {
             log.warn("Could not list {} for old /tmp directories: {}", skills, e.toString());
             return;
         }
+        synchronized (sharedTmpLock) {
+            trash = null;
+            trash();   // while there is room for it, made before anything is taken out
+        }
         Thread.ofVirtual().name("ownclaw-old-tmp").start(() -> {
             for (Path p : old) deleteUnwrittenTree(p);
             // A disk a skill filled is made room on at the start, as a restart once emptied it.
@@ -1022,7 +1044,7 @@ public class SkillJail {
                 taken = takeOut(unused);
             }
             // Removed outside the lock, which every launch takes: what was moved aside no run sees.
-            if (taken.aside() != null) deleteUnwrittenTree(taken.aside());
+            if (taken.aside() != null) emptyTrash();
             int moved = taken.count();
             if (moved > 0) {
                 log.info("Removed {} {} of the account's /tmp {} that no run had used for {} days", moved,
@@ -1034,6 +1056,40 @@ public class SkillJail {
     }
 
     /**
+     * Where what is taken out of the accounts' /tmp is moved before it is removed: made at the
+     * start, while the disk has room for it, so that taking something out on a full disk is a
+     * rename, never a directory to make, and its removal happens after the lock every launch
+     * takes is let go. Null when it cannot be made: then what is taken out is removed where it is.
+     */
+    private Path trash;
+
+    /** The trash, made now if it is not there; null when it cannot be. Under {@link #sharedTmpLock}. */
+    private Path trash() {
+        if (trash != null && Files.isDirectory(trash, LinkOption.NOFOLLOW_LINKS)) return trash;
+        try {
+            trash = Files.createDirectory(sharedTmpRoot().getParent().resolve("_tmp-old-trash-" + UUID.randomUUID()),
+                    ownerOnlyAttribute());
+        } catch (IOException | RuntimeException e) {
+            trash = null;
+        }
+        return trash;
+    }
+
+    /** Remove what is in the trash: outside {@link #sharedTmpLock}; no jail binds any of it. */
+    private void emptyTrash() {
+        Path t;
+        synchronized (sharedTmpLock) {
+            t = trash;
+        }
+        if (t == null) return;
+        try {
+            for (Path p : listed(t)) deleteUnwrittenTree(p);
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not empty {}: {}", t, e.toString());
+        }
+    }
+
+    /**
      * Take these entries out of an account's /tmp and remove them: under {@link #sharedTmpLock},
      * with no run of the account in flight, so nothing writes them. Each is moved aside first, at
      * once, and removed after; where that cannot be done -- on a full disk the directory to move
@@ -1042,20 +1098,13 @@ public class SkillJail {
      * caller to remove once it has let the lock go.
      */
     private Taken takeOut(List<Path> entries) {
-        Path aside = sharedTmpRoot().getParent().resolve("_tmp-old-" + UUID.randomUUID());
-        boolean asideMade;
-        try {
-            Files.createDirectory(aside, ownerOnlyAttribute());
-            asideMade = true;
-        } catch (IOException | RuntimeException e) {
-            asideMade = false;
-        }
+        Path aside = trash();
         int out = 0;
         for (Path entry : entries) {
             try {
-                if (asideMade) {
+                if (aside != null) {
                     openToMove(entry);
-                    Files.move(entry, aside.resolve(entry.getFileName().toString()),
+                    Files.move(entry, aside.resolve(UUID.randomUUID().toString()),
                             java.nio.file.StandardCopyOption.ATOMIC_MOVE);
                     out++;
                 } else if (deleteUnwrittenTree(entry)) {
@@ -1065,21 +1114,21 @@ public class SkillJail {
                 log.warn("Could not take {} out of the account's /tmp: {}", entry, e.toString());
             }
         }
-        return new Taken(out, asideMade ? aside : null);
+        return new Taken(out, aside);
     }
 
-    /** What {@link #takeOut} took out: how many, and the directory they were moved into, if any. */
+    /** What {@link #takeOut} took out: how many, and the trash they were moved into, if any. */
     private record Taken(int count, Path aside) {}
 
     /**
-     * Free space the accounts' /tmp keeps on its disk: 5% of it, and never under 1 GiB. Below it,
-     * the entries the accounts used least recently go first, until there is that much again
-     * ({@link #makeRoom}): a jailed skill that fills the disk -- which a restart used to clear --
-     * must not leave every next launch refused, the jail's self-check unable to run.
+     * Free space below which the disk the accounts' /tmp is on counts as full: 1 GiB. Below it,
+     * the largest of their entries go first, until there is that much again ({@link #makeRoom}):
+     * a jailed skill that fills the disk -- which a restart used to clear -- must not leave every
+     * next launch refused, the jail's self-check unable to run. Only then: what fills a disk is
+     * often something else -- backups, logs, images -- and a reserve that grew with the disk (5% of
+     * it) emptied every account's /tmp, hourly, on a disk merely getting full.
      */
-    static long reserve(long total) {
-        return Math.max(1L << 30, total / 20);
-    }
+    static final long FULL = 1L << 30;
 
     /** The free and the total space of the disk the accounts' /tmp is on; a test's own. */
     volatile java.util.function.Function<Path, long[]> diskSpace = p -> {
@@ -1092,17 +1141,19 @@ public class SkillJail {
     };
 
     /**
-     * When the accounts' /tmp's disk has less free than {@link #reserve}: remove their entries, the
-     * least recently used first ({@link #lastUse}; one that cannot be checked counts as oldest),
-     * until it has that much again, or none is left. An account with a run in flight is left alone.
-     * Returns how many went.
+     * When the accounts' /tmp's disk has less than {@link #FULL} free: remove their entries, the
+     * largest first -- a run that filled the disk left the largest -- until it has that much again,
+     * or none is left. One that cannot be measured counts as the largest. An account with a run in
+     * flight is left alone: its run may be what is writing, and it is removed once the run has
+     * ended. Each is moved to the trash under the lock and removed after it, and the disk measured
+     * again. Returns how many went.
      */
     int makeRoom() {
         Path accounts = accountsTmpRoot();
         if (!Files.isDirectory(accounts, LinkOption.NOFOLLOW_LINKS)) return 0;
         long[] space = diskSpace.apply(accounts);
-        if (space == null || space[0] >= reserve(space[1])) return 0;
-        record Entry(String account, Path path, long lastUse) {}
+        if (space == null || space[0] >= FULL) return 0;
+        record Entry(String account, Path path, long size) {}
         var all = new ArrayList<Entry>();
         try {
             for (Path dir : listed(accounts)) {
@@ -1113,34 +1164,50 @@ public class SkillJail {
                     entries = listed(dir);
                 }
                 for (Path entry : entries) {
-                    Long last = lastUse(entry);
-                    all.add(new Entry(dir.getFileName().toString(), entry, last == null ? Long.MIN_VALUE : last));
+                    Long size = sizeOf(entry);
+                    all.add(new Entry(dir.getFileName().toString(), entry, size == null ? Long.MAX_VALUE : size));
                 }
             }
         } catch (IOException | RuntimeException e) {
             log.warn("Could not look into the accounts' /tmp to make room on the disk: {}", e.toString());
         }
-        all.sort(java.util.Comparator.comparingLong(Entry::lastUse));
+        all.sort(java.util.Comparator.comparingLong(Entry::size).reversed());
         int removed = 0;
         for (Entry e : all) {
-            if (space == null || space[0] >= reserve(space[1])) break;
+            if (space == null || space[0] >= FULL) break;
+            Taken taken;
             synchronized (sharedTmpLock) {
                 if (tmpRuns.getOrDefault(e.account(), 0) > 0) continue;
-                // Removed here, not moved: what frees the disk is the removal, and it is measured next.
-                try {
-                    openToMove(e.path());
-                } catch (IOException | RuntimeException ignored) {
-                    // deleteUnwrittenTree opens what it can
-                }
-                if (deleteUnwrittenTree(e.path())) removed++;
+                taken = takeOut(List.of(e.path()));
             }
+            if (taken.aside() != null) emptyTrash();
+            removed += taken.count();
             space = diskSpace.apply(accounts);
         }
         if (removed > 0) {
-            log.warn("The disk of the accounts' /tmp was nearly full: removed {} of their entries, the least "
-                    + "recently used first", removed);
+            log.warn("The disk of the accounts' /tmp had less than {} MiB free: removed {} of their entries, the "
+                    + "largest first", FULL >> 20, removed);
         }
         return removed;
+    }
+
+    /** The bytes the regular files under {@code entry} take, following no link; null when part of it cannot be read. */
+    static Long sizeOf(Path entry) {
+        long total = 0;
+        var pending = new ArrayDeque<Path>(List.of(entry));
+        while (!pending.isEmpty()) {
+            Path p = pending.pop();
+            try {
+                var a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (a.isDirectory()) pending.addAll(listed(p));
+                else if (a.isRegularFile()) total += a.size();
+            } catch (NoSuchFileException gone) {
+                // gone since it was listed
+            } catch (IOException e) {
+                return null;
+            }
+        }
+        return total;
     }
 
     /**

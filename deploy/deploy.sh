@@ -1202,9 +1202,10 @@ TIMER
     # Gradle needs a writable home; keep it outside the repo and owned by root.
     mkdir -p "$DEPLOY_DIR/.gradle" && chown -R root:root "$DEPLOY_DIR/.gradle"
     # The service user still owns everything it writes at runtime.
-    for d in data skills logs backups; do
+    for d in data logs backups; do
         [ -d "$DEPLOY_DIR/$d" ] && chown -R ownclaw:ownclaw "$DEPLOY_DIR/$d"
     done
+    chown_skills_but_tmp
     [ -f "$DEPLOY_DIR/.env" ] && { chown root:ownclaw "$DEPLOY_DIR/.env"; chmod 0640 "$DEPLOY_DIR/.env"; }
     [ -f "$DEPLOY_DIR/ownclaw.jar" ] && chown root:root "$DEPLOY_DIR/ownclaw.jar"
     log "  $REPO_DIR is now root-owned; data/, skills/, logs/ and backups/ stay with ownclaw"
@@ -1594,7 +1595,7 @@ main() {
             ensure_sudoers_restart_rule || die "Failed to install sudoers rule for service restart"
             # Also fix repo ownership while we have root access
             chown -R ownclaw:ownclaw "$REPO_DIR" 2>/dev/null || true
-            chown -R ownclaw:ownclaw "$DEPLOY_DIR/skills" 2>/dev/null || true
+            chown_skills_but_tmp
             log "Sudoers rule installed + repo permissions fixed. Cron-based updates can restart the service without prompts."
             exit 0
             ;;

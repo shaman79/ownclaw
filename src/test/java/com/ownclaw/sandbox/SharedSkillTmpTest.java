@@ -201,7 +201,7 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("a kept /tmp holding a hard link out is set aside at its first bind after a start, and removed")
+    @DisplayName("an entry of a kept /tmp holding a hard link out is set aside at its first bind after a start, and removed; the rest is kept")
     void aHardLinkOutIsSetAside() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
         Files.writeString(tmp.resolve("ow_perf_1.txt"), "collected");
@@ -211,10 +211,11 @@ class SharedSkillTmpTest {
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
         jail = next;
-        assertEquals("absent", run(m.otherSkill(), """
+        assertEquals("absent present", run(m.otherSkill(), """
                 import os
-                print('present' if os.path.exists('/tmp/innocent.log') or os.path.exists('/tmp/ow_perf_1.txt') else 'absent')
-                """, "owner1"), "the whole of it set aside");
+                print(('present' if os.path.exists('/tmp/innocent.log') else 'absent') + ' '
+                      + ('present' if os.path.exists('/tmp/ow_perf_1.txt') else 'absent'))
+                """, "owner1"), "the link set aside, the rest kept");
         awaitNoOldTmp();
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
         assertEquals(1, SkillJail.nlink(m.db()), "the hard link to the database is still there");
@@ -228,6 +229,13 @@ class SharedSkillTmpTest {
         Files.writeString(Files.createDirectory(tmp.resolve("mail")).resolve("1.eml"), "Subject: invoice");
         Path closed = Files.createDirectory(tmp.resolve("keep"));
         Files.createLink(closed.resolve("db"), m.db());
+        // A link between two of its entries -- cp -al, rsync --link-dest -- one of them closed:
+        // the other name cannot be seen, so the entry holding this one goes too, and no more.
+        Files.writeString(closed.resolve("f"), "f");
+        Files.createLink(Files.createDirectory(tmp.resolve("copy")).resolve("f"), closed.resolve("f"));
+        for (int i = 0; i < 200; i++) {
+            Files.setPosixFilePermissions(Files.createDirectory(tmp.resolve("closed" + i)), java.util.Set.of());
+        }
         Files.setPosixFilePermissions(closed, java.util.Set.of());
 
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
@@ -239,6 +247,11 @@ class SharedSkillTmpTest {
                 """, "owner1"));
         assertEquals("Subject: invoice", run(m.otherSkill(), "print(open('/tmp/mail/1.eml').read())\n", "owner1"),
                 "the rest of the account's /tmp is kept");
+        assertEquals("absent 0", run(m.otherSkill(), """
+                import os
+                print(('present' if os.path.exists('/tmp/copy') else 'absent') + ' '
+                      + str(len([n for n in os.listdir('/tmp') if n.startswith('closed')])))
+                """, "owner1"), "the entry linked into the closed one, and every closed one, in one pass");
         // Removed, closed or not: what it holds cannot be checked, so it is not kept.
         awaitNoOldTmp();
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
@@ -286,12 +299,21 @@ class SharedSkillTmpTest {
         // Mutation: count no run in -> swept under the run.
     }
 
+    /** Set aside, and not this process's trash while it is empty. */
+    static boolean oldAndNotEmptyTrash(Path p) {
+        String name = p.getFileName().toString();
+        if (!name.startsWith("_tmp-old-")) return false;
+        if (!name.startsWith("_tmp-old-trash-")) return true;
+        String[] in = p.toFile().list();
+        return in == null || in.length > 0;
+    }
+
     /** The old /tmp directories go in the background: wait until they have. */
     private void awaitNoOldTmp() throws Exception {
         long deadline = System.currentTimeMillis() + 10_000;
         while (true) {
             try (var left = Files.list(m.root().resolve("skills"))) {
-                if (left.noneMatch(p -> p.getFileName().toString().startsWith("_tmp-old-"))) return;
+                if (left.noneMatch(SharedSkillTmpTest::oldAndNotEmptyTrash)) return;
             }
             assertTrue(System.currentTimeMillis() < deadline, "the old /tmp directories were not removed");
             Thread.sleep(50);

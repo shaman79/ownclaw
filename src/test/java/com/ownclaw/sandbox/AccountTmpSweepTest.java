@@ -75,7 +75,7 @@ class AccountTmpSweepTest {
         }
         assertEquals(0, jail.sweepUnusedTmp(System.currentTimeMillis()), "nothing is a week old today");
         try (var left = Files.list(m.root().resolve("skills"))) {
-            assertTrue(left.noneMatch(p -> p.getFileName().toString().startsWith("_tmp-old-")), "removed, not only set aside");
+            assertTrue(left.noneMatch(SharedSkillTmpTest::oldAndNotEmptyTrash), "removed, not only set aside");
         }
         // Mutations: count a directory's access time -> listed stays; count only the top entry's
         // times -> deep goes; compare with the creation time -> household goes.
@@ -114,28 +114,33 @@ class AccountTmpSweepTest {
     }
 
     @Test
-    @DisplayName("a disk nearly full is made room on: the least recently used entries first, until there is room again")
+    @DisplayName("a full disk is made room on: the largest entries first, until there is 1 GiB free again; a disk merely filling is left alone")
     void aFullDisk() throws Exception {
-        long day = Duration.ofDays(1).toMillis();
-        long now = System.currentTimeMillis();
-        usedAt(Files.writeString(tmp.resolve("a.bin"), "a"), now + 5 * day, true);
-        usedAt(Files.writeString(tmp.resolve("b.bin"), "b"), now + 9 * day, true);
-        usedAt(Files.writeString(tmp.resolve("c.bin"), "c"), now + 7 * day, true);
+        Files.writeString(tmp.resolve("filler.bin"), "f".repeat(3_000));   // what a runaway run left, just now
+        Files.writeString(Files.createDirectory(tmp.resolve("mail")).resolve("1.eml"), "m".repeat(2_000));
+        Files.writeString(tmp.resolve("report.txt"), "r");
         long gib = 1L << 30;
-        // 100 GiB, 5 GiB kept free: full while more than one entry is left.
+        long[] free = {8 * gib};
+        jail.diskSpace = p -> new long[] {free[0], 200 * gib};
+        assertEquals(0, jail.makeRoom(), "8 GiB free of 200: not full, whatever fills it");
+        // Full while more than one entry is left.
         jail.diskSpace = p -> {
             try (var left = Files.list(tmp)) {
-                return new long[] {left.count() > 1 ? 0 : 10 * gib, 100 * gib};
+                return new long[] {left.count() > 1 ? 100L << 20 : 2 * gib, 200 * gib};
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
         };
         assertEquals(2, jail.makeRoom());
-        assertTrue(Files.exists(tmp.resolve("b.bin")), "the most recently used is kept");
+        assertFalse(Files.exists(tmp.resolve("filler.bin")), "the largest first, however new");
+        assertTrue(Files.exists(tmp.resolve("report.txt")), "the smallest is kept");
         assertEquals(0, jail.makeRoom(), "room enough now");
-        assertEquals(5 * gib, SkillJail.reserve(100 * gib));
-        assertEquals(gib, SkillJail.reserve(10 * gib), "never under 1 GiB");
-        // Mutations: sort newest first -> b.bin goes; never look at the disk -> nothing goes.
+        try (var left = Files.list(m.root().resolve("skills"))) {
+            assertTrue(left.filter(q -> q.getFileName().toString().startsWith("_tmp-old-trash-"))
+                    .allMatch(t -> t.toFile().list().length == 0), "removed, not only moved to the trash");
+        }
+        // Mutations: least recently used first -> the filler, just written, kept to the last;
+        // a reserve of 5% -> 8 GiB of 200 is full, and everything goes.
     }
 
     @Test
