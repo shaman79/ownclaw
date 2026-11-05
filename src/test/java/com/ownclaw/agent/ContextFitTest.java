@@ -200,6 +200,34 @@ class ContextFitTest {
     }
 
     @Test
+    @DisplayName("a cut never falls inside one of the user's own named values: an SSID the placeholder table knows")
+    void namedValuesAreNotCut() {
+        var redactor = new Redactor(null);
+        redactor.filter("u1", "config wifi-iface\n\toption ssid 'KazdaHome5G'\n", Map.of(), new Redactor.Tally());
+        String log = "roamed to KazdaHome5G then left";
+        var readable = redactor.cuttable("u1", log, Map.of());
+        String part = ContextFit.read(1, readable, (long) log.indexOf("Home5G"), 4L, null, 0);
+        assertTrue(part.contains("\nKazdaHome5G"), part);
+        assertFalse(part.contains("\nHome5G"), part);
+        // Mutation: cut without the user's table -> "Home5G", which the gateway no longer knows.
+    }
+
+    @Test
+    @DisplayName("the read budget is the model's that overflowed: on another model a read takes the rest until that one overflows")
+    void budgetPerModel() {
+        var ctx = new AgentContext("u1", "t1", "go");
+        ctx.trajectory().record(new AgentAction("read_log", Map.of(), ""),
+                AgentObservation.success("read_log", "x".repeat(100_000), Map.of(), 1));
+        ctx.requestSize(110_000, "anthropic/claude-opus-5-5");
+        assertEquals(List.of(0), ctx.fitToWindow(30_000));
+        ctx.requestSize(12_000, "anthropic/claude-opus-5-5");
+        assertEquals((60_000 - 12_000) / 2, ctx.readChunk());
+        ctx.requestSize(12_000, "ollama/qwen3");
+        assertEquals(0, ctx.readChunk(), "another model's window is not this one's");
+        // Mutation: keep the budget across models -> 24,000 on the local model too.
+    }
+
+    @Test
     @DisplayName("find shows places whose text meets once: a letter on every line of one long line is that line once")
     void findMerges() {
         String line = "abcde".repeat(24_000);   // 120,000 characters, one line

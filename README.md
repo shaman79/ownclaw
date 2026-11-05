@@ -120,7 +120,7 @@ Each call is recorded with the number of secrets removed and identifiers replace
 - **Skill jail**: every Python process OwnClaw starts for a skill — its runs, its checks, its venv and pip — runs in an unprivileged bubblewrap jail:
   - the host is read-only, and the skill sees only its own processes;
   - OwnClaw's own directory is hidden — the database and the vault's key, `.env`, uploads it was not handed, other skills, logs, backups and the code — and so are the system journal and `/run`;
-  - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs and keep across restarts (what none of them has used for a week is removed, and sooner when the disk is nearly full);
+  - it can write only its own directory and its account's `/tmp`, which that account's skills share between runs and keep across restarts (what none of them has used for a week is removed, and the largest first when the disk is full);
   - the network is the host's, so skills that talk to the LAN, mail servers, Home Assistant or Ollama keep working.
 
   The jail turns itself on once bubblewrap is installed and passes its self-check. The update timer installs bubblewrap, restarts OwnClaw onto the jail and logs the state it came up in. On a server that is not hardened, run `sudo apt install bubblewrap`, then restart OwnClaw. `/status` and `/api/ops/health` show its state, and `OWNCLAW_SANDBOX_ISOLATION=required` refuses to run any skill without it.

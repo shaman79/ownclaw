@@ -93,7 +93,7 @@ public class ThinkingEngine {
         }
         // Measured before it is sent: a request too long for the model's window is folded by
         // this measure (AgentContext#fitToWindow).
-        context.requestSize(requestChars(messages, requestConfig.tools()));
+        context.requestSize(requestChars(messages, requestConfig.tools()), provider.name() + "/" + provider.model());
 
         // The task's progress hook keeps its stall watchdog from taking a long call for silence,
         // and lets its Stop end it; the call's own keeps what the owner is shown of it while it

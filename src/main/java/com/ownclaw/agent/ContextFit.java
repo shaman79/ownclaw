@@ -215,6 +215,18 @@ final class ContextFit {
     }
 
     /**
+     * A delegation's read of a result as its conversation shows it once folded: its first
+     * {@link #PREVIEW} characters and a note -- the same read reads it again.
+     */
+    static String foldedRead(String read) {
+        int cut = Math.min(read.length(),
+                read.offsetByCodePoints(0, Math.min(PREVIEW, read.codePointCount(0, read.length()))));
+        return "[A read of " + count(read.length()) + " characters, folded to fit your context window: its first "
+                + count(cut) + " are below. read_result with the same arguments reads it again.]\n"
+                + read.substring(0, cut) + "\n[… folded]";
+    }
+
+    /**
      * A delegation's result as its conversation shows it once folded: the line its reply opened
      * with, then its first {@link #PREVIEW} characters and a note. The local model reads the rest
      * with read_result, and a tool it hands {{n}} is still handed the whole result.

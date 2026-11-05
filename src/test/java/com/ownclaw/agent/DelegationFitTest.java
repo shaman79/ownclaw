@@ -34,8 +34,14 @@ class DelegationFitTest {
         final List<List<LlmMessage>> asked = new CopyOnWriteArrayList<>();
         final Deque<Function<List<LlmMessage>, LlmResponse>> script = new ArrayDeque<>();
 
+        /** A request longer than this, in characters, is refused as longer than the window. */
+        volatile long window = Long.MAX_VALUE;
+
         public LlmResponse chat(List<LlmMessage> m, LlmRequestConfig c) {
             asked.add(List.copyOf(m));
+            if (m.stream().mapToLong(x -> x.content().length()).sum() > window) {
+                throw new OutputTruncated("ollama", OutputTruncated.Limit.CONTEXT_WINDOW, 262_144, null);
+            }
             var next = script.poll();
             if (next == null) throw new AssertionError("the script has no reply for local call " + asked.size());
             return next.apply(m);
@@ -96,6 +102,31 @@ class DelegationFitTest {
                         + "of read_access_log (57,629 characters) is folded")), "the owner is told");
         // Mutations: fail the delegation on the window, as before -> 2 local calls, the cloud
         // takes over; count a read as a turn that ran nothing -> it ends after three reads.
+    }
+
+    @Test
+    @DisplayName("a delegation reads through a result larger than its room: its own reads fold as they pile up")
+    void readsFoldToo(@TempDir Path tmp) throws Exception {
+        String big = "a line of a large private mailbox, read in parts\n".repeat(1_920);   // 96,000 characters
+        var local = new Local();
+        local.window = 60_000;
+        local.says(DelegationBehaviourTest.call("read_mail", Map.of()));
+        for (int from = 0; from < big.length(); from += 16_000) {
+            local.says(DelegationBehaviourTest.call("read_result", Map.of("result", 1, "from", from, "length", 16_000)));
+        }
+        local.says(DelegationBehaviourTest.done("read it all"));
+        var rig = new LoopRig(tmp, List.of(tool("read_mail", List.of(), p -> big)), 600, local);
+        rig.cloud.think.add(call(AgentAction.DELEGATE, Map.of("goal", "Read the mailbox.", "tools", "read_mail")));
+        rig.cloud.think.add(respond("done"));
+
+        AgentResult r = rig.turn(session(rig), "read the mailbox");
+
+        assertEquals(AgentResult.TerminationReason.COMPLETED, r.terminationReason(), r.response());
+        assertTrue(String.join("\n", LoopRig.userParts(rig.cloud.calls("think").get(1))).contains("read it all"),
+                "the delegation finished: " + String.join("\n", LoopRig.userParts(rig.cloud.calls("think").get(1))));
+        assertTrue(local.asked.stream().anyMatch(m -> m.stream().anyMatch(x -> x.content().contains("[A read of 16,"))),
+                "a read was folded");
+        // Mutation: fold only results, as before -> the window fills with reads, and the delegation fails.
     }
 
     @Test

@@ -349,7 +349,7 @@ public class LocalExecutor {
                 // the task's own steps do (AgentLoop) -- for as long as a result is left to fold.
                 if (e instanceof OutputTruncated cut && cut.limit() == OutputTruncated.Limit.CONTEXT_WINDOW
                         && !ContextFit.replyFilledIt(cut)) {
-                    List<String> folded = fit.fold(messages, mine, specs, cut.tokens());
+                    List<String> folded = fit.fold(messages, specs, cut.tokens());
                     if (!folded.isEmpty()) {
                         log.warn("Delegation turn {}: the conversation did not fit the local model's context "
                                 + "window ({}); folded {} and asking again", turn, cut.getMessage(), folded);
@@ -510,6 +510,7 @@ public class LocalExecutor {
                 } else if (Fit.READ.equals(action.tool)) {
                     // A read of a result is no result: nothing is numbered after it, and it ran.
                     reply = fit.read(action.params, mine, messages, specs);
+                    fit.readReplied(reply);
                     read = true;
                 } else {
                     int had = mine.size();
@@ -517,7 +518,7 @@ public class LocalExecutor {
                     if (mine.size() == had) didNotRun = i + 1;
                     else {
                         words = null;   // said once, above the call that ran
-                        fit.replied(mine.size(), reply);
+                        fit.replied(mine.get(mine.size() - 1), mine.size(), reply);
                     }
                 }
                 String name = action.done ? "done" : action.tool;
@@ -553,7 +554,7 @@ public class LocalExecutor {
             }
             messages.add(LlmMessage.assistant(raw));
             messages.add(LlmMessage.user(told));
-            fit.told(before, mine.size(), messages.size() - 1);
+            fit.told(messages.size() - 1);
         }
     }
 
@@ -585,11 +586,31 @@ public class LocalExecutor {
     static final class Fit {
         static final String READ = "read_result";
 
-        /** Each result's reply as it was told, by its handle in the delegation. */
-        private final Map<Integer, String> replies = new HashMap<>();
-        /** The message each result's reply is in, by its handle. */
-        private final Map<Integer, Integer> at = new HashMap<>();
-        private final java.util.Set<Integer> folded = new java.util.HashSet<>();
+        /**
+         * A reply the conversation shows that can fold: a result's, or a read's -- reads pile up
+         * as a large result is read through, and a delegation whose reads could not fold read
+         * about one window of it and failed.
+         */
+        private static final class Part {
+            final String label;
+            final Integer handle;   // the result's, or null for a read
+            final String body;      // what it shows: the result's output, or the read's text
+            String reply;           // as the conversation shows it now
+            int message = -1;
+            boolean folded;
+
+            Part(String label, Integer handle, String body, String reply) {
+                this.label = label;
+                this.handle = handle;
+                this.body = body;
+                this.reply = reply;
+            }
+        }
+
+        /** Every reply told so far that can fold, in the order it was told. */
+        private final List<Part> parts = new ArrayList<>();
+        /** This turn's, until it is told ({@link #told}). */
+        private final List<Part> turn = new ArrayList<>();
         /** Rounds of this overflow; none again once a turn's request fits ({@link #told}). */
         private int rounds;
         /** The characters that fit, by the last overflow; 0 before any. */
@@ -597,50 +618,57 @@ public class LocalExecutor {
         /** Whether read_result has been added to the tools offered natively. */
         boolean offered;
 
-        void replied(int handle, String reply) {
-            replies.put(handle, reply);
+        /** A result's reply, as the turn tells it. */
+        void replied(Artifact result, int handle, String reply) {
+            turn.add(new Part(result.tool(), handle, result.output(), reply));
         }
 
-        /** A turn's reply was told in message {@code index}: its results, {@code from}+1 to {@code to}, are there. */
-        void told(int from, int to, int index) {
-            for (int h = from + 1; h <= to; h++) at.put(h, index);
+        /** A read's reply, as the turn tells it. */
+        void readReplied(String reply) {
+            turn.add(new Part("a read", null, reply, reply));
+        }
+
+        /** The turn was told in message {@code index}: its replies are there. */
+        void told(int index) {
+            for (Part p : turn) p.message = index;
+            parts.addAll(turn);
+            turn.clear();
             rounds = 0;   // the turn's request fitted
         }
 
         /**
-         * Fold the largest results until the conversation fits ({@link ContextFit#target}); returns
-         * each folded, by its handle and size, none when nothing is left to fold.
+         * Fold the largest replies until the conversation fits ({@link ContextFit#target}); returns
+         * each folded, by what it was and its size, none when nothing is left to fold.
          */
-        List<String> fold(List<LlmMessage> messages, List<Artifact> mine, List<ToolSpec> specs, Integer window) {
+        List<String> fold(List<LlmMessage> messages, List<ToolSpec> specs, Integer window) {
             long size = ThinkingEngine.requestChars(messages, specs);
             long target = ContextFit.target(size, window, rounds);
-            var candidates = new ArrayList<Integer>();
-            for (int h : at.keySet()) {
-                if (!folded.contains(h) && h <= mine.size() && replies.containsKey(h)
-                        && mine.get(h - 1).output().length() > ContextFit.FOLDABLE) {
-                    candidates.add(h);
-                }
+            var candidates = new ArrayList<Part>();
+            for (Part p : parts) {
+                if (!p.folded && p.message >= 0 && p.body.length() > ContextFit.FOLDABLE) candidates.add(p);
             }
-            // The largest first, the older among equals.
-            candidates.sort(java.util.Comparator.<Integer>comparingInt(h -> mine.get(h - 1).output().length())
-                    .reversed().thenComparing(java.util.Comparator.naturalOrder()));
+            // The largest first, the older among equals: the sort is stable.
+            candidates.sort(java.util.Comparator.comparingInt((Part p) -> p.body.length()).reversed());
             var out = new ArrayList<String>();
-            for (int h : candidates) {
+            for (Part p : candidates) {
                 if (size <= target) break;
-                String output = mine.get(h - 1).output();
-                String reply = replies.get(h);
-                int index = at.get(h);
-                String content = messages.get(index).content();
-                int pos = content.indexOf(reply);
-                if (!reply.endsWith(output) || pos < 0) continue;
-                String head = reply.substring(0, reply.length() - output.length());
-                String shown = ContextFit.foldedResult(h, head, new com.ownclaw.privacy.Redactor.Cuttable(output, List.of()));
-                messages.set(index, LlmMessage.user(content.substring(0, pos) + shown + content.substring(pos + reply.length())));
-                replies.put(h, shown);
-                folded.add(h);
-                size -= output.length() - ContextFit.PREVIEW;
-                out.add(mine.get(h - 1).tool() + " (" + String.format(java.util.Locale.ROOT, "%,d", output.length())
-                        + " characters)");
+                String content = messages.get(p.message).content();
+                int pos = content.indexOf(p.reply);
+                if (pos < 0) continue;
+                String shown;
+                if (p.handle != null) {
+                    if (!p.reply.endsWith(p.body)) continue;
+                    String head = p.reply.substring(0, p.reply.length() - p.body.length());
+                    shown = ContextFit.foldedResult(p.handle, head, new com.ownclaw.privacy.Redactor.Cuttable(p.body, List.of()));
+                } else {
+                    shown = ContextFit.foldedRead(p.body);
+                }
+                messages.set(p.message, LlmMessage.user(content.substring(0, pos) + shown
+                        + content.substring(pos + p.reply.length())));
+                p.reply = shown;
+                p.folded = true;
+                size -= p.body.length() - ContextFit.PREVIEW;
+                out.add(p.label + " (" + String.format(java.util.Locale.ROOT, "%,d", p.body.length()) + " characters)");
             }
             if (!out.isEmpty()) {
                 budget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN) : target;

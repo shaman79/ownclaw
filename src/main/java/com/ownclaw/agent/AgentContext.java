@@ -795,7 +795,7 @@ public class AgentContext {
     private int fitRounds;
 
     /** The size of the last request a think call sent, in characters ({@link #requestSize}). */
-    private volatile long lastRequestChars;
+    private long lastRequestChars;
 
     /**
      * The characters that fit, by the last overflow: the window it named, at
@@ -804,12 +804,37 @@ public class AgentContext {
      */
     private long fitBudget;
 
+    /** The model the last overflow was on: its budget holds for it alone. */
+    private String fitModel;
+
     /**
-     * The size of the request a think call is about to send: its messages and the tools it offers
-     * in full, in characters. What a fold measures the request that did not fit by.
+     * The size of the request a think call is about to send to {@code model}: its messages and the
+     * tools it offers in full, in characters. What a fold measures the request that did not fit by.
+     * A request to another model than the last overflow's drops that overflow's budget: a cloud
+     * window's worth read on the local model overflows it ({@link #readChunk}).
      */
-    public void requestSize(long chars) {
+    public synchronized void requestSize(long chars, String model) {
         lastRequestChars = chars;
+        if (fitModel != null && !fitModel.equals(model)) {
+            fitBudget = 0;
+            fitModel = null;
+        }
+        lastModel = model;
+    }
+
+    /** {@link #requestSize(long, String)} to the model of the last request. */
+    public void requestSize(long chars) {
+        requestSize(chars, lastModel);
+    }
+
+    private String lastModel;
+
+    /** How a result is cut to be read in parts; by default without the user's named values. */
+    private volatile java.util.function.Function<String, com.ownclaw.privacy.Redactor.Cuttable> cutter;
+
+    /** The cut with the user's named values ({@code Redactor#cuttable(String, String, Map)}). */
+    public void setCutter(java.util.function.Function<String, com.ownclaw.privacy.Redactor.Cuttable> cutter) {
+        this.cutter = cutter;
     }
 
     /** A request fitted the model's window: a later overflow starts its rounds again. */
@@ -842,7 +867,8 @@ public class AgentContext {
      * removed ({@link com.ownclaw.privacy.Redactor#cuttable}).
      */
     public com.ownclaw.privacy.Redactor.Cuttable readable(String output) {
-        return com.ownclaw.privacy.Redactor.cuttable(output, secretValues());
+        var c = cutter;
+        return c != null ? c.apply(output) : com.ownclaw.privacy.Redactor.cuttable(output, secretValues());
     }
 
     /**
@@ -858,6 +884,7 @@ public class AgentContext {
         if (plan.isEmpty()) return List.of();
         fitBudget = window != null && window > 0 ? (long) (window * ContextFit.CHARS_PER_TOKEN)
                 : ContextFit.target(lastRequestChars, null, fitRounds);
+        fitModel = lastModel;
         fitRounds++;
         folded.putAll(plan);
         return List.copyOf(plan.keySet());

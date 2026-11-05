@@ -162,17 +162,30 @@ public final class Redactor {
      * hold a piece of a secret that no detector knows for one -- the value after
      * "password=" without its key, a vault value without its first letter -- and the gateway
      * would send it. Cut from this, a part holds no secret, and is cut around an identifier,
-     * never through one ({@link Cuttable#from}, {@link Cuttable#to}). The owner's own named
-     * values (the placeholder table) are not looked for: those the gateway replaces wherever
-     * they stand.
+     * never through one ({@link Cuttable#from}, {@link Cuttable#to}). The user's own named
+     * values are looked for only by {@link #cuttable(String, String, Map)}, which knows whose.
      */
     public static Cuttable cuttable(String text, Map<String, String> vault) {
+        return cuttable(text, vault, Map.of());
+    }
+
+    /**
+     * {@link #cuttable(String, Map)} with the user's own named values -- the SSIDs and hostnames
+     * the placeholder table holds -- among the identifiers no cut falls inside: the gateway
+     * replaces one wherever it stands, and "Home5G" cut from "KazdaHome5G" is no longer one it
+     * knows.
+     */
+    public Cuttable cuttable(String userId, String text, Map<String, String> vault) {
+        return cuttable(text, vault, table(userId).named());
+    }
+
+    private static Cuttable cuttable(String text, Map<String, String> vault, Map<Kind, java.util.Set<String>> known) {
         if (text == null || text.isEmpty()) return new Cuttable(text == null ? "" : text, List.of());
         String s = scrubVault(text, vault).text();
         var sb = new StringBuilder(s.length());
         var ids = new ArrayList<int[]>();
         int from = 0;
-        for (Finding f : find(s, Map.of())) {
+        for (Finding f : find(s, known)) {
             sb.append(s, from, f.start());
             if (f.kind() == null) {
                 sb.append(SECRET_REMOVED);

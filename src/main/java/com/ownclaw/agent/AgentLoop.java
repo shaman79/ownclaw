@@ -289,6 +289,10 @@ public class AgentLoop {
         // the vault's try, because it has nothing to do with credentials and a vault error must
         // not silently leave it unwired.
         context.setSkillSource(skillManager::readSkillCode);
+        // A result read in parts is cut around the user's own named values too (ContextFit).
+        if (redactor != null) {
+            context.setCutter(text -> redactor.cuttable(context.userId(), text, context.secretValues()));
+        }
 
         // Deterministic capability gap detection — if the task requires a known
         // capability (network scanning, media processing, etc.) and no existing
