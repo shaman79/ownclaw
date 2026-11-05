@@ -104,7 +104,8 @@ final class ContextFit {
      * @param steps     the steps folded, by index from 0, largest first
      * @param stepFolds what each is shown as
      * @param chat      the chat messages folded, by index from 0, as each is shown now
-     * @param labels    each fold as the owner is told it: "memory_manage (613,878 characters)"
+     * @param labels    each fold as the owner is told it: "the result of memory_manage (613,878 characters)",
+     *                  "12 messages of this chat (40,210 characters)"
      */
     record Folded(List<Integer> steps, Map<Integer, Fold> stepFolds, Map<Integer, ChatFold> chat,
                   List<String> labels) {
@@ -161,7 +162,7 @@ final class ContextFit {
                 Fold f = new Fold(shown(turn, c.key() + 1, readable.apply(turn.observation().output())));
                 steps.add(c.key());
                 stepFolds.put(c.key(), f);
-                labels.add(turn.action().tool() + " (" + count(c.length()) + " characters)");
+                labels.add("the result of " + turn.action().tool() + " (" + count(c.length()) + " characters)");
                 size -= c.length() - f.shown().length();
             } else {
                 int i = -1 - c.key();

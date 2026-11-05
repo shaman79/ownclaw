@@ -620,12 +620,12 @@ public class LocalExecutor {
 
         /** A result's reply, as the turn tells it. */
         void replied(Artifact result, int handle, String reply) {
-            turn.add(new Part(result.tool(), handle, result.output(), reply));
+            turn.add(new Part("the result of " + result.tool(), handle, result.output(), reply));
         }
 
         /** A read's reply, as the turn tells it. */
         void readReplied(String reply) {
-            turn.add(new Part("a read", null, reply, reply));
+            turn.add(new Part("a read of a result", null, reply, reply));
         }
 
         /** The turn was told in message {@code index}: its replies are there. */

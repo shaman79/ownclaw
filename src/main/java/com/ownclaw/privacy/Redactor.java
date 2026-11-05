@@ -187,21 +187,27 @@ public final class Redactor {
         int from = 0;
         for (Finding f : find(s, known)) {
             sb.append(s, from, f.start());
+            int at = sb.length();
             if (f.kind() == null) {
                 sb.append(SECRET_REMOVED);
             } else {
-                int at = sb.length();
                 sb.append(s, f.start(), f.end());
-                ids.add(new int[] {at, sb.length()});
             }
+            // A marker is no more cut than an identifier is: "«secret remove…" reads as nothing.
+            ids.add(new int[] {at, sb.length()});
             from = f.end();
         }
-        return new Cuttable(sb.append(s, from, s.length()).toString(), List.copyOf(ids));
+        String out = sb.append(s, from, s.length()).toString();
+        // And the vault's markers the scrub wrote, «vault:NAME».
+        var vaultMarker = java.util.regex.Pattern.compile("«vault:[^«»\\s]{1,200}»").matcher(out);
+        while (vaultMarker.find()) ids.add(new int[] {vaultMarker.start(), vaultMarker.end()});
+        ids.sort(java.util.Comparator.comparingInt((int[] a) -> a[0]));
+        return new Cuttable(out, List.copyOf(ids));
     }
 
     /**
-     * A text with its secrets removed ({@link #cuttable}), and the spans of its identifiers, in
-     * order: where a cut may not fall.
+     * A text with its secrets removed ({@link #cuttable}), and the spans of its identifiers and of
+     * the markers that stand for what was removed, in order: where a cut may not fall.
      */
     public record Cuttable(String text, List<int[]> identifiers) {
         /** {@code at}, or the start of the identifier it falls inside: where a part may begin. */

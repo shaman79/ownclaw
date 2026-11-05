@@ -98,8 +98,8 @@ class DelegationFitTest {
         assertTrue(String.join("\n", LoopRig.userParts(rig.cloud.calls("think").get(1)))
                 .contains("198.51.100.23 was refused /admin"), "the delegation's answer reached the cloud");
         assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
-                .anyMatch(c -> c.startsWith("📦 The task no longer fit the local model's context window, so the result "
-                        + "of read_access_log (57,629 characters) is folded")), "the owner is told");
+                .anyMatch(c -> c.startsWith("📦 The task no longer fit the local model's context window, so it folded the "
+                        + "result of read_access_log (57,629 characters)")), "the owner is told");
         // Mutations: fail the delegation on the window, as before -> 2 local calls, the cloud
         // takes over; count a read as a turn that ran nothing -> it ends after three reads.
     }

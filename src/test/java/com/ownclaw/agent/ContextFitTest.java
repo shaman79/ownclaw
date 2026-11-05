@@ -160,6 +160,7 @@ class ContextFitTest {
         assertFalse(read.contains("hunter2") || read.contains("abc99"), read);
         assertTrue(AgentLoop.readResult(Map.of("step", 2), ctx).contains("password=" + Redactor.SECRET_REMOVED));
         // Mutation: readResult cuts the output as it is -> from 19 reads hunter2abc99.
+        assertTrue(AgentLoop.readResult(Map.of("step", 1, "message", 1), ctx).startsWith("ERROR: give step or message, not both"));
         assertEquals(60_000L, AgentLoop.wholeNumber("60,000"));
         assertNull(AgentLoop.wholeNumber(" "));
     }
@@ -223,6 +224,10 @@ class ContextFitTest {
         }
         String found = ContextFit.read(1, readable, null, null, "password=", 0);
         assertTrue(found.contains("password=" + Redactor.SECRET_REMOVED), found);
+        // Nor a marker: a part that ends inside one ends after it.
+        int marker = all.lastIndexOf(Redactor.SECRET_REMOVED);   // after "password="
+        String cutNearIt = ContextFit.read(1, readable, (long) marker - 3, 5L, null, 0);
+        assertTrue(cutNearIt.contains("\nrd=" + Redactor.SECRET_REMOVED + "\n[… characters "), cutNearIt);
         // Mutation: cut the bytes as they are -> from just after "password=" reads hunter2abc99.
     }
 

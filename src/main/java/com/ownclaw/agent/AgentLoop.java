@@ -1803,7 +1803,11 @@ public class AgentLoop {
             return "ERROR: step, message, from and length are whole numbers: " + notANumber.getMessage();
         }
         Object find = params.get("find");
-        if (message != null && step == null) {
+        if (message != null && step != null) {
+            return "ERROR: give step or message, not both: step reads a step's result, message a message of "
+                    + "this chat.";
+        }
+        if (message != null) {
             // A message of the chat, as Prior Context writes it, whole: its record and files too.
             List<String> chat = context.conversation();
             if (message < 1 || message > chat.size()) {

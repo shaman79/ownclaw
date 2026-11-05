@@ -231,16 +231,15 @@ public final class TaskChat {
      * the owner should not wonder why it reads its own results again. Named by tool and size, not
      * by step: the step rows count only the model's steps.
      *
-     * @param results each folded result: its tool and size, "memory_manage (613,878 characters)"
+     * @param results each fold, what it was and its size: "the result of memory_manage (613,878 characters)"
      * @param model   which model's window: "the local model's", "the cloud model's"
      */
     void folded(java.util.List<String> results, String model) {
         if (sessionId == null || results.isEmpty()) return;
         String list = results.size() == 1 ? results.getFirst()
                 : String.join(", ", results.subList(0, results.size() - 1)) + " and " + results.getLast();
-        note("📦 The task no longer fit " + model + " context window, so the result" + (results.size() == 1
-                ? " of " + list + " is" : "s of " + list + " are")
-                + " folded: the model sees the beginning and reads the rest in parts when it needs it. "
+        note("📦 The task no longer fit " + model + " context window, so it folded " + list
+                + ": the model sees the beginning and reads the rest in parts when it needs it. "
                 + "Nothing was dropped.");
     }
 

@@ -560,8 +560,8 @@ class TaskEndToEndTest {
                     provider + ": " + read);
             assertTrue(sentTo(rig, 5).contains("[Step 1's result is 57,629 characters"), provider + ": still folded");
             assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
-                    .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so the "
-                            + "result of read_access_log (57,629 characters) is folded")), provider + ": the owner is told");
+                    .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so it folded "
+                            + "the result of read_access_log (57,629 characters)")), provider + ": the owner is told");
         }
         // Mutations: end on the first CONTEXT_WINDOW (the old way) -> 3 calls, ended; fold the
         // smallest first -> step 2 folded and the request still too long; render the history
@@ -596,8 +596,8 @@ class TaskEndToEndTest {
         assertTrue(read.startsWith("[read_result] OK") && read.contains("Message 2 of this chat, characters 0-3,511 of 3,511:\n"
                 + "ASSISTANT: answer 0: the router log said nothing new."), read);
         assertTrue(rig.jdbc.queryForList("SELECT content FROM conversations", String.class).stream()
-                .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so the results of ")
-                        || c.startsWith("📦 The task no longer fit the cloud model's context window, so the result of ")),
+                .anyMatch(c -> c.startsWith("📦 The task no longer fit the cloud model's context window, so it folded ")
+                        && c.contains(" messages of this chat (")),
                 "the owner is told");
         // Mutation: fold only the task's results -> nothing to fold, and the task ends on the window.
     }
