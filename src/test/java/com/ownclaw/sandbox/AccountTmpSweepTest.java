@@ -100,6 +100,45 @@ class AccountTmpSweepTest {
     }
 
     @Test
+    @DisplayName("a read-only directory goes like any other, and one that cannot be moved leaves the rest to go")
+    void readOnlyEntries() throws Exception {
+        Path extracted = Files.createDirectory(tmp.resolve("extracted"));
+        Files.writeString(extracted.resolve("a.txt"), "a");
+        Files.setPosixFilePermissions(extracted, PosixFilePermissions.fromString("r-x------"));
+        for (int i = 0; i < 5; i++) Files.writeString(tmp.resolve("old" + i + ".txt"), "o");
+        assertEquals(6, jail.sweepUnusedTmp(later));
+        try (var left = Files.list(tmp)) {
+            assertEquals(0, left.count(), "a read-only directory stopped the sweep");
+        }
+        // Mutation: move without opening a directory first -> EACCES on extracted, and what follows stays.
+    }
+
+    @Test
+    @DisplayName("a disk nearly full is made room on: the least recently used entries first, until there is room again")
+    void aFullDisk() throws Exception {
+        long day = Duration.ofDays(1).toMillis();
+        long now = System.currentTimeMillis();
+        usedAt(Files.writeString(tmp.resolve("a.bin"), "a"), now + 5 * day, true);
+        usedAt(Files.writeString(tmp.resolve("b.bin"), "b"), now + 9 * day, true);
+        usedAt(Files.writeString(tmp.resolve("c.bin"), "c"), now + 7 * day, true);
+        long gib = 1L << 30;
+        // 100 GiB, 5 GiB kept free: full while more than one entry is left.
+        jail.diskSpace = p -> {
+            try (var left = Files.list(tmp)) {
+                return new long[] {left.count() > 1 ? 0 : 10 * gib, 100 * gib};
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        assertEquals(2, jail.makeRoom());
+        assertTrue(Files.exists(tmp.resolve("b.bin")), "the most recently used is kept");
+        assertEquals(0, jail.makeRoom(), "room enough now");
+        assertEquals(5 * gib, SkillJail.reserve(100 * gib));
+        assertEquals(gib, SkillJail.reserve(10 * gib), "never under 1 GiB");
+        // Mutations: sort newest first -> b.bin goes; never look at the disk -> nothing goes.
+    }
+
+    @Test
     @DisplayName("no account /tmp yet: nothing to sweep")
     void nothingYet() throws Exception {
         var fresh = JailTestKit.Mirror.create(JailTestKit.visibleDir(base, "fresh-"));

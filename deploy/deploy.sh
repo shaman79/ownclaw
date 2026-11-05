@@ -894,10 +894,28 @@ ensure_runtime_permissions() {
     mkdir -p "$DEPLOY_DIR"/skills/{generated,_envs} "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
 
     if [ "$(id -u)" -eq 0 ]; then
-        chown -R ownclaw:ownclaw "$DEPLOY_DIR"/skills "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
+        chown -R ownclaw:ownclaw "$DEPLOY_DIR"/data "$DEPLOY_DIR"/logs 2>/dev/null || true
+        chown_skills_but_tmp
     fi
 
     chmod -R u+rwX,go-rwx "$DEPLOY_DIR"/skills/generated "$DEPLOY_DIR"/skills/_envs 2>/dev/null || true
+}
+
+# skills/ to the service user, but for the accounts' /tmp (skills/_tmp, and what is set aside
+# beside it): a chown that changes nothing still sets a file's change time, which the skill jail
+# reads as its last use (SkillJail.lastUse). Run on every deploy, it made every file there look
+# just used, and none was ever removed. Everything there is the service user's own already.
+chown_skills_but_tmp() {
+    local skills="$DEPLOY_DIR/skills" e
+    [ -d "$skills" ] || return 0
+    chown -h ownclaw:ownclaw "$skills" 2>/dev/null || true
+    for e in "$skills"/* "$skills"/.[!.]* "$skills"/..?*; do
+        [ -e "$e" ] || [ -L "$e" ] || continue
+        case "${e##*/}" in
+            _tmp|_tmp-old-*) continue ;;
+        esac
+        chown -hR ownclaw:ownclaw "$e" 2>/dev/null || true   # a link is changed, never followed
+    done
 }
 
 # === Pre-provision MCP server npm packages ===

@@ -175,18 +175,25 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("an older OwnClaw's per-process /tmp is taken over at the start, and the rest of it removed")
+    @DisplayName("an older OwnClaw's per-process /tmp is taken over at the start, a closed one too, and the rest of it removed")
     void anOlderLayoutIsTakenOver() throws Exception {
         Path older = Files.createDirectories(m.root().resolve("skills/_tmp/run-1234567890/owner1"));
         Files.writeString(older.resolve("ow_perf_1.txt"), "collected");
-        Files.createDirectories(m.root().resolve("skills/_tmp/run-1234567890/owner9"));
+        Path closed = Files.createDirectories(m.root().resolve("skills/_tmp/run-1234567890/owner9"));
+        Files.setPosixFilePermissions(closed, java.util.Set.of());
         Files.writeString(m.root().resolve("skills/_tmp/stray.txt"), "x");
+        // A link where an account's /tmp goes: set aside, never followed.
+        Files.createDirectories(m.root().resolve("skills/_tmp/accounts"));
+        Files.createSymbolicLink(m.root().resolve("skills/_tmp/accounts/owner2"), m.root().resolve("data"));
 
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
         jail = next;
         assertEquals("collected absent", run(m.otherSkill(), READ, "owner1"), "the account's files, kept");
-        assertTrue(Files.isDirectory(m.root().resolve("skills/_tmp/accounts/owner9")));
+        assertTrue(Files.isDirectory(m.root().resolve("skills/_tmp/accounts/owner9")), "closed, and taken over");
+        assertEquals("absent absent", run(m.otherSkill(), READ, "owner2"), "the link set aside, a /tmp of its own");
+        assertTrue(Files.isDirectory(m.root().resolve("skills/_tmp/accounts/owner2"), java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        assertTrue(Files.exists(m.db()), "the link's target was left alone");
         awaitNoOldTmp();
         try (var left = Files.list(m.root().resolve("skills/_tmp"))) {
             assertEquals(List.of("accounts"), left.map(p -> p.getFileName().toString()).toList());
@@ -215,9 +222,10 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("a directory a run closed, a hard link to the database in it, is set aside at the next start's first bind, and removed")
+    @DisplayName("a directory a run closed, a hard link to the database in it, is set aside on its own at the next start's first bind, and removed")
     void aClosedDirectoryIsSetAside() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
+        Files.writeString(Files.createDirectory(tmp.resolve("mail")).resolve("1.eml"), "Subject: invoice");
         Path closed = Files.createDirectory(tmp.resolve("keep"));
         Files.createLink(closed.resolve("db"), m.db());
         Files.setPosixFilePermissions(closed, java.util.Set.of());
@@ -229,10 +237,38 @@ class SharedSkillTmpTest {
                 import os
                 print('present' if os.path.exists('/tmp/keep') else 'absent')
                 """, "owner1"));
+        assertEquals("Subject: invoice", run(m.otherSkill(), "print(open('/tmp/mail/1.eml').read())\n", "owner1"),
+                "the rest of the account's /tmp is kept");
         // Removed, closed or not: what it holds cannot be checked, so it is not kept.
         awaitNoOldTmp();
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
         assertEquals(1, SkillJail.nlink(m.db()), "the hard link to the database is still there");
+    }
+
+    @Test
+    @DisplayName("a path longer than the system takes, left in a kept /tmp, is set aside on its own: the account's launches still run")
+    void aPathTooLongIsSetAside() throws Exception {
+        Path tmp = jail.sharedTmp("owner1");
+        Files.writeString(tmp.resolve("ow_perf_1.txt"), "collected");
+        // Made the way a skill makes one: a directory at a time, each from inside the last.
+        Files.createDirectory(tmp.resolve("unpacked"));
+        Process deep = new ProcessBuilder("python3", "-c", """
+                import os, sys
+                os.chdir(sys.argv[1])
+                for i in range(20):
+                    name = 'd' * 250
+                    os.mkdir(name)
+                    os.chdir(name)
+                open('leaf.txt', 'w').write('x')
+                """, tmp.resolve("unpacked").toString()).redirectErrorStream(true).start();
+        assertEquals(0, deep.waitFor(), new String(deep.getInputStream().readAllBytes()));
+
+        var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+        next.init();
+        jail = next;
+        assertEquals("collected absent", run(m.otherSkill(), READ, "owner1"), "refused, or the rest set aside too");
+        assertFalse(Files.exists(tmp.resolve("unpacked")), "kept, and never checked");
+        // Mutation: let a walk error other than access denied through -> every launch refused.
     }
 
     @Test
