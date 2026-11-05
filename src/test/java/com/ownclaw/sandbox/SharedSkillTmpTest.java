@@ -18,8 +18,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * An account's /tmp, against the real bubblewrap: what one of its skills leaves there, the next
  * run of another of its skills reads -- the OpenWRT collect and digest skills, the audit
  * extractor and shell_exec's read-back pass files that way -- while another account's skills
- * and a check see a /tmp of their own. And a run that ends kills nothing of another run that
- * shares that /tmp.
+ * and a check see a /tmp of their own. A run that ends kills nothing of another run that
+ * shares that /tmp. And it is kept across restarts, checked for hard links out before a new
+ * process binds it.
  */
 class SharedSkillTmpTest {
 
@@ -46,7 +47,6 @@ class SharedSkillTmpTest {
 
     @AfterEach
     void cleanUp() {
-        if (jail != null) jail.clearSharedTmp();
         if (base != null) SkillJail.deleteTree(base);
     }
 
@@ -150,30 +150,73 @@ class SharedSkillTmpTest {
     }
 
     @Test
-    @DisplayName("the accounts' /tmp directories are the service user's alone, and new in each process")
-    void ownerOnlyAndNewInEachProcess() throws Exception {
+    @DisplayName("the accounts' /tmp directories are the service user's alone, and kept from one start to the next")
+    void ownerOnlyAndKeptAcrossStarts() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
-        Path epoch = tmp.getParent();
-        assertEquals(m.root().resolve("skills/_tmp"), epoch.getParent(), "not in the hidden skills directory");
-        assertTrue(epoch.getFileName().toString().startsWith("run-"), epoch.toString());
-        for (Path d : List.of(epoch, tmp)) {
+        Path accounts = tmp.getParent();
+        assertEquals(m.root().resolve("skills/_tmp/accounts"), accounts, "not in the hidden skills directory");
+        for (Path d : List.of(accounts.getParent(), accounts, tmp)) {
             assertEquals("rwx------", java.nio.file.attribute.PosixFilePermissions.toString(
                     Files.getPosixFilePermissions(d, java.nio.file.LinkOption.NOFOLLOW_LINKS)), d.toString());
         }
-        Files.writeString(tmp.resolve("left.txt"), "x");
+        assertEquals("written", run(m.skillDir(), WRITE, "owner1"));
+        // A hard link between two of its own files is the account's business, and stays.
+        Files.createLink(tmp.resolve("ow_perf_1.copy"), tmp.resolve("ow_perf_1.txt"));
 
         var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
         next.init();
-        assertFalse(Files.exists(epoch), "a start left the last process's /tmp directories in use");
-        Path again = next.sharedTmp("owner1");
-        assertNotEquals(epoch, again.getParent(), "the next process reused the directory");
-        assertFalse(Files.exists(again.resolve("left.txt")), "the next process sees what the last one left");
-        awaitNoOldTmp();
+        jail = next;
+        assertEquals(tmp, next.sharedTmp("owner1"), "the next process uses the same directory");
+        assertEquals("collected state", run(m.otherSkill(), READ, "owner1"),
+                "the next start's run does not find what the last start's left");
+        assertTrue(Files.exists(tmp.resolve("ow_perf_1.copy")));
+        // Mutations: keep the per-process directory -> a new one, empty; walk each top-level
+        // entry on its own -> the link between two of them taken for a link out.
     }
 
     @Test
-    @DisplayName("a start puts what a run closed out of use at once, a hard link to the database in it, and removes it")
-    void aStartPutsAClosedDirectoryOutOfUse() throws Exception {
+    @DisplayName("an older OwnClaw's per-process /tmp is taken over at the start, and the rest of it removed")
+    void anOlderLayoutIsTakenOver() throws Exception {
+        Path older = Files.createDirectories(m.root().resolve("skills/_tmp/run-1234567890/owner1"));
+        Files.writeString(older.resolve("ow_perf_1.txt"), "collected");
+        Files.createDirectories(m.root().resolve("skills/_tmp/run-1234567890/owner9"));
+        Files.writeString(m.root().resolve("skills/_tmp/stray.txt"), "x");
+
+        var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+        next.init();
+        jail = next;
+        assertEquals("collected absent", run(m.otherSkill(), READ, "owner1"), "the account's files, kept");
+        assertTrue(Files.isDirectory(m.root().resolve("skills/_tmp/accounts/owner9")));
+        awaitNoOldTmp();
+        try (var left = Files.list(m.root().resolve("skills/_tmp"))) {
+            assertEquals(List.of("accounts"), left.map(p -> p.getFileName().toString()).toList());
+        }
+    }
+
+    @Test
+    @DisplayName("a kept /tmp holding a hard link out is set aside at its first bind after a start, and removed")
+    void aHardLinkOutIsSetAside() throws Exception {
+        Path tmp = jail.sharedTmp("owner1");
+        Files.writeString(tmp.resolve("ow_perf_1.txt"), "collected");
+        // What an unjailed skill of an earlier start could leave: a name of the database.
+        Files.createLink(tmp.resolve("innocent.log"), m.db());
+
+        var next = new SkillJail("required", BWRAP.toString(), m.layout(), List.of(), System::currentTimeMillis);
+        next.init();
+        jail = next;
+        assertEquals("absent", run(m.otherSkill(), """
+                import os
+                print('present' if os.path.exists('/tmp/innocent.log') or os.path.exists('/tmp/ow_perf_1.txt') else 'absent')
+                """, "owner1"), "the whole of it set aside");
+        awaitNoOldTmp();
+        assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
+        assertEquals(1, SkillJail.nlink(m.db()), "the hard link to the database is still there");
+        // Mutation: never walk a kept /tmp -> /tmp/innocent.log reads the database.
+    }
+
+    @Test
+    @DisplayName("a directory a run closed, a hard link to the database in it, is set aside at the next start's first bind, and removed")
+    void aClosedDirectoryIsSetAside() throws Exception {
         Path tmp = jail.sharedTmp("owner1");
         Path closed = Files.createDirectory(tmp.resolve("keep"));
         Files.createLink(closed.resolve("db"), m.db());
@@ -186,10 +229,25 @@ class SharedSkillTmpTest {
                 import os
                 print('present' if os.path.exists('/tmp/keep') else 'absent')
                 """, "owner1"));
-        // Removed, closed or not: a full disk a skill left must not outlive the restart.
+        // Removed, closed or not: what it holds cannot be checked, so it is not kept.
         awaitNoOldTmp();
         assertEquals("canary-db-secret", Files.readString(m.db()), "the database was touched");
         assertEquals(1, SkillJail.nlink(m.db()), "the hard link to the database is still there");
+    }
+
+    @Test
+    @DisplayName("the sweep leaves an account alone while one of its runs is in flight")
+    void theSweepLeavesARunningAccountAlone() throws Exception {
+        Path tmp = jail.sharedTmp("owner1");
+        Path old = Files.writeString(tmp.resolve("old.txt"), "x");
+        long nextWeek = System.currentTimeMillis() + java.time.Duration.ofDays(8).toMillis();
+        try (var launch = jail.prepare(List.of("/bin/true"), m.skillDir(), List.of(), "owner1")) {
+            assertTrue(launch.jailed(), String.valueOf(launch.refusal()));
+            assertEquals(0, jail.sweepUnusedTmp(nextWeek), "swept while a run was in flight");
+        }
+        assertEquals(1, jail.sweepUnusedTmp(nextWeek), "the run has ended: swept");
+        assertFalse(Files.exists(old));
+        // Mutation: count no run in -> swept under the run.
     }
 
     /** The old /tmp directories go in the background: wait until they have. */

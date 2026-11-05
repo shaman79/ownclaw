@@ -65,7 +65,7 @@ import java.util.stream.Stream;
  * a process outside the jail when asked. The crash dumps are hidden as well
  * ({@link #HOST_STORES}): one of a process of the service user's is readable by it, and holds
  * that process's memory. A skill's /tmp is its account's, shared by that account's skills and
- * kept between their runs as the service's own /tmp was, and the same directory is its /var/tmp.
+ * kept between their runs and across restarts, and the same directory is its /var/tmp.
  * A fresh PID namespace removes
  * {@code /proc/<jvm>/environ} and {@code /proc/<jvm>/root}. The network is deliberately shared:
  * the property that matters -- a skill cannot read the database and post it anywhere -- comes
@@ -99,8 +99,9 @@ import java.util.stream.Stream;
  *   <li>a skill's /tmp, and /var/tmp with it, is one directory for each account
  *       ({@link #sharedTmp}): what a skill leaves there -- a report another skill of the account
  *       reads next, a downloaded browser, a backup -- is there for the account's next run, as it
- *       was in the service's own /tmp, and is gone when OwnClaw restarts, as that was. Another
- *       account's skills cannot see it. The checks and the venv and pip commands get a fresh one
+ *       was in the service's own /tmp, and still there after OwnClaw restarts, which that was
+ *       not; what no run of the account has used for a week is removed ({@link #TMP_UNUSED}).
+ *       Another account's skills cannot see it. The checks and the venv and pip commands get a fresh one
  *       for each run instead. A process a run left in the background is gone with its jail, so
  *       nothing writes there between runs;</li>
  *   <li>journald's stores are hidden, so journalctl exits 0 with "-- No entries --";</li>
@@ -325,16 +326,20 @@ public class SkillJail {
      * @param marker what only this run's bubblewrap carries in its argv, for {@link #jailEnded}:
      *               the path of its own /tmp, or a random id when its /tmp is the account's
      * @param tmpDir the run's own /tmp, removed on close; null when there is none to remove
+     * @param ended  what to do once the jail has ended, for a run whose /tmp is its account's:
+     *               count the run out; null for none. Not done while a process of the jail is
+     *               still running -- it can still be using the account's /tmp
      */
-    public record Launch(List<String> argv, boolean jailed, String refusal, String marker, Path tmpDir)
+    public record Launch(List<String> argv, boolean jailed, String refusal, String marker, Path tmpDir,
+                         Runnable ended)
             implements AutoCloseable {
 
         static Launch direct(List<String> command) {
-            return new Launch(List.copyOf(command), false, null, null, null);
+            return new Launch(List.copyOf(command), false, null, null, null, null);
         }
 
         static Launch refused(String reason) {
-            return new Launch(List.of(), false, reason, null, null);
+            return new Launch(List.of(), false, reason, null, null, null);
         }
 
         @Override
@@ -342,6 +347,7 @@ public class SkillJail {
             if (marker == null) return;
             if (jailEnded(marker)) {
                 if (tmpDir != null) deleteTree(tmpDir);
+                if (ended != null) ended.run();
             } else if (tmpDir != null) {
                 log.warn("Not removing {}: a process of its jail is still running", tmpDir);
             } else {
@@ -492,12 +498,11 @@ public class SkillJail {
 
     /**
      * Evaluate once at startup, so the log says what the jail will do before the first skill;
-     * and remove what earlier processes left of the accounts' /tmp directories
-     * ({@link #clearSharedTmp}), as a restart empties the service's own /tmp.
+     * and keep the accounts' /tmp directories an earlier process left ({@link #keepSharedTmp}).
      */
     @PostConstruct
     public void init() {
-        clearSharedTmp();
+        keepSharedTmp();
         status();
     }
 
@@ -567,16 +572,25 @@ public class SkillJail {
                 // The account's /tmp is every run's of its skills at once, so its path tells no
                 // run's processes apart: each launch carries an id of its own instead.
                 String marker = "ownclaw-run-" + UUID.randomUUID();
-                List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
-                        e.expose(), sharedTmp(tmpOwner), marker, command);
+                // Counted in until the run's jail has ended, so the sweep leaves the account alone.
+                Path accountTmp = sharedTmp(tmpOwner, true);
+                Runnable ended = () -> tmpRunEnded(tmpOwner);
+                List<String> argv;
+                try {
+                    argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
+                            e.expose(), accountTmp, marker, command);
+                } catch (RuntimeException notStarted) {
+                    ended.run();
+                    throw notStarted;
+                }
                 isolatedRuns.incrementAndGet();
-                return new Launch(argv, true, null, marker, null);
+                return new Launch(argv, true, null, marker, null, ended);
             }
             tmp = Files.createTempDirectory("ownclaw-run-");
             List<String> argv = bwrapArgs(bwrap.toString(), roots, resolver(RESOLV_CONF), dir, ro,
                     e.expose(), tmp, command);
             isolatedRuns.incrementAndGet();
-            return new Launch(argv, true, null, tmp.toString(), tmp);
+            return new Launch(argv, true, null, tmp.toString(), tmp, null);
         } catch (IOException | RuntimeException ex) {
             // Never a quiet fallback to an unjailed run: this one launch fails, with the reason.
             if (tmp != null) deleteTree(tmp);
@@ -597,49 +611,105 @@ public class SkillJail {
     }
 
     /**
-     * This process's directory of the accounts' /tmp directories: made, under a random name and
-     * for the service user alone, by the first jailed run that needs one. Nothing unjailed runs
-     * beside it: under auto the jail turns on only in a process where no launch has run unjailed
-     * ({@link #RESTART_TO_JAIL}), and from then on none does; required never runs one; off binds
-     * none. So nothing can have put a hard link to the database in it -- nothing inside a jail can
-     * make one -- and an earlier process's are never bound again. Null until then.
+     * The directory of the accounts' /tmp directories, one for each account, named by
+     * {@link #tmpName}: kept from one start to the next.
      */
-    private Path sharedTmpEpoch;
+    Path accountsTmpRoot() {
+        return sharedTmpRoot().resolve("accounts");
+    }
+
     private final Object sharedTmpLock = new Object();
+
+    /** Each account's runs whose jail has not ended, by its directory's name ({@link #tmpName}). */
+    private final Map<String, Integer> tmpRuns = new HashMap<>();
+
+    /** How many runs have bound each account's /tmp in this process, by its directory's name. */
+    private final Map<String, Long> tmpBinds = new HashMap<>();
+
+    /** The accounts whose /tmp this process has walked for hard links ({@link #sharedTmp}). */
+    private final Set<String> tmpWalked = new HashSet<>();
 
     /**
      * An account's /tmp: one directory its skills' runs share, as they shared the service's own
      * /tmp before there was a jail. A skill that writes a report there for another to read next,
-     * keeps a downloaded browser or a backup there, finds it on the account's next run. It is new
-     * in each process ({@link #sharedTmpEpoch}), so it is gone when OwnClaw restarts, as the
-     * service's /tmp was. Other accounts' skills do not see it: each run sees its own account's
-     * at /tmp, and the jail hides the directory they are all in, which only the service user can
-     * open.
+     * keeps a downloaded browser or a backup there, finds it on the account's next run -- and
+     * after OwnClaw restarts too: it is kept from one start to the next, and what no run of the
+     * account has used for {@link #TMP_UNUSED} is removed ({@link #sweepUnusedTmp}). Until
+     * 2026-11-05 it was new in each process, gone at every restart as the service's /tmp was:
+     * on 2026-11-04 four restarts for deploys emptied an invoice search's working files four
+     * times, and the owner's chat downloaded 17,004 emails again three times, for 50, 50 and 82
+     * minutes. Other accounts' skills do not see it: each run sees its own account's at /tmp,
+     * and the jail hides the directory they are all in, which only the service user can open.
      * <p>
      * Set back to the service user alone before each run binds it: a run can chmod its own /tmp.
-     * It is not walked for hard links, as a skill's own directory is ({@link #checkBinds}): that
-     * walk is for what a skill left while it ran unjailed, and nothing ever ran unjailed beside
-     * this directory ({@link #sharedTmpEpoch}).
+     * The first time this process binds it, it is walked for a file with a name outside it
+     * ({@link #linkedOutside}), as a skill's own directory is at every launch ({@link #checkBinds}):
+     * an earlier process may have run skills unjailed, and an unjailed skill can put a hard link
+     * to the database into it. Nothing inside a jail can make one, and nothing runs unjailed in a
+     * process where the jail binds this directory: under auto the jail turns on only in a process
+     * where no launch has run unjailed ({@link #RESTART_TO_JAIL}), and from then on none does;
+     * required never runs one; off binds none. So one walk a process is enough. One that finds
+     * a link out, or a directory it cannot list, sets the whole of it aside and starts the
+     * account with an empty /tmp, saying so in the log.
      */
     Path sharedTmp(String owner) throws IOException {
+        return sharedTmp(owner, false);
+    }
+
+    /** {@link #sharedTmp(String)}; counting a run in when {@code run}: see {@link #tmpRunEnded}. */
+    private Path sharedTmp(String owner, boolean run) throws IOException {
+        String name = tmpName(owner);
         synchronized (sharedTmpLock) {
-            if (sharedTmpEpoch == null || !Files.isDirectory(sharedTmpEpoch, LinkOption.NOFOLLOW_LINKS)) {
-                Path root = sharedTmpRoot();
-                if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(root);
-                if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new IOException("the accounts' /tmp root is not a directory of its own: " + root);
+            for (Path d : List.of(sharedTmpRoot(), accountsTmpRoot())) {
+                if (!Files.exists(d, LinkOption.NOFOLLOW_LINKS)) Files.createDirectories(d);
+                if (!Files.isDirectory(d, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("the accounts' /tmp root is not a directory of its own: " + d);
                 }
-                ownerOnly(root);
-                sharedTmpEpoch = Files.createTempDirectory(root, "run-", ownerOnlyAttribute());
+                ownerOnly(d);
             }
-            Path dir = sharedTmpEpoch.resolve(tmpName(owner));
+            Path dir = accountsTmpRoot().resolve(name);
             if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir, ownerOnlyAttribute());
             if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("the account's /tmp is not a directory of its own: " + dir);
             }
             ownerOnly(dir);
+            if (!tmpWalked.contains(name)) {
+                String linked = linkedOutside(dir);
+                if (linked != null) {
+                    if (tmpRuns.getOrDefault(name, 0) > 0) {
+                        throw new IOException("the account's /tmp cannot be checked while a run uses it: " + linked);
+                    }
+                    log.warn("The account's /tmp {} was kept from an earlier start, and {}: it is set aside "
+                            + "and removed, and the account's skills start with an empty /tmp", dir, linked);
+                    setAside(dir);
+                    Files.createDirectory(dir, ownerOnlyAttribute());
+                }
+                tmpWalked.add(name);
+            }
+            if (run) {
+                tmpRuns.merge(name, 1, Integer::sum);
+                tmpBinds.merge(name, 1L, Long::sum);
+            }
             return dir;
         }
+    }
+
+    /** A run of the account whose /tmp it bound has ended, its jail with it: counted out. */
+    private void tmpRunEnded(String owner) {
+        synchronized (sharedTmpLock) {
+            tmpRuns.computeIfPresent(tmpName(owner), (k, n) -> n > 1 ? n - 1 : null);
+        }
+    }
+
+    /**
+     * Move {@code dir} out of use, beside skills/_tmp under a name of its own, and remove it in the
+     * background ({@link #deleteUnwrittenTree}): only for a directory no jail binds, and no run of
+     * the account is using.
+     */
+    private void setAside(Path dir) throws IOException {
+        Path aside = sharedTmpRoot().getParent().resolve("_tmp-old-" + UUID.randomUUID());
+        Files.move(dir, aside, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        Thread.ofVirtual().name("ownclaw-old-tmp").start(() -> deleteUnwrittenTree(aside));
     }
 
     /** rwx for the service user alone, for a directory made new; none where there are no POSIX modes. */
@@ -677,31 +747,64 @@ public class SkillJail {
     }
 
     /**
-     * Put what earlier processes left of the accounts' /tmp directories out of use, and remove it
-     * in the background. At the start, so it is gone when OwnClaw restarts, as the service's /tmp
-     * was. The root is renamed aside first, at once: whatever is in it is never bound again, so
-     * removing it is only tidying, on a thread of its own -- a tree of millions of files must not
-     * hold up the start (and fail the deploy's health check). It is removed by
+     * At the start: keep the accounts' /tmp directories ({@link #accountsTmpRoot}), and put the
+     * rest of the root out of use. An OwnClaw before 2026-11-05 made the accounts' directories in
+     * a directory of each process, {@code run-*}: the newest one's are taken over, so the update
+     * to this one keeps them; what is left goes. Each is walked for hard links before this
+     * process binds it ({@link #sharedTmp}). What is set aside is removed in the background by
      * {@link #deleteUnwrittenTree}, which never follows a link and opens again a directory a run
-     * closed (mode 000): a full disk a jailed skill left must not outlive the restart. Only a tree
-     * more than {@link #DELETE_DEPTH} directories deep is left, hidden under skills/ and never
-     * bound; the log says what.
+     * closed (mode 000): a tree of millions of files must not hold up the start (and fail the
+     * deploy's health check). Only a tree more than {@link #DELETE_DEPTH} directories deep is
+     * left, hidden under skills/ and never bound; the log says what.
      */
-    void clearSharedTmp() {
+    void keepSharedTmp() {
         Path skills;
         synchronized (sharedTmpLock) {
-            sharedTmpEpoch = null;
+            tmpWalked.clear();
             Path root = sharedTmpRoot();
             skills = root.getParent();
             // Followed if it is a link: a skills/ elsewhere is the owner's layout (see refuseLink).
             if (skills == null || !Files.isDirectory(skills)) return;
-            if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
-                try {
-                    Files.move(root, skills.resolve("_tmp-old-" + UUID.randomUUID()),
-                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-                } catch (IOException | RuntimeException e) {
-                    log.warn("Could not set the accounts' old /tmp {} aside: {}", root, e.toString());
+            try {
+                if (Files.exists(root, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+                    moveAside(skills, root);   // a link or a file where the root goes: never followed
+                } else if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+                    Path accounts = accountsTmpRoot();
+                    if (Files.exists(accounts, LinkOption.NOFOLLOW_LINKS)
+                            && !Files.isDirectory(accounts, LinkOption.NOFOLLOW_LINKS)) {
+                        moveAside(skills, accounts);
+                    }
+                    List<Path> epochs = new ArrayList<>();
+                    for (Path p : listed(root)) {
+                        if (p.getFileName().toString().startsWith("run-") && Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+                            epochs.add(p);
+                        }
+                    }
+                    epochs.sort(java.util.Comparator.comparing((Path p) -> {
+                        try {
+                            return Files.getLastModifiedTime(p, LinkOption.NOFOLLOW_LINKS);
+                        } catch (IOException e) {
+                            return java.nio.file.attribute.FileTime.fromMillis(0);
+                        }
+                    }).reversed());
+                    for (Path epoch : epochs) {
+                        ownerOnly(epoch);
+                        for (Path account : listed(epoch)) {
+                            Path kept = accounts.resolve(account.getFileName().toString());
+                            if (!Files.isDirectory(account, LinkOption.NOFOLLOW_LINKS)
+                                    || Files.exists(kept, LinkOption.NOFOLLOW_LINKS)) continue;
+                            if (!Files.exists(accounts, LinkOption.NOFOLLOW_LINKS)) {
+                                Files.createDirectory(accounts, ownerOnlyAttribute());
+                            }
+                            Files.move(account, kept, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                        }
+                    }
+                    for (Path p : listed(root)) {
+                        if (!p.equals(accounts)) moveAside(skills, p);
+                    }
                 }
+            } catch (IOException | RuntimeException e) {
+                log.warn("Could not keep the accounts' /tmp under {} as it was: {}", root, e.toString());
             }
         }
         List<Path> old;
@@ -716,6 +819,126 @@ public class SkillJail {
         Thread.ofVirtual().name("ownclaw-old-tmp").start(() -> {
             for (Path p : old) deleteUnwrittenTree(p);
         });
+    }
+
+    /** {@code p} renamed to skills/_tmp-old-*, at once, out of use; removed later. */
+    private static void moveAside(Path skills, Path p) throws IOException {
+        Files.move(p, skills.resolve("_tmp-old-" + UUID.randomUUID()), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    /**
+     * How long an entry of an account's /tmp -- a file or a directory at its top -- stays when no
+     * run of the account uses it: about a week, as the owner chose on 2026-11-05. Nothing says
+     * when a skill is done with its working files, and an entry in use is never removed however
+     * old it is: the week counts from its last use, read or write, not from when it was made.
+     */
+    static final java.time.Duration TMP_UNUSED = java.time.Duration.ofDays(7);
+
+    /** Every hour, from ten minutes after the start: remove what the accounts have not used. */
+    @org.springframework.scheduling.annotation.Scheduled(initialDelay = 600_000L, fixedDelay = 3_600_000L)
+    public void sweepUnusedTmp() {
+        sweepUnusedTmp(System.currentTimeMillis());
+    }
+
+    /**
+     * Remove every entry at the top of an account's /tmp that no run has used for
+     * {@link #TMP_UNUSED} ({@link #lastUse}), a directory with all it holds. An account with a run
+     * in flight is left alone, and so is one a run bound while the sweep was looking: the run may
+     * be using what looked unused. What goes is moved aside at once, under the lock every launch
+     * takes, and then removed. Returns how many entries were removed.
+     *
+     * @param now the time, in milliseconds since the epoch
+     */
+    int sweepUnusedTmp(long now) {
+        Path accounts = accountsTmpRoot();
+        if (!Files.isDirectory(accounts, LinkOption.NOFOLLOW_LINKS)) return 0;
+        long cutoff = now - TMP_UNUSED.toMillis();
+        List<Path> dirs;
+        try {
+            dirs = listed(accounts).stream().filter(p -> Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)).toList();
+        } catch (IOException e) {
+            log.warn("Could not list the accounts' /tmp directories in {}: {}", accounts, e.toString());
+            return 0;
+        }
+        int removed = 0;
+        for (Path dir : dirs) {
+            String name = dir.getFileName().toString();
+            long binds;
+            List<Path> entries;
+            synchronized (sharedTmpLock) {
+                if (tmpRuns.getOrDefault(name, 0) > 0) continue;
+                binds = tmpBinds.getOrDefault(name, 0L);
+                try {
+                    ownerOnly(dir);   // a run can close its own /tmp
+                    entries = listed(dir);
+                } catch (IOException e) {
+                    log.warn("Could not look into the account's /tmp {}: {}", dir, e.toString());
+                    continue;
+                }
+            }
+            var unused = new ArrayList<Path>();
+            for (Path entry : entries) {
+                Long last = lastUse(entry);
+                if (last != null && last < cutoff) unused.add(entry);
+            }
+            if (unused.isEmpty()) continue;
+            Path aside = sharedTmpRoot().getParent().resolve("_tmp-old-" + UUID.randomUUID());
+            int moved = 0;
+            synchronized (sharedTmpLock) {
+                if (tmpRuns.getOrDefault(name, 0) > 0 || tmpBinds.getOrDefault(name, 0L) != binds) continue;
+                try {
+                    Files.createDirectory(aside, ownerOnlyAttribute());
+                    for (Path entry : unused) {
+                        Files.move(entry, aside.resolve(entry.getFileName().toString()),
+                                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                        moved++;
+                    }
+                } catch (IOException | RuntimeException e) {
+                    log.warn("Could not set aside what the account's /tmp {} has not used: {}", dir, e.toString());
+                }
+            }
+            if (Files.exists(aside, LinkOption.NOFOLLOW_LINKS)) deleteUnwrittenTree(aside);
+            if (moved > 0) {
+                log.info("Removed {} {} of the account's /tmp {} that no run had used for {} days", moved,
+                        moved == 1 ? "entry" : "entries", dir, TMP_UNUSED.toDays());
+            }
+            removed += moved;
+        }
+        return removed;
+    }
+
+    /**
+     * When an entry of an account's /tmp was last used: the newest time that a file in it was
+     * read, written or changed -- its access, modification or status-change time -- or a
+     * directory in it written or changed. A directory's access time does not count: listing it,
+     * which this does, sets it. The status-change time counts because nothing can set it back: a
+     * file unpacked with its archive's dates is as new as its unpacking. On a file system mounted
+     * noatime, a file that is only read counts as used when it was last written. Null when part
+     * of it cannot be listed: then it is kept.
+     */
+    static Long lastUse(Path entry) {
+        boolean unix = entry.getFileSystem().supportedFileAttributeViews().contains("unix");
+        long newest = Long.MIN_VALUE;
+        var pending = new ArrayDeque<Path>(List.of(entry));
+        while (!pending.isEmpty()) {
+            Path p = pending.pop();
+            try {
+                var a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                long t = a.lastModifiedTime().toMillis();
+                if (!a.isDirectory()) t = Math.max(t, a.lastAccessTime().toMillis());
+                if (unix) {
+                    t = Math.max(t, ((java.nio.file.attribute.FileTime)
+                            Files.getAttribute(p, "unix:ctime", LinkOption.NOFOLLOW_LINKS)).toMillis());
+                }
+                newest = Math.max(newest, t);
+                if (a.isDirectory()) pending.addAll(listed(p));
+            } catch (NoSuchFileException gone) {
+                // Gone since its directory was listed: what is left still says when.
+            } catch (IOException e) {
+                return null;
+            }
+        }
+        return newest == Long.MIN_VALUE ? null : newest;
     }
 
     /**
