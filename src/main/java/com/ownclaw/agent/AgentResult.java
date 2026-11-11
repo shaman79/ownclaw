@@ -26,6 +26,10 @@ import java.util.List;
  *                       chat draws as buttons under it and Telegram as keys: one is sent as the
  *                       owner's reply when picked. Empty for every other result, and for a
  *                       question that offers none -- the owner types the answer
+ * @param localOnly      whether the task ran on local only, as it decided when it started -- sent
+ *                       on Free, or while everything is local only: the cloud may read nothing of
+ *                       it, so nothing of it is kept as a fact either (FactCapture), which every
+ *                       later prompt would carry there
  */
 public record AgentResult(
         boolean success,
@@ -36,10 +40,19 @@ public record AgentResult(
         TerminationReason terminationReason,
         String taskId,
         String ownerText,
-        List<String> choices
+        List<String> choices,
+        boolean localOnly
 ) {
     public AgentResult {
         choices = choices == null ? List.of() : List.copyOf(choices);
+    }
+
+    /** Of a task that was not local only, or of none the loop ran. */
+    public AgentResult(boolean success, String response, AgentTrajectory trajectory, int totalSteps,
+                       long totalDurationMs, TerminationReason terminationReason, String taskId, String ownerText,
+                       List<String> choices) {
+        this(success, response, trajectory, totalSteps, totalDurationMs, terminationReason, taskId, ownerText,
+                choices, false);
     }
 
     /** Without an id — every factory below builds this shape and the loop stamps it after. */
@@ -140,19 +153,25 @@ public record AgentResult(
      */
     public AgentResult withTaskId(String taskId) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText, choices);
+                terminationReason, taskId, ownerText, choices, localOnly);
     }
 
     /** The same result, with the text only the owner's own screen shows. */
     public AgentResult withOwnerText(String ownerText) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText, choices);
+                terminationReason, taskId, ownerText, choices, localOnly);
+    }
+
+    /** The same result, of a task that ran on local only as it decided when it started ({@link #localOnly}). */
+    public AgentResult withLocalOnly(boolean localOnly) {
+        return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
+                terminationReason, taskId, ownerText, choices, localOnly);
     }
 
     /** The same result, offering these answers to pick from. */
     public AgentResult withChoices(List<String> choices) {
         return new AgentResult(success, response, trajectory, totalSteps, totalDurationMs,
-                terminationReason, taskId, ownerText, choices);
+                terminationReason, taskId, ownerText, choices, localOnly);
     }
 
     /**

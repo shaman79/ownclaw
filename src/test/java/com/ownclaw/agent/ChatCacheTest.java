@@ -105,6 +105,26 @@ class ChatCacheTest {
     }
 
     @Test
+    @DisplayName("the owner's facts are in the task's block, under its mark, not in the per-step block; a fact kept since changes no chat block")
+    void factsAreUnderTheTasksMark() throws Exception {
+        var chat = List.of("USER: is the battery charging?\n", "ASSISTANT: Yes, from the grid.\n");
+        var ctx = turn("stop it", chat, List.of());
+        ctx.setUserPreferences("The NAS is at 192.0.2.20. (the owner said this)");
+        JsonNode body = body(engine().buildMessages(ctx, "anthropic", FASTEST), engine().toolsFor(ctx, FASTEST));
+        List<String> sent = blocks(body);
+        assertEquals(List.of(1, 2), marked(body), "the chat's end, then the task: " + sent);
+        assertTrue(sent.get(2).startsWith("\n## Preferences\nThe NAS is at 192.0.2.20. (the owner said this)\n\n## Task\nstop it"),
+                sent.get(2));
+        assertFalse(sent.get(3).contains("## Preferences"), "paid in full on every step there: " + sent.get(3));
+
+        var later = turn("stop it", chat, List.of());
+        later.setUserPreferences("The NAS is at 192.0.2.20. (the owner said this)\nThe printer is in the study. (the owner said this)");
+        List<String> after = blocks(body(engine().buildMessages(later, "anthropic", FASTEST), engine().toolsFor(later, FASTEST)));
+        assertEquals(sent.subList(0, 2), after.subList(0, 2), "the chat's cached blocks are the same bytes");
+        // Mutation: render the facts in the per-step block again -> they are in sent.get(3).
+    }
+
+    @Test
     @DisplayName("what the model reads is the text the other providers are sent; they get no marker")
     void theModelReadsTheSameText() throws Exception {
         var chat = List.of("USER: is the battery charging?\n", "ASSISTANT: Yes, from the grid.\n");

@@ -27,6 +27,8 @@ public final class Inbox {
     /** What the task's message was sent with: what the task runs on. */
     private final ChatOptions options;
     private final List<Sent> waiting = new ArrayList<>();
+    /** Every message the task has read, in order: part of its turn ({@link #read}). */
+    private final List<UserMessage> read = new ArrayList<>();
     private boolean taking = true;
 
     public Inbox(TaskChat.Channel channel, ChatOptions options) {
@@ -59,9 +61,15 @@ public final class Inbox {
 
     /** The messages offered since the task last read, in the order they came: the task reads them now. */
     public synchronized List<UserMessage> drain() {
-        List<UserMessage> read = waiting.stream().map(Sent::message).toList();
+        List<UserMessage> now = waiting.stream().map(Sent::message).toList();
         waiting.clear();
-        return read;
+        read.addAll(now);
+        return now;
+    }
+
+    /** Every message the task has read so far, in the order it read them. */
+    public synchronized List<UserMessage> read() {
+        return List.copyOf(read);
     }
 
     /**

@@ -148,6 +148,88 @@ public class AgentLoop {
         if (cancellationService != null) cancellationService.onRequest(this::interruptStopped);
     }
 
+    /** What the local model keeps of each chat turn ({@link FactCapture}); null until wired, or switched off. */
+    private volatile FactCapture factCapture;
+    /** Where the facts kept after a turn came from, for a task's prompt to say; null until wired. */
+    private volatile com.ownclaw.agent.memory.CapturedFacts capturedFacts;
+
+    /**
+     * Wired by Spring after the loop is made: the facts the local model finds in a chat turn are
+     * recorded here, for the owner to undo or keep. Reading turns is switched off by
+     * {@code ownclaw.executor.capture-facts}; the facts kept before still say where they came from.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setCapturedFacts(com.ownclaw.agent.memory.CapturedFacts captured) {
+        this.capturedFacts = captured;
+        if (captured == null || !config.getExecutor().isCaptureFacts()) {
+            log.info("Fact capture off: chat turns are not read for facts to keep.");
+            return;
+        }
+        this.factCapture = new FactCapture(lane, llmRouter::local, captured, memory, this::secretValuesOf,
+                conversationService, statusEmitter, eventLog);
+        log.info("Fact capture on: the local model reads each chat turn, once it has ended, for facts to keep.");
+    }
+
+    /** The application stops: no chat turn is read for facts from now on, and the read under way ends. */
+    @jakarta.annotation.PreDestroy
+    public void stopReadingTurns() {
+        FactCapture capture = factCapture;
+        if (capture != null) capture.stop();
+    }
+
+    /**
+     * A chat turn the owner had has ended, and its answer was delivered: what he wrote in it --
+     * {@code said}, his message and those the task read while it worked -- and what he was
+     * answered are read by the local model for what to keep ({@link FactCapture}). Not a turn he
+     * stopped, nor an ops check's: the operator's questions are no facts of the owner's. Nor one
+     * the cloud may not read -- sent on Free, or while everything is local only -- as the task
+     * itself decided it when it started ({@link AgentResult#localOnly}), not as the settings say
+     * now: a fact kept goes with every later task's prompt to the cloud.
+     * <p>
+     * The answer as the cloud may read it ({@link AgentResult#response}), never his private text:
+     * a fact taken from a private answer -- what a mail said -- would carry it there. What he wrote
+     * goes to the cloud as the chat it belongs to.
+     */
+    public void turnEnded(String userId, String sessionId, List<String> said, AgentResult result,
+                          TaskChat.Channel channel) {
+        FactCapture capture = factCapture;
+        if (capture == null || result == null || said == null || said.isEmpty()) return;
+        if (result.terminationReason() == AgentResult.TerminationReason.CANCELLED) return;
+        if (result.localOnly()) return;
+        capture.after(new FactCapture.Turn(userId, sessionId, result.taskId(), List.copyOf(said),
+                result.response(), result.success(), channel));
+    }
+
+    /** Where each fact came from, by key; none said when that cannot be read -- the facts are still told. */
+    private Map<String, com.ownclaw.agent.memory.CapturedFacts.Source> sourcesOf(String userId,
+                                                                                List<AgentMemory.MemoryEntry> facts) {
+        var captured = capturedFacts;
+        if (captured == null) return Map.of();
+        try {
+            return captured.sources(userId, facts);
+        } catch (Exception e) {
+            log.warn("Could not read where the facts of user {} came from: {}", userId, e.getClass().getSimpleName());
+            return Map.of();
+        }
+    }
+
+    /** Whether chat turns are read for facts: wired, and not switched off. */
+    boolean readsTurns() {
+        return factCapture != null;
+    }
+
+    /** The user's secret vault values, as a task reads them; null when the vault cannot be read. */
+    private Map<String, String> secretValuesOf(String userId) {
+        try {
+            List<String> secretKeys = credentialVault.listCredentialKeys(userId).stream()
+                    .filter(Redactor::isSecretName).toList();
+            return secretKeys.isEmpty() ? Map.of() : credentialVault.getCredentials(userId, secretKeys);
+        } catch (Exception e) {
+            log.warn("Could not read the vault of user {}: {}", userId, e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
     /**
      * Execute the agent loop and return the full AgentResult (with trajectory).
      * Used by the debug API for full execution trace visibility.
@@ -250,8 +332,12 @@ public class AgentLoop {
         try {
             List<AgentMemory.MemoryEntry> facts = memory.getFacts(userId);
             if (!facts.isEmpty()) {
+                // Each with where it came from, when the local model found it in a chat turn: what
+                // the owner said, or what he chose to keep of an answer (FactCapture).
+                Map<String, com.ownclaw.agent.memory.CapturedFacts.Source> from = sourcesOf(userId, facts);
                 String factContext = facts.stream()
-                        .map(AgentMemory.MemoryEntry::content)
+                        .map(f -> f.content() + FactCapture.label(from.get(
+                                com.ownclaw.agent.memory.CapturedFacts.keyOf(f))))
                         .collect(Collectors.joining("\n"));
                 context.setUserPreferences(factContext);
             }
@@ -383,7 +469,8 @@ public class AgentLoop {
         // From here the counters are what the ending says and records (AgentContext#closeCounters).
         context.closeCounters();
         AgentResult ended = TaskEnding.apply(result, context, traceOf(context.userId(), context.taskId()))
-                .withTaskId(context.taskId());
+                .withTaskId(context.taskId())
+                .withLocalOnly(context.options() != null && context.options().localOnly());
         emitResult(context, ended);
         if (remember) storeEpisode(context, ended);
         return ended;

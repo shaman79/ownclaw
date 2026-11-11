@@ -62,6 +62,11 @@ public class OwnClawConfig {
          * (OllamaProvider). On by default; off sends every model its tools natively, as before.
          */
         private boolean toolCallsAsText = true;
+        /**
+         * Whether the local model reads each chat turn the owner had, once it has ended, for facts
+         * to keep -- shown in the chat as "Remembered", with an Undo (FactCapture). On by default.
+         */
+        private boolean captureFacts = true;
 
         public String getProvider() { return provider; }
         public void setProvider(String provider) { this.provider = provider; }
@@ -75,6 +80,8 @@ public class OwnClawConfig {
         public void setAnswering(Sampling answering) { this.answering = answering; }
         public boolean isToolCallsAsText() { return toolCallsAsText; }
         public void setToolCallsAsText(boolean toolCallsAsText) { this.toolCallsAsText = toolCallsAsText; }
+        public boolean isCaptureFacts() { return captureFacts; }
+        public void setCaptureFacts(boolean captureFacts) { this.captureFacts = captureFacts; }
     }
 
     /**

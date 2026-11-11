@@ -79,6 +79,9 @@ ownclaw:
     # a model whose template writes calls in Qwen's text format is given its tools in the system
     # message instead, and its calls are read as they stream. false: tools go natively, as before.
     tool-calls-as-text: ${OWNCLAW_EXECUTOR_TOOL_CALLS_AS_TEXT:true}
+    # After each chat turn the local model reads what the owner said and was answered, and keeps
+    # the facts worth keeping -- shown in the chat as "Remembered", with an Undo. false: it does not.
+    capture-facts: ${OWNCLAW_EXECUTOR_CAPTURE_FACTS:true}
 
   mentor:
     provider: ${OWNCLAW_MENTOR_PROVIDER:openai}

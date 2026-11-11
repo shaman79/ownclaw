@@ -872,6 +872,9 @@
         .choice-btn:hover:not(:disabled) { background: rgba(91,95,199,.32); border-color: var(--accent-hi) }
         .choice-btn:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px }
         .msg-choices.retired .choice-btn { cursor: default; opacity: .45; background: none }
+        .msg-undo { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px }
+        .msg-undo.retired .choice-btn { cursor: default; opacity: .45; background: none }
+        .undo-said { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere }
         .msg-choices.retired .choice-btn.picked { opacity: 1; border-color: var(--accent-hi); background: var(--accent-glow) }
 
         /* A message a link put in the box: where it came from, and whether its signature holds. */
@@ -6272,6 +6275,17 @@
                 } else if (type === 'debug') {
                     // In the chat of the task it is about.
                     if (!data.sessionId || data.sessionId === displayedSessionId) addMsg('debug', content);
+                } else if (type === 'progress' && data.progress
+                        && (data.progress.kind === 'remembered' || data.progress.kind === 'offered')) {
+                    // A fact the local model found in a turn: written once its task had ended, so news
+                    // in its chat -- marked unread when that chat is not on screen, or while another
+                    // view is, to be drawn when the chat is opened -- and never a sign that work goes
+                    // on, which every other progress row is.
+                    if (currentView === 'chat' && data.sessionId === displayedSessionId) {
+                        addProgress(content, data.progress, null, data.timestamp);
+                    } else if (data.sessionId) {
+                        markUnread(data.sessionId);
+                    }
                 } else if (type === 'progress') {
                     // A running task saying what it is doing, in the chat it was asked from: drawn
                     // there while that chat is on screen (it is saved, so a reload shows it too),
@@ -6748,10 +6762,62 @@
             b.querySelectorAll('pre').forEach(foldCodeBlock);
             main.appendChild(b);
         }
+        if ((header.kind === 'remembered' || header.kind === 'offered') && header.ref) addFactButtons(main, header);
         div.appendChild(main);
         if (before) { messagesEl.insertBefore(div, before); return; }
         messagesEl.insertBefore(div, thinkingEl);
         scrollBottom(false);
+    }
+
+    /**
+     * Under a fact the local model found in a turn: Undo under one it kept, which takes it back -- a
+     * new fact is forgotten, a corrected one is what it was -- and Keep under one it found only in
+     * the answer, which keeps it, and then offers Undo. Each says what it did. Not a question's
+     * choices (addChoices): the owner's next message leaves them as they are. What was done shows on
+     * every load: the server marks the row.
+     */
+    function addFactButtons(main, header) {
+        var group = node('div', 'msg-undo');
+        var said = node('span', 'undo-said');
+        group.appendChild(said);   // what was done, after the buttons
+        function act(button, action, then) {
+            button.disabled = true;
+            fetch('/api/facts/captures/' + encodeURIComponent(header.ref) + '/' + action, {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + authToken }
+            }).then(okJson).then(function(res) {
+                said.textContent = res.text;
+                then(res.done);
+            }).catch(function(e) {
+                button.disabled = false;
+                said.textContent = 'Could not do it: ' + e.message;
+            });
+        }
+        function undoButton(undone) {
+            var b = node('button', 'choice-btn', undone ? 'Undone' : 'Undo');
+            b.type = 'button';
+            b.title = 'Take this fact back';
+            b.disabled = !!undone;
+            b.addEventListener('click', function() {
+                if (!b.disabled) act(b, 'undo', function(done) { b.textContent = done ? 'Undone' : 'Not undone'; });
+            });
+            group.insertBefore(b, said);
+        }
+        if (header.kind === 'offered' && !header.kept && !header.undone) {
+            var keep = node('button', 'choice-btn', 'Keep');
+            keep.type = 'button';
+            keep.title = 'Keep this fact';
+            keep.addEventListener('click', function() {
+                if (!keep.disabled) act(keep, 'keep', function(done) {
+                    keep.textContent = done ? 'Kept' : 'Not kept';
+                    if (done) undoButton(false);
+                });
+            });
+            group.insertBefore(keep, said);
+        } else {
+            undoButton(header.undone);
+        }
+        main.appendChild(group);
     }
 
     /**

@@ -298,7 +298,7 @@ public class ThinkingEngine {
      * <p>
      * The system prompt is the same static text for every provider, and every provider's last
      * user message ends with the same per-step block ({@link #buildDynamicContext}): the date, who
-     * is waiting, what to write beside a call, the preferences, the tools where the prompt is
+     * is waiting, what to write beside a call, the tools where the prompt is
      * where they are learnt, the vault. The providers differ only in how the steps so far are
      * sent. That block used to be written twice, and the copy every provider but Anthropic got
      * had drifted: it never said whether anyone was waiting, which the static prompt tells the
@@ -735,8 +735,8 @@ public class ThinkingEngine {
     }
 
     /**
-     * The per-step block (datetime, attendance, what to write beside a call, preferences, tools,
-     * vault, what next): what changes from one step to the next, at the end of the last user
+     * The per-step block (datetime, attendance, what to write beside a call, tools, vault, what
+     * next): what changes from one step to the next, at the end of the last user
      * message for every provider ({@link #buildMessages}), so the system prompt stays the same
      * bytes and is cached. What changes partway through a task is said here too -- the words
      * asked for beside a call once the provider has declined a step as reasoning extraction, the
@@ -803,11 +803,6 @@ public class ThinkingEngine {
                     + "skills to run yourself as well.\n");
         }
         sb.append(beside(mode.nativeTools(), context.declinedAsReasoning())).append("\n\n");
-
-        if (context.userPreferences() != null && !context.userPreferences().isBlank()) {
-            sb.append("## Preferences\n");
-            sb.append(context.userPreferences()).append("\n\n");
-        }
 
         // The full manifest on EVERY step, not just step 0.
         //
@@ -1042,6 +1037,7 @@ public class ThinkingEngine {
             sb.append(chat).append("\n\n");
         }
 
+        sb.append(preferences(context));
         sb.append("## Task\n");
         sb.append(context.originalMessage());
 
@@ -1083,11 +1079,24 @@ public class ThinkingEngine {
             sb.append("## Prior Context\n").append(LlmMessage.unmarked(shown)).append('\n')
               .append(LlmMessage.HISTORY_END).append('\n');
         }
+        sb.append(LlmMessage.unmarked(preferences(context)));
         sb.append("## Task\n");
         sb.append(LlmMessage.unmarked(context.originalMessage()));
         String files = filesSection(context);
         if (!files.isEmpty()) sb.append("\n\n").append(LlmMessage.unmarked(files));
         return sb.toString();
+    }
+
+    /**
+     * The facts the owner asked to keep and the ones kept after his chat turns, each with where it
+     * came from (AgentLoop), before the task: in the task's own block, after the chat's end, so
+     * under the task's cache mark. They are read once, as the task starts, and are the same on
+     * every step of it: in the per-step block after every mark, they were paid in full on every
+     * step. Empty when there are none.
+     */
+    private static String preferences(AgentContext context) {
+        String prefs = context.userPreferences();
+        return prefs == null || prefs.isBlank() ? "" : "## Preferences\n" + prefs + "\n\n";
     }
 
     /**

@@ -268,6 +268,13 @@ public class TelegramBotService {
         String queued = CommandHandler.queued(text);
         if (queued != null) text = queued;
 
+        // /forget and /keep answer with the fact itself: in the owner's private chat only, never a
+        // group's (the facts are his).
+        if (queued == null && CommandHandler.privateOnly(text) && chatId != telegramUserId) {
+            sendMessage(chatId, PRIVATE_ONLY);
+            return;
+        }
+
         // Handle slash commands consistently with the Web UI
         // Blanks first, as the command grammar reads them (CommandHandler.unblanked), as the web
         // chat does: " /cred set KEY VALUE" was no command, and was saved and run as a task.
@@ -342,6 +349,9 @@ public class TelegramBotService {
         if (fate != null) sendMessage(chatId, fate);
     }
 
+    /** What a group is told of /forget or /keep: they work in the private chat only. */
+    static final String PRIVATE_ONLY = "Remembered facts are changed in your private chat with the bot, not here.";
+
     /**
      * Forward this user's status stream to Telegram -- what is meant for him to read, as
      * {@link #forTelegram} says -- to the chat remembered for him, resolved at delivery time.
@@ -350,29 +360,40 @@ public class TelegramBotService {
     private void subscribe(String userId) {
         statusEmitter.subscribe(userId, this, msg -> {
             if (!running || !forTelegram(msg)) return;
-            StringBuilder sb = new StringBuilder(telegramText(msg));
-            // Append token/step stats if available
-            Map<String, Object> data = msg.data();
-            if (data != null) {
-                Object cloud = data.get("cloudTokens");
-                Object local = data.get("localTokens");
-                Object steps = data.get("totalSteps");
-                Object ok = data.get("successCount");
-                if (steps != null || cloud != null) {
-                    sb.append("\n");
-                    if (steps != null) sb.append("Steps ").append(steps).append(" OK ").append(ok != null ? ok : 0).append(" | ");
-                    if (cloud != null) sb.append("Cloud ").append(cloud);
-                    if (local != null) sb.append(" Local ").append(local);
-                }
-            }
             // Resolve the chat at DELIVERY time, not from whichever message happened to create
             // this subscription. The lambda used to capture that message's chatId, so once a
             // user had written from a second chat everything kept going to the first.
             Long target = userChatIds.get(userId);
             if (isOwnersChat(userId, target, id -> userRepo.findByTelegramId(id))) {
-                sendMessage(target, sb.toString());
+                sendMessage(target, statusText(msg));
             }
         });
+    }
+
+    /**
+     * What Telegram is sent for a status message it gets ({@link #forTelegram}): its text
+     * ({@link #telegramText}), the task's steps and tokens when it carries them, and for a fact the
+     * local model found in a chat turn (FactCapture) the command that takes it back or keeps it --
+     * "/forget_k3j9x2m1qa", "/keep_k3j9x2m1qa" -- which Telegram shows as a link to tap.
+     */
+    static String statusText(ChatStatusEmitter.StatusMessage msg) {
+        StringBuilder sb = new StringBuilder(telegramText(msg));
+        Map<String, Object> data = msg.data();
+        if (data != null) {
+            Object cloud = data.get("cloudTokens");
+            Object local = data.get("localTokens");
+            Object steps = data.get("totalSteps");
+            Object ok = data.get("successCount");
+            if (steps != null || cloud != null) {
+                sb.append("\n");
+                if (steps != null) sb.append("Steps ").append(steps).append(" OK ").append(ok != null ? ok : 0).append(" | ");
+                if (cloud != null) sb.append("Cloud ").append(cloud);
+                if (local != null) sb.append(" Local ").append(local);
+            }
+            if (data.get("undo") instanceof String undo) sb.append("\n\nUndo: ").append(undo);
+            if (data.get("keep") instanceof String keep) sb.append("\n\nKeep: ").append(keep);
+        }
+        return sb.toString();
     }
 
     /**

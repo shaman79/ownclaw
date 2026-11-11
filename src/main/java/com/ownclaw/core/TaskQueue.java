@@ -407,6 +407,7 @@ public class TaskQueue {
                 throw e;
             }
             answer(message, result);
+            turnEnded(message, inbox, result);
             return result;
         } finally {
             // Closed before it leaves the map: a sender who still finds it is refused once what
@@ -420,6 +421,24 @@ public class TaskQueue {
                 statusEmitter.emit(unread.userId(), StatusMessage.Type.QUEUED, UNREAD,
                         Map.of("requeued", unread.messageId(), "sessionId", String.valueOf(unread.sessionId())));
             }
+        }
+    }
+
+    /**
+     * The turn is over and its answer delivered: what the owner wrote in it -- his message, then
+     * those the task read while it worked -- goes with the answer to the loop, whose local model
+     * reads them for facts to keep once it is free (AgentLoop#turnEnded). Whatever that throws
+     * costs the facts of this turn and nothing else.
+     */
+    private void turnEnded(UserMessage message, Inbox inbox, AgentResult result) {
+        if (agentLoop == null) return;
+        try {
+            var said = new ArrayList<String>();
+            said.add(message.text());
+            for (UserMessage read : inbox.read()) said.add(read.text());
+            agentLoop.turnEnded(message.userId(), message.sessionId(), said, result, message.channel());
+        } catch (RuntimeException e) {
+            log.warn("The facts of a turn of {} were not read: {}", message.userId(), e.getClass().getSimpleName());
         }
     }
 

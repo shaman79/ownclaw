@@ -53,6 +53,10 @@ final class LocalLane {
     private BooleanSupplier backgroundStopped;
     /** Whether foreground work, or another task taking the lane, ended the background call under way. */
     private volatile boolean preempted;
+    /** Background calls that do not yield, waiting or under way; guarded by this ({@link #yielding}). */
+    private int unyielding;
+    /** Whether the background call under way yields to all other work of the lane; guarded by this. */
+    private boolean backgroundYields;
     /** Each task's background work, in order, on a thread of the task's own; guarded by this. */
     private final Map<String, ExecutorService> backgrounds = new HashMap<>();
     /** Told when a task begins to wait for the lane, with the task: its page is told why it waits. */
@@ -217,6 +221,59 @@ final class LocalLane {
      */
     LlmResponse call(LlmProvider local, List<LlmMessage> prompt, String taskId, BooleanSupplier stopped)
             throws InterruptedException {
+        return call(local, prompt, false, taskId, stopped);
+    }
+
+    /**
+     * {@link #call(LlmProvider, List, String, BooleanSupplier)}, the answer asked for as JSON when
+     * {@code json}: what the local model keeps of a chat turn is read as data ({@link FactCapture}).
+     */
+    LlmResponse call(LlmProvider local, List<LlmMessage> prompt, boolean json, String taskId, BooleanSupplier stopped)
+            throws InterruptedException {
+        return call(local, prompt, json, taskId, stopped, false);
+    }
+
+    /**
+     * A background call that yields to every other use of the lane: it waits while foreground work
+     * runs, while a task has the lane, and while any other background call -- a task's summary of a
+     * private result -- waits or is under way, and one of those that comes while it is under way
+     * ends it, to be made again afterwards. What the local model keeps of a chat turn
+     * ({@link FactCapture}) is asked so: nothing waits for it, and it never holds up what something
+     * waits for.
+     */
+    LlmResponse yielding(LlmProvider local, List<LlmMessage> prompt, boolean json, String taskId,
+                         BooleanSupplier stopped) throws InterruptedException {
+        return call(local, prompt, json, taskId, stopped, true);
+    }
+
+    private LlmResponse call(LlmProvider local, List<LlmMessage> prompt, boolean json, String taskId,
+                             BooleanSupplier stopped, boolean yields) throws InterruptedException {
+        Runnable endYielding = null;
+        synchronized (this) {
+            if (!yields) {
+                unyielding++;
+                // A yielding call under way ends for this one.
+                if (backgroundTask != null && backgroundYields && backgroundCall != null) {
+                    preempted = true;
+                    endYielding = backgroundCall;
+                }
+            }
+        }
+        if (endYielding != null) endYielding.run();
+        try {
+            return calling(local, prompt, json, taskId, stopped, yields);
+        } finally {
+            if (!yields) {
+                synchronized (this) {
+                    unyielding--;
+                    notifyAll();
+                }
+            }
+        }
+    }
+
+    private LlmResponse calling(LlmProvider local, List<LlmMessage> prompt, boolean json, String taskId,
+                                BooleanSupplier stopped, boolean yields) throws InterruptedException {
         LlmProgress hook = new LlmProgress() {
             @Override
             public void onProgress() {
@@ -231,7 +288,7 @@ final class LocalLane {
                 boolean end;
                 synchronized (LocalLane.this) {
                     backgroundCall = cancel;
-                    boolean blocked = blocked(taskId);
+                    boolean blocked = blocked(taskId) || yields && unyielding > 0;
                     end = cancel != null && (blocked || stopped.getAsBoolean());
                     if (end && blocked) preempted = true;
                 }
@@ -240,15 +297,18 @@ final class LocalLane {
         };
         for (;;) {
             synchronized (this) {
-                // And no other background call under way: the model answers one call at a time.
-                while ((blocked(taskId) || backgroundTask != null) && !stopped.getAsBoolean()) wait(1_000);
+                // And no other background call under way: the model answers one call at a time. A
+                // yielding call waits for every other one, waiting or under way, too.
+                while ((blocked(taskId) || backgroundTask != null || yields && unyielding > 0)
+                        && !stopped.getAsBoolean()) wait(1_000);
                 if (stopped.getAsBoolean()) throw new TaskCancellationService.TaskCancelledException(taskId);
                 preempted = false;
                 backgroundStopped = stopped;
                 backgroundTask = taskId;
+                backgroundYields = yields;
             }
             try {
-                return local.chat(prompt, new LlmRequestConfig(null, null, false).withProgress(hook)
+                return local.chat(prompt, new LlmRequestConfig(null, null, json).withProgress(hook)
                         .answeringDirectly());
             } catch (Preempted again) {
                 // Foreground work or another task's lane ended it: made again once the lane is free.
@@ -257,6 +317,7 @@ final class LocalLane {
                     backgroundCall = null;
                     backgroundStopped = null;
                     backgroundTask = null;
+                    backgroundYields = false;
                     notifyAll();
                 }
             }

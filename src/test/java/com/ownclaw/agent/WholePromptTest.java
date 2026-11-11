@@ -206,7 +206,13 @@ class WholePromptTest {
                         assertEquals(system, messages.get(0).content(), provider + " gets another system prompt");
                         String last = messages.get(messages.size() - 1).content();
                         assertTrue(last.contains(attendance), provider + " is not told who is waiting: " + last);
-                        assertTrue(last.contains("## Preferences\nReports in Czech."), provider + ": " + last);
+                        // In the task's own message, before the task: the same on every step, so under
+                        // the task's cache mark -- not in the per-step block, paid in full every step.
+                        String task = messages.get(1).content();
+                        assertTrue(task.contains("## Preferences\nReports in Czech.\n\n## Task\ncheck the routers"),
+                                provider + ": " + task);
+                        String step = last.substring(last.lastIndexOf("\n---\n"));
+                        assertFalse(step.contains("## Preferences"), provider + ", per step: " + step);
                         assertEquals(steps == 1, last.contains("Next action? If done, use 'respond'."),
                                 provider + ", " + steps + " steps: " + last);
                     }

@@ -104,6 +104,12 @@ public class ConversationService {
      */
     public String saveProgress(String userId, String sessionId, String content, String taskId,
                                String privateContent, Map<String, Object> header) {
+        return insertProgress(userId, sessionId, content, taskId, privateContent, header, true);
+    }
+
+    /** {@link #saveProgress}, moving its chat up the list only when {@code touch}. */
+    private String insertProgress(String userId, String sessionId, String content, String taskId,
+                                  String privateContent, Map<String, Object> header, boolean touch) {
         var metadata = new LinkedHashMap<String, Object>();
         if (isTaskId(taskId)) metadata.put("taskId", taskId);
         metadata.put("progress", header);
@@ -121,8 +127,33 @@ public class ConversationService {
             """, messageId, userId, sessionId, content, json,
                 privateContent, sessionId, userId);
         if (saved == 0) return null;
-        touch(sessionId, "progress", content);
+        if (touch) touch(sessionId, "progress", content);
         return timestampOf(messageId);
+    }
+
+    /**
+     * Mark the chat's row of fact capture {@code ref} -- "Remembered", or a fact offered to keep --
+     * kept or undone ({@code CapturedFacts}), in the header the page draws it from: a reload shows
+     * what was done, where the button would offer it again. Only a row of this user's.
+     *
+     * @param what "kept" or "undone"
+     */
+    public void markFact(String userId, String ref, String what) {
+        if (!"kept".equals(what) && !"undone".equals(what)) throw new IllegalArgumentException(what);
+        jdbc.update("UPDATE conversations SET metadata = json_set(metadata, '$.progress." + what + "', json('true')) "
+                + "WHERE user_id = ? AND role = 'progress' AND json_valid(metadata) "
+                + "AND json_extract(metadata, '$.progress.kind') IN ('remembered', 'offered') "
+                + "AND json_extract(metadata, '$.progress.ref') = ?", userId, ref);
+    }
+
+    /**
+     * Save a fact capture's row, as {@link #saveProgress} saves a progress row -- but without moving
+     * its chat up the list: a fact is kept after its turn has ended, when nothing new was said in
+     * the chat. Null when the chat is gone.
+     */
+    public String saveFactRow(String userId, String sessionId, String content, String taskId,
+                              String privateContent, Map<String, Object> header) {
+        return insertProgress(userId, sessionId, content, taskId, privateContent, header, false);
     }
 
     /**

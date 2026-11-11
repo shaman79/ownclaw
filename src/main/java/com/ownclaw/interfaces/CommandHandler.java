@@ -207,6 +207,9 @@ public class CommandHandler {
                 if (command.equals("/user") || command.startsWith("/user ")) {
                     yield Optional.of(handleUser(userId, message.trim().substring(5).strip()));
                 }
+                if (FACT_COMMAND.matcher(command).lookingAt()) {
+                    yield Optional.of(handleFact(userId, command));
+                }
                 // Not a recognized shared command — caller may handle interface-specific
                 // commands (like /debug, /setup) or treat as unknown.
                 yield Optional.empty();
@@ -598,6 +601,50 @@ public class CommandHandler {
                         + "model by itself. `/local on` stops calling the cloud.";
     }
 
+    /** The facts the local model found in a chat turn; null where there are none (a test's handler). */
+    private com.ownclaw.agent.memory.CapturedFacts capturedFacts;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setCapturedFacts(com.ownclaw.agent.memory.CapturedFacts capturedFacts) {
+        this.capturedFacts = capturedFacts;
+    }
+
+    /** /forget or /keep, with what follows them: a fact the local model found in a chat turn. */
+    private static final Pattern FACT_COMMAND = Pattern.compile("/(?:forget|keep)(?=$|[ _@])");
+
+    /** "/forget ref", or "/forget_ref" -- the form Telegram makes a link of -- with a bot's name after it there. */
+    private static final Pattern FACT = Pattern.compile("/(forget|keep)[ _]([a-z0-9]+)(?:@\\w+)?");
+
+    static final String FACT_USAGE = "Usage: `/forget <ref>` takes back a fact the local model remembered after a turn, "
+            + "and `/keep <ref>` keeps one it found in an answer -- the ref its message in Telegram gives; the web "
+            + "chat has buttons under each.";
+
+    /**
+     * Whether {@code text} is /forget or /keep, which answer with the fact itself: Telegram sends
+     * their answer only to the owner's private chat with the bot, never to a group.
+     */
+    public static boolean privateOnly(String text) {
+        String s = unblanked(text);
+        return s != null && FACT_COMMAND.matcher(s.toLowerCase(Locale.ROOT)).lookingAt();
+    }
+
+    /**
+     * A fact the local model found in a chat turn: taken back with /forget -- a new one forgotten, a
+     * corrected one what it was -- or kept with /keep, when it was found in an answer
+     * (CapturedFacts). Only the caller's own.
+     */
+    private String handleFact(String userId, String command) {
+        Matcher m = FACT.matcher(command.strip());
+        if (!m.matches()) return FACT_USAGE;
+        if (capturedFacts == null) return "Facts found in a chat turn cannot be changed here.";
+        String ref = m.group(2);
+        if ("keep".equals(m.group(1))) {
+            var kept = capturedFacts.keep(userId, ref);
+            return kept.done() ? kept.text() + "\n\nUndo: /forget_" + ref : kept.text();
+        }
+        return capturedFacts.undo(userId, ref).text();
+    }
+
     private String helpText() {
         return """
                 ### Commands
@@ -624,6 +671,8 @@ public class CommandHandler {
                 - `/user add <username> <password>` — Create an account (owner only)
                 - `/user disable <username|id>` — Revoke an account's access (owner only)
                 - `/user telegram <username> <telegram id>` — Let a Telegram ID use the bot (owner only)
+                - `/forget <ref>` — Take back a fact the local model remembered after a turn (the web chat has an Undo under it)
+                - `/keep <ref>` — Keep a fact the local model found in an answer (the web chat has a Keep under it)
                 - `/schedule` — List scheduled/deferred tasks
                 - `/schedule in <time> <task>` — Run a task after a delay
                 - `/schedule every <schedule> : <task>` — Recurring task
