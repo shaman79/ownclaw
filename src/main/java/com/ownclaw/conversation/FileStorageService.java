@@ -114,36 +114,35 @@ public class FileStorageService implements CloudImages {
         return pasted ? shown(userId, id, dest) : new Stored(id, false, null, null);
     }
 
-    /** The pasted image stored as {@code id} at {@code file}, shown to the cloud model if it is one. */
+    /**
+     * The pasted image stored as {@code id} at {@code file}, shown to the cloud model if it is one: its
+     * copy written beside it, always -- never the pasted bytes themselves -- and recorded with what the
+     * pasted file carries beside the picture, which makes what skills read from it private.
+     */
     private Stored shown(String userId, String id, Path file) throws IOException {
-        CloudImageCopy.Made made;
-        try {
-            made = CloudImageCopy.of(file);
-        } catch (IOException | RuntimeException e) {
-            made = new CloudImageCopy.Made(null, "it could not be read as an image");
-        }
+        CloudImageCopy.Made made = CloudImageCopy.of(file);
         CloudImageCopy.Copy copy = made.copy();
         if (copy == null) {
             log.info("Pasted file {} stays private: {}", id, made.privateBecause());
             return new Stored(id, false, made.privateBecause(), null);
         }
-        String sidecar = copy.original() ? null
-                : id + ".cloud." + ("image/png".equals(copy.mediaType()) ? "png" : "jpg");
-        if (sidecar != null) Files.write(uploadsDir.resolve(sidecar), copy.bytes(), StandardOpenOption.CREATE_NEW);
+        String sidecar = id + ".cloud." + ("image/png".equals(copy.mediaType()) ? "png" : "jpg");
+        Files.write(uploadsDir.resolve(sidecar), copy.bytes(), StandardOpenOption.CREATE_NEW);
         try {
             jdbc.update("""
                 UPDATE file_attachments SET shown_to_cloud = 1, cloud_copy = ?, cloud_media_type = ?,
                     cloud_width = ?, cloud_height = ?, cloud_bytes = ?, cloud_sha256 = ?,
-                    image_width = ?, image_height = ?
+                    image_width = ?, image_height = ?, image_metadata = ?
                 WHERE id = ? AND user_id = ?
                 """, sidecar, copy.mediaType(), copy.width(), copy.height(), copy.bytes().length, copy.sha256(),
-                    copy.originalWidth(), copy.originalHeight(), id, userId);
+                    copy.originalWidth(), copy.originalHeight(), copy.metadata(), id, userId);
         } catch (RuntimeException e) {
-            if (sidecar != null) Files.deleteIfExists(uploadsDir.resolve(sidecar));
+            Files.deleteIfExists(uploadsDir.resolve(sidecar));
             throw e;
         }
         log.info("Pasted image {} is shown to the cloud model: {} {}x{}, {} bytes{}", id, copy.mediaType(),
-                copy.width(), copy.height(), copy.bytes().length, copy.original() ? ", the file itself" : "");
+                copy.width(), copy.height(), copy.bytes().length,
+                copy.metadata() == null ? "" : "; its file also carries " + copy.metadata());
         return new Stored(id, true, null, copy);
     }
 
@@ -155,9 +154,19 @@ public class FileStorageService implements CloudImages {
      * @param mediaType   the copy's type
      * @param width       the copy's width, which the model reads
      * @param bytes       the copy's size
+     * @param metadata    what the pasted file carries beside the picture -- EXIF data, text, a colour
+     *                    profile -- in words, or null when it holds the picture alone. Skills are
+     *                    handed that file, so what they read from it is private.
      */
     public record PastedImage(String fileId, String contentType, String mediaType, int width, int height, long bytes,
-                              int originalWidth, int originalHeight) {}
+                              int originalWidth, int originalHeight, String metadata) {
+
+        /** An image whose file holds the picture alone. */
+        public PastedImage(String fileId, String contentType, String mediaType, int width, int height, long bytes,
+                           int originalWidth, int originalHeight) {
+            this(fileId, contentType, mediaType, width, height, bytes, originalWidth, originalHeight, null);
+        }
+    }
 
     /**
      * {@code row}'s pasted image -- a row of {@code file_attachments}, or of a message's attachments
@@ -174,8 +183,10 @@ public class FileStorageService implements CloudImages {
         int ow = row.get("image_width") instanceof Number n ? n.intValue() : w.intValue();
         int oh = row.get("image_height") instanceof Number n ? n.intValue() : h.intValue();
         Object uploadedAs = row.get("content_type");
+        Object metadata = row.get("image_metadata");
         return new PastedImage(String.valueOf(row.get("id")), uploadedAs == null ? (String) type : String.valueOf(uploadedAs),
-                (String) type, w.intValue(), h.intValue(), b.longValue(), ow, oh);
+                (String) type, w.intValue(), h.intValue(), b.longValue(), ow, oh,
+                metadata instanceof String m && !m.isBlank() ? m : null);
     }
 
     /**
@@ -191,29 +202,30 @@ public class FileStorageService implements CloudImages {
                    cloud_height, cloud_sha256
             FROM file_attachments WHERE id = ?
             """, fileId);
-        if (rows.isEmpty()) return CloudImages.Found.withheld("there is no such file");
+        if (rows.isEmpty()) return CloudImages.Found.withheld("the file no longer exists");
         Map<String, Object> row = rows.getFirst();
         if (userId == null || !userId.equals(row.get("user_id"))) {
-            return CloudImages.Found.withheld("it is not this user's file");
+            return CloudImages.Found.withheld("it is another account's file");
         }
         if (!(row.get("shown_to_cloud") instanceof Number shown) || shown.intValue() != 1) {
-            return CloudImages.Found.withheld("it was not pasted as an image the cloud model is shown: it is private");
+            return CloudImages.Found.withheld("it is a private file, not an image pasted to be shown");
         }
         if (!(row.get("cloud_media_type") instanceof String type) || !(row.get("cloud_sha256") instanceof String sha)
                 || !(row.get("cloud_width") instanceof Number w) || !(row.get("cloud_height") instanceof Number h)) {
-            return CloudImages.Found.withheld("its copy was never recorded");
+            return CloudImages.Found.withheld("no copy for the cloud model was made of it");
         }
-        Object sidecar = row.get("cloud_copy");
-        Path path = plainFile(storedPath((String) (sidecar != null ? sidecar : row.get("stored_name"))));
-        if (path == null) return CloudImages.Found.withheld("its copy is not a plain file in the uploads directory");
+        // The copy beside it, always: the pasted bytes themselves are never sent.
+        if (!(row.get("cloud_copy") instanceof String sidecar)) return CloudImages.Found.withheld("no copy for the cloud model was made of it");
+        Path path = plainFile(storedPath(sidecar));
+        if (path == null) return CloudImages.Found.withheld("its copy is missing, or was replaced by a link");
         byte[] bytes;
         try {
             bytes = Files.readAllBytes(path);
         } catch (IOException e) {
-            return CloudImages.Found.withheld("its copy could not be read (" + e.getClass().getSimpleName() + ")");
+            return CloudImages.Found.withheld("its copy could not be read");
         }
         if (!CloudImageCopy.sha256(bytes).equals(sha)) {
-            return CloudImages.Found.withheld("its copy is not the bytes recorded when it was pasted");
+            return CloudImages.Found.withheld("its copy changed after it was pasted");
         }
         return CloudImages.Found.of(new CloudImages.Copy(type, w.intValue(), h.intValue(), bytes, sha));
     }
@@ -313,7 +325,7 @@ public class FileStorageService implements CloudImages {
         return jdbc.queryForList("""
             SELECT f.id, f.user_id, f.original_name, f.content_type, f.size_bytes, f.uploaded_at,
                    f.shown_to_cloud, f.cloud_media_type, f.cloud_width, f.cloud_height, f.cloud_bytes,
-                   f.image_width, f.image_height
+                   f.image_width, f.image_height, f.image_metadata
             FROM file_attachments f
             JOIN message_attachments ma ON ma.file_id = f.id
             WHERE ma.message_id = ?

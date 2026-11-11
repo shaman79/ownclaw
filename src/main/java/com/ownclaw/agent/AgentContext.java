@@ -402,34 +402,66 @@ public class AgentContext {
 
     /**
      * Fold the chat's oldest images to their lines -- each message still says an image was pasted
-     * with it -- until a request's images are within what the Messages API takes: {@code maxImages}
-     * images and {@code maxBytes} of them base64-encoded, this message's own counted first. Those
-     * are never folded. Folded, an image stays so for the rest of the task, so its requests stay the
-     * same bytes. Returns how many were folded now.
+     * with it -- so that a request's images are within what the Messages API takes: {@code maxImages}
+     * images and {@code maxBytes} of them base64-encoded, this message's own counted with them. Those
+     * are never folded. Returns how many this message's own images made fold now; none when the chat
+     * was folded as far already.
+     * <p>
+     * Where the chat is folded to is a function of its images alone, so every turn finds it where the
+     * last one left it: the chat's turns are replayed one by one, each message's images counted as a
+     * request's own when it was sent, and whenever a turn's request would have been past a limit, the
+     * oldest images are folded until it is at half of that limit -- in a batch, not one at a time.
+     * Folding just enough moved the fold one image on every turn that pasted one, and each move changed
+     * the chat's first blocks, so every such turn wrote the whole chat to the cache again. Half the
+     * limit is room for many turns before the next fold: a hysteresis on the API's own limits. Folded,
+     * an image stays so for the rest of the task.
      */
     public synchronized int fitImages(int maxImages, long maxBytes) {
+        int folded = 0;
+        int k = 0;
+        for (int message = 0; message < conversation.size(); message++) {
+            int first = k;
+            long bytes = 0;
+            while (k < chatImages.size() && chatImages.get(k).message() == message) {
+                bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
+                k++;
+            }
+            folded = settle(folded, first, k - first, bytes, maxImages, maxBytes);
+        }
         int count = 0;
         long bytes = 0;
         for (Attachment p : pasted()) {
             count++;
             bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(p.image().bytes());
         }
-        var shown = new java.util.ArrayList<Integer>();
-        for (int k = chatImagesFolded; k < chatImages.size(); k++) {
-            ContextFit.ChatFold fold = chatFolded.get(chatImages.get(k).message());
-            if (fold != null && fold.line()) continue;
-            shown.add(k);
-            count++;
-            bytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
+        int before = folded;
+        folded = settle(folded, chatImages.size(), count, bytes, maxImages, maxBytes);
+        chatImagesFolded = Math.max(chatImagesFolded, folded);
+        return folded - before;
+    }
+
+    /**
+     * Where the chat is folded to once a request is sent with {@code count} images of its own --
+     * {@code bytes} of them -- after the chat's first {@code history} images, folded up to {@code from}:
+     * there still, when the request is within both limits; else as far as takes the limit it was past
+     * to half of it, and the request within both.
+     */
+    private int settle(int from, int history, int count, long bytes, int maxImages, long maxBytes) {
+        int shown = history - from;
+        long shownBytes = 0;
+        for (int k = from; k < history; k++) {
+            shownBytes += com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
         }
-        int before = chatImagesFolded;
-        for (int k : shown) {
-            if (count <= maxImages && bytes <= maxBytes) break;
-            count--;
-            bytes -= com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(k).image().bytes());
-            chatImagesFolded = k + 1;
+        boolean tooMany = shown + count > maxImages, tooLarge = shownBytes + bytes > maxBytes;
+        if (!tooMany && !tooLarge) return from;
+        int folded = from;
+        while (folded < history && (tooMany && shown + count > maxImages / 2 || tooLarge && shownBytes + bytes > maxBytes / 2
+                || shown + count > maxImages || shownBytes + bytes > maxBytes)) {
+            shownBytes -= com.ownclaw.llm.LlmMessage.Image.base64Bytes(chatImages.get(folded).image().bytes());
+            shown--;
+            folded++;
         }
-        return chatImagesFolded - before;
+        return folded;
     }
 
     /** The chat's messages, whole, in order. */
@@ -726,10 +758,11 @@ public class AgentContext {
     /**
      * Register an image the owner pasted into the web chat box, which the cloud model is shown --
      * its file marked so when it was uploaded (FileStorageService): a PUBLIC artifact, with no text.
-     * Every skill is handed it as it is handed a file ({@link #attachmentIds}), and it makes no
-     * result private: the cloud model sees the picture itself, so what a skill reads from it is
-     * nothing the cloud has not been shown. A private file sent with it still makes every result
-     * private ({@link #decide}).
+     * Every skill is handed it as it is handed a file ({@link #attachmentIds}). It makes no result
+     * private when its file holds the picture alone: the cloud model sees the picture itself, so
+     * what a skill reads from it is nothing the cloud has not been shown. One whose file carries
+     * more ({@link #files}), and a private file sent with it, make every result private
+     * ({@link #decide}).
      */
     public synchronized Artifact addPastedImage(com.ownclaw.conversation.FileStorageService.PastedImage image,
                                                 List<String> why) {
@@ -739,8 +772,19 @@ public class AgentContext {
         return a;
     }
 
-    /** The private files registered for this task, in order: what makes every result of it PRIVATE. */
+    /**
+     * The files registered for this task that make every result of it PRIVATE, in order: each private
+     * file, and each pasted image whose file carries more than the picture -- EXIF data, text, a colour
+     * profile ({@code PastedImage#metadata}). Skills are handed that file whole, so what they read
+     * from it can be what the picture never showed; the picture itself is still shown to the cloud.
+     */
     public synchronized List<Artifact> files() {
+        return attachments.stream().filter(p -> p.image() == null || p.image().metadata() != null)
+                .map(Attachment::artifact).toList();
+    }
+
+    /** The private files registered for this task, in order: those the cloud is never shown. */
+    public synchronized List<Artifact> privateFiles() {
         return attachments.stream().filter(p -> p.image() == null).map(Attachment::artifact).toList();
     }
 

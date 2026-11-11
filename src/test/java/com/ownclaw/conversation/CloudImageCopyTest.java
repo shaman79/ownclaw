@@ -5,22 +5,26 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
-import java.util.zip.CRC32;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * The copy of a pasted image the cloud model is sent: Anthropic's own resize rule, at and around
- * its limits; the pasted bytes themselves only when they hold the picture and nothing else; a PNG,
- * or a JPEG when a PNG would be larger than one image may be; the same bytes every time; and no
- * copy at all of anything that is not a PNG, JPEG or GIF this code decoded.
+ * its limits; always the decoded pixels encoded again, in the original's family -- a PNG for a PNG
+ * or a GIF, a JPEG for a JPEG -- turned upright as its EXIF says, grey kept grey; the same bytes
+ * every time; what the file carries beside the picture said; and no copy at all of anything that is
+ * not a PNG, a baseline JPEG or a GIF this code decoded within its time.
  */
 class CloudImageCopyTest {
 
@@ -31,10 +35,6 @@ class CloudImageCopyTest {
 
     static BufferedImage screenshot(int width, int height) {
         return TestImages.screenshot(width, height);
-    }
-
-    static BufferedImage noise(int width, int height, long seed) {
-        return TestImages.noise(width, height, seed);
     }
 
     static byte[] encoded(BufferedImage image, String format) throws Exception {
@@ -49,46 +49,47 @@ class CloudImageCopyTest {
         return ImageIO.read(new ByteArrayInputStream(bytes));
     }
 
+    private static String latin1(byte[] bytes) {
+        return new String(bytes, StandardCharsets.ISO_8859_1);
+    }
+
     @Test
     @DisplayName("the size is Anthropic's: its documented examples, both tiers, and the edges at and past the limits")
     void theApisOwnRule() {
-        // The examples platform.claude.com gives, standard tier and high-resolution tier.
         assertEquals(new CloudImageCopy.Size(924, 1307), CloudImageCopy.resizedSize(1075, 1520, 1568, 1568));
         assertEquals(new CloudImageCopy.Size(1456, 819), CloudImageCopy.resizedSize(1920, 1080, 1568, 1568));
         assertEquals(new CloudImageCopy.Size(2576, 1449), CloudImageCopy.resizedSize(3840, 2160, 2576, 4784));
         assertEquals(new CloudImageCopy.Size(2000, 1500), CloudImageCopy.resizedSize(2000, 1500, 2576, 4784),
                 "3,888 tokens: not resized on the high-resolution tier");
         assertEquals(3_888, CloudImageCopy.countImageTokens(2000, 1500));
-        // At the limits: 2,576 is 92 patches exactly, and 92 x 52 is 4,784 tokens exactly.
         assertEquals(4_784, CloudImageCopy.countImageTokens(2576, 1449));
         assertEquals(new CloudImageCopy.Size(2576, 1449), CloudImageCopy.resizedSize(2576, 1449, 2576, 4784));
-        assertEquals(new CloudImageCopy.Size(1449, 2576), CloudImageCopy.resizedSize(1449, 2576, 2576, 4784),
-                "a tall image, the same rule turned");
-        // A pixel past either limit is resized.
+        assertEquals(new CloudImageCopy.Size(1449, 2576), CloudImageCopy.resizedSize(1449, 2576, 2576, 4784));
         assertNotEquals(new CloudImageCopy.Size(2577, 1449), CloudImageCopy.resizedSize(2577, 1449, 2576, 4784));
-        var wide = CloudImageCopy.resizedSize(2577, 100, 2576, 4784);
-        assertTrue(Math.ceilDiv(wide.width(), 28) * 28 <= 2576, "the padded edge fits: " + wide);
         var square = CloudImageCopy.resizedSize(2576, 2576, 2576, 4784);
         assertTrue(CloudImageCopy.countImageTokens(square.width(), square.height()) <= 4784, square.toString());
-        assertTrue(CloudImageCopy.countImageTokens(square.width() + 28, square.height() + 28) > 4784,
-                "the largest that fits: " + square);
+        assertTrue(CloudImageCopy.countImageTokens(square.width() + 28, square.height() + 28) > 4784, square.toString());
         // Mutation: Math.round for Math.rint, or the unpadded edge -> one of these sizes differs.
     }
 
     @Test
-    @DisplayName("a screenshot within the tier is sent as pasted: the file's own bytes, and the same pixel size")
-    void withinTheTierTheOriginalIsTheCopy(@TempDir Path dir) throws Exception {
-        byte[] png = encoded(screenshot(1920, 1080), "png");
-        var made = CloudImageCopy.of(file(dir, "a.png", png));
-        var copy = made.copy();
-        assertNotNull(copy, made.privateBecause());
-        assertTrue(copy.original());
-        assertArrayEquals(png, copy.bytes(), "the bytes as pasted");
+    @DisplayName("within the tier a screenshot keeps its size, as a PNG encoded again from its pixels -- never the pasted bytes")
+    void withinTheTierItIsEncodedAgain(@TempDir Path dir) throws Exception {
+        // A PNG another encoder wrote: its rows unfiltered, deflated hard.
+        BufferedImage picture = screenshot(640, 480);
+        byte[] row = new byte[1 + 3 * 640];
+        byte[] handMade = TestImages.pngOf("IHDR", TestImages.ihdr(640, 480, 8, 2), "IDAT", TestImages.idat(row, 480),
+                "IEND", new byte[0]);
+        var copy = CloudImageCopy.of(file(dir, "hand.png", handMade)).copy();
+        assertNotNull(copy);
         assertEquals("image/png", copy.mediaType());
-        assertEquals(1920, copy.width());
-        assertEquals(1080, copy.height());
-        assertEquals(1920, copy.originalWidth());
-        assertEquals(CloudImageCopy.sha256(png), copy.sha256());
+        assertEquals(640, copy.width());
+        assertFalse(Arrays.equals(handMade, copy.bytes()), "made again, not sent as pasted");
+        assertNull(copy.metadata(), "nothing beside the picture");
+        assertEquals(640, decoded(copy.bytes()).getWidth());
+        var shot = CloudImageCopy.of(file(dir, "a.png", encoded(picture, "png"))).copy();
+        assertEquals(picture.getRGB(320, 240), decoded(shot.bytes()).getRGB(320, 240), "the same pixels");
+        // Mutation: hand back the file's own bytes within the tier -> the hand-made bytes go as they are.
     }
 
     @Test
@@ -97,66 +98,111 @@ class CloudImageCopyTest {
         Path f = file(dir, "big.png", encoded(screenshot(3840, 2160), "png"));
         var one = CloudImageCopy.of(f).copy();
         var two = CloudImageCopy.of(f).copy();
-        assertFalse(one.original());
         assertEquals("image/png", one.mediaType());
         assertEquals(2576, one.width());
         assertEquals(1449, one.height());
         assertEquals(3840, one.originalWidth());
         assertEquals(2160, one.originalHeight());
         var pixels = decoded(one.bytes());
-        assertEquals(2576, pixels.getWidth(), "the bytes are the size the copy says");
+        assertEquals(2576, pixels.getWidth());
         assertEquals(1449, pixels.getHeight());
         assertArrayEquals(one.bytes(), two.bytes(), "made twice, byte for byte the same");
-        // A strip far past the edge limit, its short edge rounded as the API rounds it.
         var strip = CloudImageCopy.of(file(dir, "strip.png", encoded(screenshot(20000, 300), "png"))).copy();
         assertEquals(new CloudImageCopy.Size(2576, 39), new CloudImageCopy.Size(strip.width(), strip.height()));
-        // Mutation: drop the scale -> 3840 wide; drop the halving loop's last step -> not 2576.
     }
 
     @Test
-    @DisplayName("a PNG larger than one image may be, base64: the copy is a JPEG of high quality instead, the same bytes each time")
-    void tooLargeAsPngIsAJpeg(@TempDir Path dir) throws Exception {
-        // Noise at the tier's own size: its PNG is over 7.5 MB, 10 MB as base64.
-        Path f = file(dir, "noise.png", encoded(noise(2576, 1449, 7), "png"));
-        assertTrue(CloudImageCopy.base64(Files.size(f)) > CloudImageCopy.MAX_BASE64, "the original is too large");
-        var copy = CloudImageCopy.of(f).copy();
+    @DisplayName("a JPEG stays a JPEG -- a phone photo is not made a PNG many times its size; a PNG becomes a JPEG only when too large as one")
+    void theOriginalsFamily(@TempDir Path dir) throws Exception {
+        BufferedImage photo = new BufferedImage(1600, 1200, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < 1200; y++) for (int x = 0; x < 1600; x++) photo.setRGB(x, y, (x * 255 / 1600) << 16 | (y * 255 / 1200) << 8 | 90);
+        byte[] jpeg = encoded(photo, "jpeg");
+        var copy = CloudImageCopy.of(file(dir, "photo.jpg", jpeg)).copy();
+        assertEquals("image/jpeg", copy.mediaType(), "a photograph stays a JPEG");
+        assertTrue(copy.bytes().length < 3 * jpeg.length, copy.bytes().length + " bytes from " + jpeg.length);
+
+        // Noise at the tier's own size: as a PNG over 7.5 MB, 10 MB as base64.
+        Path noise = file(dir, "noise.png", encoded(TestImages.noise(2576, 1449, 7), "png"));
+        var big = CloudImageCopy.of(noise).copy();
+        assertEquals("image/jpeg", big.mediaType());
+        assertTrue(CloudImageCopy.base64(big.bytes().length) <= CloudImageCopy.MAX_BASE64);
+        assertArrayEquals(big.bytes(), CloudImageCopy.of(noise).copy().bytes(), "made twice, the same");
+        // Mutation: encode every copy as a PNG first -> the photo's copy is several times its size.
+    }
+
+    @Test
+    @DisplayName("a phone's portrait photo is turned upright as its EXIF says, its sizes as a viewer shows them")
+    void exifOrientationIsApplied(@TempDir Path dir) throws Exception {
+        // Stored 800x600, its left half red; EXIF Orientation 6: shown turned a quarter clockwise.
+        var stored = new BufferedImage(800, 600, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = stored.createGraphics();
+        g.setColor(Color.WHITE);
+        g.fillRect(0, 0, 800, 600);
+        g.setColor(Color.RED);
+        g.fillRect(0, 0, 400, 600);
+        g.dispose();
+        byte[] jpeg = TestImages.withSegment(encoded(stored, "jpeg"), 0xE1, TestImages.exif(6, ""));
+        var copy = CloudImageCopy.of(file(dir, "portrait.jpg", jpeg)).copy();
         assertNotNull(copy);
-        assertEquals("image/jpeg", copy.mediaType());
-        assertFalse(copy.original());
-        assertEquals(2576, copy.width());
-        assertTrue(CloudImageCopy.base64(copy.bytes().length) <= CloudImageCopy.MAX_BASE64);
-        assertEquals((byte) 0xFF, copy.bytes()[0]);
-        assertEquals((byte) 0xD8, copy.bytes()[1]);
-        assertArrayEquals(copy.bytes(), CloudImageCopy.of(f).copy().bytes(), "made twice, the same");
-        // Mutation: keep the PNG regardless -> the API refuses the request for its size.
+        assertEquals(600, copy.width(), "upright: as every viewer, and the API, shows it");
+        assertEquals(800, copy.height());
+        assertEquals(600, copy.originalWidth());
+        BufferedImage shown = decoded(copy.bytes());
+        assertEquals(600, shown.getWidth());
+        assertEquals(Color.RED.getRGB() & 0xF0F0F0, shown.getRGB(300, 100) & 0xF0F0F0, "its top half red");
+        assertEquals(Color.WHITE.getRGB() & 0xF0F0F0, shown.getRGB(300, 700) & 0xF0F0F0, "its bottom half white");
+        assertEquals("EXIF data", copy.metadata());
+        // And 3, half round: the red half on the right.
+        var half = decoded(CloudImageCopy.of(file(dir, "o3.jpg", TestImages.withSegment(encoded(stored, "jpeg"), 0xE1,
+                TestImages.exif(3, "")))).copy().bytes());
+        assertEquals(800, half.getWidth());
+        assertEquals(Color.RED.getRGB() & 0xF0F0F0, half.getRGB(700, 300) & 0xF0F0F0);
+        // Mutation: ignore the orientation -> 800 wide, on its side.
     }
 
     @Test
-    @DisplayName("only the picture leaves: a text chunk, bytes after the end, EXIF -- the copy is made from the pixels, without them")
-    void metadataNeverLeaves(@TempDir Path dir) throws Exception {
+    @DisplayName("grey stays the grey it was: with alpha and with tRNS, 128 is 128, not the 188 Java2D's drawing made of it")
+    void greyKeepsItsTone(@TempDir Path dir) throws Exception {
+        var alpha = CloudImageCopy.of(file(dir, "la.png", TestImages.greyAlphaPng(800, 600, 128, 255))).copy();
+        int red = (decoded(alpha.bytes()).getRGB(400, 300) >> 16) & 255;
+        assertTrue(Math.abs(red - 128) <= 2, "grey and alpha: " + red);
+        var trns = CloudImageCopy.of(file(dir, "trns.png", TestImages.greyTrnsPng(3000, 2000, 128))).copy();
+        BufferedImage t = decoded(trns.bytes());
+        int right = t.getRGB(3 * t.getWidth() / 4, t.getHeight() / 2);
+        assertTrue(Math.abs(((right >> 16) & 255) - 128) <= 2, "grey and tRNS: " + ((right >> 16) & 255));
+        assertEquals(0, t.getRGB(t.getWidth() / 4, t.getHeight() / 2) >>> 24, "its transparent half still transparent");
+        // Mutation: draw grey with Java2D -> 188.
+    }
+
+    @Test
+    @DisplayName("what the file carries beside the picture is said, and never leaves: EXIF with a place and an address, text, bytes after the end")
+    void metadataIsSaidAndNeverLeaves(@TempDir Path dir) throws Exception {
+        byte[] jpeg = encoded(screenshot(800, 600), "jpeg");
+        assertNull(CloudImageCopy.of(file(dir, "plain.jpg", jpeg)).copy().metadata(), "ImageIO's JPEG: the picture alone");
+        byte[] gps = TestImages.withSegment(jpeg, 0xE1, TestImages.exif(1, "GPS 49.19N 16.61E owner@example.com"));
+        var withGps = CloudImageCopy.of(file(dir, "gps.jpg", gps)).copy();
+        assertEquals("EXIF data", withGps.metadata());
+        assertFalse(latin1(withGps.bytes()).contains("owner@example.com"));
+        assertFalse(latin1(withGps.bytes()).contains("GPS"));
+
         byte[] png = encoded(screenshot(800, 600), "png");
-        byte[] withText = withChunk(png, "tEXt", "Comment\0account 1234567890 of the owner");
-        var text = CloudImageCopy.of(file(dir, "t.png", withText)).copy();
-        assertFalse(text.original(), "a text chunk is not the picture");
-        assertFalse(new String(text.bytes(), StandardCharsets.ISO_8859_1).contains("1234567890"));
-        assertTrue(CloudImageCopy.onlyThePicturePng(text.bytes()), "the copy has only the picture's chunks");
-        assertEquals(800, text.width(), "not scaled: it fits the tier");
+        assertNull(CloudImageCopy.of(file(dir, "clean.png", png)).copy().metadata());
+        var text = CloudImageCopy.of(file(dir, "t.png", TestImages.withChunk(png, "tEXt",
+                "Comment\0account 1234567890 of the owner".getBytes(StandardCharsets.ISO_8859_1)))).copy();
+        assertEquals("text", text.metadata());
+        assertFalse(latin1(text.bytes()).contains("1234567890"));
+        // A setting of the wrong length carries whatever it holds.
+        var gamma = CloudImageCopy.of(file(dir, "g.png", TestImages.withChunk(png, "gAMA",
+                "note: the owner's password hint".getBytes(StandardCharsets.ISO_8859_1)))).copy();
+        assertEquals("data where a setting of the picture belongs", gamma.metadata());
+        assertFalse(latin1(gamma.bytes()).contains("password"));
 
         byte[] trailing = Arrays.copyOf(png, png.length + 20);
         System.arraycopy("SECRET-AFTER-THE-END".getBytes(StandardCharsets.ISO_8859_1), 0, trailing, png.length, 20);
         var after = CloudImageCopy.of(file(dir, "after.png", trailing)).copy();
-        assertFalse(after.original());
-        assertFalse(new String(after.bytes(), StandardCharsets.ISO_8859_1).contains("SECRET"));
-
-        byte[] jpeg = encoded(screenshot(800, 600), "jpeg");
-        assertTrue(CloudImageCopy.onlyThePictureJpeg(jpeg), "ImageIO's own JPEG holds the picture alone");
-        assertTrue(CloudImageCopy.of(file(dir, "j.jpg", jpeg)).copy().original());
-        byte[] exif = withSegment(jpeg, 0xE1, "Exif\0\0GPS 49.0N 16.0E serial 0000");
-        var gps = CloudImageCopy.of(file(dir, "exif.jpg", exif)).copy();
-        assertFalse(gps.original());
-        assertEquals("image/png", gps.mediaType(), "a lossless copy of the decoded pixels");
-        assertFalse(new String(gps.bytes(), StandardCharsets.ISO_8859_1).contains("GPS"));
-        // Mutation: accept any chunk or segment -> the account number or the location leaves.
+        assertEquals("bytes after the picture's end", after.metadata());
+        assertFalse(latin1(after.bytes()).contains("SECRET"));
+        // Mutation: say nothing of an APP1 -> a skill that reads the photo's EXIF sends it as public.
     }
 
     @Test
@@ -165,12 +211,11 @@ class CloudImageCopyTest {
         var copy = CloudImageCopy.of(file(dir, "g.gif", encoded(screenshot(300, 200), "gif"))).copy();
         assertNotNull(copy);
         assertEquals("image/png", copy.mediaType());
-        assertFalse(copy.original());
         assertEquals(300, decoded(copy.bytes()).getWidth());
     }
 
     @Test
-    @DisplayName("what is not a PNG, JPEG or GIF that decodes stays private: text, a WebP, a WBMP-shaped run of bytes, a broken PNG")
+    @DisplayName("what is not a PNG, baseline JPEG or GIF stays private, unread: text, a WebP, WBMP-shaped bytes, a broken PNG, progressive and multi-scan JPEGs")
     void nothingElseIsAnImage(@TempDir Path dir) throws Exception {
         for (var bad : new byte[][]{
                 "date,amount\n2026-09-01,-1200\n".getBytes(StandardCharsets.UTF_8),
@@ -178,43 +223,102 @@ class CloudImageCopyTest {
                 {0, 0, 10, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
                 Arrays.copyOf(encoded(screenshot(400, 300), "png"), 60)}) {
             var made = CloudImageCopy.of(file(dir, "x" + bad.length, bad));
-            assertNull(made.copy(), "no copy of " + new String(bad, 0, Math.min(12, bad.length), StandardCharsets.ISO_8859_1));
+            assertNull(made.copy(), "no copy of " + latin1(Arrays.copyOf(bad, Math.min(12, bad.length))));
             assertNotNull(made.privateBecause());
         }
         assertTrue(CloudImageCopy.of(file(dir, "w.webp", "RIFF\0\0\0\0WEBPVP8 ".getBytes(StandardCharsets.ISO_8859_1)))
                 .privateBecause().contains("WebP"));
-        // Mutation: let ImageIO pick the reader by its guess -> the WBMP-shaped bytes "decode".
+        // A 200-byte progressive JPEG declaring 30,000 x 30,000 took a server's memory: not read at all.
+        long start = System.nanoTime();
+        var progressive = CloudImageCopy.of(file(dir, "p.jpg", TestImages.jpegDeclaring(0xC2, 30000, 30000, 3, 1)));
+        assertNull(progressive.copy());
+        assertTrue(progressive.privateBecause().contains("progressive"), progressive.privateBecause());
+        assertTrue(System.nanoTime() - start < 2_000_000_000L, "refused from its header, without decoding it");
+        for (int frame : new int[]{0xC3, 0xC5, 0xC6, 0xC9, 0xCA}) {
+            assertNull(CloudImageCopy.of(file(dir, "f" + frame, TestImages.jpegDeclaring(frame, 3000, 3000, 3, 1))).copy(),
+                    "frame " + Integer.toHexString(frame));
+        }
+        var scans = CloudImageCopy.of(file(dir, "s.jpg", TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 3)));
+        assertNull(scans.copy(), "a baseline JPEG in several scans is read into buffers of its whole size");
+        assertTrue(scans.privateBecause().contains("several scans"), scans.privateBecause());
+        // Mutation: let ImageIO pick the reader by its guess -> the WBMP-shaped bytes "decode";
+        // accept SOF2 -> the 30,000 x 30,000 JPEG is decoded into gigabytes.
     }
 
-    /** {@code png} with a chunk of {@code type} after its header chunk. */
-    static byte[] withChunk(byte[] png, String type, String data) {
-        byte[] t = type.getBytes(StandardCharsets.ISO_8859_1);
-        byte[] d = data.getBytes(StandardCharsets.ISO_8859_1);
-        var crc = new CRC32();
-        crc.update(t);
-        crc.update(d);
-        var out = new ByteArrayOutputStream();
-        out.write(png, 0, 33);  // signature and IHDR
-        out.write(d.length >>> 24); out.write(d.length >>> 16); out.write(d.length >>> 8); out.write(d.length);
-        out.writeBytes(t);
-        out.writeBytes(d);
-        long c = crc.getValue();
-        out.write((int) (c >>> 24)); out.write((int) (c >>> 16)); out.write((int) (c >>> 8)); out.write((int) c);
-        out.write(png, 33, png.length - 33);
-        return out.toByteArray();
+    /** The most of the heap {@code run} takes above what was in use when it started, in bytes. */
+    private static long heapPeak(Runnable run) throws Exception {
+        var memory = ManagementFactory.getMemoryMXBean();
+        System.gc();
+        long base = memory.getHeapMemoryUsage().getUsed();
+        var peak = new AtomicLong(base);
+        var sampler = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                peak.accumulateAndGet(memory.getHeapMemoryUsage().getUsed(), Math::max);
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+        sampler.setDaemon(true);
+        sampler.start();
+        try {
+            run.run();
+        } finally {
+            sampler.interrupt();
+            sampler.join();
+        }
+        return peak.get() - base;
     }
 
-    /** {@code jpeg} with a segment of {@code marker} after its start. */
-    static byte[] withSegment(byte[] jpeg, int marker, String data) {
-        byte[] d = data.getBytes(StandardCharsets.ISO_8859_1);
-        var out = new ByteArrayOutputStream();
-        out.write(jpeg, 0, 2);
-        out.write(0xFF);
-        out.write(marker);
-        out.write((d.length + 2) >>> 8);
-        out.write(d.length + 2);
-        out.writeBytes(d);
-        out.write(jpeg, 2, jpeg.length - 2);
-        return out.toByteArray();
+    @Test
+    @DisplayName("each accepted format at its largest size -- 65,535 x 65,535 -- is read in bounded memory and time, from a file of a few hundred bytes")
+    void theLargestDeclarationsAreBounded(@TempDir Path dir) throws Exception {
+        for (var crafted : new Object[][]{
+                {"baseline.jpg", TestImages.jpegDeclaring(0xC0, 65535, 65535, 3, 1)},
+                // The largest the JDK's reader takes is a little under 2^31 samples: read every 8th pixel.
+                {"baseline30000.jpg", TestImages.jpegDeclaring(0xC0, 30000, 30000, 3, 1)},
+                {"grey.png", TestImages.uniformGreyPng(65535, 300)},
+                {"tall.png", TestImages.uniformGreyPng(300, 65535)},
+                {"two.gif", TestImages.gifDeclaring(65535, 65535)}}) {
+            Path f = file(dir, (String) crafted[0], (byte[]) crafted[1]);
+            assertTrue(Files.size(f) < 200_000, crafted[0] + " is small: " + Files.size(f));
+            var result = new CloudImageCopy.Made[1];
+            long start = System.nanoTime();
+            long peak = heapPeak(() -> result[0] = CloudImageCopy.of(f, Duration.ofSeconds(3)));
+            long seconds = (System.nanoTime() - start) / 1_000_000_000L;
+            assertTrue(seconds < 15, crafted[0] + " took " + seconds + " s");
+            assertTrue(peak < 400L << 20, crafted[0] + " took " + (peak >> 20) + " MB of heap");
+            assertNotNull(result[0], crafted[0] + ": an answer");
+        }
+        // Mutation: read the full resolution (no subsampling) -> gigabytes; no time limit -> minutes.
+    }
+
+    @Test
+    @DisplayName("past its time the read is aborted and the file stays private, saying so; checks run one at a time")
+    void pastItsTimeItStaysPrivate(@TempDir Path dir) throws Exception {
+        // Twenty thousand rows of twenty thousand grey pixels: under a megabyte, seconds of inflating.
+        Path big = file(dir, "big.png", TestImages.uniformGreyPng(20000, 20000));
+        long start = System.nanoTime();
+        var made = CloudImageCopy.of(big, Duration.ofMillis(300));
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        assertNull(made.copy());
+        assertEquals(CloudImageCopy.TOO_LONG, made.privateBecause());
+        assertTrue(ms < 5_000, "the read was aborted, not let run: " + ms + " ms");
+
+        // Two at once queue: one thread, so the second starts when the first has ended.
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            long t0 = System.nanoTime();
+            var a = pool.submit(() -> CloudImageCopy.of(big, Duration.ofMillis(700)));
+            var b = pool.submit(() -> CloudImageCopy.of(big, Duration.ofMillis(700)));
+            assertEquals(CloudImageCopy.TOO_LONG, a.get().privateBecause());
+            assertEquals(CloudImageCopy.TOO_LONG, b.get().privateBecause());
+            assertTrue((System.nanoTime() - t0) / 1_000_000 >= 1_300, "one after the other, not side by side");
+        } finally {
+            pool.shutdownNow();
+        }
+        // Mutation: no abort on the timer -> the read runs its seconds; a pool of two -> side by side.
     }
 }

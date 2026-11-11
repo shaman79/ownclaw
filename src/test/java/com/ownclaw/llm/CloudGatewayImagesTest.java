@@ -31,9 +31,9 @@ class CloudGatewayImagesTest {
 
         public Found copyOf(String userId, String fileId) {
             asked.add(userId + "/" + fileId);
-            if (!"u1".equals(userId)) return Found.withheld("it is not this user's file");
+            if (!"u1".equals(userId)) return Found.withheld("it is another account's file");
             if ("f1".equals(fileId)) return Found.of(new Copy("image/png", 1456, 819, bytes, recorded));
-            return Found.withheld("it was not pasted as an image the cloud model is shown: it is private");
+            return Found.withheld("it is a private file, not an image pasted to be shown");
         }
     }
 
@@ -98,12 +98,12 @@ class CloudGatewayImagesTest {
 
         gw.chat(List.of(marked(List.of(new LlmMessage.Image("f1", 1, 1, 1)))), cfg("u2"));
         assertNull(provider.calls.get(1).get(0).images().get(0).sent(), "u1's image is not u2's to send");
-        assertTrue(rows.last().withheld().get(0).why().contains("not this user's"));
+        assertTrue(rows.last().withheld().get(0).why().contains("another account's"));
 
         store.bytes = "OTHER-BYTES".getBytes(StandardCharsets.UTF_8);
         gw.chat(List.of(marked(List.of(new LlmMessage.Image("f1", 1, 1, 1)))), cfg("u1"));
         assertNull(provider.calls.get(2).get(0).images().get(0).sent(), "bytes that are not the copy recorded");
-        assertTrue(rows.last().withheld().get(0).why().contains("not the bytes recorded"));
+        assertTrue(rows.last().withheld().get(0).why().contains("changed after it was pasted"));
         // Mutation: drop the gateway's own hash -> a store that answers other bytes sends them.
     }
 

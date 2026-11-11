@@ -53,7 +53,7 @@ class ChatOptionsPageTest {
     @DisplayName("a chat opened shows its choice, or the default it follows by name; a message is sent with what is chosen")
     void shownAndSent() {
         String load = function("loadSessionMessages");
-        assertTrue(load.contains("showChatOptions(data.options, data.defaults);"), load);
+        assertTrue(load.contains("showChatOptions(data.options, data.defaults, data.cloud);"), load);
         String show = function("showChatOptions");
         assertTrue(show.contains("nameDefaults(defaults);"), show);
         String name = function("nameDefaults");

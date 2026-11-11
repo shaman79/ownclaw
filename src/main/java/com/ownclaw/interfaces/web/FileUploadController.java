@@ -85,6 +85,10 @@ public class FileUploadController {
                         result.put("cloud_height", stored.copy().height());
                         result.put("image_width", stored.copy().originalWidth());
                         result.put("image_height", stored.copy().originalHeight());
+                        // What its file carries beside the picture: skills are handed that file, so what
+                        // they read from it is private, as for any file.
+                        result.put("results_private", stored.copy().metadata() != null);
+                        if (stored.copy().metadata() != null) result.put("metadata", stored.copy().metadata());
                     } else {
                         result.put("private_because", stored.privateBecause());
                     }

@@ -340,6 +340,9 @@ public class AgentLoop {
             }
         }
         registerAttachments(context, attachmentIds, fileStorage, eventLog);
+        AgentResult tooMany = imagesPastOneRequest(context, com.ownclaw.llm.CloudGateway.showsImages(config),
+                () -> llmRouter.cloud().contextWindow(context.progress()));
+        if (tooMany != null) return end(context, tooMany, false);
         AgentResult stopped = stopWithoutLocalModel(context, () -> {
             LlmProvider local = llmRouter.local();
             return local != null && local.isAvailable();
@@ -593,7 +596,9 @@ public class AgentLoop {
                     boolean scaled = image.width() != image.originalWidth() || image.height() != image.originalHeight();
                     a = context.addPastedImage(image, List.of("pasted image", ct + ", " + size + " bytes, "
                             + image.originalWidth() + "x" + image.originalHeight() + " px; the cloud model is shown it"
-                            + (scaled ? " at " + image.width() + "x" + image.height() + " px" : "")));
+                            + (scaled ? " at " + image.width() + "x" + image.height() + " px" : "")
+                            + (image.metadata() == null ? ""
+                                    : "; its file also carries " + image.metadata() + ", so what skills read from it is private")));
                 } else {
                     String text = fileStorage.isTextContent(ct) ? fileStorage.readAsText(id) : null;
                     // The type and the size, never the name: a statement's file name carries its
@@ -712,18 +717,59 @@ public class AgentLoop {
     }
 
     /**
-     * The first step of a task holding an image the owner pasted that the local model takes -- on
-     * Free, in local mode, after the cloud could not be reached, or with no cloud configured -- tells
-     * its chat once that the image is not seen there, and why: the local model cannot see images,
-     * and is sent none. Skills are still handed it.
+     * The first step of a task holding images the owner pasted that goes to a model not shown them
+     * tells its chat so, once, and why: the local model -- on Free, in local mode, after the cloud
+     * could not be reached, or with no cloud configured -- cannot see images and is sent none; a cloud
+     * model other than Anthropic's is sent none either (OpenAiProvider). Said before the step is
+     * asked, so said of the step, not of a reply: true whatever the call does. Skills are still handed
+     * the images.
+     *
+     * @param local whether the step goes to the local model
      */
-    static void imagesNotSeen(AgentContext context) {
+    static void imagesNotSeen(AgentContext context, boolean local, LlmProvider provider) {
         int images = context.pasted().size();
-        if (images == 0 || !context.imagesNotSeenTold()) return;
-        String why = context.options().localOnly() ? "this chat runs on the local model only (Free)"
-                : context.onLocal() ? "the cloud model can't be used -- " + context.onLocalBecause()
-                : "no cloud model is configured";
+        if (images == 0) return;
+        String why;
+        if (local) {
+            why = "it goes to the local model, which cannot see images -- "
+                    + (context.options().localOnly() ? "this chat runs on the local model only (Free)"
+                    : context.onLocal() ? "the cloud model can't be used: " + context.onLocalBecause()
+                    : "no cloud model is configured");
+        } else if (!"anthropic".equals(provider.name())) {
+            why = "it goes to the cloud model of " + provider.name() + ", which OwnClaw sends no images";
+        } else {
+            return;
+        }
+        if (!context.imagesNotSeenTold()) return;
         context.chat().imagesNotSeen(images, why);
+    }
+
+    /**
+     * The result that ends a task, before any model is called, whose message carries more pasted
+     * images than one request to the cloud model can: past the Messages API's own limits -- 100
+     * images on a model with a 200k window, 600 on a larger one, 128 MB in all -- the request is
+     * refused and the task would end with an error that names none of this. Fitting the chat's older
+     * images makes room only for this message's own ({@link AgentContext#fitImages}); these are what
+     * the owner asked about, so none is left out: he is told how to send them. Null to go on -- on
+     * Free too, and with a cloud model that is sent no image.
+     *
+     * @param shown  whether the configured cloud model is shown images ({@code CloudGateway#showsImages})
+     * @param window the cloud model's context window, as its provider tells it, or null
+     */
+    static AgentResult imagesPastOneRequest(AgentContext ctx, boolean shown, java.util.function.Supplier<Integer> window) {
+        var pasted = ctx.pasted();
+        if (pasted.isEmpty() || !shown || ctx.options().localOnly()) return null;
+        long bytes = pasted.stream().mapToLong(p -> LlmMessage.Image.base64Bytes(p.image().bytes())).sum();
+        int most = LlmMessage.imagesPerRequest(window.get());
+        if (pasted.size() <= most && bytes <= LlmMessage.IMAGE_BYTES_PER_REQUEST) return null;
+        log.warn("Task {}: {} pasted images, {} bytes as sent, are more than one request to the cloud takes",
+                ctx.taskId(), pasted.size(), bytes);
+        return AgentResult.error("this message carries " + pasted.size() + " pasted images ("
+                + String.format(java.util.Locale.ROOT, "%,d", bytes / 1_000_000) + " MB as they are sent), more than one "
+                + "request to the cloud model can carry -- at most " + most + " images and "
+                + LlmMessage.IMAGE_BYTES_PER_REQUEST / 1_000_000 + " MB of them -- so nothing was sent. Paste them "
+                + "over several messages, each within those, or ask about them a few at a time", ctx.trajectory(),
+                ctx.elapsedMs());
     }
 
     /** Above the local model's answer on the owner's screen: who wrote it, and who never saw it. */
@@ -860,7 +906,8 @@ public class AgentLoop {
      */
     static AgentResult stopWithoutLocalModel(AgentContext ctx,
                                              java.util.function.BooleanSupplier localAvailable) {
-        if (ctx.files().isEmpty() || localAvailable.getAsBoolean()) return null;
+        // A private file: an image the owner pasted is shown to the cloud, which can answer from it.
+        if (ctx.privateFiles().isEmpty() || localAvailable.getAsBoolean()) return null;
         log.warn("Task {}: a file was sent and the local model is not answering; stopping "
                 + "before any cloud call.", ctx.taskId());
         return AgentResult.error(LOCAL_DOWN_FOR_FILES, ctx.trajectory(), ctx.elapsedMs());
@@ -958,7 +1005,7 @@ public class AgentLoop {
             LlmProvider provider = llmRouter.selectProvider(context);
             boolean local = llmRouter.isLocal(provider);
             readMessages(context, step + 1, local);
-            if (local) imagesNotSeen(context);
+            imagesNotSeen(context, local, provider);
             String providerLabel = local ? "local" : provider.name();
             statusEmitter.emitForTask(context.userId(), context.taskId(), StatusMessage.Type.STEP,
                     "Step " + (step + 1) + " · " + providerLabel,
@@ -3600,6 +3647,10 @@ public class AgentLoop {
             d.put("height", image.height());
             d.put("imageWidth", image.originalWidth());
             d.put("imageHeight", image.originalHeight());
+            if (image.metadata() != null) {
+                d.put("resultsPrivate", true);
+                d.put("metadata", image.metadata());
+            }
         }
         if (!a.why().isEmpty()) d.put("why", a.why());
         return d;

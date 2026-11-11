@@ -362,10 +362,14 @@ public record LlmMessage(Role role, String content, boolean authored, boolean ma
         if (content == null) return null;
         String out = content;
         if (out.contains(IMAGE_OPENS)) {
-            out = IMAGE_MARKER.matcher(out).replaceAll(Matcher.quoteReplacement(
-                    "\n[An image was pasted here. It is not shown to you: " + why + ".]\n"));
+            out = IMAGE_MARKER.matcher(out).replaceAll(Matcher.quoteReplacement("\n" + notShown(why) + "\n"));
         }
         return plain(out);
+    }
+
+    /** The line a model reads where an image was pasted that it is not shown, and why: "the local model cannot see images". */
+    public static String notShown(String why) {
+        return "[An image was pasted here. It is not shown to you: " + why + ".]";
     }
 
     /**

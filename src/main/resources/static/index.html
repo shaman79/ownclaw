@@ -1083,7 +1083,7 @@
             padding: 4px 10px 4px 12px;
             font-size: 12px;
             color: var(--text-2);
-            max-width: 240px;
+            max-width: 100%;
         }
         .file-chip-name {
             overflow: hidden;
@@ -1114,14 +1114,32 @@
         .file-chip-remove:hover { color: var(--red); background: var(--red-dim) }
         .file-chip-remove svg { width: 10px; height: 10px; fill: currentColor }
 
-        /* A pasted image's chip says who sees it: the cloud model, nobody (Free), or it stays private. */
-        .file-chip.pasted { max-width: 360px }
+        /*
+         * Every chip says who sees its file: the cloud model, nobody (Free), or it stays private. The
+         * chip is no wider than the row; its name and that line shrink, each to an ellipsis, and the
+         * remove button never does. A tap on the line opens what it means, in full, under them.
+         */
+        .file-chip { max-width: 100%; box-sizing: border-box; min-width: 0 }
+        .file-chip-name { flex: 0 3 auto; min-width: 2em }
         .file-chip-seen {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
             white-space: nowrap;
-            flex-shrink: 0;
+            font: inherit;
             font-size: 11px;
             color: var(--text-3);
+            background: none;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            text-align: left;
         }
+        .file-chip-remove { flex-shrink: 0 }
+        .file-chip-detail { display: none; flex-basis: 100%; font-size: 11px; color: var(--text-3); white-space: normal; line-height: 1.35 }
+        .file-chip.open { flex-wrap: wrap; border-radius: 12px }
+        .file-chip.open .file-chip-detail { display: block }
 
         .file-chip.uploading {
             opacity: .6;
@@ -2832,7 +2850,7 @@
             </select>
         </label>
     </div>
-    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Files you attach with 📎 or drag &amp; drop stay private &nbsp;&middot;&nbsp; Images you paste are shown to the cloud model as they are — the privacy filter reads text, not pictures &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
+    <div class="input-hint"><span id="hint-keys">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</span> &nbsp;&middot;&nbsp; Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures (the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private &nbsp;&middot;&nbsp; <strong>/help</strong> for commands</div>
 </div>
 
     </div><!-- end #chat-main -->
@@ -3180,7 +3198,7 @@
             });
             if (data.hasMore) holdEarlier(sessionId, msgs[0].id);
             settleChoices();
-            showChatOptions(data.options, data.defaults);
+            showChatOptions(data.options, data.defaults, data.cloud);
             // A chat opens on its newest message, and follows from there: how far the chat shown
             // before was scrolled says nothing about this one. At once, not smoothly: scrolled down
             // from its top, it would ask for its earlier rows on the way.
@@ -3646,11 +3664,16 @@
             if (dec.REFUSED) head += ' ' + tdCount(dec.REFUSED, 'request was', 'requests were') + ' stopped before sending.';
             if (dec.unparsed) head += ' ' + tdCount(dec.unparsed, 'record', 'records') + ' could not be read.';
             panel.appendChild(node('div', 'task-trace-headline', head));
-            // Images the owner pasted went as they are: the filter reads text, not pictures.
-            if (totals.images) {
-                panel.appendChild(node('div', 'task-trace-line', tdCount(totals.images, 'image', 'images')
-                        + ' you pasted went with these requests, each at the size the model reads it -- not filtered: '
-                        + 'the privacy filter reads text, not pictures. Each request below names its images.'));
+            // The images the owner pasted that went, each once, as they are: the filter reads text,
+            // not pictures. Those only on requests that failed may not have reached the provider.
+            if (totals.images || totals.imagesFailed) {
+                panel.appendChild(node('div', 'task-trace-line', (totals.images
+                        ? tdCount(totals.images, 'image', 'images') + ' you pasted went with '
+                            + tdCount(totals.imageRequests, 'request', 'requests') + ', each at the size the model reads it'
+                        : 'No image you pasted went with a request that reached the cloud model')
+                        + (totals.imagesFailed ? '; ' + tdCount(totals.imagesFailed, 'image was', 'images were')
+                            + ' only in requests that failed, which may not have reached the provider' : '')
+                        + ' -- not filtered: the privacy filter reads text, not pictures. Each request below names its images.'));
             }
             if (dec.OBSERVED_LEAK) {
                 panel.appendChild(node('div', 'task-trace-line bad', tdCount(dec.OBSERVED_LEAK, 'request', 'requests')
@@ -3734,12 +3757,20 @@
                 item.appendChild(node('div', 'task-trace-line', a.handle + ' your pasted image'
                         + (a.name != null ? ' "' + a.name + '"' : '') + ' · ' + (a.contentType || 'image') + ', '
                         + a.imageWidth + '×' + a.imageHeight + ' px'));
-                item.appendChild(node('div', 'task-trace-line muted', 'Shown to the cloud model'
-                        + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ' at ' + a.width + '×' + a.height
-                            + ' px, the size it reads' : '')
-                        + (a.mediaType && a.mediaType !== a.contentType ? ', as ' + a.mediaType : '')
-                        + ' — not filtered: the privacy filter reads text, not pictures. '
-                        + 'Skills were given the file as you pasted it.'));
+                // Shown only when a request that went carried it: none on a Free task, or with no cloud.
+                item.appendChild(node('div', 'task-trace-line muted', a.shownWith
+                        ? 'Shown to the cloud model with ' + tdCount(a.shownWith, 'request', 'requests')
+                            + (a.width !== a.imageWidth || a.height !== a.imageHeight ? ', at ' + a.width + '×' + a.height
+                                + ' px, the size it reads' : '')
+                            + (a.mediaType && a.mediaType !== a.contentType ? ', as ' + a.mediaType : '')
+                            + ' — not filtered: the privacy filter reads text, not pictures. '
+                            + 'Skills were given the file as you pasted it.'
+                        : 'Not shown to the cloud model in this task: no request that went carried it. '
+                            + 'Skills were given the file as you pasted it.'));
+                if (a.resultsPrivate) {
+                    item.appendChild(node('div', 'task-trace-line muted', 'Its file carries ' + (a.metadata || 'more than the picture')
+                            + ', so what skills read from it was kept private.'));
+                }
                 panel.appendChild(item);
                 return;
             }
@@ -4690,8 +4721,10 @@
         document.getElementById('settings-save').addEventListener('click', function() {
             saveSettings(data);
         });
-        // The page reloads them after a save: "Default" next to Send names the new ones.
+        // The page reloads them after a save: "Default" next to Send names the new ones, and the chips
+        // say whether the cloud model now chosen is shown pasted images.
         nameDefaults({ costMode: ['fast', 'cheaper', 'free'][costStop(data)], effort: data.thinking_effort });
+        noteCloud({ provider: provider, seesImages: provider === 'anthropic' });
     }
 
     /** The time-vs-cost slider's stops, as the settings page says them. */
@@ -7144,7 +7177,8 @@
         // A browser that lists the clipboard's files but not its items.
         if (!found.length && data.files) {
             for (var j = 0; j < data.files.length; j++) {
-                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(false); }
+                // Of no known origin: a file, as one from a file manager is -- never a pasted picture.
+                if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); }
             }
         }
         // The time of day: short enough to show whole in a chip, and the message has its date.
@@ -7216,7 +7250,7 @@
                 }
                 chips[i].classList.remove('uploading');
                 chips[i].dataset.fileId = uploaded[i].id;
-                if (pasted) markSeen(chips[i], uploaded[i]);
+                markSeen(chips[i], uploaded[i], pasted);
                 pendingFiles.push({ id: uploaded[i].id, name: uploaded[i].original_name, chip: chips[i] });
             }
         })
@@ -7312,15 +7346,26 @@
     var pictureQueue = Promise.resolve();
 
     /**
-     * A pasted image's chip, once the server has said what it is: shown to the cloud model -- its
-     * bytes decoded as an image -- or kept private, and why. Its line says who sees it (seenLine).
+     * A chip, once the server has said what its file is: a file -- attached, dropped, pasted from a
+     * file manager -- private; or an image pasted from the clipboard, shown to the cloud model when its
+     * bytes decoded as one, else kept private, and why. Its line says who sees it (seenLine); a tap on
+     * the line opens what it means, which a touch screen cannot hover for.
      */
-    function markSeen(chip, uploaded) {
-        chip.classList.add('pasted');
-        chip.dataset.shown = uploaded.shown_to_cloud ? '1' : '';
-        chip.dataset.privateBecause = uploaded.shown_to_cloud ? '' : String(uploaded.private_because || '');
-        var seen = node('span', 'file-chip-seen');
+    function markSeen(chip, uploaded, pasted) {
+        chip.classList.add(pasted ? 'pasted' : 'attached');
+        chip.dataset.shown = pasted && uploaded.shown_to_cloud ? '1' : '';
+        chip.dataset.privateBecause = pasted && !uploaded.shown_to_cloud ? String(uploaded.private_because || '') : '';
+        chip.dataset.carries = pasted && uploaded.results_private ? String(uploaded.metadata || 'more than the picture') : '';
+        var seen = node('button', 'file-chip-seen');
+        seen.type = 'button';
+        seen.setAttribute('aria-expanded', 'false');
+        var detail = node('span', 'file-chip-detail');
+        seen.addEventListener('click', function() {
+            var open = chip.classList.toggle('open');
+            seen.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
         chip.insertBefore(seen, chip.querySelector('.file-chip-remove'));
+        chip.appendChild(detail);
         seenLine(chip);
     }
 
@@ -7330,31 +7375,66 @@
     }
 
     /**
-     * What a pasted image's chip says of who sees it, as text, never markup: the cloud model, as the
-     * image is -- the filter reads text; in a Free chat, nobody, for the local model cannot see
-     * images; or nobody, the image kept private as a file is.
+     * Whether the chat's cloud model is shown the images pasted here, and which it is, as the server
+     * says (cloud, with a chat's messages; the settings page's provider): OwnClaw sends images to
+     * Anthropic's models only.
      */
-    function seenLine(chip) {
-        var seen = chip.querySelector('.file-chip-seen');
-        if (!seen) return;
-        if (chip.dataset.shown !== '1') {
-            seen.textContent = '🔒 private';
-            seen.title = 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
-                    || 'it is not an image the cloud model can be shown') + '.';
-        } else if (chatRunsFree()) {
-            seen.textContent = '🏠 Free: the local model can\'t see images';
-            seen.title = 'This chat runs on the local model only (Free), and the local model cannot see images. '
-                    + 'Skills are still given it as a file.';
-        } else {
-            seen.textContent = '☁️ the cloud model will see it';
-            seen.title = 'The cloud model is shown this image as it is: the privacy filter reads text, not pictures. '
-                    + 'Skills are given it as a file too.';
-        }
+    var cloudSeesImages = true, cloudProvider = '';
+
+    function noteCloud(cloud) {
+        if (!cloud) return;
+        cloudSeesImages = cloud.seesImages !== false;
+        cloudProvider = String(cloud.provider || '');
+        refreshSeen();
     }
 
-    /** Every pasted image's line again: the chat's choice next to Send, or the default, changed. */
+    /**
+     * What a chip says of who sees its file, as text, never markup, and what that means in full: a
+     * file, private; a pasted image the cloud model is shown as it is -- the filter reads text -- with
+     * what skills read from it private when its file carries more than the picture; on Free nobody,
+     * for the local model cannot see images, until the chat runs on the cloud, when the image goes
+     * with the chat's history; a cloud model that is sent no image, nobody; or kept private, and why.
+     */
+    function seenLine(chip) {
+        var seen = chip.querySelector('.file-chip-seen'), detail = chip.querySelector('.file-chip-detail');
+        if (!seen || !detail) return;
+        var line, full;
+        if (chip.classList.contains('attached')) {
+            line = '🔒 private';
+            full = 'A file you attach, drop or paste from a file manager stays private: only your local model reads it. '
+                    + 'The cloud model is told only that a file came, with its type and size.';
+        } else if (chip.dataset.shown !== '1') {
+            line = '🔒 private';
+            full = 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
+                    || 'it is not an image the cloud model can be shown') + '.';
+        } else if (chatRunsFree()) {
+            line = '🏠 Free: the local model can\'t see it';
+            full = 'This chat runs on the local model only (Free), and the local model cannot see images, so no model '
+                    + 'is shown this one now. If the chat later runs on the cloud model, the image goes with the '
+                    + 'chat\'s history, as its text does. Skills are given it as a file.';
+        } else if (!cloudSeesImages) {
+            line = '☁️ not seen: the cloud model is sent no images';
+            full = 'OwnClaw sends images to Anthropic\'s models only, and this chat\'s cloud model'
+                    + (cloudProvider ? ' (' + cloudProvider + ')' : '') + ' is sent none; the local model cannot see '
+                    + 'images either. Skills are given it as a file.';
+        } else if (chip.dataset.carries) {
+            line = '☁️ the cloud model will see it · skill results private';
+            full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. Its '
+                    + 'file also carries ' + chip.dataset.carries + ', and skills are given the file, so what skills '
+                    + 'read from it stays private.';
+        } else {
+            line = '☁️ the cloud model will see it';
+            full = 'The cloud model is shown this picture as it is: the privacy filter reads text, not pictures. '
+                    + 'Skills are given it as a file too.';
+        }
+        seen.textContent = line;
+        seen.title = full;
+        detail.textContent = full;
+    }
+
+    /** Every chip's line again: the chat's choice next to Send, its default or its cloud changed. */
     function refreshSeen() {
-        var chips = fileChips.querySelectorAll('.file-chip.pasted');
+        var chips = fileChips.querySelectorAll('.file-chip.pasted, .file-chip.attached');
         for (var i = 0; i < chips.length; i++) seenLine(chips[i]);
     }
 
@@ -7770,11 +7850,15 @@
      * Show what the chat opened runs on: what it has chosen, or, where it has chosen nothing,
      * "Default: ..." naming the default on the settings page it follows.
      */
-    function showChatOptions(options, defaults) {
+    function showChatOptions(options, defaults, cloud) {
         nameDefaults(defaults);
         costSel.value = options.costMode || '';
         effortSel.value = options.effort || '';
         updateComposer();
+        noteCloud(cloud);
+        // After the chat's own choice is in place -- set from code, it fires no change event: a chip
+        // pasted in another chat says who sees it in this one, which its message is sent in.
+        refreshSeen();
     }
 
     /** Name, in each "Default" choice next to Send, the default on the settings page it follows. */

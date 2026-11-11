@@ -257,18 +257,17 @@ public final class TaskChat {
     }
 
     /**
-     * A step of a task holding images the owner pasted is taken on the local model, which cannot
-     * see images and is sent none ({@code AgentLoop#imagesNotSeen}): said once, with why the local
-     * model works on it, because the owner pasted them to be seen.
+     * A step of a task holding images the owner pasted goes to a model not shown them
+     * ({@code AgentLoop#imagesNotSeen}): said once, with why, because the owner pasted them to be
+     * seen. Of the step as it is asked, so true however its call goes.
      *
-     * @param why "this chat runs on the local model only (Free)", "the cloud model can't be used -- ..."
+     * @param why "it goes to the local model, which cannot see images -- this chat runs on ..."
      */
     void imagesNotSeen(int images, String why) {
         if (sessionId == null) return;
-        note("🖼️ The local model is working on this task -- " + why + " -- and it cannot see images: "
-                + (images == 1 ? "the image you pasted is not shown to it. Skills are still given it as a file."
-                        : "the " + images + " images you pasted are not shown to it. Skills are still given "
-                                + "them as files."));
+        note("🖼️ " + (images == 1 ? "The image you pasted is" : "The " + images + " images you pasted are")
+                + " not shown to the model taking this step: " + why + ". Skills are still given "
+                + (images == 1 ? "it as a file." : "them as files."));
     }
 
     /**

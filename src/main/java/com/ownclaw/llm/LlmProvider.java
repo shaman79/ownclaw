@@ -58,4 +58,14 @@ public interface LlmProvider {
      * it never makes a call of its own.
      */
     default Integer knownContextWindow() { return null; }
+
+    /**
+     * The configured model's context window in tokens, asking the provider's own API when it is not
+     * known yet -- Anthropic's Models API -- or null when it cannot be told. Read before a request is
+     * written whose shape depends on it (the per-request image count), so that the first request of
+     * a process is shaped as every later one is.
+     *
+     * @param progress the hook the lookup's call reports to, and is stopped by
+     */
+    default Integer contextWindow(LlmProgress progress) { return knownContextWindow(); }
 }

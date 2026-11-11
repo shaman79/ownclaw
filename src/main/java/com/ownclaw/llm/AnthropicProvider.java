@@ -187,7 +187,7 @@ class AnthropicProvider implements LlmProvider {
                                 && reqConfig.tools().stream().anyMatch(ToolSpec::deferred)
                                 ? "," + TOOL_CHANGES_BETA : ""))
                 .header("Content-Type", "application/json")
-                .post(RequestBody.create(body.toString(), JSON_TYPE))
+                .post(RequestBody.create(utf8(body), JSON_TYPE))
                 .build();
 
         return StreamedCall.send(httpClient, request, "anthropic", reqConfig.progress(), response -> {
@@ -509,6 +509,9 @@ class AnthropicProvider implements LlmProvider {
         String systemPrompt = null;
         ArrayNode msgs = body.putArray("messages");
         boolean stable = false;
+        // The first message's blocks, and where each message of the chat ends among them.
+        ArrayNode chatBlocks = null;
+        List<Integer> chatEnds = List.of();
         // A model that takes no tool changes -- the one a refusal is retried on, say -- is sent
         // what a provider without deferred loading is: the tools offered so far, none deferred,
         // and no TOOLS message.
@@ -561,11 +564,15 @@ class AnthropicProvider implements LlmProvider {
                     // among that message's blocks: no mark of its own, and the same bytes on every
                     // turn, read from the same copy.
                     ObjectNode last = null;
+                    var ends = new ArrayList<Integer>();
                     for (var message : layout.chat()) {
                         ObjectNode b = blocks(blocks, message, msg.images());
                         if (b != null) last = b;
+                        ends.add(blocks.size() - 1);
                     }
                     if (last != null) last.set("cache_control", cacheControl(true));
+                    chatBlocks = blocks;
+                    chatEnds = ends;
                     ObjectNode task = blocks(blocks, layout.task(), msg.images());
                     if (task != null) task.set("cache_control", cacheControl(true));
                     if (!layout.rest().isBlank()) textBlock(blocks, layout.rest());
@@ -573,8 +580,9 @@ class AnthropicProvider implements LlmProvider {
                     // A marked message with its boundary gone -- a private key with no END line
                     // removes to the end of the text, the markers in it too -- goes as the text the
                     // model reads: that chat loses its blocks for the turn, and no marker is sent,
-                    // nor any image (the gateway sent it none: CloudGateway#images).
-                    m.put("content", msg.marked() ? LlmMessage.plain(content) : content);
+                    // nor any image (the gateway sent it none: CloudGateway#images) -- each image
+                    // still standing a line saying so, as the task's text says one is shown.
+                    m.put("content", msg.marked() ? LlmMessage.textOnly(content, NOT_SENT_WHY) : content);
                 }
             }
         }
@@ -600,11 +608,22 @@ class AnthropicProvider implements LlmProvider {
         // or before it -- is not one.
         int newest = msgs.size() - 1;
         while (newest > 0 && !"user".equals(msgs.get(newest).path("role").asText())) newest--;
+        boolean sliding = false;
         for (int i = newest - 1; i > 0; i--) {
             if (msgs.get(i).path("content").isTextual()) {
                 setMessageCacheBreakpoint(msgs, i);
+                sliding = true;
                 break;
             }
+        }
+        // A turn's first step has no sliding mark, so a fourth is free: where the last turn's chat
+        // ended, when the chat's mark is more blocks past it than the API looks back over (the mark
+        // itself and nineteen before it). A message pasted with eighteen images or more is that many
+        // blocks: the last turn's cached chat was then not found, and the whole chat was written
+        // again. Two messages back, the last turn's own and its answer, as a turn adds them.
+        if (!sliding && chatEnds.size() >= 3) {
+            int was = chatEnds.get(chatEnds.size() - 3), is = chatEnds.get(chatEnds.size() - 1);
+            if (was >= 0 && is - was > 19) ((ObjectNode) chatBlocks.get(was)).set("cache_control", cacheControl(true));
         }
 
         // Native tools.
@@ -660,7 +679,19 @@ class AnthropicProvider implements LlmProvider {
      * it (CloudGateway#images): the task's text says an image is shown there, and the model is not
      * left to think it is looking at one.
      */
-    static final String IMAGE_NOT_SENT = "[An image was pasted here. It was not sent with this request.]";
+    static final String NOT_SENT_WHY = "it could not be sent with this request";
+
+    /** {@link #NOT_SENT_WHY} as the line it is. */
+    static final String IMAGE_NOT_SENT = LlmMessage.notShown(NOT_SENT_WHY);
+
+    /** {@code body} as the UTF-8 bytes the request sends, written straight: a String of it first held it twice more. */
+    private byte[] utf8(ObjectNode body) {
+        try {
+            return mapper.writeValueAsBytes(body);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new LlmException("anthropic", "the request could not be written: " + e.getOriginalMessage());
+        }
+    }
 
     /**
      * A block's pieces added to {@code blocks} ({@link LlmMessage#pieces}): each text as a text
@@ -833,5 +864,21 @@ class AnthropicProvider implements LlmProvider {
         String model = config.getAnthropicModel();
         ModelLimits known = model == null ? null : limits.get(model);
         return known == null ? null : known.contextWindow();
+    }
+
+    /** The configured model's window, from the Models API when this process has not asked yet. */
+    @Override
+    public Integer contextWindow(LlmProgress progress) {
+        Integer known = knownContextWindow();
+        if (known != null) return known;
+        String apiKey = config.getAnthropicApiKey();
+        String model = config.getAnthropicModel();
+        if (apiKey == null || apiKey.isBlank() || model == null) return null;
+        try {
+            return limits(model, apiKey, progress == null ? LlmProgress.NONE : progress).contextWindow();
+        } catch (LlmException unknown) {
+            // The request that follows asks again, and fails saying why.
+            return null;
+        }
     }
 }

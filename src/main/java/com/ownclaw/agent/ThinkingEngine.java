@@ -66,9 +66,11 @@ public class ThinkingEngine {
 
         // A request takes so many images, and so many bytes of them, at most: past that the chat's
         // oldest are shown by their lines alone (AgentContext#fitImages), before the request is
-        // written -- the count by the model's window, as far as the provider knows it already.
-        if ("anthropic".equals(provider.name())) {
-            int folded = context.fitImages(LlmMessage.imagesPerRequest(provider.knownContextWindow()),
+        // written -- the count by the model's window, asked of the Models API first when this process
+        // has not asked yet: guessed on the first request after a restart, it folded and then
+        // unfolded the chat, and each wrote the whole chat to the cache again.
+        if ("anthropic".equals(provider.name()) && (context.conversationImageCount() > 0 || !context.pasted().isEmpty())) {
+            int folded = context.fitImages(LlmMessage.imagesPerRequest(provider.contextWindow(context.progress())),
                     LlmMessage.IMAGE_BYTES_PER_REQUEST);
             if (folded > 0) {
                 log.info("Task {}: {} of the chat's oldest images are shown by their lines alone, to keep the "
@@ -1180,6 +1182,17 @@ public class ThinkingEngine {
                 sb.append(" The local model cannot see images: a delegation is not shown one, so put what it needs ")
                   .append("from an image in its goal, or name a skill that reads the file.");
             }
+            // A file that carries more than the picture: a skill can read that, so its results are private.
+            var carrying = pasted.stream().filter(p -> p.image().metadata() != null).toList();
+            if (!carrying.isEmpty()) {
+                sb.append(carrying.size() == 1 ? " The file of " : " The files of ")
+                  .append(String.join(", ", carrying.stream().map(p -> p.artifact().handle()).toList()))
+                  .append(carrying.size() == 1 ? " carries " : " carry ")
+                  .append(String.join("; ", carrying.stream().map(p -> p.image().metadata()).distinct().toList()))
+                  .append(" beside the picture, and skills are given the file whole: so every result of this task is ")
+                  .append("private and reaches you only as a description, as for a file the user sent. To answer from ")
+                  .append("one, delegate and name its handle in the goal.");
+            }
             sb.append('\n');
         }
         if (chatTotal > 0) {
@@ -1221,7 +1234,7 @@ public class ThinkingEngine {
      * the file holds. In the user message, so the cached system prompt and tools stay the same.
      */
     static String filesSection(AgentContext context) {
-        List<Artifact> files = context.files();
+        List<Artifact> files = context.privateFiles();
         if (files.isEmpty()) return "";
         var sb = new StringBuilder("## Files sent with this message\n");
         for (Artifact f : files) {

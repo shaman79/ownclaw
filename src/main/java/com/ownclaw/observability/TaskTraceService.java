@@ -96,7 +96,7 @@ public class TaskTraceService {
         var pending = new ArrayList<Map<String, Object>>();
         var decisions = new LinkedHashMap<String, Integer>();
         long bytesOut = 0, prompt = 0, completion = 0, cacheRead = 0, cacheWrite = 0;
-        int scrubs = 0, identifiers = 0, imagesSent = 0;
+        int scrubs = 0, identifiers = 0;
         double cost = 0;
         boolean costIsFloor = false;
         long prevCloud = 0, prevLocal = 0, localAfterEnd = 0;
@@ -128,7 +128,6 @@ public class TaskTraceService {
                     scrubs += d.path("scrubs").asInt();
                     identifiers += d.path("identifiers").asInt();
                     cost += d.path("costUsd").asDouble();
-                    imagesSent += d.path("images").size();
                     // A failed call is recorded with at most what its stream had reported when
                     // it ended, so a total over it is a lower bound.
                     if (isError(c)) costIsFloor = true;
@@ -277,8 +276,31 @@ public class TaskTraceService {
         totals.put("cacheWriteTokens", cacheWrite);
         totals.put("scrubs", scrubs);
         totals.put("identifiers", identifiers);
-        // Images that left with a request: a refused one carries none (CloudGateway).
-        totals.put("images", imagesSent);
+        // The images that left: each pasted image once, however many requests carried it -- the
+        // requests that went (a refused one carries none: CloudGateway); and apart, those only on
+        // requests that failed, which may not have reached the provider.
+        var went = new java.util.LinkedHashSet<String>();
+        var failed = new java.util.LinkedHashSet<String>();
+        int imageRequests = 0;
+        for (var c : calls) {
+            var ids = imageIds(c);
+            if (answered(c) && !ids.isEmpty()) {
+                imageRequests++;
+                went.addAll(ids);
+            } else if (isError(c)) {
+                failed.addAll(ids);
+            }
+        }
+        failed.removeAll(went);
+        totals.put("images", went.size());
+        totals.put("imageRequests", imageRequests);
+        totals.put("imagesFailed", failed.size());
+        // And each pasted image: how many requests that went carried it -- none on a Free task, or
+        // one whose cloud could not be called.
+        for (var a : artifacts) {
+            if (!"pasted image".equals(a.get("kind")) || a.get("fileId") == null) continue;
+            a.put("shownWith", (int) calls.stream().filter(c -> answered(c) && imageIds(c).contains(a.get("fileId"))).count());
+        }
         totals.put("costUsd", cost);
         totals.put("costIsFloor", costIsFloor);
         totals.put("decisions", decisions);
@@ -297,6 +319,34 @@ public class TaskTraceService {
         out.put("artifacts", artifacts);
         out.put("notObserved", NOT_OBSERVED);
         return out;
+    }
+
+    /** The files of the images a request carried. */
+    @SuppressWarnings("unchecked")
+    private static List<String> imageIds(Map<String, Object> c) {
+        var out = new ArrayList<String>();
+        if (c.get("images") instanceof List<?> images) {
+            for (Object i : images) {
+                Object id = ((Map<String, Object>) i).get("fileId");
+                if (id != null) out.add(String.valueOf(id));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * How many requests of a task that went carried the image of file {@code fileId}, as its page
+     * counts them ({@link #trace}): 0 when none did -- a Free task, or one with no cloud to call.
+     */
+    @SuppressWarnings("unchecked")
+    public static int requestsCarrying(Map<String, Object> trace, String fileId) {
+        if (!(trace.get("calls") instanceof List<?> calls)) return 0;
+        int n = 0;
+        for (Object c : calls) {
+            var call = (Map<String, Object>) c;
+            if (answered(call) && imageIds(call).contains(fileId)) n++;
+        }
+        return n;
     }
 
     /** Whether a request came back with a reply: a refused one never left, a failed one got none. */
@@ -422,6 +472,11 @@ public class TaskTraceService {
             a.put("height", d.path("height").asInt());
             a.put("imageWidth", d.path("imageWidth").asInt());
             a.put("imageHeight", d.path("imageHeight").asInt());
+            // Its file carries more than the picture: what skills read from it is private.
+            if (d.path("resultsPrivate").asBoolean(false)) {
+                a.put("resultsPrivate", true);
+                a.put("metadata", d.path("metadata").asText(null));
+            }
         }
         return a;
     }

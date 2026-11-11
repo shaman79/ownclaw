@@ -61,37 +61,69 @@ class ChatPastePageTest {
         assertTrue(page.contains("var clipboardImages = new WeakSet();"));
         String u = between("function uploadFiles(files, pasted) {", "function createFileChip(");
         assertTrue(u.contains("if (pasted) formData.append('pasted', 'true');"), "the claim, for the server to check: " + u);
-        assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("if (pasted) markSeen(chips[i], uploaded[i]);"), u);
-        // Mutation: mark every pasted file -> a statement copied in a file manager goes up as an image.
+        assertTrue(u.indexOf("if (!chips[i].isConnected)") < u.indexOf("markSeen(chips[i], uploaded[i], pasted);"), u);
+        // A clipboard that lists its files but not its items says nothing of where they came from: a file.
+        assertTrue(f.contains("if (data.files[j].type) { found.push(data.files[j]); onDisk.push(true); }"), f);
+        // Mutation: mark every pasted file -> a statement copied in a file manager goes up as an image;
+        // onDisk false in the fallback -> a file manager's image.png goes up as a pasted picture.
     }
 
     @Test
-    @DisplayName("a pasted image's chip says who sees it, as text: the cloud model, nobody on Free, or nobody because it stays private")
+    @DisplayName("every chip says who sees its file, as text, with what that means a tap away: private, the cloud model, nobody on Free, nobody with a cloud sent no images")
     void theChipSaysWhoSeesIt() {
-        String mark = between("function markSeen(chip, uploaded) {", "function chatRunsFree()");
-        assertTrue(mark.contains("chip.dataset.shown = uploaded.shown_to_cloud ? '1' : '';"), "the server's word, not the page's: " + mark);
-        assertTrue(mark.contains("var seen = node('span', 'file-chip-seen');"), mark);
-        String free = between("function chatRunsFree() {", "function seenLine(");
+        String mark = between("function markSeen(chip, uploaded, pasted) {", "function chatRunsFree()");
+        assertTrue(mark.contains("chip.classList.add(pasted ? 'pasted' : 'attached');"), "every chip, a file's too: " + mark);
+        assertTrue(mark.contains("chip.dataset.shown = pasted && uploaded.shown_to_cloud ? '1' : '';"), "the server's word: " + mark);
+        assertTrue(mark.contains("chip.dataset.carries = pasted && uploaded.results_private ? String(uploaded.metadata || 'more than the picture') : '';"), mark);
+        assertTrue(mark.contains("var seen = node('button', 'file-chip-seen');"), "a button, which a touch screen can tap: " + mark);
+        assertTrue(mark.contains("var open = chip.classList.toggle('open'); seen.setAttribute('aria-expanded', open ? 'true' : 'false');"), mark);
+        String free = between("function chatRunsFree() {", "var cloudSeesImages");
         assertTrue(free.contains("return (costSel.value || defaultCostMode) === 'free';"), free);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
-        assertTrue(line.contains("if (chip.dataset.shown !== '1') { seen.textContent = '🔒 private';"), line);
-        assertTrue(line.contains("} else if (chatRunsFree()) { seen.textContent = '🏠 Free: the local model can\\'t see images';"), line);
-        assertTrue(line.contains("the local model cannot see images"), line);
-        assertTrue(line.contains("} else { seen.textContent = '☁️ the cloud model will see it';"), line);
-        assertTrue(line.contains("the privacy filter reads text, not pictures"), line);
+        int attached = line.indexOf("if (chip.classList.contains('attached')) { line = '🔒 private';");
+        int kept = line.indexOf("} else if (chip.dataset.shown !== '1') { line = '🔒 private';");
+        int onFree = line.indexOf("} else if (chatRunsFree()) { line = '🏠 Free: the local model can\\'t see it';");
+        int notSent = line.indexOf("} else if (!cloudSeesImages) { line = '☁️ not seen: the cloud model is sent no images';");
+        int carries = line.indexOf("} else if (chip.dataset.carries) { line = '☁️ the cloud model will see it · skill results private';");
+        int sees = line.indexOf("} else { line = '☁️ the cloud model will see it';");
+        assertTrue(attached >= 0 && kept > attached && onFree > kept && notSent > onFree && carries > notSent && sees > carries,
+                "each case, in this order -- Free and a cloud sent none before any 'will see it': " + line);
+        assertTrue(line.contains("If the chat later runs on the cloud model, the image goes with the '"
+                + " + 'chat\\'s history, as its text does."), "Free says what a later cloud turn does: " + line);
+        assertTrue(line.contains("so what skills ' + 'read from it stays private."), line);
+        assertTrue(line.contains("seen.textContent = line; seen.title = full; detail.textContent = full;"), line);
         assertFalse(line.contains("innerHTML") || mark.contains("innerHTML"), "text, never markup");
         assertTrue(page.contains("costSel.addEventListener('change', refreshSeen);"), "the chat's choice changes the line");
-        assertTrue(between("function nameDefaults(defaults) {", "var defaultCostMode;").contains("defaultCostMode = defaults.costMode; refreshSeen();"));
-        // Mutation: say "sees it" before checking Free -> a Free chat's chip claims the cloud sees the image.
+        assertTrue(page.contains("var chips = fileChips.querySelectorAll('.file-chip.pasted, .file-chip.attached');"));
+        // Mutation: say "will see it" before checking Free or the cloud -> a chip claims what does not happen.
     }
 
     @Test
-    @DisplayName("a paste that carries text pastes the text: a copy from a spreadsheet brings a picture of the cells too")
-    void textWins() {
-        String h = handler();
-        assertTrue(h.contains("if ((e.clipboardData.getData('text/plain') || '').trim()) return;"), h);
-        assertTrue(h.indexOf("getData('text/plain')") < h.indexOf("e.preventDefault();"),
-                "the text is looked at before the paste is cancelled: " + h);
+    @DisplayName("opening another chat says, on a chip pasted in the last one, who sees it in this one: after the chat's own choice is set")
+    void theChipFollowsTheChatSwitch() {
+        String show = between("function showChatOptions(options, defaults, cloud) {", "function nameDefaults(defaults)");
+        int set = show.indexOf("costSel.value = options.costMode || '';");
+        int refresh = show.lastIndexOf("refreshSeen();");
+        assertTrue(set >= 0 && refresh > set, "refreshed after the value is set, which fires no change event: " + show);
+        assertTrue(show.contains("noteCloud(cloud);"), "and the chat's cloud: " + show);
+        assertTrue(page.contains("showChatOptions(data.options, data.defaults, data.cloud);"));
+        String note = between("function noteCloud(cloud) {", "function seenLine(chip)");
+        assertTrue(note.contains("cloudSeesImages = cloud.seesImages !== false;"), note);
+        assertTrue(page.contains("noteCloud({ provider: provider, seesImages: provider === 'anthropic' });"),
+                "the settings page's provider too");
+        // Mutation: refresh in nameDefaults only -> the chip keeps the last chat's wording (the review's Free-to-Cheaper send).
+    }
+
+    @Test
+    @DisplayName("on a narrow screen a chip is no wider than the row: its name and line shrink to an ellipsis, the remove button never does")
+    void narrowScreens() {
+        String css = between("/* * Every chip says who sees its file", ".file-chip.uploading {");
+        assertTrue(css.contains(".file-chip { max-width: 100%; box-sizing: border-box; min-width: 0 }"), css);
+        assertTrue(css.contains("min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"), css);
+        assertTrue(css.contains(".file-chip-remove { flex-shrink: 0 }"), css);
+        assertTrue(css.contains(".file-chip.open { flex-wrap: wrap; border-radius: 12px }"), css);
+        assertFalse(css.contains("max-width: 360px"), "no width of its own past the row's");
+        // Mutation: give the line flex-shrink 0 again -> at 320 px the remove button is pushed off the screen.
     }
 
     @Test
@@ -150,9 +182,9 @@ class ChatPastePageTest {
     @Test
     @DisplayName("the hint under the box says it plainly: files stay private, pasted images are shown to the cloud model, unfiltered")
     void theHintSaysSo() {
-        assertTrue(page.contains("Files you attach with 📎 or drag &amp; drop stay private &nbsp;&middot;&nbsp; Images you "
-                + "paste are shown to the cloud model as they are — the privacy filter reads text, not pictures"), page.substring(
-                page.indexOf("<div class=\"input-hint\">"), page.indexOf("<div class=\"input-hint\">") + 400));
+        assertTrue(page.contains("Screenshots and pictures pasted from the clipboard are shown to the cloud model as pictures "
+                + "(the privacy filter reads text, not pictures); files you attach, drop or paste from a file manager stay private"),
+                page.substring(page.indexOf("<div class=\"input-hint\">"), page.indexOf("<div class=\"input-hint\">") + 500));
         assertFalse(page.contains("paste or 📎 to attach files — they stay private"), "pasted images are not private");
     }
 
@@ -164,9 +196,15 @@ class ChatPastePageTest {
         assertTrue(call.contains("im.mediaType + ', ' + im.width + '×' + im.height + ' px, ' + formatBytes(im.bytes) + ' · sha256 ' + im.sha256_16"), call);
         assertTrue(call.contains("(c.withheld || []).forEach(function(w) { d.appendChild(tdRow('Image withheld', "), call);
         String panel = between("function buildTaskSentPanel(t, recorded) {", "function buildTaskCallElement(c) {");
-        assertTrue(panel.contains("if (totals.images) {"), panel);
+        assertTrue(panel.contains("if (totals.images || totals.imagesFailed) {"), panel);
+        assertTrue(panel.contains("tdCount(totals.images, 'image', 'images') + ' you pasted went with ' + tdCount(totals.imageRequests, 'request', 'requests')"),
+                "each image once, with how many requests: " + panel);
+        assertTrue(panel.contains("only in requests that failed, which may not have reached the provider"), panel);
         assertTrue(panel.contains("the privacy filter reads text, not pictures"), panel);
         assertTrue(panel.contains("if (a.kind === 'pasted image') {"), "a pasted image is said as one: " + panel);
+        assertTrue(panel.contains("a.shownWith ? 'Shown to the cloud model with ' + tdCount(a.shownWith, 'request', 'requests')"), panel);
+        assertTrue(panel.contains(": 'Not shown to the cloud model in this task: no request that went carried it. '"),
+                "a Free task's image is not said to have been shown: " + panel);
         assertFalse((call + panel).contains("innerHTML"), "text, never markup");
     }
 }

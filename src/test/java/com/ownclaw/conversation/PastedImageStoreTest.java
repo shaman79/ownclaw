@@ -56,20 +56,23 @@ class PastedImageStoreTest {
         assertTrue(pasted.shownToCloud());
         var row = s.row(pasted.id());
         assertEquals(1, ((Number) row.get("shown_to_cloud")).intValue());
-        assertNull(row.get("cloud_copy"), "within the tier the stored file is the copy");
+        assertNotNull(row.get("cloud_copy"), "a copy beside it, always: never the pasted bytes");
+        byte[] copy = Files.readAllBytes(s.uploads().resolve((String) row.get("cloud_copy")));
         assertEquals("image/png", row.get("cloud_media_type"));
         assertEquals(1280, ((Number) row.get("cloud_width")).intValue());
         assertEquals(720, ((Number) row.get("cloud_height")).intValue());
-        assertEquals((long) bytes.length, ((Number) row.get("cloud_bytes")).longValue());
-        assertEquals(CloudImageCopy.sha256(bytes), row.get("cloud_sha256"));
+        assertEquals((long) copy.length, ((Number) row.get("cloud_bytes")).longValue());
+        assertEquals(CloudImageCopy.sha256(copy), row.get("cloud_sha256"));
+        assertNull(row.get("image_metadata"), "a screenshot holds the picture alone");
         assertNotNull(FileStorageService.pastedImage(row));
+        assertArrayEquals(copy, s.files().copyOf("u1", pasted.id()).copy().bytes(), "the lookup gives the copy");
 
         var attached = s.put("u1", "photo.png", "image/png", bytes, false);
         assertFalse(attached.shownToCloud());
         assertEquals(0, ((Number) s.row(attached.id()).get("shown_to_cloud")).intValue(), "attached with 📎: private");
         assertNull(FileStorageService.pastedImage(s.row(attached.id())));
         assertNull(s.files().copyOf("u1", attached.id()).copy());
-        assertTrue(s.files().copyOf("u1", attached.id()).withheld().contains("private"));
+        assertTrue(s.files().copyOf("u1", attached.id()).withheld().contains("private file"));
         // Mutation: mark on the claim alone, or on an image alone -> one of the two is shown.
     }
 
@@ -105,19 +108,37 @@ class PastedImageStoreTest {
         assertNotEquals(CloudImageCopy.sha256(Files.readAllBytes(s.files().getFilePath(big.id()))), found.copy().sha256());
 
         assertNull(s.files().copyOf("u2", big.id()).copy(), "another user's file is never his");
-        assertTrue(s.files().copyOf("u2", big.id()).withheld().contains("not this user's"));
+        assertTrue(s.files().copyOf("u2", big.id()).withheld().contains("another account's"));
         assertNull(s.files().copyOf("u1", "no-such-id").copy());
 
         // Changed on disk since -- by a skill that ran unjailed, say: not sent.
         Files.write(s.uploads().resolve(sidecar), png(100, 100));
         var changed = s.files().copyOf("u1", big.id());
         assertNull(changed.copy());
-        assertTrue(changed.withheld().contains("not the bytes recorded"), changed.withheld());
+        assertTrue(changed.withheld().contains("changed after it was pasted"), changed.withheld());
         // A link where the copy was is not followed.
         Files.delete(s.uploads().resolve(sidecar));
         Files.createSymbolicLink(s.uploads().resolve(sidecar), s.uploads().resolve(sidecar + ".elsewhere"));
         assertNull(s.files().copyOf("u1", big.id()).copy());
         // Mutation: drop the hash check -> the changed bytes go; drop the user check -> u2's goes.
+    }
+
+    @Test
+    @DisplayName("a photo whose EXIF holds a place and an address is shown, and its file recorded as carrying EXIF data")
+    void metadataIsRecorded(@TempDir Path tmp) throws Exception {
+        var s = Store.in(tmp);
+        byte[] jpeg = TestImages.withSegment(TestImages.encoded(TestImages.screenshot(800, 600), "jpeg"), 0xE1,
+                TestImages.exif(1, "GPS 49.19N 16.61E owner@example.com"));
+        var stored = s.put("u1", "image.jpg", "image/jpeg", jpeg, true);
+        assertTrue(stored.shownToCloud());
+        assertEquals("EXIF data", stored.copy().metadata());
+        var row = s.row(stored.id());
+        assertEquals("EXIF data", row.get("image_metadata"));
+        assertEquals("EXIF data", FileStorageService.pastedImage(row).metadata());
+        String copy = new String(s.files().copyOf("u1", stored.id()).copy().bytes(), java.nio.charset.StandardCharsets.ISO_8859_1);
+        assertFalse(copy.contains("owner@example.com"), "the copy is the picture alone");
+        assertEquals("image/jpeg", row.get("cloud_media_type"), "a JPEG's copy is a JPEG");
+        // Mutation: drop image_metadata from the update -> skills' results on it go to the cloud.
     }
 
     @Test

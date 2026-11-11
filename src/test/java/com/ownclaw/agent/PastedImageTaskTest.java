@@ -275,10 +275,162 @@ class PastedImageTaskTest {
         for (int i = 0; i < content.size(); i++) if ("image".equals(content.get(i).path("type").asText())) at = i;
         assertTrue(at > 0, "an image block: " + content);
         assertEquals("image/png", content.get(at).path("source").path("media_type").asText());
-        assertEquals(Base64.getEncoder().encodeToString(Files.readAllBytes(rig.files.getFilePath(image.id()))),
-                content.get(at).path("source").path("data").asText(), "within the tier: the pasted file itself");
+        String sidecar = rig.jdbc.queryForObject("SELECT cloud_copy FROM file_attachments WHERE id = ?", String.class, image.id());
+        assertEquals(Base64.getEncoder().encodeToString(Files.readAllBytes(tmp.resolve("uploads").resolve(sidecar))),
+                content.get(at).path("source").path("data").asText(), "its copy, made at upload -- never the pasted bytes");
         assertTrue(content.get(at - 1).path("text").asText().endsWith("## Task\n"), content.get(at - 1).toString());
         assertTrue(content.get(at + 1).path("text").asText().startsWith("read it"), content.get(at + 1).toString());
         assertFalse(body.toString().contains("\\u0001"));
+    }
+
+    /** {@code n} different small screenshots, pasted. */
+    static List<String> pasteMany(LoopRig rig, int n) throws Exception {
+        var ids = new java.util.ArrayList<String>();
+        for (int i = 0; i < n; i++) {
+            var stored = rig.files.store("u1", "pasted-image-" + i + ".png", "image/png",
+                    new ByteArrayInputStream(TestImages.png(40 + i, 30 + i % 7)), true);
+            assertTrue(stored.shownToCloud(), stored.privateBecause());
+            ids.add(stored.id());
+        }
+        return ids;
+    }
+
+    @Test
+    @DisplayName("the task page counts each image once, however many requests carried it, and says with how many it went")
+    @SuppressWarnings("unchecked")
+    void eachImageOnce(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("A router."));
+        AgentResult r = rig.turn(LocalModeTest.session(rig), "what is this?", pasteMany(rig, 1));
+        var page = (Map<String, Object>) new com.ownclaw.interfaces.web.TaskTraceController(
+                new com.ownclaw.observability.TaskTraceService(rig.events), rig.files).trace("u1", r.taskId()).getBody();
+        var totals = (Map<String, Object>) page.get("totals");
+        assertEquals(1, totals.get("images"), "one image you pasted");
+        assertEquals(3, totals.get("imageRequests"), "went with three requests");
+        assertEquals(0, totals.get("imagesFailed"));
+        var artifact = ((List<Map<String, Object>>) page.get("artifacts")).getFirst();
+        assertEquals(3, artifact.get("shownWith"));
+        // Mutation: count an image per request again -> "3 images you pasted".
+    }
+
+    @Test
+    @DisplayName("a message pasted with more images than one request takes is refused before any call, saying how to send them")
+    void tooManyImagesForOneRequest(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        rig.cloud.think.add(respond("never asked"));
+        AgentResult r = rig.turn(LocalModeTest.session(rig), "all of these", pasteMany(rig, 101));
+        assertTrue(rig.cloud.calls.isEmpty(), "nothing went: " + rig.cloud.calls.size());
+        assertEquals(AgentResult.TerminationReason.ERROR, r.terminationReason());
+        assertTrue(r.response().contains("this message carries 101 pasted images"), r.response());
+        assertTrue(r.response().contains("at most 100 images"), r.response());
+        assertTrue(r.response().contains("Paste them over several messages"), r.response());
+        // On Free nothing is sent, so nothing is refused.
+        var local = LocalModeTest.localModel();
+        var free = new LoopRig(tmp.resolve("free"), List.of(LocalModeTest.NOOP), 600, local);
+        local.think.add(respond("done locally"));
+        assertEquals("done locally", free.turn(LocalModeTest.session(free), "all of these", new ChatOptions("free", null),
+                pasteMany(free, 101)).response());
+        // Mutation: drop the check -> the request holds 101 images and the API refuses it.
+    }
+
+    @Test
+    @DisplayName("a message pasted with eighteen images: the next turn still finds the last turn's cached chat, through the free fourth mark")
+    void eighteenImagesKeepTheCache(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        String session = LocalModeTest.session(rig);
+        rig.cloud.think.add(respond("Hi."));
+        rig.turn(session, "hello");
+        rig.cloud.think.add(respond("Screens."));
+        rig.turn(session, "what are these?", pasteMany(rig, 18));
+        rig.cloud.think.add(respond("Bye."));
+        rig.turn(session, "thanks");
+        var calls = rig.cloud.calls("think");
+        JsonNode two = ChatCacheTest.body(calls.get(1).messages(), calls.get(1).config().tools());
+        JsonNode three = ChatCacheTest.body(calls.get(2).messages(), calls.get(2).config().tools());
+        int was = firstMark(two), is = firstMark(three);
+        assertTrue(is >= 0 && is - was <= 19, "turn 3's first mark is " + (is - was) + " blocks past turn 2's");
+        for (int i = 0; i <= was; i++) {
+            assertEquals(two.path("messages").get(0).path("content").get(i).path("text"),
+                    three.path("messages").get(0).path("content").get(i).path("text"), "the cached prefix, block " + i);
+        }
+        // Mutation: no fourth mark -> the mark 21 blocks on cannot reach back, and the chat is written again.
+    }
+
+    static int firstMark(JsonNode body) {
+        JsonNode content = body.path("messages").get(0).path("content");
+        for (int i = 0; i < content.size(); i++) if (content.get(i).has("cache_control")) return i;
+        return -1;
+    }
+
+    @Test
+    @DisplayName("a photo whose file carries EXIF with a place and an address: shown to the cloud, and what skills read from it private")
+    void metadataMakesResultsPrivate(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        byte[] jpeg = TestImages.withSegment(TestImages.encoded(TestImages.screenshot(800, 600), "jpeg"), 0xE1,
+                TestImages.exif(1, "GPS 49.19N 16.61E owner@example.com"));
+        var photo = rig.files.store("u1", "image.jpg", "image/jpeg", new ByteArrayInputStream(jpeg), true);
+        assertTrue(photo.shownToCloud());
+        var ctx = new AgentContext("u1", "c3d4e5f6", "what does it show?");
+        AgentLoop.registerAttachments(ctx, List.of(photo.id()), rig.files, rig.events);
+        assertEquals(1, ctx.pasted().size(), "its picture is shown");
+        assertEquals(1, ctx.files().size(), "and it counts among the files that make results private");
+        assertTrue(ctx.privateFiles().isEmpty(), "it is no private file: the cloud sees the picture");
+        var decision = ctx.decide(List.of(), List.of(), false, "{\"GPS\": \"49.19N 16.61E\", \"owner\": \"owner@example.com\"}");
+        assertEquals(Label.PRIVATE, decision.label(), "a skill's report of its EXIF stays on this machine");
+        String task = ChatCacheTest.engine().anthropicTask(ctx).text();
+        assertTrue(task.contains("The file of {{1}} carries EXIF data beside the picture"), task);
+        assertTrue(task.contains("every result of this task is private"), task);
+        assertEquals("", ThinkingEngine.filesSection(ctx), "not listed as a private file: it is shown");
+
+        // And through the loop: the picture goes, the address does not.
+        rig.cloud.think.add(respond("A router's page."));
+        rig.turn(LocalModeTest.session(rig), "what does it show?", List.of(photo.id()));
+        LlmMessage sent = first(rig.cloud.calls("think").get(0));
+        assertNotNull(sent.images().getFirst().sent(), "the picture is sent");
+        String bytes = new String(Base64.getDecoder().decode(sent.images().getFirst().sent().base64()), StandardCharsets.ISO_8859_1);
+        assertFalse(bytes.contains("owner@example.com"), "its copy holds the picture alone");
+        // Mutation: count only private files in files() -> the EXIF a skill reads goes to the cloud as public.
+    }
+
+    @Test
+    @DisplayName("a cloud model that is sent no images -- OpenAI -- is told so, and so is the owner, once")
+    void openAiIsSentNone(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        rig.cloud.name = "openai";
+        rig.config.getMentor().setProvider("openai");
+        var image = paste(rig, 640, 480);
+        rig.cloud.think.add(call("noop", Map.of()));
+        rig.cloud.think.add(respond("I cannot see it."));
+        rig.turn(LocalModeTest.session(rig), "what is this?", List.of(image.id()));
+        for (Call call : rig.cloud.calls("think")) {
+            for (LlmMessage m : call.messages()) {
+                assertTrue(m.images().isEmpty(), "no image goes to OpenAI");
+                assertFalse(m.content().contains("\u0001"));
+            }
+        }
+        assertTrue(LocalModeTest.all(rig.cloud.calls("think").getFirst()).contains("Images are not sent to this model"));
+        List<String> notes = LocalModeTest.rows(rig).stream().filter(n -> n.startsWith("🖼️")).toList();
+        assertEquals(1, notes.size(), String.valueOf(LocalModeTest.rows(rig)));
+        assertTrue(notes.getFirst().contains("it goes to the cloud model of openai, which OwnClaw sends no images"), notes.getFirst());
+        // Mutation: tell only the local model's steps -> the owner trusts that OpenAI saw his screenshot.
+    }
+
+    @Test
+    @DisplayName("the ending names the pasted image as one, and whether a request showed it: on Free, none did")
+    void theEndingSaysItsFate(@TempDir Path tmp) throws Exception {
+        var local = LocalModeTest.localModel();
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP), 600, local);
+        var image = paste(rig, 1280, 720);
+        local.think.add(c -> {
+            throw new com.ownclaw.llm.LlmException("ollama", "Connection failed: refused", 0, new java.net.ConnectException("refused"));
+        });
+        AgentResult r = rig.turn(LocalModeTest.session(rig), "what does this say?", new ChatOptions("free", null),
+                List.of(image.id()));
+        assertTrue(r.response().contains("result 1 (the image you pasted, 1280x720 px): not shown to a model in this task."),
+                r.response());
+        assertFalse(r.response().contains("(attachment): 0 chars"), r.response());
+        // Mutation: list it as any result -> "result 1 (attachment): 0 chars, public".
     }
 }

@@ -142,4 +142,72 @@ class AnthropicImagesTest {
         assertFalse(unmarked.toString().contains("\"image\""), unmarked.toString());
         // Mutation: render images whose bytes are null, or on any message -> a block of nothing, or a forged one.
     }
+
+    @Test
+    @DisplayName("a turn that added more blocks than the API looks back over: on its first step the free fourth mark goes where the last turn's chat ended")
+    void theLookbackMark() {
+        // The last turn: "hello", "Hi." -- its chat mark on "Hi.". This turn adds the message the last
+        // one asked, with eighteen images, and its answer: twenty blocks past that mark.
+        var images = new ArrayList<LlmMessage.Image>();
+        for (int i = 0; i < 18; i++) images.add(sent("f" + i, "PIXELS-" + i));
+        var chat = List.of("USER: hello\n", "ASSISTANT: Hi.\n", "USER: what are these?\n", "ASSISTANT: Screens.\n");
+        String content = chatThenTask(chat, List.of(0, 0, 18, 0), "thanks", 0, 18) + MARK + "\n\n---\n## Environment";
+        var first = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(content, images)));
+        JsonNode blocks = first.path("messages").get(0).path("content");
+        assertTrue(blocks.get(1).has("cache_control"), "where the last turn's chat ended: " + blocks.get(1));
+        assertEquals("ASSISTANT: Hi.\n", blocks.get(1).path("text").asText());
+        assertEquals(4, marks(first).size(), "system, the last turn's end, the chat's end, the task");
+        // On a later step the sliding mark has the fourth: no extra one, and still at most four.
+        var later = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(content.substring(0, content.lastIndexOf(MARK) + MARK.length()), images),
+                LlmMessage.assistant("action 1"), LlmMessage.user("result 1\n\n---\n## Environment")));
+        assertTrue(later.path("messages").get(0).path("content").get(1).path("cache_control").isMissingNode());
+        assertEquals(4, marks(later).size(), marks(later).toString());
+        // A turn that added few blocks needs none: the chat's own mark finds the last turn's.
+        var few = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(chatThenTask(chat, List.of(0, 0, 1, 0), "thanks", 0, 1)
+                + MARK, List.of(sent("f0", "PIXELS")))));
+        assertEquals(3, marks(few).size(), marks(few).toString());
+        // Mutation: never set it -> 18 images in one message write the whole chat to the cache again next turn.
+    }
+
+    @Test
+    @DisplayName("a marked message the filter took the boundary from goes as text: each image's place says it was not sent, no marker")
+    void noBoundaryStillSaysSo() {
+        String content = "## Task\n" + LlmMessage.image(0) + "what is this?";
+        var body = body(List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(content, List.of(sent("f1", "PIXELS")))));
+        String text = body.path("messages").get(0).path("content").asText();
+        assertTrue(text.contains(AnthropicProvider.IMAGE_NOT_SENT), text);
+        assertFalse(text.contains("\u0001") || text.contains("\u001f"), text);
+        assertFalse(body.toString().contains("\"image\""), "no image block in a message of plain text");
+        // Mutation: send the plain text without the line -> the task says an image is shown that is not.
+    }
+
+    @Test
+    @DisplayName("the request leaves as UTF-8 written straight from the tree -- Czech text and an image the same bytes the tree says")
+    void theBodyIsWrittenAsBytes() throws Exception {
+        var http = AnthropicStreamingTest.api(AnthropicStreamingTest.start("claude-opus-5", 10, 0, 0)
+                + AnthropicStreamingTest.text(0, "ok") + AnthropicStreamingTest.end("end_turn", null, 1));
+        var provider = AnthropicStreamingTest.provider(http);
+        String content = "## Task\n" + LlmMessage.image(0) + "co je na obrázku? Příliš žluťoučký kůň" + MARK + "step";
+        var messages = List.of(LlmMessage.system("SYSTEM"), LlmMessage.marked(content, List.of(sent("f1", "PIXELS"))));
+        provider.chat(messages, new LlmRequestConfig(null, null, false));
+        String sent = http.to(AnthropicStreamingTest.MESSAGES).get(0).body();
+        JsonNode tree = new ObjectMapper().readTree(sent);
+        assertEquals(provider.requestBody(messages, new LlmRequestConfig(null, null, false), "claude-opus-5", 128_000),
+                tree, "the tree, whole");
+        assertTrue(sent.contains("Příliš žluťoučký kůň"), "UTF-8, not escaped and not mangled");
+        assertEquals(1_000_000, provider.contextWindow(null), "the window, now that the Models API was asked");
+    }
+
+    @Test
+    @DisplayName("the window is asked of the Models API before a request is shaped, when this process does not know it yet")
+    void theWindowBeforeTheFirstRequest() {
+        var http = new FakeHttp().json(AnthropicStreamingTest.MODELS, 200, AnthropicStreamingTest.LIMITS);
+        var provider = AnthropicStreamingTest.provider(http);
+        assertNull(provider.knownContextWindow(), "not known before it is asked");
+        assertEquals(1_000_000, provider.contextWindow(LlmProgress.NONE));
+        assertEquals(600, LlmMessage.imagesPerRequest(provider.contextWindow(LlmProgress.NONE)), "a 1M window: 600 images");
+        assertEquals(1, http.to(AnthropicStreamingTest.MODELS).size(), "asked once, then known");
+        var noKey = new AnthropicProvider(new OwnClawConfig(), new ObjectMapper());
+        assertNull(noKey.contextWindow(LlmProgress.NONE), "with no key nothing is asked");
+    }
 }

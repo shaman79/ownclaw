@@ -119,6 +119,16 @@ public final class CloudGateway implements LlmProvider {
     @Override public boolean supportsTools() { return active().supportsTools(); }
     @Override public boolean isAvailable() { return active().isAvailable(); }
     @Override public Integer knownContextWindow() { return active().knownContextWindow(); }
+    @Override public Integer contextWindow(LlmProgress progress) { return active().contextWindow(progress); }
+
+    /**
+     * Whether the configured cloud model is shown the images the owner pastes: Anthropic's, which the
+     * gateway sends them to. Another provider is sent none (OpenAiProvider), and the page and the
+     * task say so.
+     */
+    public static boolean showsImages(OwnClawConfig config) {
+        return "anthropic".equalsIgnoreCase(config.getMentor().getProvider());
+    }
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, LlmRequestConfig cfg) {
@@ -361,30 +371,30 @@ public final class CloudGateway implements LlmProvider {
             String why = null;
             CloudImages.Copy copy = null;
             if (!m.marked()) {
-                why = "not in the engine's marked message, the one message an image is placed in";
+                why = "it was not placed in the request's text, where the pictures go";
             } else if (!placed.contains(k)) {
-                why = layout == null ? "the message lost its boundary to the privacy filter, so it goes as one text"
-                        : "its place in the message went with text the privacy filter removed";
+                why = layout == null ? "the privacy filter removed a secret from the message it came with, and the message went as plain text, without pictures"
+                        : "the privacy filter removed a secret from the text around it, and its place with it";
             } else {
                 try {
                     CloudImages.Found found = images.copyOf(egress.userId(), image.fileId());
                     if (found == null || found.copy() == null) {
-                        why = found == null || found.withheld() == null ? "the image store found no copy" : found.withheld();
+                        why = found == null || found.withheld() == null ? "no copy for the cloud model was found" : found.withheld();
                     } else {
                         copy = found.copy();
                     }
                 } catch (RuntimeException e) {
-                    why = "its copy could not be read (" + e.getClass().getSimpleName() + ")";
+                    why = "its copy could not be read";
                 }
                 if (copy != null) {
                     if (!SENDABLE.contains(copy.mediaType())) {
-                        why = "its copy is " + copy.mediaType() + ", which the API does not take";
+                        why = "its copy is a kind of picture the cloud model does not take";
                         copy = null;
                     } else if (LlmMessage.Image.base64Bytes(copy.bytes().length) > LlmMessage.IMAGE_BASE64_LIMIT) {
-                        why = "its copy is larger than the API takes for one image";
+                        why = "its copy is larger than the cloud model takes for one picture";
                         copy = null;
                     } else if (!sha256(copy.bytes()).equals(copy.sha256())) {
-                        why = "its copy is not the bytes recorded when it was pasted";
+                        why = "its copy changed after it was pasted";
                         copy = null;
                     }
                 }
