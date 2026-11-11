@@ -108,6 +108,35 @@ class PastedImageTaskTest {
     }
 
     @Test
+    @DisplayName("turn after turn the chat's blocks are the same bytes, the image's among them: the next turn reads them from the cache")
+    void theChatsBlocksStayTheSame(@TempDir Path tmp) throws Exception {
+        var rig = new LoopRig(tmp, List.of(LocalModeTest.NOOP));
+        var image = paste(rig, 1920, 1080);
+        String session = LocalModeTest.session(rig);
+        rig.cloud.think.add(respond("A router's page."));
+        rig.turn(session, "what is this?", List.of(image.id()));
+        rig.cloud.think.add(respond("Yes."));
+        rig.turn(session, "is it the admin page?");
+        rig.cloud.think.add(respond("Done."));
+        rig.turn(session, "thanks");
+        var calls = rig.cloud.calls("think");
+        JsonNode second = ChatCacheTest.body(calls.get(1).messages(), calls.get(1).config().tools());
+        JsonNode third = ChatCacheTest.body(calls.get(2).messages(), calls.get(2).config().tools());
+        JsonNode two = second.path("messages").get(0).path("content");
+        JsonNode three = third.path("messages").get(0).path("content");
+        assertEquals("image", two.get(1).path("type").asText(), "the image, before the first message: " + two);
+        assertTrue(two.get(3).has("cache_control"), "the last turn cached the chat up to its answer: " + two);
+        for (int i = 0; i < 4; i++) {
+            for (String field : List.of("type", "text", "source")) {
+                assertEquals(two.get(i).path(field), three.get(i).path(field), "block " + i + "'s " + field);
+            }
+        }
+        assertEquals(second.path("system"), third.path("system"));
+        assertEquals(second.path("tools"), third.path("tools"));
+        // Mutation: give the image a marker of another index each turn, or read another copy -> a block differs.
+    }
+
+    @Test
     @DisplayName("skills are handed the pasted image; it makes no result private -- a private file sent with it still does")
     void notPrivateStillAFile(@TempDir Path tmp) throws Exception {
         var rig = new LoopRig(tmp, List.of());

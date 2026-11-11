@@ -150,6 +150,26 @@ class CloudGatewayImagesTest {
     }
 
     @Test
+    @DisplayName("the image's marker survives the filter beside the identifiers it rewrites: the image is still placed, and sent")
+    void theMarkerSurvivesTheFilter() {
+        var provider = new CloudGatewayTest.Recording();
+        var rows = new CloudGatewayTest.Rows();
+        var gw = new CloudGateway(provider, provider, config(), rows, null, new com.ownclaw.privacy.Redactor(null), new Store());
+        // Digits and identifiers on both sides of the marker, which holds digits of its own.
+        String content = "## Task\ncall +1 202 555 0143 or mail jan@example.com, card 4111 1111 1111 1111 at 12"
+                + LlmMessage.image(0) + "4111 1111 1111 1111 and +1 202 555 0143 are on the screen, jan@example.com too"
+                + LlmMessage.CACHE_BOUNDARY + "step";
+        gw.chat(List.of(LlmMessage.marked(content, List.of(new LlmMessage.Image("f1", 1, 1, 1)))), cfg("u1"));
+        LlmMessage handed = provider.calls.get(0).get(0);
+        assertFalse(handed.content().contains("jan@example.com"), "the filter ran: " + handed.content());
+        assertFalse(handed.content().contains("4111 1111"), handed.content());
+        assertEquals(java.util.Set.of(0), LlmMessage.layout(handed.content()).pictures(), handed.content());
+        assertNotNull(handed.images().get(0).sent(), "and the image went");
+        assertTrue(rows.last().withheld().isEmpty(), rows.last().withheld().toString());
+        // Mutation: a marker whose index runs into the text's digits -> a card or phone run takes it.
+    }
+
+    @Test
     @DisplayName("a call the gateway refuses sends no image, and its row names none as sent")
     void refusedCallSendsNone() {
         var provider = new CloudGatewayTest.Recording();

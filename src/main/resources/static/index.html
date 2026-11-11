@@ -7340,11 +7340,11 @@
             seen.title = 'Kept private, like an attached file: ' + (chip.dataset.privateBecause
                     || 'it is not an image the cloud model can be shown') + '.';
         } else if (chatRunsFree()) {
-            seen.textContent = '🏠 not seen: local only';
+            seen.textContent = '🏠 Free: the local model can\'t see images';
             seen.title = 'This chat runs on the local model only (Free), and the local model cannot see images. '
                     + 'Skills are still given it as a file.';
         } else {
-            seen.textContent = '☁️ the cloud model sees it';
+            seen.textContent = '☁️ the cloud model will see it';
             seen.title = 'The cloud model is shown this image as it is: the privacy filter reads text, not pictures. '
                     + 'Skills are given it as a file too.';
         }

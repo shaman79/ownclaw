@@ -75,9 +75,9 @@ class ChatPastePageTest {
         assertTrue(free.contains("return (costSel.value || defaultCostMode) === 'free';"), free);
         String line = between("function seenLine(chip) {", "function refreshSeen()");
         assertTrue(line.contains("if (chip.dataset.shown !== '1') { seen.textContent = '🔒 private';"), line);
-        assertTrue(line.contains("} else if (chatRunsFree()) { seen.textContent = '🏠 not seen: local only';"), line);
+        assertTrue(line.contains("} else if (chatRunsFree()) { seen.textContent = '🏠 Free: the local model can\\'t see images';"), line);
         assertTrue(line.contains("the local model cannot see images"), line);
-        assertTrue(line.contains("} else { seen.textContent = '☁️ the cloud model sees it';"), line);
+        assertTrue(line.contains("} else { seen.textContent = '☁️ the cloud model will see it';"), line);
         assertTrue(line.contains("the privacy filter reads text, not pictures"), line);
         assertFalse(line.contains("innerHTML") || mark.contains("innerHTML"), "text, never markup");
         assertTrue(page.contains("costSel.addEventListener('change', refreshSeen);"), "the chat's choice changes the line");
