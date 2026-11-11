@@ -298,6 +298,74 @@ class CloudGatewayTest {
         // -- the front of every cached prompt -- changes the moment a device is called "machine".
     }
 
+    /** A think call's first message as the engine writes it for Anthropic: the chat, then the task. */
+    private static String chatThenTask(List<String> chat, String task) {
+        return "## Prior Context\n### The conversation so far\n" + String.join(LlmMessage.HISTORY_BLOCK, chat)
+                + LlmMessage.HISTORY_END + "\n## Task\n" + task + LlmMessage.CACHE_BOUNDARY
+                + "\n\n---\n## Environment\n- DateTime: now";
+    }
+
+    @Test
+    @DisplayName("a private key a chat message holds without its END line is removed to the end of that message, not of the chat, the task and the step's context")
+    void aKeyStaysInItsMessage() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var cfg = new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        String asked = "USER: what does this key do?\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAfake\n";
+        String rest = "ASSISTANT: Never paste a key here.\n";
+
+        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"),
+                LlmMessage.user(chatThenTask(List.of(asked, rest), "which router is down?"))), cfg);
+
+        String sent = provider.calls.get(0).get(1).content();
+        assertFalse(sent.contains("b3BlbnNz"), sent);
+        assertTrue(sent.startsWith("## Prior Context\n### The conversation so far\nUSER: what does this key do?\n"
+                + Redactor.SECRET_REMOVED + LlmMessage.HISTORY_BLOCK + rest + LlmMessage.HISTORY_END
+                + "\n## Task\nwhich router is down?" + LlmMessage.CACHE_BOUNDARY + "\n\n---\n## Environment"), sent);
+        assertEquals(1, rows.last().secretsRemoved());
+        // Mutation: filter the message whole -> it ends "what does this key do?\n«secret removed»",
+        // and every later turn has lost its task.
+    }
+
+    @Test
+    @DisplayName("a name the task finds under its name is replaced in the chat before it too, as in one text")
+    void aNameFoundLaterIsReplacedEarlier() {
+        var redactor = new Redactor(null);
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows,
+                null, redactor);
+        var cfg = new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+
+        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.user(chatThenTask(
+                List.of("USER: is FakeKitchenNet up?\n", "ASSISTANT: It is.\n"),
+                "it shows\nssid=FakeKitchenNet\nhostname=fake-tv"))), cfg);
+
+        String sent = provider.calls.get(0).get(1).content();
+        assertFalse(sent.contains("FakeKitchenNet"), sent);
+        assertTrue(sent.contains("USER: is <ssid_1> up?\n") && sent.contains("ssid=<ssid_1>\nhostname=<host_1>"), sent);
+        // Mutation: filter the pieces in one pass -> the chat, filtered before the task named the
+        // network, sends it raw.
+    }
+
+    @Test
+    @DisplayName("only the engine's chat is split: markers in any other message are its text, and a key there is removed to its end")
+    void markersElsewhereSplitNothing() {
+        var provider = new Recording(); var rows = new Rows();
+        var gw = new CloudGateway(provider, new Recording(), config("anthropic", CloudGateway.Mode.ENFORCE), rows, null);
+        var cfg = new LlmRequestConfig(null, null, false)
+                .withEgress(egress(new PrivateIndex(), Map.of(), (h, w) -> false));
+        String page = "the page\n-----BEGIN PRIVATE KEY-----\nMIIfake" + LlmMessage.HISTORY_BLOCK + "secondhalf"
+                + LlmMessage.HISTORY_END + "thirdpart";
+
+        gw.chat(List.of(LlmMessage.authoredSystem("SYSTEM"), LlmMessage.user("## Task\nfetch it" + LlmMessage.CACHE_BOUNDARY),
+                LlmMessage.assistant("{\"tool\":\"web_fetch\"}"), LlmMessage.user(page)), cfg);
+
+        String sent = provider.calls.get(0).get(3).content();
+        assertEquals("the page\n" + Redactor.SECRET_REMOVED, sent, "nothing of the key after a marker it holds");
+    }
+
     @Test
     @DisplayName("a vault value its own marker carries refuses the call")
     void secretsThatSurviveScrubbingAreRefused() {

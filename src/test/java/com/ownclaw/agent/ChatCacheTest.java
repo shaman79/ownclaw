@@ -179,6 +179,35 @@ class ChatCacheTest {
                 "a run a day after the last caches nothing across runs: it is told its likeliest: " + scheduled);
     }
 
+    @Test
+    @DisplayName("a skill's first run between two turns of a chat changes nothing of the tools the next turn is sent")
+    void aSkillsFirstRunChangesNoTools(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        var day = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
+        var rig = new LoopRig(tmp, List.of(AssistantPartsTest.tool("smtp_send_email", List.of(), p -> "sent"),
+                AssistantPartsTest.tool("weather_lookup", List.of(), p -> "sunny")));
+        rig.jdbc.update("INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms) "
+                + "VALUES ('smtp_send_email', 'u1', 't0', 1, 5)");
+        String chat = LocalModeTest.session(rig);
+        rig.cloud.think.add(LoopRig.respond("Hello."));
+        rig.turn(chat, "hi");
+        // weather_lookup's first run: one of the five most used from now on.
+        rig.jdbc.update("INSERT INTO skill_usage (tool_name, user_id, task_id, success, duration_ms) "
+                + "VALUES ('weather_lookup', 'u1', 't1', 1, 5)");
+        rig.cloud.think.add(LoopRig.respond("Sunny."));
+        rig.turn(chat, "and the weather?");
+        org.junit.jupiter.api.Assumptions.assumeTrue(day.equals(java.time.LocalDate.now(java.time.ZoneOffset.UTC)),
+                "the UTC day ended while the test ran");
+
+        var calls = rig.cloud.calls("think");
+        assertEquals(2, calls.size());
+        List<ToolSpec> first = calls.get(0).config().tools(), second = calls.get(1).config().tools();
+        assertEquals(first, second, "the front of the prompt, as the first turn cached it");
+        assertTrue(second.stream().filter(t -> "weather_lookup".equals(t.name())).allMatch(ToolSpec::deferred),
+                "still deferred: offered whole only from tomorrow");
+        // Mutation: work the usual skills out for every task -> weather_lookup is offered whole on
+        // the second turn, the tools differ, and the whole chat is written to the cache again.
+    }
+
     static String delegate(ThinkingEngine engine, AgentContext ctx) {
         return engine.toolsFor(ctx, CHEAPER).stream().filter(t -> AgentAction.DELEGATE.equals(t.name()))
                 .findFirst().orElseThrow().description();

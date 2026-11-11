@@ -97,6 +97,12 @@ final class TaskRecord {
      * The record a later task of the chat is given under this task's answer, or null: when the
      * task did not end COMPLETED its ending already carries the record ({@link TaskEnding}), and a
      * task with no rows has none.
+     * <p>
+     * The same bytes on every later turn: every turn after it sends it again, as a block of the
+     * chat the cloud has cached, and a record that changed made that turn write the whole chat to
+     * the cache again. So not the local tokens: a local reply billed after the ending -- a summary
+     * of a private result that came back as the task ended -- is added to them later
+     * ({@code TaskTraceService}), after the next turn may already have sent the record.
      */
     static String forLaterTask(String taskId, Map<String, Object> trace) {
         Map<String, Object> outcome = map(trace.get("outcome"));
@@ -105,7 +111,7 @@ final class TaskRecord {
         return "[OwnClaw's record of task " + taskId + ", from its step log:"
                 + (steps.isEmpty() ? " no step ran." : "\n" + steps)
                 + "\nIt answered after " + duration(number(outcome.get("durationMs")))
-                + ", using " + tokens(number(outcome.get("cloudTokens")), number(outcome.get("localTokens")))
+                + ", using " + tokens(number(outcome.get("cloudTokens")), 0)
                 + ". Its results are not carried into this task: only the answer above is.]";
     }
 

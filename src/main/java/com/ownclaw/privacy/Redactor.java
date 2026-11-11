@@ -89,12 +89,6 @@ public final class Redactor {
     private static final Set<String> GENERIC_HOSTS = Set.of("host", "localhost", "localdomain",
             "localhost.localdomain", "ip6-localhost", "ip6-loopback", "broadcasthost");
 
-    /** The most an SSID can be: 32 octets (IEEE 802.11). */
-    static final int MAX_SSID_BYTES = 32;
-
-    /** The most a host's name can be: 253 characters (RFC 1035). */
-    static final int MAX_HOST_LENGTH = 253;
-
     /**
      * Whether a value found where an SSID or a host's name is written names no device: a sentinel a
      * program prints in a name's place, or a name every machine has. It is no identifier, and is
@@ -102,51 +96,17 @@ public final class Redactor {
      * WiFi sensor's state, read as an SSID -- and "host", and replaced each wherever it stood as a
      * word: in the owner's chats, in every tool description that held it, and in the system prompt
      * ("NEVER say a package is <ssid_28>"), which changed the front of every cached prompt at once.
+     * <p>
+     * Only these. Any other value found under its name is looked for everywhere from then on,
+     * however it reads -- too long for an SSID, an escape in it, a tab: the cloud writes its
+     * placeholder where it means it, the value is put back in what is kept -- the owner's answer, a
+     * call's arguments, a delegation's goal -- and the next request holds it without its name. Only
+     * looking for it everywhere replaces it there.
      */
     static boolean namesNoDevice(Kind kind, String value) {
         if (kind != Kind.SSID && kind != Kind.HOST || value == null) return false;
         String lower = value.strip().toLowerCase(Locale.ROOT);
         return lower.isEmpty() || SENTINELS.contains(lower) || kind == Kind.HOST && GENERIC_HOSTS.contains(lower);
-    }
-
-    /**
-     * Whether an SSID or a host's name, once found under its name, is also looked for wherever it
-     * stands as a word, in this text and in every later request: one that can be a name -- at least
-     * {@link #MIN_KNOWN_LENGTH} characters, no longer than the kind allows, no control character,
-     * no escape sequence of a quoted string -- and not one that {@link #namesNoDevice}.
-     * <p>
-     * What fails is still replaced where it was found under its name, as before: the rule only
-     * stops it being looked for elsewhere. Production's table held "SSIDs" of 43 to 484
-     * characters: hostapd's configuration inside a JSON string, its newlines written as escapes,
-     * read on from {@code ignore_broadcast_ssid=0} to the string's end. Replaced where they were
-     * found they still hide whatever they cover; looked for everywhere they never named anything.
-     */
-    static boolean lookedForEverywhere(Kind kind, String value) {
-        if (kind != Kind.SSID && kind != Kind.HOST || value == null) return false;
-        String t = value.strip();
-        if (t.length() < MIN_KNOWN_LENGTH || namesNoDevice(kind, t)) return false;
-        for (int i = 0; i < t.length(); i++) {
-            char c = t.charAt(i);
-            if (c < 0x20 || c == 0x7f) return false;
-            if (c == '\\' && i + 1 < t.length() && escapeAt(t, i + 1)) return false;
-        }
-        return kind == Kind.SSID ? t.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= MAX_SSID_BYTES
-                : t.length() <= MAX_HOST_LENGTH;
-    }
-
-    /**
-     * Whether what follows a backslash at {@code i} makes it an escape of a quoted string -- a
-     * line break, a tab, a quote, a backslash, a u and four hex digits -- rather than a backslash
-     * of the name: {@code WORKGROUP\pc1} is a name.
-     */
-    private static boolean escapeAt(String t, int i) {
-        char c = t.charAt(i);
-        if ("nrt\"\\".indexOf(c) >= 0) return true;
-        if (c != 'u') return false;
-        for (int k = i + 1; k <= i + 4; k++) {
-            if (k >= t.length() || !isHex(t.charAt(k))) return false;
-        }
-        return true;
     }
 
     /**
@@ -203,12 +163,48 @@ public final class Redactor {
      * Counted into {@code tally}.
      */
     public String filter(String userId, String text, Map<String, String> vault, Tally tally) {
+        return filter(userId, text, vault, tally, Map.of());
+    }
+
+    /**
+     * The pieces of one text -- a chat's messages and the task after them -- as {@link #filter}
+     * filters a text, but each on its own: what a detector reads on to the end of its text -- a
+     * private key's BEGIN line with no END line -- ends where its piece does. Filtered as one
+     * text, the key a chat message held took the rest of the chat with it, and the task and the
+     * step's context, on every later turn.
+     * <p>
+     * Every SSID or host's name found under its name in any piece is looked for in every piece,
+     * as it is in one text, as it is written there too: first the pieces are read for the names,
+     * then each is filtered with all of them. A piece filtered before another named the value
+     * would otherwise send it raw.
+     */
+    public List<String> filterPieces(String userId, List<String> pieces, Map<String, String> vault, Tally tally) {
+        if (pieces.size() == 1) return List.of(filter(userId, pieces.getFirst(), vault, tally));
+        Table table = table(userId);
+        var named = new HashMap<String, Finding>();
+        for (String piece : pieces) {
+            if (piece == null || piece.isEmpty()) continue;
+            String s = scrubVault(piece, vault).text();
+            for (Finding f : find(s, table.named())) {
+                if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH) {
+                    named.putIfAbsent(s.substring(f.start(), f.end()), new Finding(0, 0, f.kind(), f.valueIn(s)));
+                }
+            }
+        }
+        var out = new ArrayList<String>(pieces.size());
+        for (String piece : pieces) out.add(filter(userId, piece, vault, tally, named));
+        return out;
+    }
+
+    /** {@link #filter}, with names found elsewhere also looked for wherever they stand, as written. */
+    private String filter(String userId, String text, Map<String, String> vault, Tally tally,
+                          Map<String, Finding> foundElsewhere) {
         if (text == null || text.isEmpty()) return text;
         Scrubbed scrubbed = scrubVault(text, vault);
         tally.secrets += scrubbed.count();
         String s = scrubbed.text();
         Table table = table(userId);
-        List<Finding> found = find(s, table.named());
+        List<Finding> found = find(s, table.named(), foundElsewhere);
         if (found.isEmpty()) return s;
         var sb = new StringBuilder(s.length());
         int from = 0;
@@ -915,10 +911,12 @@ public final class Redactor {
                 int nul = e.indexOf('\0');
                 Kind kind = Kind.valueOf(e.substring(0, nul).toUpperCase(Locale.ROOT));
                 String value = e.substring(nul + 1);
-                // A value learned before the rule that it fails (lookedForEverywhere) -- "host",
+                // A value learned before the rule that names no device (namesNoDevice) -- "host",
                 // "unavailable" -- keeps its number, and is put back where a reply names it, but is
                 // looked for nowhere: the rows are kept, not deleted.
-                if (out.containsKey(kind) && lookedForEverywhere(kind, value)) out.get(kind).add(value);
+                if (out.containsKey(kind) && value.length() >= MIN_KNOWN_LENGTH && !namesNoDevice(kind, value)) {
+                    out.get(kind).add(value);
+                }
             }
             return out;
         }
@@ -933,6 +931,15 @@ public final class Redactor {
      * this text names.
      */
     static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known) {
+        return find(s, known, Map.of());
+    }
+
+    /**
+     * {@link #find}, with the names another piece of the same text found under their names
+     * ({@link #filterPieces}) looked for here too, each as it was written there.
+     */
+    private static List<Finding> find(String s, Map<Kind, java.util.Set<String>> known,
+                                      Map<String, Finding> foundElsewhere) {
         var secrets = new ArrayList<Finding>();
         var ids = new ArrayList<Finding>();
         pemBlocks(s, secrets);
@@ -962,11 +969,11 @@ public final class Redactor {
             }
         }
         for (Finding f : ids) {
-            if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH
-                    && lookedForEverywhere(f.kind(), f.valueIn(s))) {
+            if ((f.kind() == Kind.SSID || f.kind() == Kind.HOST) && f.end() - f.start() >= MIN_KNOWN_LENGTH) {
                 needles.putIfAbsent(s.substring(f.start(), f.end()), f);
             }
         }
+        foundElsewhere.forEach(needles::putIfAbsent);
         var again = standingAsWords(s, needles);
         if (secrets.isEmpty() && ids.isEmpty() && again.isEmpty()) return List.of();
         var covered = new BitSet(s.length());

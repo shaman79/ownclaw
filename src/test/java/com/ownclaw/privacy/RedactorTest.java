@@ -381,39 +381,46 @@ class RedactorTest {
     }
 
     @Test
-    @DisplayName("a value too long for an SSID, or holding a quoted string's escapes, is replaced where it was found and looked for nowhere else")
-    void overLongValuesStayWhereFound() {
+    @DisplayName("a value found under its name stays replaced when the reply that names it comes back without the name: however it reads")
+    void restoredValuesStayReplaced() {
+        // The cloud writes the placeholder where it means the value, the reply is restored into
+        // what is kept -- the owner's answer, a call's arguments, a delegation's goal -- and the
+        // next request holds the value without its name: only looking for it everywhere replaces
+        // it there. Values that read oddly are found as often as any: iw prints an SSID's bytes
+        // past ASCII as escapes (38 bytes printed, too long for an SSID), a NetBIOS name holds a
+        // backslash, a JSON string's escaped line breaks run on into the value, a JSON string's
+        // tab is one when unescaped.
         var redactor = new Redactor(null);
-        // hostapd's configuration inside a JSON string, read on from a name ending in "ssid".
-        String hostapd = "{\"stdout\": \"ignore_broadcast_ssid=0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan\"}";
-        String filtered = redactor.filter("u1", hostapd, Map.of(), new Redactor.Tally());
-        assertEquals("{\"stdout\": \"ignore_broadcast_ssid=<ssid_1>\"}", filtered,
-                "replaced where it was found, as before: whatever it covers stays hidden");
-        String quotedLong = "{\"ssid\": \"Fake network with a description far longer than any SSID\"}";
-        assertEquals("{\"ssid\": \"<ssid_2>\"}", redactor.filter("u1", quotedLong, Map.of(), new Redactor.Tally()));
-        String elsewhere = "0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan and "
-                + "Fake network with a description far longer than any SSID";
-        assertEquals(elsewhere, redactor.filter("u1", elsewhere, Map.of(), new Redactor.Tally()),
-                "neither is looked for where it stands without its name");
-        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "a".repeat(33)));
-        assertTrue(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "a".repeat(32)), "32 octets is an SSID");
-        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.SSID, "\u00e1".repeat(17)), "34 octets is not");
-        assertTrue(Redactor.lookedForEverywhere(Redactor.Kind.HOST, "WORKGROUP\\pc1"), "a backslash of the name");
-        assertFalse(Redactor.lookedForEverywhere(Redactor.Kind.HOST, "fake\\u0041pc"), "an escape is not");
+        for (String found : List.of(
+                "\t\tssid Fake-Doma-P\\xc5\\x99\\xc3\\xadzem\\xc3\\xad",
+                "hostname=FAKEGROUP\\nas01",
+                "{\"stdout\": \"ssid=FakeHome\\nhw_mode=g\\nchannel=6\"}",
+                "{\"ssid\": \"Fake\\tHome\"}")) {
+            var placeholder = java.util.regex.Pattern.compile("<(ssid|host)_\\d+>")
+                    .matcher(redactor.filter("u1", found, Map.of(), new Redactor.Tally()));
+            assertTrue(placeholder.find(), "replaced where it is found: " + found);
+            String reply = "Your device is " + placeholder.group() + ".";
+            String kept = redactor.restore("u1", reply);
+            assertNotEquals(reply, kept, "the value is put back in what is kept");
+            assertEquals(reply, redactor.filter("u1", kept, Map.of(), new Redactor.Tally()),
+                    "and replaced again on the next turn, though no name stands before it: " + found);
+        }
+        // Mutation: stop looking everywhere for a value too long for an SSID, or one holding an
+        // escape or a control character -> each goes to the cloud raw from the second turn on.
     }
 
     @Test
-    @DisplayName("a row learned before the rule keeps its number, and is put back where a reply names it, but is looked for nowhere")
-    void oldRowsAreKeptButNotLookedFor(@TempDir Path tmp) throws Exception {
+    @DisplayName("a row learned before the rule is kept: one that names no device is looked for nowhere, but put back where a reply names it; any other is looked for as before")
+    void oldRowsAreKept(@TempDir Path tmp) throws Exception {
         var db = MigratedDatabase.at(tmp.resolve("t.db"));
         String config = "0\\nuapsd_advertisement_enabled=1\\nbridge=br-lan";
         db.update("INSERT INTO privacy_placeholders (user_id, kind, n, value) VALUES ('u1', 'host', 16, 'host'), "
                 + "('u1', 'ssid', 28, 'unavailable'), ('u1', 'ssid', 26, ?), ('u1', 'ssid', 4, 'Fake_t33p_IoT')", config);
         var redactor = new Redactor(db);
-        String prompt = "NEVER say a package is unavailable. It stays on the host. " + config;
+        String prompt = "NEVER say a package is unavailable. It stays on the host.";
         assertEquals(prompt, redactor.filter("u1", prompt, Map.of(), new Redactor.Tally()));
-        assertEquals("on <ssid_4>", redactor.filter("u1", "on Fake_t33p_IoT", Map.of(), new Redactor.Tally()),
-                "a real name learned then is looked for as before");
+        assertEquals("on <ssid_4>, and <ssid_26>", redactor.filter("u1", "on Fake_t33p_IoT, and " + config,
+                Map.of(), new Redactor.Tally()), "any other value is looked for as before, however it reads");
         assertEquals("the sensor is unavailable on host", redactor.restore("u1", "the sensor is <ssid_28> on <host_16>"));
         assertEquals("ssid=<ssid_29>", redactor.filter("u1", "ssid=Fake New Net", Map.of(), new Redactor.Tally()),
                 "a new value takes the next number, never one of theirs");

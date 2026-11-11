@@ -58,6 +58,8 @@ public class AgentLoop {
     private final LlmRouter llmRouter;
     private final AgentMemory memory;
     private final SkillCuratorService curatorService;
+    /** The owner's usual skills, the same for a whole day (UTC). */
+    private final UsualSkills usualSkills;
     private final SkillManager skillManager;
     private final DebugSessionService debugService;
     private final TaskCancellationService cancellationService;
@@ -125,6 +127,9 @@ public class AgentLoop {
         this.llmRouter = llmRouter;
         this.memory = memory;
         this.curatorService = curatorService;
+        this.usualSkills = new UsualSkills(user -> curatorService.mostUsedTools(user).stream()
+                .filter(name -> toolRegistry.find(name).isPresent()).limit(USUAL_TOOLS).toList(),
+                java.time.Clock.systemUTC());
         this.skillManager = skillManager;
         this.debugService = debugService;
         this.cancellationService = cancellationService;
@@ -275,10 +280,12 @@ public class AgentLoop {
             log.debug("Failed to load credential keys for user {}: {}", userId, e.getMessage());
         }
 
-        // The skills every task's model is offered from the start, the cloud's and the local one's.
+        // The skills every task's model is offered from the start, the cloud's and the local one's:
+        // the owner's usual ones as they stood when his day began (UsualSkills) -- they are the
+        // front of every request's cached prompt -- but for one deleted since.
         try {
-            context.setUsualTools(curatorService.mostUsedTools(userId).stream()
-                    .filter(name -> toolRegistry.find(name).isPresent()).limit(USUAL_TOOLS).toList());
+            context.setUsualTools(usualSkills.of(userId).stream()
+                    .filter(name -> toolRegistry.find(name).isPresent()).toList());
         } catch (Exception e) {
             log.warn("Could not read which skills user {} uses most: {}", userId, e.getMessage());
         }

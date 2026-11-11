@@ -121,6 +121,26 @@ class TaskRecordTest {
     }
 
     @Test
+    @DisplayName("a record is the same bytes on every later turn: a local reply billed after the ending changes nothing of it")
+    void aRecordDoesNotChangeAfterTheEnding(@TempDir Path tmp) throws Exception {
+        var events = events(tmp);
+        var done = new AgentContext("u1", "d4e5f6a7", "summarise the statement");
+        var rows = new Rows(events, done)
+                .step(new AgentAction("web_search", Map.of(), ""), result(done, "web_search", "the public page", List.of(), 5))
+                .ended("COMPLETED");
+        String before = TaskRecord.forLaterTask("d4e5f6a7", rows.trace());
+        // The summary of a private result, whose reply came back just as the task ended.
+        events.log("u1", "d4e5f6a7", EventLogService.TOKENS_AFTER_END, "info",
+                "Local tokens billed after the task ended", "{\"localTokens\":1234}", 1234);
+        assertEquals(1234L, ((Number) ((Map<?, ?>) rows.trace().get("outcome")).get("localTokens")).longValue(),
+                "the premise: the trace counts them");
+        assertEquals(before, TaskRecord.forLaterTask("d4e5f6a7", rows.trace()),
+                "the record a later turn sends -- a cached block of its chat -- stays as it was");
+        // Mutation: print the local tokens -> "+ 1,234 local" appears, and the next turn writes
+        // its whole chat to the cache again.
+    }
+
+    @Test
     @DisplayName("handles become words; nothing left resolves as one")
     void inWords() {
         assertEquals("result 2 and result 2.body_text and result ?", TaskRecord.inWords("{{2}} and {{ 2.body_text }} and {{0}}"));
